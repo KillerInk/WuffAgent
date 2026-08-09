@@ -4,6 +4,7 @@ pub mod config;
 pub mod server;
 pub mod ui;
 pub mod tools;
+pub mod sessions;
 
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +39,17 @@ fn main() -> eframe::Result {
             Arc::new(Mutex::new(default_cfg))
         }
     };
+
+    // Setup sessions directory and ensure a session exists
+    let sessions_dir = sessions::sessions_dir(&config_path);
+    {
+        let mut cfg = config.lock().unwrap();
+        cfg.sessions_dir = sessions_dir.clone();
+        if cfg.session_id.is_none() {
+            let session = sessions::create_session(&sessions_dir, "Untitled");
+            cfg.session_id = Some(session.id.clone());
+        }
+    }
 
     // Create server manager: real instance for local mode, noop for remote
     let is_remote;
@@ -91,10 +103,18 @@ fn main() -> eframe::Result {
     }
     let client = Arc::new(Mutex::new(ChatClient::new(&base_url)));
 
-    // Set API key for remote connections
+    // Set API key and session for remote connections
     {
         let mut cl = client.lock().unwrap();
         cl.set_api_key(api_key.as_deref());
+        let cfg = config.lock().unwrap();
+        cl.set_session(cfg.session_id.clone(), cfg.sessions_dir.clone());
+    }
+
+    // Load the active session into the client conversation
+    {
+        let mut cl = client.lock().unwrap();
+        let _ = cl.load_session();
     }
 
     eframe::run_native(

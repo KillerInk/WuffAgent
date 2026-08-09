@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::types::{Message, Usage};
@@ -31,6 +32,8 @@ pub struct ChatClient {
     conversation: Arc<Mutex<Vec<Message>>>,
     http_client: reqwest::Client,
     api_key: Option<String>,
+    session_id: Option<String>,
+    session_dir: PathBuf,
 }
 
 impl ChatClient {
@@ -41,6 +44,8 @@ impl ChatClient {
             conversation: Arc::new(Mutex::new(Vec::new())),
             http_client: reqwest::Client::new(),
             api_key: None,
+            session_id: None,
+            session_dir: PathBuf::new(),
         }
     }
 
@@ -76,6 +81,33 @@ impl ChatClient {
         self.conversation.lock().unwrap().clear();
     }
 
+    pub fn set_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {
+        self.session_id = session_id;
+        self.session_dir = session_dir;
+    }
+
+    pub fn load_session(&mut self) -> Option<crate::sessions::Session> {
+        let dir = self.session_dir.clone();
+        let id = self.session_id.as_ref()?;
+        let session = crate::sessions::load_session(&dir, id)?;
+        let mut conv = self.conversation.lock().unwrap();
+        *conv = session.messages.clone();
+        if !session.system_prompt.is_empty() {
+            self.system_prompt = session.system_prompt.clone();
+        }
+        Some(session)
+    }
+
+    pub fn save_session(&self) -> Result<(), anyhow::Error> {
+        let id = self.session_id.as_ref().ok_or_else(|| anyhow::anyhow!("no session id"))?;
+        let conv = self.conversation.lock().unwrap();
+        let session = crate::sessions::load_session(&self.session_dir, id)
+            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+        let mut updated = session.clone();
+        updated.messages = conv.clone();
+        crate::sessions::save_session(&self.session_dir, &updated)
+    }
+
     fn build_request(&self, prompt: &str, stream: bool, tools: Option<&[crate::tools::ToolDefinition]>) -> ChatRequest {
         let mut messages = Vec::new();
 
@@ -83,12 +115,14 @@ impl ChatClient {
             messages.push(Message {
                 role: "system".to_string(),
                 content: self.system_prompt.clone(),
+                tool_calls: None,
             });
         }
 
         messages.push(Message {
             role: "user".to_string(),
             content: prompt.to_string(),
+            tool_calls: None,
         });
 
         ChatRequest {
@@ -155,10 +189,12 @@ impl ChatClient {
         conv.push(Message {
             role: "user".to_string(),
             content: prompt.to_string(),
+            tool_calls: None,
         });
         conv.push(Message {
             role: "assistant".to_string(),
             content: content.clone(),
+            tool_calls: None,
         });
         drop(conv);
 
@@ -195,6 +231,55 @@ impl ChatClient {
                 let mut conv = conversation.lock().unwrap();
                 if let Some(last) = conv.last_mut() {
                     last.content.push_str(text);
+                }
+            }
+        }
+
+        // Handle tool_calls in streaming delta chunks
+        if let Some(tool_calls) = chunk
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("tool_calls"))
+        {
+            if let Some(tc_array) = tool_calls.as_array() {
+                if let Some(first) = tc_array.first() {
+                    if let (Some(id), Some(func)) = (
+                        first.get("id").and_then(|v| v.as_str()),
+                        first.get("function"),
+                    ) {
+                        let name = func
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let args = func
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        // Accumulate partial args from streaming
+                        let mut conv = conversation.lock().unwrap();
+                        if let Some(last) = conv.last_mut() {
+                            if last.tool_calls.is_none() {
+                                last.tool_calls = Some(Vec::new());
+                            }
+                            let tcs = last.tool_calls.as_mut().unwrap();
+                            if let Some(tc) = tcs.iter_mut().find(|t| t.id == id) {
+                                tc.function.arguments.push_str(&args);
+                            } else {
+                                tcs.push(crate::types::ToolCall {
+                                    id: id.to_string(),
+                                    call_type: "function".to_string(),
+                                    function: crate::types::ToolFunction {
+                                        name,
+                                        arguments: args,
+                                    },
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -254,10 +339,12 @@ impl ChatClient {
             conv.push(Message {
                 role: "user".to_string(),
                 content: prompt.to_string(),
+                tool_calls: None,
             });
             conv.push(Message {
                 role: "assistant".to_string(),
                 content: String::new(),
+                tool_calls: None,
             });
         }
 
@@ -420,6 +507,7 @@ mod tests {
         conv.push(Message {
             role: "assistant".to_string(),
             content: String::new(),
+            tool_calls: None,
         });
         drop(conv);
 
@@ -445,6 +533,7 @@ mod tests {
         conv.push(Message {
             role: "assistant".to_string(),
             content: String::new(),
+            tool_calls: None,
         });
         drop(conv);
 
@@ -477,6 +566,7 @@ mod tests {
         conv.push(Message {
             role: "assistant".to_string(),
             content: String::new(),
+            tool_calls: None,
         });
         drop(conv);
 
