@@ -26,6 +26,7 @@ http = "1.1"
 rfd = { version = "0.14", optional = true }
 libloading = "0.9.0"
 chrono = { version = "0.4.45", features = ["serde"] }
+anyhow = "1.0"
 
 [dev-dependencies]
 tempfile = "3.0"

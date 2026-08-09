@@ -39,6 +39,7 @@ impl From<ChatMessage> for Message {
         Message {
             role: m.role,
             content: m.content,
+            tool_calls: None,
         }
     }
 }
@@ -65,6 +66,10 @@ pub struct Config {
     pub streaming: bool,
     pub theme: String, // "dark" | "light"
     pub chat_history: Vec<ChatMessage>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(skip)]
+    pub sessions_dir: PathBuf,
     #[serde(skip)]
     pub file_path: PathBuf,
 }
@@ -85,6 +90,8 @@ impl Default for Config {
             streaming: true,
             theme: "dark".to_string(),
             chat_history: Vec::new(),
+            session_id: None,
+            sessions_dir: PathBuf::new(),
             file_path: PathBuf::new(),
         }
     }
@@ -152,6 +159,11 @@ impl Config {
             ConnectionType::Local => format!("http://127.0.0.1:{}", self.port),
             ConnectionType::Remote => self.remote_url.clone(),
         }
+    }
+
+    /// Returns the sessions directory path.
+    pub fn sessions_dir(&self) -> &PathBuf {
+        &self.sessions_dir
     }
 
     /// Returns true if this config is in remote mode.
