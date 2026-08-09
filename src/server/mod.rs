@@ -5,6 +5,9 @@ use std::time::Duration;
 use std::net::TcpStream;
 use tokio::io::AsyncBufReadExt;
 
+mod progress;
+pub use progress::parse_progress;
+
 pub struct ServerManager {
     server_path: String,
     model_path: String,
@@ -210,19 +213,6 @@ impl ServerManager {
 
         rx
     }
-
-    pub fn parse_progress(line: &str) -> Option<f32> {
-        // llama-server outputs lines like: "loading model ... 100%"
-        if let Some(pos) = line.find('%') {
-            let before = &line[..pos];
-            if let Some(last_space) = before.rfind(' ') {
-                if let Ok(pct) = before[last_space + 1..].parse::<f32>() {
-                    return Some(pct);
-                }
-            }
-        }
-        None
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -257,11 +247,11 @@ mod tests {
 
     #[test]
     fn test_parse_progress() {
-        assert_eq!(ServerManager::parse_progress("loading model ... 100%"), Some(100.0));
-        assert_eq!(ServerManager::parse_progress("loading model ... 50%"), Some(50.0));
-        assert_eq!(ServerManager::parse_progress("loading model ... 75.5%"), Some(75.5));
-        assert_eq!(ServerManager::parse_progress("no percentage here"), None);
-        assert_eq!(ServerManager::parse_progress(""), None);
-        assert_eq!(ServerManager::parse_progress("100"), None);
+        assert_eq!(parse_progress("loading model ... 100%"), Some(100.0));
+        assert_eq!(parse_progress("loading model ... 50%"), Some(50.0));
+        assert_eq!(parse_progress("loading model ... 75.5%"), Some(75.5));
+        assert_eq!(parse_progress("no percentage here"), None);
+        assert_eq!(parse_progress(""), None);
+        assert_eq!(parse_progress("100"), None);
     }
 }

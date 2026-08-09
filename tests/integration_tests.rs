@@ -87,25 +87,15 @@ async fn test_chat_client_request() {
 
     let base_url = format!("http://127.0.0.1:{}", port);
     let client = ChatClient::new(&base_url);
-    let http_client = client.http_client.clone();
-    let conversation = client.conversation.clone();
 
-    let result = ChatClient::send_message(
-        &base_url,
-        "",
-        conversation.clone(),
-        &http_client,
-        None,
-        "Hello",
-    )
-    .await;
+    let result = client.send_message("Hello").await;
 
     assert!(result.is_ok());
     let (content, _usage) = result.unwrap();
     assert_eq!(content, "Mock response");
 
     // Verify conversation history was updated
-    let conv = conversation.lock().unwrap();
+    let conv = client.conversation().lock().unwrap();
     assert_eq!(conv.len(), 2);
     assert_eq!(conv[0].role, "user");
     assert_eq!(conv[0].content, "Hello");
@@ -124,18 +114,7 @@ async fn test_chat_client_error_handling() {
     use wuffagent::client::ChatClient;
 
     let client = ChatClient::new("http://127.0.0.1:1");
-    let http_client = client.http_client.clone();
-    let conversation = client.conversation.clone();
-
-    let result = ChatClient::send_message(
-        "http://127.0.0.1:1",
-        "",
-        conversation,
-        &http_client,
-        None,
-        "Hello",
-    )
-    .await;
+    let result = client.send_message("Hello").await;
 
     // Should fail because no server is running on port 1
     assert!(result.is_err());
@@ -197,24 +176,14 @@ async fn test_sse_parsing_end_to_end() {
 
     let base_url = format!("http://127.0.0.1:{}", port);
     let client = ChatClient::new(&base_url);
-    let http_client = client.http_client.clone();
-    let conversation = client.conversation.clone();
 
     let received_chunks = Arc::new(Mutex::new(Vec::new()));
     let chunks_clone = received_chunks.clone();
 
-    let result = ChatClient::stream_message_with_usage(
-        &base_url,
-        "",
-        conversation.clone(),
-        &http_client,
-        None,
-        "Hello",
-        move |chunk| {
-            chunks_clone.lock().unwrap().push(chunk);
-            Ok(())
-        },
-    )
+    let result = client.stream_message_with_usage("Hello", move |chunk| {
+        chunks_clone.lock().unwrap().push(chunk);
+        Ok(())
+    })
     .await;
 
     assert!(result.is_ok());
@@ -224,7 +193,7 @@ async fn test_sse_parsing_end_to_end() {
     assert_eq!(chunks[1], " world");
 
     // Verify conversation history
-    let conv = conversation.lock().unwrap();
+    let conv = client.conversation().lock().unwrap();
     assert_eq!(conv.len(), 2);
     assert_eq!(conv[0].content, "Hello");
     assert_eq!(conv[1].content, "Hello world");

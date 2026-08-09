@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::fs;
 
+use crate::types::Message;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ConnectionType {
     #[serde(rename = "local")]
@@ -13,6 +15,31 @@ pub enum ConnectionType {
 impl Default for ConnectionType {
     fn default() -> Self {
         Self::Local
+    }
+}
+
+/// A chat message for persistence in config (alias for the shared Message type).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl From<Message> for ChatMessage {
+    fn from(m: Message) -> Self {
+        ChatMessage {
+            role: m.role,
+            content: m.content,
+        }
+    }
+}
+
+impl From<ChatMessage> for Message {
+    fn from(m: ChatMessage) -> Self {
+        Message {
+            role: m.role,
+            content: m.content,
+        }
     }
 }
 
@@ -40,12 +67,6 @@ pub struct Config {
     pub chat_history: Vec<ChatMessage>,
     #[serde(skip)]
     pub file_path: PathBuf,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
 }
 
 impl Default for Config {

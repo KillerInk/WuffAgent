@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::client::{ChatClient, Usage};
+use crate::client::ChatClient;
 use crate::config::{ChatMessage as ConfigChatMessage, Config};
 use crate::server::ServerManager;
 use crate::ui::settings::SettingsDialog;
@@ -24,50 +24,50 @@ pub struct ChatMessage {
 }
 
 pub enum AppEvent {
-    MessageResult { content: String, usage: Option<Usage> },
+    MessageResult { content: String, usage: Option<crate::types::Usage> },
     MessageError { error: String },
     StreamChunk { content: String },
-    StreamComplete { content: String, usage: Option<Usage> },
+    StreamComplete { content: String, usage: Option<crate::types::Usage> },
     StreamError { error: String },
 }
 
 pub struct ChatApp {
-    server: Arc<ServerManager>,
-    client: Arc<Mutex<ChatClient>>,
-    config: Arc<Mutex<Config>>,
-    pending_tx: Option<mpsc::Sender<AppEvent>>,
-    pending_rx: Mutex<mpsc::Receiver<AppEvent>>,
+    pub(super) server: Arc<ServerManager>,
+    pub(super) client: Arc<Mutex<ChatClient>>,
+    pub(super) config: Arc<Mutex<Config>>,
+    pub(super) pending_tx: Option<mpsc::Sender<AppEvent>>,
+    pub(super) pending_rx: Mutex<mpsc::Receiver<AppEvent>>,
 
     // UI state
-    chat_display: Vec<ChatMessage>,
-    input_text: String,
-    is_generating: bool,
-    status: AppStatus,
-    streaming: bool,
-    show_settings: bool,
-    settings_dialog: Option<SettingsDialog>,
-    progress: f32,
-    pending_error: Option<String>,
+    pub(super) chat_display: Vec<ChatMessage>,
+    pub(super) input_text: String,
+    pub(super) is_generating: bool,
+    pub(super) status: AppStatus,
+    pub(super) streaming: bool,
+    pub(super) show_settings: bool,
+    pub(super) settings_dialog: Option<SettingsDialog>,
+    pub(super) progress: f32,
+    pub(super) pending_error: Option<String>,
 
     // For streaming
-    current_response: String,
-    streaming_task: Option<JoinHandle<()>>,
+    pub(super) current_response: String,
+    pub(super) streaming_task: Option<JoinHandle<()>>,
 
     // Stats for bottom bar
-    token_count: u32,
-    context_used: f32,
+    pub(super) token_count: u32,
+    pub(super) context_used: f32,
 
     // Remote server n_ctx (fetched from /props), 0 = not yet fetched
-    remote_n_ctx: u32,
+    pub(super) remote_n_ctx: u32,
 
     // Shared Arc for the background fetch task to update
-    remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
+    pub(super) remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
 
     // Shared handle for background remote n_ctx fetch task
-    remote_n_ctx_handle: Option<JoinHandle<()>>,
+    pub(super) remote_n_ctx_handle: Option<JoinHandle<()>>,
 
     // Max messages to keep in display (truncate for context window)
-    max_display_messages: usize,
+    pub(super) max_display_messages: usize,
 }
 
 impl ChatApp {
@@ -142,49 +142,7 @@ impl ChatApp {
 
         // Chat area fills all remaining space between top bar and input panel
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("chat_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Show pending error as inline warning
-                    if let Some(ref err) = self.pending_error {
-                        let err_clone = err.clone();
-                        ui.horizontal(|ui| {
-                            ui.colored_label(egui::Color32::RED, format!("Error: {}", err_clone));
-                            if ui.button("Dismiss").clicked() {
-                                self.pending_error = None;
-                            }
-                        });
-                        ui.separator();
-                    }
-
-                    // Clone messages to avoid borrow checker issues
-                    let messages: Vec<ChatMessage> = self.chat_display.clone();
-                    ui.vertical(|ui| {
-                        for msg in &messages {
-                            self.draw_message(ui, msg);
-                        }
-
-                        // Show current streaming response
-                        if self.is_generating && !self.current_response.is_empty() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                ui.label("AI:  ");
-                                ui.label(
-                                    egui::RichText::new(&self.current_response)
-                                        .color(egui::Color32::from_rgb(150, 200, 150)),
-                                );
-                                ui.spinner();
-                            });
-                        } else if self.is_generating && self.current_response.is_empty() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                ui.label("AI:  ");
-                                ui.spinner();
-                            });
-                        }
-                    });
-                });
+            self.draw_chat_area(ui);
         });
     }
 
@@ -211,253 +169,6 @@ impl ChatApp {
         };
 
         ctx.set_visuals(visuals);
-    }
-
-    fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
-        // Show pending error as inline warning
-        if let Some(ref err) = self.pending_error {
-            let err_clone = err.clone();
-            ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::RED, format!("Error: {}", err_clone));
-                if ui.button("Dismiss").clicked() {
-                    self.pending_error = None;
-                }
-            });
-            ui.separator();
-        }
-
-        // Clone messages to avoid borrow checker issues
-        let messages: Vec<ChatMessage> = self.chat_display.clone();
-
-        egui::ScrollArea::vertical()
-            .id_salt("chat_scroll")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    for msg in &messages {
-                        self.draw_message(ui, msg);
-                    }
-
-                    // Show current streaming response
-                    if self.is_generating && !self.current_response.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.label("AI:  ");
-                            ui.label(
-                                egui::RichText::new(&self.current_response)
-                                    .color(egui::Color32::from_rgb(150, 200, 150)),
-                            );
-                            ui.spinner();
-                        });
-                    } else if self.is_generating && self.current_response.is_empty() {
-                        // Show spinner while waiting for first chunk
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.label("AI:  ");
-                            ui.spinner();
-                        });
-                    }
-                });
-            });
-    }
-
-    fn draw_message(&self, ui: &mut egui::Ui, message: &ChatMessage) {
-        ui.horizontal(|ui| {
-            if message.role == "user" {
-                ui.label("You: ");
-            } else {
-                ui.label("AI: ");
-            }
-            ui.label(&message.content);
-        });
-    }
-
-    fn draw_input_area(&mut self, ui: &mut egui::Ui) {
-        ui.style_mut().spacing.item_spacing.y = 0.0;
-
-        // Validate input length
-        const MAX_MESSAGE_LENGTH: usize = 4000;
-        let input_len = self.input_text.len();
-        if input_len > MAX_MESSAGE_LENGTH {
-            ui.horizontal(|ui| {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    format!("Message too long (max {} characters, current: {})", MAX_MESSAGE_LENGTH, input_len),
-                );
-            });
-            ui.separator();
-        }
-
-        // Input takes remaining space, button stays visible
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            const BUTTON_WIDTH: f32 = 55.0;
-            let input_width = (ui.available_width() - BUTTON_WIDTH - 4.0).max(0.0);
-            let text_edit = egui::TextEdit::singleline(&mut self.input_text);
-            ui.add_sized([input_width, 22.0], text_edit);
-            if !self.is_generating {
-                if ui.button("Send").clicked() {
-                    self.send_message();
-                }
-            } else {
-                if ui.button("Stop").clicked() {
-                    self.stop_generation();
-                }
-            }
-        });
-    }
-
-    fn validate_input(&self, text: &str) -> Result<(), String> {
-        if text.trim().is_empty() {
-            return Err("Message cannot be empty".to_string());
-        }
-        const MAX_MESSAGE_LENGTH: usize = 4000;
-        if text.len() > MAX_MESSAGE_LENGTH {
-            return Err(format!("Message too long (max {} characters)", MAX_MESSAGE_LENGTH));
-        }
-        Ok(())
-    }
-
-    fn send_message(&mut self) {
-        let text = self.input_text.trim().to_string();
-        if let Err(e) = self.validate_input(&text) {
-            self.pending_error = Some(e);
-            return;
-        }
-
-        self.input_text.clear();
-        self.add_message("user", &text);
-
-        // Transition to generating state
-        self.is_generating = true;
-        self.current_response.clear();
-        self.status = AppStatus::Generating;
-
-        // Cancel any existing streaming task
-        if let Some(task) = self.streaming_task.take() {
-            task.abort();
-        }
-
-        let text_clone = text.clone();
-        let tx = self.pending_tx.as_ref().unwrap().clone();
-        let streaming = self.streaming;
-
-        // Extract client fields before spawning to avoid MutexGuard across await
-        let (base_url, system_prompt, conversation, http_client, api_key) = {
-            let c = self.client.lock().unwrap();
-            (
-                c.base_url.clone(),
-                c.system_prompt.clone(),
-                c.conversation.clone(),
-                c.http_client.clone(),
-                c.api_key.clone(),
-            )
-        };
-
-        let handle = tokio::spawn(async move {
-            if streaming {
-                Self::do_streaming(
-                    base_url,
-                    system_prompt,
-                    conversation,
-                    http_client,
-                    api_key,
-                    text_clone,
-                    tx,
-                )
-                .await;
-            } else {
-                Self::do_send_message(
-                    base_url,
-                    system_prompt,
-                    conversation,
-                    http_client,
-                    api_key,
-                    text_clone,
-                    tx,
-                )
-                .await;
-            }
-        });
-
-        self.streaming_task = Some(handle);
-    }
-
-    async fn do_streaming(
-        base_url: String,
-        system_prompt: String,
-        conversation: Arc<Mutex<Vec<crate::client::Message>>>,
-        http_client: reqwest::Client,
-        api_key: Option<String>,
-        text: String,
-        tx: mpsc::Sender<AppEvent>,
-    ) {
-        let tx_clone = tx.clone();
-        let conversation_clone = conversation.clone();
-        let result = ChatClient::stream_message_with_usage(
-            &base_url,
-            &system_prompt,
-            conversation,
-            &http_client,
-            api_key.as_deref(),
-            &text,
-            move |chunk| {
-                let _ = tx_clone.send(AppEvent::StreamChunk {
-                    content: chunk.clone(),
-                });
-                Ok(())
-            },
-        )
-        .await;
-
-        match result {
-            Ok(usage) => {
-                let content = {
-                    let c = conversation_clone.lock().unwrap();
-                    c.last().map(|m| m.content.clone())
-                };
-                if let Some(content) = content {
-                    let _ = tx.send(AppEvent::StreamComplete { content, usage });
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(AppEvent::StreamError { error: e.to_string() });
-            }
-        }
-    }
-
-    async fn do_send_message(
-        base_url: String,
-        system_prompt: String,
-        conversation: Arc<Mutex<Vec<crate::client::Message>>>,
-        http_client: reqwest::Client,
-        api_key: Option<String>,
-        text: String,
-        tx: mpsc::Sender<AppEvent>,
-    ) {
-        let result = ChatClient::send_message(
-            &base_url,
-            &system_prompt,
-            conversation,
-            &http_client,
-            api_key.as_deref(),
-            &text,
-        )
-        .await;
-
-        let _ = tx.send(match result {
-            Ok((content, usage)) => AppEvent::MessageResult { content, usage },
-            Err(e) => AppEvent::MessageError { error: e.to_string() },
-        });
-    }
-
-    fn stop_generation(&mut self) {
-        if let Some(task) = self.streaming_task.take() {
-            task.abort();
-        }
-        self.is_generating = false;
-        self.current_response.clear();
-        self.status = AppStatus::Ready;
     }
 
     fn process_pending_events(&mut self) {
@@ -535,7 +246,7 @@ impl ChatApp {
         }
     }
 
-    fn add_message(&mut self, role: &str, content: &str) {
+    pub(super) fn add_message(&mut self, role: &str, content: &str) {
         self.chat_display.push(ChatMessage {
             role: role.to_string(),
             content: content.to_string(),
@@ -544,76 +255,6 @@ impl ChatApp {
         if self.chat_display.len() > self.max_display_messages {
             self.chat_display.drain(..self.chat_display.len() - self.max_display_messages);
         }
-    }
-
-    fn draw_status_bar(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let status_text = match &self.status {
-                AppStatus::Stopped => "● Stopped".to_string(),
-                AppStatus::Connecting => "● Connecting...".to_string(),
-                AppStatus::Ready => "● Ready".to_string(),
-                AppStatus::Generating => "● Generating...".to_string(),
-                AppStatus::Error(e) => format!("● Error: {}", e),
-            };
-            let status_color = match &self.status {
-                AppStatus::Stopped => egui::Color32::GRAY,
-                AppStatus::Connecting => egui::Color32::BLUE,
-                AppStatus::Ready => egui::Color32::GREEN,
-                AppStatus::Generating => egui::Color32::BLUE,
-                AppStatus::Error(_) => egui::Color32::RED,
-            };
-            ui.label(egui::RichText::new(&status_text).color(status_color));
-
-            if self.streaming {
-                ui.separator();
-                ui.label("Streaming");
-            }
-            ui.separator();
-            ui.label(format!("Messages: {}", self.chat_display.len()));
-        });
-    }
-
-    /// Rough token count estimation: ~4 chars per token is a common rule of thumb
-    fn estimate_token_count(text: &str) -> u32 {
-        if text.is_empty() {
-            0
-        } else {
-            (text.len() as f32 / 4.0).ceil() as u32
-        }
-    }
-
-    /// Returns true when in remote connection mode.
-    fn is_remote_mode(&self) -> bool {
-        let cfg = self.config.lock().unwrap();
-        let is_remote = cfg.connection_type == crate::config::ConnectionType::Remote;
-        drop(cfg);
-        is_remote
-    }
-
-    /// Returns the effective n_ctx for display and percentage calculations.
-    /// Local mode: uses the configured n_ctx (we control the server process).
-    /// Remote mode: uses the n_ctx fetched from the remote server's /props endpoint.
-    fn get_effective_n_ctx(&self) -> u32 {
-        if self.is_remote_mode() && self.remote_n_ctx > 0 {
-            self.remote_n_ctx
-        } else {
-            self.server.get_n_ctx()
-        }
-    }
-
-    fn draw_bottom_bar(&self, ui: &mut egui::Ui) {
-        let n_ctx = self.get_effective_n_ctx();
-        let n_gpu_layers = self.server.get_n_gpu_layers();
-        let threads = self.server.get_threads();
-
-        ui.horizontal(|ui| {
-            ui.label("Tokens:");
-            ui.label(self.token_count.to_string());
-            ui.label(" | Context: ");
-            ui.label(format!("{:.1}%", self.context_used));
-            ui.separator();
-            ui.label(format!("Ctx: {} | GPU: {} | Threads: {}", n_ctx, n_gpu_layers, threads));
-        });
     }
 
     fn handle_error(&mut self, err: &str) {
