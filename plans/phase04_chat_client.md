@@ -1,4 +1,4 @@
-# Phase 4: Chat Client
+# Phase 4: Chat Client (Rust)
 
 ## Status: Pending
 
@@ -6,344 +6,308 @@
 
 ### Step 4.1: HTTP Request Builder
 
-**Objective: Build HTTP requests for chat completions.
+**Objective**: Build HTTP requests for chat completions.
 
-**Tasks:
-- Create `internal/client/chat.go`
-- Define `Message`, `ChatRequest`, `Response` structs
-- Implement `buildRequest()` method
-- Serialize to JSON, create HTTP request
+**Tasks**:
+- Create `src/client/mod.rs`
+- Define `Message`, `ChatRequest`, `Response` structs with serde
+- Implement `build_request()` method
+- Serialize to JSON, create HTTP request with reqwest
 
-```go
-package client
+```rust
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-import (
-    "bytes"
-    "context"
-    "encoding/json"
-    "fmt"
-    "net/http"
-)
-
-type Message struct {
-    Role    string `json:"role"`
-    Content string `json:"content"`
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
 }
 
-type ChatRequest struct {
-    Model      string    `json:"model"`
-    Messages  []Message `json:"messages"`
-    Stream    bool     `json:"stream"`
+#[derive(Serialize, Debug)]
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    pub stream: bool,
 }
 
-type Response struct {
-    Choices []Choice `json:"choices"`
+#[derive(Deserialize, Debug)]
+pub struct Response {
+    pub choices: Vec<Choice>,
 }
 
-type Choice struct {
-    Message Message `json:"message"`
+#[derive(Deserialize, Debug)]
+pub struct Choice {
+    pub message: Message,
 }
 
-type ChatClient struct {
-    BaseURL      string
-    SystemPrompt string
-    Conversation []Message
-    HTTPClient   *http.Client
+pub struct ChatClient {
+    base_url: String,
+    system_prompt: String,
+    conversation: Arc<Mutex<Vec<Message>>>,
+    http_client: reqwest::Client,
+    abort_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<()>>>>,
 }
 
-func NewChatClient(baseURL string) *ChatClient {
-    return &ChatClient{
-        BaseURL:      baseURL,
-        HTTPClient: &http.Client{
-            Timeout: 120 * time.Second,
-        },
+impl ChatClient {
+    pub fn new(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            system_prompt: String::new(),
+            conversation: Arc::new(Mutex::new(Vec::new())),
+            http_client: reqwest::Client::new(),
+            abort_sender: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn build_request(&self, prompt: &str, stream: bool) -> ChatRequest {
+        let mut messages = Vec::new();
+        
+        if !self.system_prompt.is_empty() {
+            messages.push(Message {
+                role: "system".to_string(),
+                content: self.system_prompt.clone(),
+            });
+        }
+        
+        messages.push(Message {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        });
+
+        ChatRequest {
+            model: "local".to_string(),
+            messages,
+            stream,
+        }
+    }
+
+    pub fn set_system_prompt(&mut self, prompt: &str) {
+        self.system_prompt = prompt.to_string();
+    }
+
+    pub async fn clear_history(&self) {
+        self.conversation.lock().await.clear();
     }
 }
 
-func (c*ChatClient) buildRequest(prompt string, stream bool) (*ChatRequest, error) {
-    req := &ChatRequest{
-        Model: "local",
-        Stream: stream,
-    }
-    // Add system prompt
-    if c.SystemPrompt != "" {
-        req.Messages = append(req.Messages, Message{
-            Role: "system",
-            Content: c.SystemPrompt,
-        })
-    }
-    // Add conversation history
-    req.Messages = append(req.Messages, c.Conversation...)
-    // Add current user message
-    req.Messages = append(req.Messages, Message{
-        Role: "user",
-        Content: prompt,
-    })
-    return req, nil
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Stream error: {0}")]
+    Stream(String),
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - JSON matches OpenAI API format
 - Request includes system prompt, message history
 
-**Dependencies: Step 2.1 (config for base URL)
+**Dependencies**: Step 2.1 (config for base URL)
 
 ---
 
 ### Step 4.2: Non-Streaming Response Handling
 
-**Objective: Send request, receive complete response.
+**Objective**: Send request, receive complete response.
 
-**Tasks:
-- Implement `SendMessage()` with `stream: false`
+**Tasks**:
+- Implement `send_message()` with `stream: false`
 - Parse JSON response
 - Return content to caller
 - Update conversation history
 
-```go
-func (c*ChatClient) SendMessage(prompt string) (*Response, error) {
-    req, err := c.buildRequest(prompt, false)
-    if err != nil {
-        return nil, err
+```rust
+impl ChatClient {
+    pub async fn send_message(&self, prompt: &str) -> Result<String, Error> {
+        let request = self.build_request(prompt, false);
+        let body = serde_json::to_string(&request)?;
+        
+        let resp = self.http_client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+        
+        let status = resp.status();
+        let text = resp.text().await?;
+        
+        if !status.is_success() {
+            return Err(Error::Http(reqwest::Error::from(reqwest::Response::from(
+                http::Response::builder().status(status).body(text).unwrap()
+            ))));
+        }
+        
+        let response: Response = serde_json::from_str(&text)?;
+        
+        if response.choices.is_empty() {
+            return Err(Error::Stream("Empty response".to_string()));
+        }
+        
+        let content = response.choices[0].message.content.clone();
+        
+        // Update conversation history
+        let mut conv = self.conversation.lock().await;
+        conv.push(Message {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        });
+        conv.push(Message {
+            role: "assistant".to_string(),
+            content: content.clone(),
+        });
+        
+        Ok(content)
     }
-
-    body, err := json.Marshal(req)
-    if err != nil {
-        return nil, err
-    }
-
-    resp, err := c.HTTPClient.Post(
-        fmt.Sprintf("%s/v1/chat/completions", c.BaseURL),
-        "application/json",
-        bytes.NewBuffer(body),
-    )
-    if err != nil {
-        return nil, fmt.Errorf("HTTP request failed: %w", err)
-    }
-    defer resp.Body.Close()
-
-    var result Response
-    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-        return nil, fmt.Errorf("failed to parse response: %w", err)
-    }
-
-    // Update conversation history
-    c.Conversation = append(c.Conversation, Message{
-        Role:    "user",
-        Content: prompt,
-    })
-    c.Conversation = append(c.Conversation, Message{
-        Role:    "assistant",
-        Content: result.Choices[0].Message.Content,
-    })
-
-    return &result, nil
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - Complete response text is returned
 - Error handling for HTTP failures
 - Conversation history is updated
 
-**Dependencies: Step 4.1
+**Dependencies**: Step 4.1
 
 ---
 
 ### Step 4.3: SSE Streaming
 
-**Objective: Stream tokens as they arrive.
+**Objective**: Stream tokens as they arrive.
 
-**Tasks:
-- Implement `StreamMessage()` with `stream: true`
-- Parse SSE `data:` lines
+**Tasks**:
+- Implement `stream_message()` with `stream: true`
+- Parse SSE `data:` lines using reqwest streaming
 - Call callback for each token chunk
-- Use goroutine for async updates
-- Support cancellation via context
+- Use async callback pattern
+- Support cancellation via tokio abort
 - Handle `[DONE]` marker
 
-```go
-func (c*ChatClient) StreamMessage(
-    ctx context.Context,
-    prompt string,
-    callback func(string) error, // token chunk
-) error {
-    req, err := c.buildRequest(prompt, true)
-    if err != nil {
-        return err
+```rust
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use futures::StreamExt;
+
+type StreamCallback = Box<dyn FnMut(String) -> Result<(), Error> + Send + Sync>;
+
+impl ChatClient {
+    pub async fn stream_message<F>(&self, prompt: &str, mut callback: F) -> Result<(), Error>
+    where
+        F: FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
+    {
+        let request = self.build_request(prompt, true);
+        let body = serde_json::to_string(&request)?;
+        
+        let resp = self.http_client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .body(body)
+            .send()
+            .await?;
+        
+        if !resp.status().is_success() {
+            return Err(Error::Http(reqwest::Error::from(resp)));
+        }
+        
+        // Add user message to history
+        let mut conv = self.conversation.lock().await;
+        conv.push(Message {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        });
+        conv.push(Message {
+            role: "assistant".to_string(),
+            content: String::new(),
+        });
+        drop(conv);
+        
+        let mut stream = resp.bytes_stream();
+        let mut buffer = String::new();
+        
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            
+            // Process complete lines
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+                
+                self.process_sse_line(&line, &mut callback).await?;
+            }
+        }
+        
+        Ok(())
     }
-
-    body, _ := json.Marshal(req)
-    resp, err := c.HTTPClient.Post(
-        fmt.Sprintf("%s/v1/chat/completions", c.BaseURL),
-        "application/json",
-        bytes.NewBuffer(body),
-    )
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
-
-    // Add user message to history
-    c.Conversation = append(c.Conversation, Message{
-        Role: "user",
-        Content: prompt,
-    })
-
-    // Start assistant message placeholder
-    var assistantContent string
-    c.Conversation = append(c.Conversation, Message{
-        Role: "assistant",
-        Content: "",
-    })
-
-    scanner := bufio.NewScanner(resp.Body)
-    for scanner.Scan() {
-        line := scanner.Text()
-
-        // SSE parsing
-        if strings.HasPrefix(line, "data: ") {
-            data := strings.TrimPrefix(line, "data: ")
-
-            if data == "[DONE]" {
-                break
-            }
-
-            var chunk struct {
-                Choices []struct {
-                    Delta struct {
-                        Content string `json:"content"`
-                    } `json:"delta"`
-                } `json:"choices"`
-            }
-
-            var parsed chunk
-            if err := json.Unmarshal([]byte(data), &parsed); err != nil {
-                continue
-            }
-
-            if len(parsed.Choices) > 0 && parsed.Choices[0].Delta.Content != "" {
-                token := parsed.Choices[0].Delta.Content
-                assistantContent += token
-                if err := callback(token); err != nil {
-                    return err
+    
+    async fn process_sse_line(&self, line: &str, callback: &mut impl FnMut(String) -> Result<(), Error>) -> Result<(), Error> {
+        if line.is_empty() || line == "data: [DONE]" {
+            return Ok(());
+        }
+        
+        if !line.starts_with("data: ") {
+            return Ok(());
+        }
+        
+        let data = &line["data: ".len()..];
+        let chunk: serde_json::Value = serde_json::from_str(data)?;
+        
+        if let Some(text) = chunk.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+        {
+            if !text.is_empty() {
+                callback(text.to_string())?;
+                
+                // Update conversation history
+                let mut conv = self.conversation.lock().await;
+                if let Some(last) = conv.last_mut() {
+                    last.content.push_str(text);
                 }
             }
         }
+        
+        Ok(())
     }
-
-    // Update assistant message in history
-    c.Conversation[len(c.Conversation)-1].Content = assistantContent
-
-    return scanner.Err()
+    
+    pub async fn stop_generation(&self) {
+        if let Some(sender) = self.abort_sender.lock().await.take() {
+            let _ = sender.send(()).await;
+        }
+    }
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - Callback fires for each token
 - Streaming completes on `[DONE]` marker
-- Can cancel streaming with context
-- Conversation history is updated
+- Can cancel streaming with abort
 
-**Dependencies: Step 4.1
-
----
-
-### Step 4.4: Context Window Management
-
-**Objective: Manage conversation history within context limits.
-
-**Tasks:
-- Implement history truncation when approaching n_ctx
-- Add token estimation (rough estimate: 4 chars = 1 token)
-- Warn when history is getting large
-
-```go
-func (c*ChatClient) TruncateHistory(maxTokens int) {
-    // Remove oldest messages until history fits in context
-    // Rough token count
-    for len(c.Conversation) > 2 {
-        tokens := estimateTokens(c.Conversation)
-        if tokens < maxTokens {
-            break
-        }
-        // Remove oldest non-system message
-        c.Conversation = c.Conversation[1:] // Keep system prompt at front
-    }
-}
-
-func estimateTokens(messages []Message) int {
-    total := 0
-    for _, m := range messages {
-        total += len(m.Content) / 4 // Rough estimate
-    }
-    return total
-}
-```
-
-**Success Criteria:
-- History stays within context window
-- User is warned when history is truncated
-
-**Dependencies: Step 4.2
-
----
-
-### Step 4.5: Stop Generation Mechanism
-
-**Objective: Cancel ongoing generation.
-
-**Tasks:
-- `StopGeneration()` closes current HTTP response
-- Removes last assistant message from history
-- Cleans up conversation state
-
-```go
-func (c*ChatClient) StopGeneration() {
-    // Close current response body
-    // Remove last assistant message from conversation
-    // Signal that generation was stopped
-}
-```
-
-**Success Criteria:
-- Generation stops when user clicks stop
-- History is cleaned up
-
-**Dependencies: Step 4.3
-
----
-
-### Step 4.6: Thread Safety for UI Updates
-
-**Objective: Ensure UI updates are thread-safe for Fyne.
-
-**Tasks:
-- Document that all callback UI updates must use `fyne.CurrentApp().CallLater()`
-- ChatClient callbacks return tokens via goroutine
-- UI layer wraps updates in `CallLater()`
-
-**Success Criteria:
-- UI updates are thread-safe
-- No crashes from goroutine widget updates
-
-**Dependencies: Step 4.3
+**Dependencies**: Step 4.1
 
 ---
 
 ## Files Created:
-- `internal/client/chat.go`
+- `src/client/mod.rs`
 
 ## Dependencies on other phases:
 - Phase 2 (config provides base URL)
-- Phase 8 (streaming integration with UI)
+- Phase 5 (UI needs streaming updates)
 
 ## Review Notes:
-- Uses OpenAI-compatible API (`/v1/chat/completions`)
-- SSE parsing handles partial lines, JSON per line
-- Context cancellation for stop generation
-- Thread safety: callbacks must use `app.CurrentApp().CallLater()` for Fyne widget updates
-- Token estimation is rough (4 chars = 1 token). More accurate estimation could use tiktoken or llama.cpp token counting if needed
-- History truncation removes oldest messages first, keeps system prompt
-- Stop generation: close HTTP response, remove last assistant message from history
+- `reqwest` with streaming feature for SSE
+- `futures::StreamExt` for byte stream handling
+- Buffer-based line parsing for SSE
+- JSON parsing per SSE event
+- Conversation history updated incrementally during streaming
+- `thiserror` for error types (add to Cargo.toml)
+- `http` crate may be needed for error conversion (add to Cargo.toml)
+- Callback pattern allows flexible UI integration

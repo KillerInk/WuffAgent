@@ -1,8 +1,22 @@
-# WuffAgent - Implementation Plans
+# WuffAgent - Implementation Plans (Rust)
 
 ## Overview
 
-This directory contains the phased implementation plan for WuffAgent, split by phase for pause/resume capability.
+This directory contains the phased implementation plan for WuffAgent, built in **Rust** for performance, safety, and reliability.
+
+---
+
+## Technology Stack
+
+| Component | Technology |
+|-----------|------------|
+| Language | **Rust** (compiled, zero-cost abstractions, memory safety) |
+| UI Framework | **eframe** + **egui** (cross-platform native GUI, immediate mode) |
+| HTTP Client | **reqwest** (async, streaming support) |
+| Process Mgmt | **tokio** (async runtime, `tokio::process`) |
+| Config | **serde** + **serde_json** |
+| SSE Streaming | **reqwest** streaming |
+| Backend | llama-server (llama.cpp) |
 
 ---
 
@@ -10,22 +24,22 @@ This directory contains the phased implementation plan for WuffAgent, split by p
 
 | Phase | File | Description |
 |-------|------|-------------|
-|  | [`phase01_project_foundation.md`](phase01_project_foundation.md) | Go module, directory structure |
-|  | [`phase02_config_management.md`](phase02_config_management.md) | Config struct, persistence |
-|  |[`phase03_server_manager.md`](phase03_server_manager.md) | llama-server process management |
-|  |[`phase04_chat_client.md`](phase04_chat_client.md) | HTTP client, SSE streaming |
-|  |[`phase05_main_window.md`](phase05_main_window.md) | Fyne UI, chat display, input, status |
-|  |[`phase06_settings_panel.md`](phase06_settings_panel.md) | Settings dialog, file pickers |
-|  |[`phase07_integration.md`](phase07_integration.md) | Wire everything together |
-|  |[`phase08_streaming.md`](phase08_streaming.md) | Streaming integration, stop generation |
-|  |[`phase09_polish.md`](phase09_polish.md) | Theme, errors, persistence |
-|  |[`phase10_testing.md`](phase10_testing.md) | Unit tests, integration tests, final build |
+| 1 | [`phase01_project_foundation.md`](phase01_project_foundation.md) | Cargo.toml, directory structure, main.rs |
+| 2 | [`phase02_config_management.md`](phase02_config_management.md) | Config struct, serde, persistence |
+| 3 | [`phase03_server_manager.md`](phase03_server_manager.md) | llama-server process management (tokio) |
+| 4 | [`phase04_chat_client.md`](phase04_chat_client.md) | HTTP client, SSE streaming (reqwest) |
+| 5 | [`phase05_main_window.md`](phase05_main_window.md) | eframe/egui window, chat display, input |
+| 6 | [`phase06_settings_panel.md`](phase06_settings_panel.md) | Settings dialog, file pickers |
+| 7 | [`phase07_integration.md`](phase07_integration.md) | Wire everything together |
+| 8 | [`phase08_streaming.md`](phase08_streaming.md) | Streaming integration, stop generation |
+| 9 | [`phase09_polish.md`](phase09_polish.md) | Theme, errors, persistence |
+| 10 | [`phase10_testing.md`](phase10_testing.md) | Unit tests, integration tests, final build |
 
 ---
 
 ## Architecture
 
-See [`architecture.md`](architecture.md) for the overall design.
+See [`architecture.md`](architecture.md) for the overall Rust design.
 
 ---
 
@@ -34,7 +48,7 @@ See [`architecture.md`](architecture.md) for the overall design.
 ```mermaid
 graph TB
     subgraph Phase1
-        A[1.1 Module]
+        A[1.1 Cargo Init]
         A-->B[1.2 Structure]
         B-->C[1.3 Verify Build]
     end
@@ -55,23 +69,18 @@ graph TB
         D-->J[4.1 Request Builder]
         J-->K[4.2 Non-Streaming]
         J-->L[4.3 SSE Streaming]
-        L-->M[4.4 Context Window]
-        L-->N[4.5 Stop Generation]
-        L-->O[4.6 Thread Safety]
     end
     
     subgraph Phase5
-        C-->P[5.1 Window Skeleton]
+        C-->P[5.1 App Skeleton]
         P-->Q[5.2 Chat Display]
         P-->R[5.3 Input Area]
         P-->S[5.4 Status Bar]
         P-->T[5.5 Bottom Bar]
-        P-->U[5.6 Loading Progress]
-        P-->V[5.7 Keyboard Shortcuts]
     end
     
     subgraph Phase6
-        D-->W[6.1 Settings Window]
+        D-->W[6.1 Settings Dialog]
         W-->X[6.2 File Pickers]
         W-->Y[6.3 Server Control]
     end
@@ -107,7 +116,7 @@ graph TB
 
 ## Pause/Resume Guide
 
-At any phase, run `go build` to verify compilation. If it passes, you can stop here.
+At any phase, run `cargo check` to verify compilation. If it passes, you can stop here.
 
 To resume, check the last completed phase and start the next one.
 
@@ -117,72 +126,47 @@ To resume, check the last completed phase and start the next one.
 
 | Phase | Files | Key Functions |
 |-------|-------|---------------|
-|  | go.mod, main.go | `go mod init`, `app.New()` |
-|  | internal/config/config.go | `Config`, `LoadConfig`, `Save`, `Validate` |
-|  | internal/server/manager.go | `ServerManager`, `StartServer`, `StopServer` |
-|  | internal/client/chat.go | `ChatClient`, `SendMessage`, `StreamMessage`, `StopGeneration` |
-|  | internal/ui/window.go | `NewChatWindow`, `DisplayMessage`, `StreamUpdate` |
-|  | internal/ui/settings.go | `SettingsDialog`, `SaveConfig`, `StartServer` |
-|  | main.go | `main()`, full app wiring |
-|  | internal/client/chat.go, internal/ui/window.go | `StreamMessage` to UI updates |
-|  | internal/ui/*.go | Theme, errors, persistence |
-|  | *_test.go | Tests, build, release |
+| 1 | `Cargo.toml`, `src/main.rs` | `cargo init`, eframe setup |
+| 2 | `src/config/mod.rs` | `Config`, `load`, `save`, `validate` |
+| 3 | `src/server/mod.rs` | `ServerManager`, `start_server`, `stop_server` |
+| 4 | `src/client/mod.rs` | `ChatClient`, `send_message`, `stream_message` |
+| 5 | `src/ui/window.rs` | `ChatApp`, `draw_chat_area`, `draw_input_area` |
+| 6 | `src/ui/settings.rs` | `SettingsDialog`, `save`, `start_server` |
+| 7 | `src/main.rs` | `main()`, full app wiring |
+| 8 | `src/client/mod.rs`, `src/ui/window.rs` | `stream_message` to UI updates |
+| 9 | `src/ui/*.rs` | Theme, errors, persistence |
+| 10 | Tests, final binary | `cargo test`, `cargo build --release` |
 
 ---
 
-## Go Modules Required
+## Cargo.toml Dependencies
 
-```
-module wuffagent
-
-go 1.21
-
-require github.com/fyne-io/fyne/v2 v2.5.2
+```toml
+[dependencies]
+eframe = "0.30"
+egui = "0.30"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["stream"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5.0"
+thiserror = "1.0"
+futures = "0.3"
 ```
 
 ---
 
 ## Critical Design Notes
 
-1. **Thread Safety**: All UI updates from goroutines MUST use `app.CurrentApp().CallLater()` for Fyne widget updates.
+1. **Async Runtime**: All async operations use tokio. The main thread is the tokio runtime.
 2. **Stop Generation**: No abort endpoint in llama-server. Stop works by closing HTTP response body.
 3. **SSE Parsing**: Handle partial lines, JSON per line, `[DONE]` marker.
 4. **Context Window**: History truncation keeps system prompt, removes oldest messages.
-4. **Config Location**: Config file is next to binary via `os.Executable()`.
-
----
-
-## Review Improvements Applied
-
-From the comprehensive review, the following critical issues were addressed:
-
-1. **Stop Generation**: Added Step 8.3 with HTTP response closure and history cleanup
-2. **Model Loading Progress**: Added Step 5.6 for loading progress indicator
-3. **Thread Safety**: Added Step 4.6 for Fyne `CallLater()` documentation
-4. **SSE Parsing**: Expanded Step 4.3 with detailed parsing logic
-5. **Context Window**: Added Step 4.4 for history management
-6. **Input Validation**: Added Step 9.4 for input validation
-7. **Model Info Display**: Added Step 9.5 for model information
-8. **Keyboard Shortcuts**: Added Step 5.7 for Ctrl+Enter, Escape
-9. **Config Location**: Added Step 2.2 for binary-relative config path
-10. **Error Handling**: Enhanced Step 9.2 with auto-reconnect
-
----
-
-## Files per Phase
-
-| Phase | Files Created/Modified |
-|-------|-------------------|
-|  | go.mod, go.sum, main.go |
-|  | internal/config/config.go |
-|  | internal/server/manager.go |
-|  | internal/client/chat.go |
-|  | internal/ui/window.go |
-|  | internal/ui/settings.go |
-|  | main.go |
-|  | internal/client/chat.go, internal/ui/window.go |
-|  | internal/ui/*.go, config.json |
-|  | *_test.go, final binary |
+5. **Config Location**: Config file is next to binary via `std::env::current_exe()`.
+6. **Thread Safety**: Use `Arc<Mutex<>>` for shared state across async tasks.
+7. **UI Updates**: Use `ctx.request_repaint()` for responsive streaming UI.
 
 ---
 

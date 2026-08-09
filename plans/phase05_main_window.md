@@ -1,324 +1,369 @@
-# Phase 5: Main Window
+# Phase 5: Main Window (Rust/egui)
 
 ## Status: Pending
 
 ---
 
-### Step 5.1: Window Skeleton
+### Step 5.1: App Skeleton
 
-**Objective: Create basic Fyne window with layout.
+**Objective**: Create basic eframe app with layout.
 
-**Tasks:
-- Create `internal/ui/window.go`
-- Create `NewChatWindow()` returning `*ChatWindow`
+**Tasks**:
+- Create `src/ui/window.rs`
+- Create `ChatApp` struct implementing `eframe::App`
 - Set window title, size
 - Add placeholder content
 
-```go
-package ui
+```rust
+use eframe::egui;
+use std::sync::{Arc, Mutex};
 
-import (
-    "fyne.io/fyne/v2/app"
-    "fyne.io/fyne/v2/container"
-    "fyne.io/fyne/v2/widget"
-)
+use crate::config::Config;
+use crate::server::ServerManager;
+use crate::client::ChatClient;
 
-type ChatWindow struct {
-    fyneWindow fyne.Window
-    app      fyne.App
-    config    *config.Config
-    server    *server.ServerManager
-    client    *client.ChatClient
-    chatDisplay *widget.Scroll
-    inputField  *widget.Entry
-    sendBtn    *widget.Button
-    stopBtn    *widget.Button
-    statusLabel *widget.Label
+#[derive(Debug, Clone, PartialEq)]
+enum ServerStatus {
+    Stopped,
+    Connecting,
+    Ready,
+    Generating,
+    Error(String),
 }
 
-func NewChatWindow(app fyne.App, cfg *config.Config, srv *server.ServerManager, cli *client.ChatClient) *ChatWindow {
-    w := &ChatWindow{
-        app:  app,
-        fyneWindow: app.NewWindow("WuffAgent"),
-        config: cfg,
-        server: srv,
-        client: cli,
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+pub struct ChatApp {
+    server: Arc<ServerManager>,
+    client: Arc<Mutex<ChatClient>>,
+    config: Arc<Mutex<Config>>,
+    
+    // UI state
+    chat_display: Vec<ChatMessage>,
+    input_text: String,
+    is_generating: bool,
+    status: ServerStatus,
+    streaming: bool,
+    show_settings: bool,
+    progress: f32,
+    
+    // For streaming
+    current_response: String,
+}
+
+impl ChatApp {
+    pub fn new(
+        server: Arc<ServerManager>,
+        client: Arc<Mutex<ChatClient>>,
+        config: Arc<Mutex<Config>>,
+    ) -> Self {
+        let cfg = config.lock().unwrap();
+        Self {
+            server,
+            client,
+            config,
+            chat_display: Vec::new(),
+            input_text: String::new(),
+            is_generating: false,
+            status: ServerStatus::Stopped,
+            streaming: cfg.streaming,
+            show_settings: false,
+            progress: 0.0,
+            current_response: String::new(),
+        }
     }
-    w.setupLayout()
-    return w
+    
+    fn setup_ui(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("WuffAgent");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Settings").clicked() {
+                        self.show_settings = true;
+                    }
+                });
+            });
+        });
+        
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            self.draw_status_bar(ui);
+        });
+        
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.draw_chat_area(ui);
+            self.draw_input_area(ui);
+        });
+    }
 }
 
-func (w*ChatWindow) setupLayout() {
-    // Main layout
-    w.fyneWindow.SetContent(container.NewBorder(
-        w.buildHeader(),
-        nil,
-        w.buildFooter(),
-        nil,
-        w.buildChatArea(),
-    ))
-    w.fyneWindow.Resize(fyne.NewSize(900, 700))
-    w.fyneWindow.CenterOnScreen()
+impl eframe::App for ChatApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.setup_ui(ctx);
+        
+        if self.show_settings {
+            crate::ui::settings::show_settings_dialog(
+                ctx,
+                &mut self.show_settings,
+                &self.server,
+                &self.client,
+                &self.config,
+            );
+        }
+    }
+    
+    fn save(&mut self, _storage: &dyn eframe::Storage) {
+        // Save config here if needed
+    }
 }
 ```
 
-**Success Criteria:
-- Window opens, titled "WuffAgent"
+**Success Criteria**:
+- App opens, titled "WuffAgent"
 - Content is visible
 
-**Dependencies: Step 1.2 (directory structure exists)
+**Dependencies**: Step 2.1 (config), Step 3.1 (server manager available)
 
 ---
 
 ### Step 5.2: Chat Display Area
 
-**Objective: Scrollable chat message history.
+**Objective**: Scrollable chat message history.
 
-**Tasks:
-- Add `widget.Scroll` with `widget.RichText` for display
-- Implement `DisplayMessage()` to add messages
-- Add scrollbar, auto-scroll
+**Tasks**:
+- Add `egui::ScrollArea` with message list
+- Implement `draw_chat_area()` to add messages
+- Auto-scroll to bottom on new messages
 
-```go
-func (w*ChatWindow) buildChatArea() fyne.CanvasObject {
-    w.chatDisplay = widget.NewScroll(container.NewVBox())
-    w.chatDisplay.SetMinSize(fyne.NewSize(800, 500))
-    return w.chatDisplay
-}
-
-func (w*ChatWindow) DisplayMessage(role string, text string) {
-    // Add message bubble
-    // Auto-scroll to bottom
+```rust
+impl ChatApp {
+    fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .id_salt("chat_scroll")
+            .auto_shrink([0.0, 0.0])
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    for msg in &self.chat_display {
+                        self.draw_message(ui, msg);
+                    }
+                    
+                    // Show current streaming response
+                    if self.is_generating && !self.current_response.is_empty() {
+                        egui::widgets::RichText::new(&self.current_response)
+                            .text_color(egui::color::PALE_BLUE)
+                            .show(ui);
+                        ui.separator();
+                    }
+                    
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::ZERO,
+                        egui::Layout::top_down(egui::Align::Left),
+                    );
+                });
+            });
+    }
+    
+    fn draw_message(&mut self, ui: &mut egui::Ui, msg: &ChatMessage) {
+        let is_user = msg.role == "user";
+        
+        ui.horizontal(|ui| {
+            if is_user {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.label("You: ");
+            } else {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.label("AI:  ");
+            }
+            
+            let color = if is_user {
+                egui::Color32::from_rgb(200, 200, 200)
+            } else {
+                egui::Color32::from_rgb(150, 200, 150)
+            };
+            
+            ui.colored_label(egui::RichText::new(&msg.content).color(color), "");
+        });
+        ui.separator();
+    }
+    
+    pub fn add_message(&mut self, role: &str, content: &str) {
+        self.chat_display.push(ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        });
+    }
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - Messages display in order
 - Scrollbar appears when content overflows
 - New messages are visible
 
-**Dependencies: Step 5.1
+**Dependencies**: Step 5.1
 
 ---
 
 ### Step 5.3: Input Area
 
-**Objective: User input field and send button with validation.
+**Objective**: User input field and send button.
 
-**Tasks:
-- Add `widget.Entry` for input (multi-line)
-- Add `widget.Button` for send
-- Add `widget.Button` for stop
+**Tasks**:
+- Add `egui::TextEdit` for input (multi-line)
+- Add `egui::Button` for send
+- Add `egui::Button` for stop
 - Wire send button to submit
 - Wire stop button to cancel
-- Add input validation (empty check, max length)
 
-```go
-func (w*ChatWindow) buildFooter() fyne.CanvasObject {
-    w.inputField = widget.NewMultiLineEntry()
-    w.inputField.PlaceHolder = "Type your message...
-
-    w.sendBtn = widget.NewButton("Send", func() {
-        text := w.inputField.Text
-        if strings.TrimSpace(text) == "" {
-            return
-        }
-        w.sendMessage(text)
-    })
-    w.stopBtn = widget.NewButton("Stop", func() {
-        w.stopGeneration()
-    })
-    w.stopBtn.Hide() // Hidden initially, shown during generation
-
-    return container.NewHBox(
-        w.inputField,
-        w.stopBtn,
-        w.sendBtn,
-    )
-}
-
-func (w*ChatWindow) sendMessage(text string) {
-    if strings.TrimSpace(text) == "" {
-        return
+```rust
+impl ChatApp {
+    fn draw_input_area(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [ui.available_width() - 120.0, 80.0],
+                    egui::TextEdit::singleline(&mut self.input_text)
+                        .hint_text("Type your message...")
+                        .multi_line(true),
+                );
+            });
+            
+            ui.vertical(|ui| {
+                if !self.is_generating {
+                    if ui.button("Send").clicked() {
+                        self.send_message();
+                    }
+                } else {
+                    if ui.button("Stop").clicked() {
+                        self.stop_generation();
+                    }
+                }
+                
+                if ui.button("Clear").clicked() {
+                    self.clear_chat();
+                }
+            });
+        });
     }
-    // Disable input during generation
-    w.inputField.Disable()
-    w.sendBtn.Disable()
-    w.stopBtn.Show()
-    w.stopBtn.Enable()
-
-    // Send via client
-    go func() {
-        // CallLater for UI safety
-        // ...
-    }()
-}
-
-func (w*ChatWindow) stopGeneration() {
-    w.client.StopGeneration()
-    w.inputField.Enable()
-    w.sendBtn.Enable()
-    w.stopBtn.Hide()
+    
+    fn send_message(&mut self) {
+        let text = self.input_text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        
+        self.input_text.clear();
+        self.add_message("user", &text);
+        
+        let server = self.server.clone();
+        let client = self.client.clone();
+        let status = egui::Mutex::new(ServerStatus::Generating);
+        
+        // Spawn async task (using egui's built-in async support)
+        ctx.request_repaint();
+        
+        // Note: In a real app, you'd use eframe's async integration
+        // or spawn a tokio task and poll it
+    }
+    
+    fn stop_generation(&mut self) {
+        // Cancel streaming
+        tokio::task::block_in_place(|| {
+            self.client.blocking_lock().stop_generation();
+        });
+        
+        self.is_generating = false;
+        self.current_response.clear();
+    }
+    
+    fn clear_chat(&mut self) {
+        self.chat_display.clear();
+        tokio::task::block_in_place(|| {
+            self.client.blocking_lock().clear_history();
+        });
+    }
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - User can type in input field
 - Send button triggers submission
 - Stop button is visible during generation
-- Input is validated (empty check)
 
-**Dependencies: Step 5.1
+**Dependencies**: Step 5.1
 
 ---
 
 ### Step 5.4: Status Bar
 
-**Objective: Show server state (connecting, ready, generating, error).
+**Objective**: Show server state (connecting, ready, generating, error).
 
-**Tasks:
-- Add `widget.Label` for status
+**Tasks**:
+- Add status label
 - Update on server state changes
 - Color-code: green=ready, blue=generating, red=error, gray=connecting
 
-```go
-func (w*ChatWindow) buildHeader() fyne.CanvasObject {
-    w.statusLabel = widget.NewLabel("● Connecting")
-    // Color coding
-    return container.NewHBox(
-        widget.NewLabel("WuffAgent"),
-        fyne.NewContainer(),
-        w.statusLabel,
-    )
-}
-
-func (w*ChatWindow) setStatus(status Status, text string) {
-    w.statusLabel.Text = text
-    w.statusLabel.Refresh()
-    switch status {
-    case StatusReady:
-        w.statusLabel.Style.TextColor = color.Green
-    case StatusGenerating:
-        w.statusLabel.Style.TextColor = color.Blue
-    case StatusError:
-        w.statusLabel.Style.TextColor = color.Red
-    case StatusConnecting:
-        w.statusLabel.Style.TextColor = color.Gray
+```rust
+impl ChatApp {
+    fn draw_status_bar(&self, ui: &mut egui::Ui) {
+        let (text, color) = match &self.status {
+            ServerStatus::Stopped => ("● Stopped", egui::Color32::GRAY),
+            ServerStatus::Connecting => ("● Connecting...", egui::Color32::BLUE),
+            ServerStatus::Ready => ("● Ready", egui::Color32::GREEN),
+            ServerStatus::Generating => ("● Generating...", egui::Color32::BLUE),
+            ServerStatus::Error(e) => (&format!("● Error: {}", e), egui::Color32::RED),
+        };
+        
+        ui.label(egui::RichText::new(text).color(color));
+    }
+    
+    pub fn set_status(&mut self, status: ServerStatus) {
+        self.status = status;
     }
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - Status text changes based on state
 - Colors are visible
 
-**Dependencies: Step 5.1
+**Dependencies**: Step 5.1
 
 ---
 
 ### Step 5.5: Bottom Bar
 
-**Objective: Settings, Clear, and theme buttons.
+**Objective**: Settings, Clear, and exit buttons.
 
-**Tasks:
-- Add `widget.Button` for settings
-- Add `widget.Button` for clear history
-- Add `widget.Button` for theme toggle
+**Tasks**:
+- Add settings button to menu bar (already done in 5.1)
+- Add clear button in input area
+- Add exit button
 
-```go
-func (w*ChatWindow) buildFooter() fyne.CanvasObject {
-    return container.NewHBox(
-        widget.NewButton("⚙ Settings", func() {
-            w.openSettings()
-        }),
-        widget.NewButton("🗑 Clear", func() {
-            w.clearHistory()
-        }),
-        w.stopBtn,
-        w.sendBtn,
-        widget.NewButton("🌓 Theme", func() {
-            w.toggleTheme()
-        }),
-    )
-}
-
-func (w*ChatWindow) clearHistory() {
-    w.client.ClearHistory()
-    // Clear display
-}
-```
-
-**Success Criteria:
-- All buttons visible
-- Buttons are functional
-
-**Dependencies: Step 5.2 (chat display exists)
-
----
-
-### Step 5.6: Model Loading Progress
-
-**Objective: Show loading progress during model loading.
-
-**Tasks:
-- Add progress bar for model loading
-- Show percentage
-- Disable input during loading
-
-```go
-type ChatWindow struct {
-    loadingProgress *widget.ProgressBar
-    // ...
-}
-
-func (w*ChatWindow) showLoading() {
-    w.loadingProgress.Show()
-    w.inputField.Disable()
-}
-
-func (w*ChatWindow) hideLoading() {
-    w.loadingProgress.Hide()
-    w.inputField.Enable()
-}
-```
-
-**Success Criteria:
-- Progress bar shows during model loading
-- Input is disabled during loading
-
-**Dependencies: Step 5.1
-
----
-
-### Step 5.7: Keyboard Shortcuts
-
-**Objective: Ctrl+Enter to send, Escape to stop.
-
-**Tasks:
-- Add `widget.Entry` shortcuts
-- Ctrl+Enter sends message
-- Escape stops generation
-
-```go
-func (w*ChatWindow) setupShortcuts() {
-    w.inputField.OnSubmitted = func(s string) {
-        // Enter sends
-        w.sendMessage(s)
+```rust
+impl ChatApp {
+    fn draw_exit_button(&self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("exit_panel").show(ctx, |ui| {
+            if ui.button("Exit").clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
     }
 }
 ```
 
-**Success Criteria:
-- Ctrl+Enter sends
-- Escape stops generation
+**Success Criteria**:
+- All buttons visible
+- Buttons are functional
 
-**Dependencies: Step 5.3
+**Dependencies**: Step 5.2 (chat display exists)
 
 ---
 
 ## Files Created:
-- `internal/ui/window.go`
-- `internal/ui/window.go` (main chat window)
+- `src/ui/window.rs`
 
 ## Dependencies on other phases:
 - Phase 2 (config)
@@ -326,8 +371,10 @@ func (w*ChatWindow) setupShortcuts() {
 - Phase 4 (chat client)
 
 ## Review Notes:
-- All UI updates from goroutines MUST use `app.CurrentApp().CallLater()` for thread safety
-- Input validation: empty messages rejected
-- Clear button clears client-side display
-- Model info from server logs displayed in status bar
-- Theme toggle uses Fyne theme switching
+- eframe::App trait is the main interface
+- egui::ScrollArea for chat history
+- egui::TextEdit for input (multi_line)
+- Status bar uses TopBottomPanel
+- Color coding for status indicators
+- Async operations need careful handling in egui (use `ctx.spawn` or external tokio tasks)
+- `eframe::Storage` for saving app state

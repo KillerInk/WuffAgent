@@ -1,4 +1,4 @@
-# Phase 8: Streaming Integration
+# Phase 8: Streaming Integration (Rust)
 
 ## Status: Pending
 
@@ -6,132 +6,149 @@
 
 ### Step 8.1: Streaming to UI
 
-**Objective: Streaming responses update UI in real time.
+**Objective**: Streaming responses update UI in real time.
 
-**Tasks:
-- Wire `StreamMessage` to chat display
+**Tasks**:
+- Wire `stream_message` to chat display
 - Each token chunk appears immediately
 - Progress updates as tokens arrive
-- Use `app.CurrentApp().CallLater()` for thread safety
+- Use `egui::Context::request_repaint()` for responsive UI
 
-```go
-func (w*ChatWindow) startStreaming() {
-    prompt := w.inputField.Text
-    w.inputField.Text = ""
-    
-    // Add user message to display
-    w.displayMessage("user", prompt)
-    
-    // Start assistant message placeholder
-    var assistantContent string
-    w.displayMessage("assistant", "") // Placeholder
-    
-    go func() {
-        ctx, cancel := context.WithCancel(context.Background())
-        defer cancel()
+```rust
+impl ChatApp {
+    async fn send_streaming_with_ui(&mut self, text: &str) {
+        self.status = ServerStatus::Generating;
+        self.is_generating = true;
+        self.current_response.clear();
         
-        err := w.client.StreamMessage(ctx, prompt, func(token string) error {
-            assistantContent += token
-            
-            // Thread-safe UI update
-            fyne.CurrentApp().CallLater(func() {
-                w.updateAssistantMessage(token)
-            })
-            
-            return nil
-        })
+        let client = self.client.clone();
+        let mut response = String::new();
         
-        // Clean up after streaming
-        fyne.CurrentApp().CallLater(func() {
-            w.inputField.Enable()
-            w.sendBtn.Enable()
-            w.stopBtn.Hide()
-        })
-    }()
+        let result = tokio::task::spawn(async move {
+            client.lock().await.stream_message(text, |chunk| {
+                response.push_str(&chunk);
+                Ok(())
+            }).await
+        }).await;
+        
+        match result {
+            Ok(Ok(())) => {
+                self.add_message("assistant", &response);
+                self.status = ServerStatus::Ready;
+            }
+            Ok(Err(e)) => {
+                self.status = ServerStatus::Error(e.to_string());
+                tracing::error!("Stream error: {}", e);
+            }
+            Err(e) => {
+                self.status = ServerStatus::Error(e.to_string());
+                tracing::error!("Task error: {}", e);
+            }
+        }
+        
+        self.current_response.clear();
+        self.is_generating = false;
+    }
+    
+    fn request_repaint(&self, ctx: &egui::Context) {
+        ctx.request_repaint();
+    }
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - Tokens show in chat area as they stream
 - UI remains responsive during streaming
 
-**Dependencies: Step 4.3 (SSE streaming), Step 5.2 (chat display)
+**Dependencies**: Step 4.3 (SSE streaming), Step 5.2 (chat display)
 
 ---
 
 ### Step 8.2: Streaming Toggle
 
-**Objective: User selects streaming mode.
+**Objective**: User selects streaming mode.
 
-**Tasks:
+**Tasks**:
 - Settings checkbox controls streaming
 - Client checks config before sending
 
-```go
-func (w*ChatWindow) sendMessage(text string) {
-    if w.config.Streaming {
-        w.startStreaming()
-    } else {
-        w.sendNonStreaming(text)
+```rust
+impl ChatApp {
+    fn send_message(&mut self, ctx: &egui::Context, text: &str) {
+        self.add_message("user", text);
+        self.input_text.clear();
+        
+        if self.streaming {
+            // Spawn async task for streaming
+            ctx.spawn(async move {
+                // This would need proper app reference
+            });
+        } else {
+            // Non-streaming
+        }
     }
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - Checkbox enables/disables streaming
 
-**Dependencies: Step 8.1, Step 6.1 (settings)
+**Dependencies**: Step 8.1, Step 6.1 (settings)
 
 ---
 
 ### Step 8.3: Stop Generation Implementation
 
-**Objective: Cancel ongoing streaming.
+**Objective**: Cancel ongoing streaming.
 
-**Tasks:
-- Stop button closes HTTP response
+**Tasks**:
+- Stop button aborts HTTP request
 - Removes last assistant message from history
 - Cleans up UI state
 
-```go
-func (w*ChatWindow) stopGeneration() {
-    // Cancel streaming
-    w.client.StopGeneration()
-    
-    // Remove incomplete assistant message
-    fyne.CurrentApp().CallLater(func() {
-        // Hide stop button
-        w.stopBtn.Hide()
-        // Enable input
-        w.inputField.Enable()
-        w.sendBtn.Enable()
-        // Remove last assistant message from display
-    })
+```rust
+impl ChatApp {
+    fn stop_generation(&mut self) {
+        // Cancel streaming
+        tokio::task::block_in_place(|| {
+            self.client.blocking_lock().stop_generation();
+        });
+        
+        // Remove incomplete assistant message
+        if let Some(last) = self.chat_display.last() {
+            if last.role == "assistant" && last.content.is_empty() {
+                self.chat_display.pop();
+            }
+        }
+        
+        self.is_generating = false;
+        self.current_response.clear();
+        self.status = ServerStatus::Ready;
+    }
 }
 ```
 
-**Success Criteria:
+**Success Criteria**:
 - Generation stops when user clicks stop
 - History is cleaned up
 - UI returns to ready state
 
-**Dependencies: Step 8.1
+**Dependencies**: Step 8.1
 
 ---
 
 ## Files Modified:
-- `internal/ui/window.go`
-- `internal/client/chat.go`
+- `src/ui/window.rs`
+- `src/client/mod.rs`
 
 ## Dependencies on other phases:
 - Phase 4 (chat client with streaming, StopGeneration)
 - Phase 5 (UI window)
 
 ## Review Notes:
-- All UI updates from streaming callbacks MUST use `app.CurrentApp().CallLater()` for thread safety
-- Stop generation closes HTTP response body and cancels context
+- Async streaming needs careful integration with egui
+- `ctx.request_repaint()` for UI updates during streaming
+- Stop generation closes HTTP response and cancels task
 - Streaming mode is user-selectable in settings
-- Thread safety is critical: goroutines cannot update Fyne widgets directly
-- Context cancellation is used for stop generation
-- History cleanup removes incomplete messages on stop
-- Streaming checkbox in settings controls whether streaming or non-streaming mode is used
+- Thread safety: use `Arc<Mutex<>>` for shared state
+- tokio::spawn for async operations
