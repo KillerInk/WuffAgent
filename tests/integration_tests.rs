@@ -101,7 +101,7 @@ async fn test_chat_client_request() {
     .await;
 
     assert!(result.is_ok());
-    let content = result.unwrap();
+    let (content, _usage) = result.unwrap();
     assert_eq!(content, "Mock response");
 
     // Verify conversation history was updated
@@ -187,6 +187,7 @@ async fn test_sse_parsing_end_to_end() {
             "\r\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n",
             "data: [DONE]\n",
         ].concat();
 
@@ -202,7 +203,7 @@ async fn test_sse_parsing_end_to_end() {
     let received_chunks = Arc::new(Mutex::new(Vec::new()));
     let chunks_clone = received_chunks.clone();
 
-    let result = ChatClient::stream_message(
+    let result = ChatClient::stream_message_with_usage(
         &base_url,
         "",
         conversation.clone(),

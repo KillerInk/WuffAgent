@@ -15,9 +15,17 @@ pub struct ChatRequest {
     pub stream: bool,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct Response {
     pub choices: Vec<Choice>,
+    pub usage: Option<Usage>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -101,7 +109,7 @@ impl ChatClient {
         http_client: &reqwest::Client,
         api_key: Option<&str>,
         prompt: &str,
-    ) -> Result<String, Error> {
+    ) -> Result<(String, Option<Usage>), Error> {
         let request = Self::build_request(system_prompt, prompt, false);
         let body = serde_json::to_string(&request)?;
 
@@ -138,6 +146,7 @@ impl ChatClient {
         }
 
         let content = response.choices[0].message.content.clone();
+        let usage = response.usage.clone();
 
         // Update conversation history
         let mut conv = conversation.lock().unwrap();
@@ -151,10 +160,52 @@ impl ChatClient {
         });
         drop(conv);
 
-        Ok(content)
+        Ok((content, usage))
     }
 
-    pub async fn stream_message(
+    async fn process_sse_line(
+        line: &str,
+        callback: &mut impl FnMut(String) -> Result<(), Error>,
+        conversation: Arc<Mutex<Vec<Message>>>,
+    ) -> Result<Option<Usage>, Error> {
+        if line.is_empty() || line == "data: [DONE]" {
+            return Ok(None);
+        }
+
+        if !line.starts_with("data: ") {
+            return Ok(None);
+        }
+
+        let data = &line["data: ".len()..];
+        let chunk: serde_json::Value = serde_json::from_str(data)?;
+
+        if let Some(text) = chunk
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+        {
+            if !text.is_empty() {
+                callback(text.to_string())?;
+
+                // Update conversation history
+                let mut conv = conversation.lock().unwrap();
+                if let Some(last) = conv.last_mut() {
+                    last.content.push_str(text);
+                }
+            }
+        }
+
+        // Extract usage from the final chunk (when choices has no delta but has usage)
+        if let Some(usage) = chunk.get("usage").and_then(|u| serde_json::from_value(u.clone()).ok()) {
+            return Ok(Some(usage));
+        }
+
+        Ok(None)
+    }
+
+    pub async fn stream_message_with_usage(
         base_url: &str,
         system_prompt: &str,
         conversation: Arc<Mutex<Vec<Message>>>,
@@ -162,7 +213,7 @@ impl ChatClient {
         api_key: Option<&str>,
         prompt: &str,
         mut callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<Usage>, Error> {
         let request = Self::build_request(system_prompt, prompt, true);
         let body = serde_json::to_string(&request)?;
 
@@ -204,6 +255,7 @@ impl ChatClient {
 
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
+        let mut last_usage: Option<Usage> = None;
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
@@ -214,48 +266,13 @@ impl ChatClient {
                 let line = buffer[..newline_pos].to_string();
                 buffer = buffer[newline_pos + 1..].to_string();
 
-                Self::process_sse_line(&line, &mut callback, conversation.clone()).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn process_sse_line(
-        line: &str,
-        callback: &mut impl FnMut(String) -> Result<(), Error>,
-        conversation: Arc<Mutex<Vec<Message>>>,
-    ) -> Result<(), Error> {
-        if line.is_empty() || line == "data: [DONE]" {
-            return Ok(());
-        }
-
-        if !line.starts_with("data: ") {
-            return Ok(());
-        }
-
-        let data = &line["data: ".len()..];
-        let chunk: serde_json::Value = serde_json::from_str(data)?;
-
-        if let Some(text) = chunk
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("delta"))
-            .and_then(|d| d.get("content"))
-            .and_then(|c| c.as_str())
-        {
-            if !text.is_empty() {
-                callback(text.to_string())?;
-
-                // Update conversation history
-                let mut conv = conversation.lock().unwrap();
-                if let Some(last) = conv.last_mut() {
-                    last.content.push_str(text);
+                if let Some(usage) = Self::process_sse_line(&line, &mut callback, conversation.clone()).await? {
+                    last_usage = Some(usage);
                 }
             }
         }
 
-        Ok(())
+        Ok(last_usage)
     }
 }
 

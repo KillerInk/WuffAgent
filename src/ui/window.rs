@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::client::ChatClient;
+use crate::client::{ChatClient, Usage};
 use crate::config::{ChatMessage as ConfigChatMessage, Config};
 use crate::server::ServerManager;
 use crate::ui::settings::SettingsDialog;
@@ -24,10 +24,10 @@ pub struct ChatMessage {
 }
 
 pub enum AppEvent {
-    MessageResult { content: String },
+    MessageResult { content: String, usage: Option<Usage> },
     MessageError { error: String },
     StreamChunk { content: String },
-    StreamComplete { content: String },
+    StreamComplete { content: String, usage: Option<Usage> },
     StreamError { error: String },
 }
 
@@ -56,7 +56,15 @@ pub struct ChatApp {
     // Stats for bottom bar
     token_count: u32,
     context_used: f32,
-    model_name: String,
+
+    // Remote server n_ctx (fetched from /props), 0 = not yet fetched
+    remote_n_ctx: u32,
+
+    // Shared Arc for the background fetch task to update
+    remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
+
+    // Shared handle for background remote n_ctx fetch task
+    remote_n_ctx_handle: Option<JoinHandle<()>>,
 
     // Max messages to keep in display (truncate for context window)
     max_display_messages: usize,
@@ -95,7 +103,9 @@ impl ChatApp {
             streaming_task: None,
             token_count: 0,
             context_used: 0.0,
-            model_name: String::new(),
+            remote_n_ctx: 0,
+            remote_n_ctx_arc: None,
+            remote_n_ctx_handle: None,
             max_display_messages: 100,
         }
     }
@@ -384,7 +394,7 @@ impl ChatApp {
     ) {
         let tx_clone = tx.clone();
         let conversation_clone = conversation.clone();
-        let result = ChatClient::stream_message(
+        let result = ChatClient::stream_message_with_usage(
             &base_url,
             &system_prompt,
             conversation,
@@ -401,13 +411,13 @@ impl ChatApp {
         .await;
 
         match result {
-            Ok(()) => {
+            Ok(usage) => {
                 let content = {
                     let c = conversation_clone.lock().unwrap();
                     c.last().map(|m| m.content.clone())
                 };
                 if let Some(content) = content {
-                    let _ = tx.send(AppEvent::StreamComplete { content });
+                    let _ = tx.send(AppEvent::StreamComplete { content, usage });
                 }
             }
             Err(e) => {
@@ -436,7 +446,7 @@ impl ChatApp {
         .await;
 
         let _ = tx.send(match result {
-            Ok(content) => AppEvent::MessageResult { content },
+            Ok((content, usage)) => AppEvent::MessageResult { content, usage },
             Err(e) => AppEvent::MessageError { error: e.to_string() },
         });
     }
@@ -459,11 +469,28 @@ impl ChatApp {
 
         for event in events {
             match event {
-                AppEvent::MessageResult { content } => {
+                AppEvent::MessageResult { content, usage } => {
                     self.add_message("assistant", &content);
                     self.is_generating = false;
                     self.status = AppStatus::Ready;
                     self.progress += 1.0;
+                    let server_n_ctx = self.get_effective_n_ctx();
+                    if let Some(u) = &usage {
+                        self.token_count = u.total_tokens;
+                        self.context_used = if server_n_ctx > 0 {
+                            (u.total_tokens as f32 / server_n_ctx as f32) * 100.0
+                        } else {
+                            0.0
+                        };
+                    } else {
+                        // Fallback: estimate tokens from message content when server doesn't report usage
+                        self.token_count = Self::estimate_token_count(&content);
+                        self.context_used = if server_n_ctx > 0 {
+                            (self.token_count as f32 / server_n_ctx as f32) * 100.0
+                        } else {
+                            0.0
+                        };
+                    }
                 }
                 AppEvent::MessageError { error } => {
                     self.status = AppStatus::Error(error.clone());
@@ -474,12 +501,29 @@ impl ChatApp {
                 AppEvent::StreamChunk { content } => {
                     self.current_response.push_str(&content);
                 }
-                AppEvent::StreamComplete { content } => {
+                AppEvent::StreamComplete { content, usage } => {
                     self.add_message("assistant", &content);
                     self.current_response.clear();
                     self.is_generating = false;
                     self.status = AppStatus::Ready;
                     self.progress += 1.0;
+                    let server_n_ctx = self.get_effective_n_ctx();
+                    if let Some(u) = &usage {
+                        self.token_count = u.total_tokens;
+                        self.context_used = if server_n_ctx > 0 {
+                            (u.total_tokens as f32 / server_n_ctx as f32) * 100.0
+                        } else {
+                            0.0
+                        };
+                    } else {
+                        // Fallback: estimate tokens from message content when server doesn't report usage
+                        self.token_count = Self::estimate_token_count(&content);
+                        self.context_used = if server_n_ctx > 0 {
+                            (self.token_count as f32 / server_n_ctx as f32) * 100.0
+                        } else {
+                            0.0
+                        };
+                    }
                 }
                 AppEvent::StreamError { error } => {
                     self.status = AppStatus::Error(error.clone());
@@ -529,20 +573,44 @@ impl ChatApp {
         });
     }
 
-    fn draw_bottom_bar(&self, ui: &mut egui::Ui) {
+    /// Rough token count estimation: ~4 chars per token is a common rule of thumb
+    fn estimate_token_count(text: &str) -> u32 {
+        if text.is_empty() {
+            0
+        } else {
+            (text.len() as f32 / 4.0).ceil() as u32
+        }
+    }
+
+    /// Returns true when in remote connection mode.
+    fn is_remote_mode(&self) -> bool {
         let cfg = self.config.lock().unwrap();
-        let n_ctx = cfg.n_ctx;
-        let n_gpu_layers = cfg.n_gpu_layers;
-        let threads = cfg.threads;
+        let is_remote = cfg.connection_type == crate::config::ConnectionType::Remote;
         drop(cfg);
+        is_remote
+    }
+
+    /// Returns the effective n_ctx for display and percentage calculations.
+    /// Local mode: uses the configured n_ctx (we control the server process).
+    /// Remote mode: uses the n_ctx fetched from the remote server's /props endpoint.
+    fn get_effective_n_ctx(&self) -> u32 {
+        if self.is_remote_mode() && self.remote_n_ctx > 0 {
+            self.remote_n_ctx
+        } else {
+            self.server.get_n_ctx()
+        }
+    }
+
+    fn draw_bottom_bar(&self, ui: &mut egui::Ui) {
+        let n_ctx = self.get_effective_n_ctx();
+        let n_gpu_layers = self.server.get_n_gpu_layers();
+        let threads = self.server.get_threads();
 
         ui.horizontal(|ui| {
-            ui.label("Token Count:");
+            ui.label("Tokens:");
             ui.label(self.token_count.to_string());
-            ui.label(" | Context Used: ");
+            ui.label(" | Context: ");
             ui.label(format!("{:.1}%", self.context_used));
-            ui.label(" | Model: ");
-            ui.label(if self.model_name.is_empty() { "unknown" } else { &self.model_name });
             ui.separator();
             ui.label(format!("Ctx: {} | GPU: {} | Threads: {}", n_ctx, n_gpu_layers, threads));
         });
@@ -593,6 +661,52 @@ impl eframe::App for ChatApp {
         // Request repaint during streaming for real-time updates
         if self.is_generating {
             ctx.request_repaint();
+        }
+
+        // Fetch remote server props periodically (every ~5s while connected)
+        if self.is_remote_mode() && self.remote_n_ctx == 0 {
+            let config = self.config.clone();
+            let remote_n_ctx = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let remote_n_ctx_clone = remote_n_ctx.clone();
+            if self.remote_n_ctx_handle.is_none() {
+                let handle = tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        let url = {
+                            let cfg = config.lock().unwrap();
+                            cfg.remote_url.clone()
+                        };
+                        if url.is_empty() {
+                            continue;
+                        }
+                        let props_url = format!("{}/props", url.trim_end_matches('/'));
+                        if let Ok(resp) = reqwest::get(&props_url).await {
+                            if resp.status().is_success() {
+                                if let Ok(text) = resp.text().await {
+                                    if let Ok(props) = serde_json::from_str::<serde_json::Value>(&text) {
+                                        if let Some(n_ctx) = props
+                                            .get("default_generation_settings")
+                                            .and_then(|s| s.get("n_ctx"))
+                                            .and_then(|v| v.as_u64())
+                                        {
+                                            remote_n_ctx_clone.store(n_ctx as u32, std::sync::atomic::Ordering::Relaxed);
+                                            tracing::info!("Remote server n_ctx: {}", n_ctx);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                self.remote_n_ctx_handle = Some(handle);
+                self.remote_n_ctx_arc = Some(remote_n_ctx);
+            }
+            // Read current value each frame
+            if let Some(arc) = &self.remote_n_ctx_arc {
+                self.remote_n_ctx = arc.load(std::sync::atomic::Ordering::Relaxed);
+            }
+        } else if let Some(arc) = &self.remote_n_ctx_arc {
+            self.remote_n_ctx = arc.load(std::sync::atomic::Ordering::Relaxed);
         }
 
         // Process any pending async results first

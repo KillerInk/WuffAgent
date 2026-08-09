@@ -141,6 +141,23 @@ impl ServerManager {
         self.running.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Returns the n_ctx value this server was started with.
+    /// For local mode this is accurate since we control the server process.
+    /// Returns 0 for noop (remote mode) server managers.
+    pub fn get_n_ctx(&self) -> u32 {
+        self.n_ctx
+    }
+
+    /// Returns the actual n_gpu_layers value this server was started with.
+    pub fn get_n_gpu_layers(&self) -> i32 {
+        self.n_gpu_layers
+    }
+
+    /// Returns the actual threads value this server was started with.
+    pub fn get_threads(&self) -> u32 {
+        self.threads
+    }
+
     pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), Error> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
