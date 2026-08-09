@@ -4,6 +4,8 @@ use std::fs;
 
 use crate::types::Message;
 
+fn default_max_messages() -> usize { 100 }
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ConnectionType {
     #[serde(rename = "local")]
@@ -70,6 +72,8 @@ pub struct Config {
     pub session_id: Option<String>,
     #[serde(skip)]
     pub sessions_dir: PathBuf,
+    #[serde(default = "default_max_messages")]
+    pub max_messages: usize,
     #[serde(skip)]
     pub file_path: PathBuf,
 }
@@ -92,6 +96,7 @@ impl Default for Config {
             chat_history: Vec::new(),
             session_id: None,
             sessions_dir: PathBuf::new(),
+            max_messages: 100,
             file_path: PathBuf::new(),
         }
     }

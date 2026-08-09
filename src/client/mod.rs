@@ -81,6 +81,22 @@ impl ChatClient {
         self.conversation.lock().unwrap().clear();
     }
 
+    pub fn trim_conversation(&self, max_messages: usize) {
+        let mut conv = self.conversation.lock().unwrap();
+        if conv.len() <= max_messages {
+            return;
+        }
+        let system_idx = conv.iter().position(|m| m.role == "system");
+        let keep_from = if let Some(idx) = system_idx {
+            idx + 1
+        } else {
+            0
+        };
+        let trim_at = conv.len().saturating_sub(max_messages);
+        let start = keep_from.min(trim_at);
+        conv.drain(..start);
+    }
+
     pub fn set_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {
         self.session_id = session_id;
         self.session_dir = session_dir;
@@ -197,6 +213,8 @@ impl ChatClient {
             tool_calls: None,
         });
         drop(conv);
+
+        self.trim_conversation(100);
 
         Ok((content, usage))
     }
