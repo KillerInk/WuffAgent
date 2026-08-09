@@ -70,6 +70,9 @@ pub struct ChatApp {
 
     // Max messages to keep in display (truncate for context window)
     pub(super) max_display_messages: usize,
+
+    // Session sidebar
+    pub(super) sessions_panel: Option<super::sessions_panel::SessionsPanel>,
 }
 
 impl ChatApp {
@@ -90,7 +93,7 @@ impl ChatApp {
         Self {
             server,
             client,
-            config,
+            config: config.clone(),
             tool_manager,
             pending_tx: Some(tx),
             pending_rx: Mutex::new(rx),
@@ -111,6 +114,7 @@ impl ChatApp {
             remote_n_ctx_arc: None,
             remote_n_ctx_handle: None,
             max_display_messages: 100,
+            sessions_panel: Some(super::sessions_panel::SessionsPanel::new(&config.clone())),
         }
     }
 
@@ -119,6 +123,13 @@ impl ChatApp {
     }
 
     fn setup_ui(&mut self, ctx: &egui::Context) {
+        // Session sidebar — draw before other panels so it sits on the left
+        if let Some(ref mut panel) = self.sessions_panel {
+            if let Some(new_id) = panel.draw(ctx) {
+                self.switch_session(&new_id);
+            }
+        }
+
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("WuffAgent");
@@ -263,6 +274,18 @@ impl ChatApp {
         if self.chat_display.len() > self.max_display_messages {
             self.chat_display.drain(..self.chat_display.len() - self.max_display_messages);
         }
+    }
+
+    fn switch_session(&mut self, _session_id: &str) {
+        let mut cl = self.client.lock().unwrap();
+        if let Some(session) = cl.load_session() {
+            self.chat_display = session.messages.iter().map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            }).collect();
+            cl.set_system_prompt(&session.system_prompt);
+        }
+        drop(cl);
     }
 
     fn handle_error(&mut self, err: &str) {
