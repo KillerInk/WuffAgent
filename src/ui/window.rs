@@ -128,6 +128,11 @@ impl ChatApp {
             if let Some(new_id) = panel.draw(ctx) {
                 self.switch_session(&new_id);
             }
+            if panel.clear_action {
+                let mut cl = self.client.lock().unwrap();
+                cl.clear_session_messages();
+                panel.clear_action = false;
+            }
         }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {

@@ -13,6 +13,7 @@ pub struct SessionsPanel {
     rename_input: String,
     creating: bool,
     new_name: String,
+    pub(super) clear_action: bool,
 }
 
 #[derive(Debug)]
@@ -36,6 +37,7 @@ impl SessionsPanel {
             rename_input: String::new(),
             creating: false,
             new_name: String::new(),
+            clear_action: false,
         }
     }
 
@@ -58,6 +60,9 @@ impl SessionsPanel {
                 if ui.button("+ New").clicked() {
                     self.creating = true;
                     self.new_name = String::new();
+                }
+                if ui.button("Clear").clicked() {
+                    self.clear_action = true;
                 }
 
                 ui.separator();
@@ -142,6 +147,10 @@ impl SessionsPanel {
                     self.refresh();
                 }
             }
+        }
+
+        if self.clear_action {
+            self.clear_action = false;
         }
 
         selected_id

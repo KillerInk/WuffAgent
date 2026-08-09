@@ -81,6 +81,13 @@ impl ChatClient {
         self.conversation.lock().unwrap().clear();
     }
 
+    pub fn clear_session_messages(&mut self) {
+        self.conversation.lock().unwrap().clear();
+        if let Err(e) = self.save_session() {
+            eprintln!("Failed to save session after clear: {}", e);
+        }
+    }
+
     pub fn trim_conversation(&self, max_messages: usize) {
         let mut conv = self.conversation.lock().unwrap();
         if conv.len() <= max_messages {
