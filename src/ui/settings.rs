@@ -2,7 +2,7 @@ use eframe::egui;
 use std::sync::{Arc, Mutex};
 use std::path::Path;
 
-use crate::config::Config;
+use crate::config::{Config, ConnectionType};
 use crate::server::ServerManager;
 use crate::client::ChatClient;
 
@@ -10,7 +10,9 @@ use crate::client::ChatClient;
 use rfd::FileDialog;
 
 pub struct SettingsDialog {
-    pub show: bool,
+    connection_type: ConnectionType,
+    remote_url: String,
+    remote_api_key: String,
     server_path: String,
     model_path: String,
     port: u16,
@@ -25,7 +27,9 @@ pub struct SettingsDialog {
 impl SettingsDialog {
     pub fn new(config: &Config) -> Self {
         Self {
-            show: false,
+            connection_type: config.connection_type.clone(),
+            remote_url: config.remote_url.clone(),
+            remote_api_key: config.remote_api_key.clone().unwrap_or_default(),
             server_path: config.server_path.clone(),
             model_path: config.model_path.clone(),
             port: config.port,
@@ -48,8 +52,12 @@ impl SettingsDialog {
         server: &Arc<ServerManager>,
         client: &Arc<Mutex<ChatClient>>,
         config: &Arc<Mutex<Config>>,
+        open: &mut bool,
     ) {
         // Capture fields into local variables to avoid borrowing `self` inside the closure
+        let mut connection_type = self.connection_type.clone();
+        let mut remote_url = self.remote_url.clone();
+        let mut remote_api_key = self.remote_api_key.clone();
         let mut server_path = self.server_path.clone();
         let mut model_path = self.model_path.clone();
         let mut port = self.port;
@@ -63,42 +71,74 @@ impl SettingsDialog {
         egui::Window::new("Settings")
             .vscroll(true)
             .show(ctx, |ui| {
-                ui.heading("Server Settings");
+                ui.heading("Connection Settings");
                 ui.separator();
 
-                // Server path
+                // Connection type selector
                 ui.horizontal(|ui| {
-                    ui.label("Server Path:");
-                    ui.text_edit_singleline(&mut server_path);
-                    #[cfg(feature = "rfd")]
-                    if ui.button("...").clicked() {
-                        // open file picker (handled after UI)
+                    ui.label("Connection:");
+                    if ui.selectable_label(connection_type == ConnectionType::Local, "Local").clicked() {
+                        connection_type = ConnectionType::Local;
                     }
-                });
-
-                // Model path
-                ui.horizontal(|ui| {
-                    ui.label("Model Path:");
-                    ui.text_edit_singleline(&mut model_path);
-                    #[cfg(feature = "rfd")]
-                    if ui.button("...").clicked() {
-                        // open file picker (handled after UI)
+                    if ui.selectable_label(connection_type == ConnectionType::Remote, "Remote").clicked() {
+                        connection_type = ConnectionType::Remote;
                     }
                 });
 
                 ui.separator();
 
-                // Port
-                ui.add(egui::Slider::new(&mut port, 1024..=65535).text("Port"));
+                match connection_type {
+                    ConnectionType::Local => {
+                        // Local server path
+                        ui.horizontal(|ui| {
+                            ui.label("Server Path:");
+                            ui.text_edit_singleline(&mut server_path);
+                            #[cfg(feature = "rfd")]
+                            if ui.button("...").clicked() {
+                                // open file picker (handled after UI)
+                            }
+                        });
 
-                // GPU Layers
-                ui.add(egui::Slider::new(&mut n_gpu_layers, 0..=99).text("GPU Layers"));
+                        // Model path
+                        ui.horizontal(|ui| {
+                            ui.label("Model Path:");
+                            ui.text_edit_singleline(&mut model_path);
+                            #[cfg(feature = "rfd")]
+                            if ui.button("...").clicked() {
+                                // open file picker (handled after UI)
+                            }
+                        });
 
-                // Context Size
-                ui.add(egui::Slider::new(&mut n_ctx, 512..=32768).text("Context Size"));
+                        ui.separator();
 
-                // Threads
-                ui.add(egui::Slider::new(&mut threads, 1..=64).text("Threads"));
+                        // Port
+                        ui.add(egui::Slider::new(&mut port, 1024..=65535).text("Port"));
+
+                        // GPU Layers
+                        ui.add(egui::Slider::new(&mut n_gpu_layers, 0..=99).text("GPU Layers"));
+
+                        // Context Size
+                        ui.add(egui::Slider::new(&mut n_ctx, 512..=32768).text("Context Size"));
+
+                        // Threads
+                        ui.add(egui::Slider::new(&mut threads, 1..=64).text("Threads"));
+                    }
+                    ConnectionType::Remote => {
+                        // Remote URL
+                        ui.horizontal(|ui| {
+                            ui.label("Remote URL:");
+                            ui.text_edit_singleline(&mut remote_url);
+                        });
+                        ui.label(egui::RichText::new("Example: http://192.168.1.100:8080").color(egui::Color32::DARK_GRAY));
+
+                        // API key (optional)
+                        ui.horizontal(|ui| {
+                            ui.label("API Key (optional):");
+                            ui.text_edit_singleline(&mut remote_api_key);
+                        });
+                        ui.label(egui::RichText::new("Leave empty if no authentication required").color(egui::Color32::DARK_GRAY));
+                    }
+                }
 
                 ui.separator();
 
@@ -122,11 +162,25 @@ impl SettingsDialog {
 
                 // Server status display
                 ui.horizontal(|ui| {
-                    ui.label("Server Status:");
-                    let running = server.is_running();
-                    let status_text = if running { "Running" } else { "Stopped" };
-                    let status_color = if running { egui::Color32::GREEN } else { egui::Color32::RED };
-                    ui.label(egui::RichText::new(status_text).color(status_color));
+                    ui.label("Connection Status:");
+                    if connection_type == ConnectionType::Remote {
+                        let url_text = if remote_url.is_empty() {
+                            "Not configured".to_string()
+                        } else {
+                            format!("Remote ({})", remote_url)
+                        };
+                        let status_color = if remote_url.is_empty() {
+                            egui::Color32::GRAY
+                        } else {
+                            egui::Color32::GREEN
+                        };
+                        ui.label(egui::RichText::new(url_text).color(status_color));
+                    } else {
+                        let running = server.is_running();
+                        let status_text = if running { "Running" } else { "Stopped" };
+                        let status_color = if running { egui::Color32::GREEN } else { egui::Color32::RED };
+                        ui.label(egui::RichText::new(status_text).color(status_color));
+                    }
                 });
 
                 // Buttons
@@ -134,6 +188,133 @@ impl SettingsDialog {
                     if ui.button("Save").clicked() {
                         // Save config
                         let mut cfg = config.lock().unwrap();
+                        cfg.connection_type = connection_type.clone();
+                        cfg.remote_url = remote_url.clone();
+                        cfg.remote_api_key = if remote_api_key.is_empty() {
+                            None
+                        } else {
+                            Some(remote_api_key.clone())
+                        };
+                        cfg.server_path = server_path.clone();
+                        cfg.model_path = model_path.clone();
+                        cfg.port = port;
+                        cfg.n_gpu_layers = n_gpu_layers;
+                        cfg.n_ctx = n_ctx;
+                        cfg.threads = threads;
+                        cfg.system_prompt = system_prompt.clone();
+                        cfg.streaming = streaming;
+                        cfg.theme = theme.clone();
+                        if let Err(e) = cfg.save() {
+                            ui.label(egui::RichText::new(format!("Failed to save config: {}", e)).color(egui::Color32::RED));
+                        } else {
+                            // Update client URL and API key
+                            let mut cl = client.lock().unwrap();
+                            let new_url = cfg.base_url();
+                            cl.set_url(&new_url);
+                            cl.set_api_key(cfg.remote_api_key.as_deref());
+                            cl.set_system_prompt(&system_prompt);
+                            drop(cl);
+                            *open = false;
+                        }
+                    }
+                    if connection_type == ConnectionType::Local {
+                        if ui.button("Start Server").clicked() {
+                            // Validate
+                            if server_path.is_empty() || model_path.is_empty() {
+                                ui.label(egui::RichText::new("Please fill in both server path and model path").color(egui::Color32::RED));
+                            } else if !Path::new(&server_path).exists() {
+                                ui.label(egui::RichText::new(format!("Server path not found: {}", server_path)).color(egui::Color32::RED));
+                            } else if !Path::new(&model_path).exists() {
+                                ui.label(egui::RichText::new(format!("Model path not found: {}", model_path)).color(egui::Color32::RED));
+                            } else {
+                                // Stop existing
+                                let server_clone = server.clone();
+                                tokio::task::block_in_place(|| {
+                                    let rt = tokio::runtime::Handle::current();
+                                    rt.block_on(async {
+                                        if let Err(e) = server_clone.stop_server().await {
+                                            eprintln!("Failed to stop server: {}", e);
+                                        }
+                                    });
+                                });
+
+                                // Start new
+                                let server_clone = server.clone();
+                                let config_clone = config.clone();
+                                let client_clone = client.clone();
+                                let port_val = port;
+                                let n_gpu = n_gpu_layers;
+                                let n_ctx_val = n_ctx;
+                                let threads_val = threads;
+                                let sp = system_prompt.clone();
+                                let server_path_val = server_path.clone();
+                                let model_path_val = model_path.clone();
+
+                                let start_result = tokio::task::block_in_place(|| {
+                                    let rt = tokio::runtime::Handle::current();
+                                    rt.block_on(async {
+                                        server_clone.start_server_with_paths(
+                                            &server_path_val,
+                                            &model_path_val,
+                                            port_val,
+                                            n_gpu,
+                                            n_ctx_val,
+                                            threads_val,
+                                        ).await
+                                    })
+                                });
+
+                                match start_result {
+                                    Ok(_) => {
+                                        // Save updated config
+                                        let mut cfg = config_clone.lock().unwrap();
+                                        cfg.server_path = server_path.clone();
+                                        cfg.model_path = model_path.clone();
+                                        cfg.port = port_val;
+                                        cfg.n_gpu_layers = n_gpu;
+                                        cfg.n_ctx = n_ctx_val;
+                                        cfg.threads = threads_val;
+                                        cfg.streaming = streaming;
+                                        cfg.system_prompt = sp.clone();
+                                        if let Err(e) = cfg.save() {
+                                            eprintln!("Failed to save updated config: {}", e);
+                                        }
+                                        // Update client URL
+                                        let new_url = format!("http://127.0.0.1:{}", port_val);
+                                        let mut cl = client_clone.lock().unwrap();
+                                        cl.set_url(&new_url);
+                                        cl.set_system_prompt(&sp);
+                                        drop(cl);
+                                        *open = false;
+                                    }
+                                    Err(e) => {
+                                        ui.label(egui::RichText::new(format!("Failed to start server: {}", e)).color(egui::Color32::RED));
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("Stop Server").clicked() {
+                            let server_clone = server.clone();
+                            tokio::task::block_in_place(|| {
+                                let rt = tokio::runtime::Handle::current();
+                                rt.block_on(async {
+                                    if let Err(e) = server_clone.stop_server().await {
+                                        eprintln!("Failed to stop server: {}", e);
+                                    }
+                                });
+                            });
+                        }
+                    }
+                    if ui.button("Close").clicked() {
+                        // Save on close to persist any unsaved changes
+                        let mut cfg = config.lock().unwrap();
+                        cfg.connection_type = connection_type.clone();
+                        cfg.remote_url = remote_url.clone();
+                        cfg.remote_api_key = if remote_api_key.is_empty() {
+                            None
+                        } else {
+                            Some(remote_api_key.clone())
+                        };
                         cfg.server_path = server_path.clone();
                         cfg.model_path = model_path.clone();
                         cfg.port = port;
@@ -146,101 +327,14 @@ impl SettingsDialog {
                         if let Err(e) = cfg.save() {
                             eprintln!("Failed to save config: {}", e);
                         }
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if ui.button("Start Server").clicked() {
-                        // Validate
-                        if server_path.is_empty() || model_path.is_empty() {
-                            ui.label(egui::RichText::new("Please fill in both server path and model path").color(egui::Color32::RED));
-                        } else if !Path::new(&server_path).exists() {
-                            ui.label(egui::RichText::new(format!("Server path not found: {}", server_path)).color(egui::Color32::RED));
-                        } else if !Path::new(&model_path).exists() {
-                            ui.label(egui::RichText::new(format!("Model path not found: {}", model_path)).color(egui::Color32::RED));
-                        } else {
-                            // Stop existing
-                            let server_clone = server.clone();
-                            tokio::task::block_in_place(|| {
-                                let rt = tokio::runtime::Handle::current();
-                                rt.block_on(async {
-                                    if let Err(e) = server_clone.stop_server().await {
-                                        eprintln!("Failed to stop server: {}", e);
-                                    }
-                                });
-                            });
-
-                            // Start new
-                            let server_clone = server.clone();
-                            let config_clone = config.clone();
-                            let client_clone = client.clone();
-                            let port_val = port;
-                            let n_gpu = n_gpu_layers;
-                            let n_ctx_val = n_ctx;
-                            let threads_val = threads;
-                            let sp = system_prompt.clone();
-                            let server_path_val = server_path.clone();
-                            let model_path_val = model_path.clone();
-
-                            let start_result = tokio::task::block_in_place(|| {
-                                let rt = tokio::runtime::Handle::current();
-                                rt.block_on(async {
-                                    server_clone.start_server_with_paths(
-                                        &server_path_val,
-                                        &model_path_val,
-                                        port_val,
-                                        n_gpu,
-                                        n_ctx_val,
-                                        threads_val,
-                                    ).await
-                                })
-                            });
-
-                            match start_result {
-                                Ok(_) => {
-                                    // Save updated config
-                                    let mut cfg = config_clone.lock().unwrap();
-                                    cfg.server_path = server_path.clone();
-                                    cfg.model_path = model_path.clone();
-                                    cfg.port = port_val;
-                                    cfg.n_gpu_layers = n_gpu;
-                                    cfg.n_ctx = n_ctx_val;
-                                    cfg.threads = threads_val;
-                                    cfg.streaming = streaming;
-                                    cfg.system_prompt = sp.clone();
-                                    if let Err(e) = cfg.save() {
-                                        eprintln!("Failed to save updated config: {}", e);
-                                    }
-                                    // Update client URL
-                                    let new_url = format!("http://127.0.0.1:{}", port_val);
-                                    let mut cl = client_clone.lock().unwrap();
-                                    cl.set_url(&new_url);
-                                    cl.set_system_prompt(&sp);
-                                    drop(cl);
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                                }
-                                Err(e) => {
-                                    ui.label(egui::RichText::new(format!("Failed to start server: {}", e)).color(egui::Color32::RED));
-                                }
-                            }
-                        }
-                    }
-                    if ui.button("Stop Server").clicked() {
-                        let server_clone = server.clone();
-                        tokio::task::block_in_place(|| {
-                            let rt = tokio::runtime::Handle::current();
-                            rt.block_on(async {
-                                if let Err(e) = server_clone.stop_server().await {
-                                    eprintln!("Failed to stop server: {}", e);
-                                }
-                            });
-                        });
-                    }
-                    if ui.button("Cancel").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        *open = false;
                     }
                 });
             });
-
-        // Sync back
+        // Write back any changes
+        self.connection_type = connection_type;
+        self.remote_url = remote_url;
+        self.remote_api_key = remote_api_key;
         self.server_path = server_path;
         self.model_path = model_path;
         self.port = port;
@@ -266,23 +360,4 @@ fn open_file_picker(file_type: &str) -> Option<String> {
 #[cfg(not(feature = "rfd"))]
 fn open_file_picker(_file_type: &str) -> Option<String> {
     None
-}
-
-pub fn show_settings_dialog(
-    ctx: &egui::Context,
-    show: &mut bool,
-    server: &Arc<ServerManager>,
-    client: &Arc<Mutex<ChatClient>>,
-    config: &Arc<Mutex<Config>>,
-) {
-    if !*show {
-        return;
-    }
-
-    // Read current config values
-    let cfg = config.lock().unwrap();
-    let mut dialog = SettingsDialog::new(&cfg);
-    drop(cfg);
-
-    dialog.show_dialog(ctx, server, client, config);
 }

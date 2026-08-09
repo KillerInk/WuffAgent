@@ -30,6 +30,7 @@ pub struct ChatClient {
     pub system_prompt: String,
     pub conversation: Arc<Mutex<Vec<Message>>>,
     pub http_client: reqwest::Client,
+    pub api_key: Option<String>,
 }
 
 impl ChatClient {
@@ -39,11 +40,28 @@ impl ChatClient {
             system_prompt: String::new(),
             conversation: Arc::new(Mutex::new(Vec::new())),
             http_client: reqwest::Client::new(),
+            api_key: None,
         }
     }
 
     pub fn set_url(&mut self, url: &str) {
         self.base_url = url.to_string();
+    }
+
+    pub fn set_api_key(&mut self, key: Option<&str>) {
+        self.api_key = key.map(|s| s.to_string());
+    }
+
+    fn build_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("Content-Type", "application/json".parse().unwrap());
+        if let Some(ref key) = self.api_key {
+            headers.insert(
+                "Authorization",
+                format!("Bearer {}", key).parse().unwrap(),
+            );
+        }
+        headers
     }
 
     fn build_request(system_prompt: &str, prompt: &str, stream: bool) -> ChatRequest {
@@ -81,17 +99,24 @@ impl ChatClient {
         system_prompt: &str,
         conversation: Arc<Mutex<Vec<Message>>>,
         http_client: &reqwest::Client,
+        api_key: Option<&str>,
         prompt: &str,
     ) -> Result<String, Error> {
         let request = Self::build_request(system_prompt, prompt, false);
         let body = serde_json::to_string(&request)?;
 
-        let resp = http_client
+        let mut builder = http_client
             .post(format!("{}/v1/chat/completions", base_url))
             .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
+            .body(body);
+        if let Some(ref key) = api_key {
+            builder = builder.header(
+                "Authorization",
+                format!("Bearer {}", key),
+            );
+        }
+
+        let resp = builder.send().await?;
 
         let status = resp.status();
         let text = resp
@@ -134,19 +159,26 @@ impl ChatClient {
         system_prompt: &str,
         conversation: Arc<Mutex<Vec<Message>>>,
         http_client: &reqwest::Client,
+        api_key: Option<&str>,
         prompt: &str,
         mut callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
     ) -> Result<(), Error> {
         let request = Self::build_request(system_prompt, prompt, true);
         let body = serde_json::to_string(&request)?;
 
-        let resp = http_client
+        let mut builder = http_client
             .post(format!("{}/v1/chat/completions", base_url))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
-            .body(body)
-            .send()
-            .await?;
+            .body(body);
+        if let Some(ref key) = api_key {
+            builder = builder.header(
+                "Authorization",
+                format!("Bearer {}", key),
+            );
+        }
+
+        let resp = builder.send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -275,6 +307,20 @@ mod tests {
         let request = ChatClient::build_request("", "Hello", true);
         assert!(request.stream);
         assert_eq!(request.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_chat_client_api_key() {
+        let mut client = ChatClient::new("http://localhost:8080");
+        assert_eq!(client.api_key, None);
+        client.set_api_key(Some("sk-test"));
+        assert_eq!(client.api_key, Some("sk-test".to_string()));
+    }
+
+    #[test]
+    fn test_chat_client_base_url() {
+        let client = ChatClient::new("http://localhost:8080");
+        assert_eq!(client.base_url, "http://localhost:8080");
     }
 
     #[tokio::test]

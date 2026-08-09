@@ -41,6 +41,22 @@ impl ServerManager {
         }
     }
 
+    /// Returns a no-op ServerManager that is always stopped.
+    /// Used when in remote mode so the UI has a valid ServerManager but no local process is managed.
+    pub fn noop() -> Self {
+        Self {
+            server_path: String::new(),
+            model_path: String::new(),
+            port: 0,
+            n_gpu_layers: 0,
+            n_ctx: 0,
+            threads: 0,
+            process: Arc::new(Mutex::new(None)),
+            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            error: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
     pub async fn start_server(&self) -> Result<(), Error> {
         self.start_server_with_paths(&self.server_path, &self.model_path, self.port, self.n_gpu_layers, self.n_ctx, self.threads).await
     }

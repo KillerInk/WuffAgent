@@ -2,14 +2,38 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::fs;
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum ConnectionType {
+    #[serde(rename = "local")]
+    Local,
+    #[serde(rename = "remote")]
+    Remote,
+}
+
+impl Default for ConnectionType {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
+    #[serde(default)]
+    pub connection_type: ConnectionType,
+    #[serde(default)]
+    pub remote_url: String,
+    #[serde(default)]
+    pub remote_api_key: Option<String>,
+
+    // Local-mode fields
     pub server_path: String,
     pub model_path: String,
     pub port: u16,
     pub n_gpu_layers: i32,
     pub n_ctx: u32,
     pub threads: u32,
+
+    // Shared fields
     pub system_prompt: String,
     pub streaming: bool,
     pub theme: String, // "dark" | "light"
@@ -27,6 +51,9 @@ pub struct ChatMessage {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            connection_type: ConnectionType::Local,
+            remote_url: String::new(),
+            remote_api_key: None,
             server_path: String::new(),
             model_path: String::new(),
             port: 8080,
@@ -62,28 +89,53 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), Error> {
-        if self.server_path.is_empty() {
-            return Err(Error::EmptyServerPath);
-        }
-        if self.model_path.is_empty() {
-            return Err(Error::EmptyModelPath);
-        }
-        if !Path::new(&self.server_path).exists() {
-            return Err(Error::ServerPathNotFound(self.server_path.clone()));
-        }
-        if !Path::new(&self.model_path).exists() {
-            return Err(Error::ModelPathNotFound(self.model_path.clone()));
-        }
-        if self.port < 1024 || self.port > 65535 {
-            return Err(Error::InvalidPort(self.port));
-        }
-        if self.threads == 0 || self.threads > 64 {
-            return Err(Error::InvalidThreads(self.threads));
-        }
-        if self.n_gpu_layers < 0 || self.n_gpu_layers > 99 {
-            return Err(Error::InvalidGPULayers(self.n_gpu_layers));
+        match self.connection_type {
+            ConnectionType::Local => {
+                if self.server_path.is_empty() {
+                    return Err(Error::EmptyServerPath);
+                }
+                if self.model_path.is_empty() {
+                    return Err(Error::EmptyModelPath);
+                }
+                if !Path::new(&self.server_path).exists() {
+                    return Err(Error::ServerPathNotFound(self.server_path.clone()));
+                }
+                if !Path::new(&self.model_path).exists() {
+                    return Err(Error::ModelPathNotFound(self.model_path.clone()));
+                }
+                if self.port < 1024 || self.port > 65535 {
+                    return Err(Error::InvalidPort(self.port));
+                }
+                if self.threads == 0 || self.threads > 64 {
+                    return Err(Error::InvalidThreads(self.threads));
+                }
+                if self.n_gpu_layers < 0 || self.n_gpu_layers > 99 {
+                    return Err(Error::InvalidGPULayers(self.n_gpu_layers));
+                }
+            }
+            ConnectionType::Remote => {
+                if self.remote_url.is_empty() {
+                    return Err(Error::EmptyRemoteUrl);
+                }
+                if !self.remote_url.starts_with("http://") && !self.remote_url.starts_with("https://") {
+                    return Err(Error::InvalidRemoteUrl(self.remote_url.clone()));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Returns the base URL to use for the ChatClient.
+    pub fn base_url(&self) -> String {
+        match self.connection_type {
+            ConnectionType::Local => format!("http://127.0.0.1:{}", self.port),
+            ConnectionType::Remote => self.remote_url.clone(),
+        }
+    }
+
+    /// Returns true if this config is in remote mode.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.connection_type, ConnectionType::Remote)
     }
 }
 
@@ -97,6 +149,10 @@ pub enum Error {
     ServerPathNotFound(String),
     #[error("Model path not found: {0}")]
     ModelPathNotFound(String),
+    #[error("Remote URL is empty")]
+    EmptyRemoteUrl,
+    #[error("Invalid remote URL: {0} (must start with http:// or https://)")]
+    InvalidRemoteUrl(String),
     #[error("Invalid port: {0}")]
     InvalidPort(u16),
     #[error("Invalid threads: {0}")]
@@ -139,9 +195,11 @@ mod tests {
         assert_eq!(cfg.threads, 8);
         assert_eq!(cfg.theme, "dark");
         assert!(cfg.streaming);
+        assert_eq!(cfg.connection_type, ConnectionType::Local);
         assert!(cfg.server_path.is_empty());
         assert!(cfg.model_path.is_empty());
         assert!(cfg.chat_history.is_empty());
+        assert_eq!(cfg.remote_url, "");
     }
 
     #[test]
@@ -150,6 +208,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.port, 8080);
+        assert_eq!(cfg.connection_type, ConnectionType::Local);
         assert!(cfg.server_path.is_empty());
     }
 
@@ -159,6 +218,7 @@ mod tests {
         let path = dir.path().join("config.json");
 
         let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Local;
         cfg.server_path = "C:\\llama\\llama-server.exe".to_string();
         cfg.model_path = "C:\\models\\model.gguf".to_string();
         cfg.port = 18080;
@@ -177,6 +237,7 @@ mod tests {
         cfg.save().unwrap();
 
         let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.connection_type, ConnectionType::Local);
         assert_eq!(loaded.server_path, "C:\\llama\\llama-server.exe");
         assert_eq!(loaded.model_path, "C:\\models\\model.gguf");
         assert_eq!(loaded.port, 18080);
@@ -196,12 +257,14 @@ mod tests {
     #[test]
     fn test_config_validate_empty_paths() {
         let cfg = Config::default();
+        // Local mode with empty server_path should fail
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validate_nonexistent_paths() {
         let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Local;
         cfg.server_path = "/nonexistent/server".to_string();
         cfg.model_path = "/nonexistent/model".to_string();
         assert!(cfg.validate().is_err());
@@ -210,6 +273,7 @@ mod tests {
     #[test]
     fn test_config_validate_invalid_port() {
         let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Local;
         cfg.server_path = "/tmp/server".to_string();
         cfg.model_path = "/tmp/model".to_string();
         cfg.port = 80; // below 1024
@@ -219,6 +283,7 @@ mod tests {
     #[test]
     fn test_config_validate_invalid_threads() {
         let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Local;
         cfg.server_path = "/tmp/server".to_string();
         cfg.model_path = "/tmp/model".to_string();
         cfg.threads = 0;
@@ -231,6 +296,7 @@ mod tests {
     #[test]
     fn test_config_validate_invalid_gpu_layers() {
         let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Local;
         cfg.server_path = "/tmp/server".to_string();
         cfg.model_path = "/tmp/model".to_string();
         cfg.n_gpu_layers = -1;
@@ -243,6 +309,7 @@ mod tests {
     #[test]
     fn test_config_validate_valid() {
         let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Local;
         cfg.server_path = "/tmp/server".to_string();
         cfg.model_path = "/tmp/model".to_string();
         cfg.port = 8080;
@@ -257,5 +324,78 @@ mod tests {
         cfg.server_path = server_file.to_string_lossy().to_string();
         cfg.model_path = model_file.to_string_lossy().to_string();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_remote_mode_validation() {
+        let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Remote;
+        cfg.remote_url = "http://192.168.1.100:8080".to_string();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_remote_mode_missing_url() {
+        let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Remote;
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, Error::EmptyRemoteUrl));
+    }
+
+    #[test]
+    fn test_config_remote_mode_invalid_url() {
+        let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Remote;
+        cfg.remote_url = "ftp://bad-url".to_string();
+        assert!(matches!(cfg.validate().unwrap_err(), Error::InvalidRemoteUrl(_)));
+    }
+
+    #[test]
+    fn test_config_base_url_local() {
+        let cfg = Config::default();
+        assert_eq!(cfg.base_url(), "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_config_base_url_remote() {
+        let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Remote;
+        cfg.remote_url = "http://example.com:3000".to_string();
+        assert_eq!(cfg.base_url(), "http://example.com:3000");
+    }
+
+    #[test]
+    fn test_config_is_remote() {
+        let cfg = Config::default();
+        assert!(!cfg.is_remote());
+        let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Remote;
+        assert!(cfg.is_remote());
+    }
+
+    #[test]
+    fn test_config_backward_compat_deserialize() {
+        let json = r#"{
+            "server_path": "C:\\llama\\llama-server.exe",
+            "model_path": "C:\\models\\model.gguf",
+            "port": 18080,
+            "n_gpu_layers": 33,
+            "n_ctx": 2048,
+            "threads": 4,
+            "system_prompt": "test",
+            "streaming": true,
+            "theme": "dark",
+            "chat_history": []
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.connection_type, ConnectionType::Local);
+        assert_eq!(cfg.server_path, "C:\\llama\\llama-server.exe");
+        assert_eq!(cfg.port, 18080);
+        assert!(cfg.remote_url.is_empty());
+    }
+
+    #[test]
+    fn test_connection_type_default() {
+        assert_eq!(ConnectionType::default(), ConnectionType::Local);
     }
 }

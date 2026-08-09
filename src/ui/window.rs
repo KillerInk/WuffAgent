@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use crate::client::ChatClient;
 use crate::config::{ChatMessage as ConfigChatMessage, Config};
 use crate::server::ServerManager;
-use crate::ui::settings::show_settings_dialog;
+use crate::ui::settings::SettingsDialog;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppStatus {
@@ -45,6 +45,7 @@ pub struct ChatApp {
     status: AppStatus,
     streaming: bool,
     show_settings: bool,
+    settings_dialog: Option<SettingsDialog>,
     progress: f32,
     pending_error: Option<String>,
 
@@ -87,6 +88,7 @@ impl ChatApp {
             status: AppStatus::Stopped,
             streaming,
             show_settings: false,
+            settings_dialog: None,
             progress: 0.0,
             pending_error: None,
             current_response: String::new(),
@@ -113,17 +115,66 @@ impl ChatApp {
             });
         });
 
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            self.draw_status_bar(ui);
-        });
-
+        // Bottom panels stack upward, so bottom_bar must be declared first to be at the bottom
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
+            self.draw_status_bar(ui);
+            ui.separator();
             self.draw_bottom_bar(ui);
         });
 
+        // Input area is its own bottom panel, anchored above the status bar
+        egui::TopBottomPanel::bottom("input_panel")
+            .default_height(50.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                self.draw_input_area(ui);
+            });
+
+        // Chat area fills all remaining space between top bar and input panel
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.draw_chat_area(ui);
-            self.draw_input_area(ui);
+            egui::ScrollArea::vertical()
+                .id_salt("chat_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Show pending error as inline warning
+                    if let Some(ref err) = self.pending_error {
+                        let err_clone = err.clone();
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::RED, format!("Error: {}", err_clone));
+                            if ui.button("Dismiss").clicked() {
+                                self.pending_error = None;
+                            }
+                        });
+                        ui.separator();
+                    }
+
+                    // Clone messages to avoid borrow checker issues
+                    let messages: Vec<ChatMessage> = self.chat_display.clone();
+                    ui.vertical(|ui| {
+                        for msg in &messages {
+                            self.draw_message(ui, msg);
+                        }
+
+                        // Show current streaming response
+                        if self.is_generating && !self.current_response.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.label("AI:  ");
+                                ui.label(
+                                    egui::RichText::new(&self.current_response)
+                                        .color(egui::Color32::from_rgb(150, 200, 150)),
+                                );
+                                ui.spinner();
+                            });
+                        } else if self.is_generating && self.current_response.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.label("AI:  ");
+                                ui.spinner();
+                            });
+                        }
+                    });
+                });
         });
     }
 
@@ -170,7 +221,7 @@ impl ChatApp {
 
         egui::ScrollArea::vertical()
             .id_salt("chat_scroll")
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     for msg in &messages {
@@ -212,6 +263,8 @@ impl ChatApp {
     }
 
     fn draw_input_area(&mut self, ui: &mut egui::Ui) {
+        ui.style_mut().spacing.item_spacing.y = 0.0;
+
         // Validate input length
         const MAX_MESSAGE_LENGTH: usize = 4000;
         let input_len = self.input_text.len();
@@ -225,8 +278,13 @@ impl ChatApp {
             ui.separator();
         }
 
+        // Input takes remaining space, button stays visible
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.input_text);
+            ui.add_space(4.0);
+            const BUTTON_WIDTH: f32 = 55.0;
+            let input_width = (ui.available_width() - BUTTON_WIDTH - 4.0).max(0.0);
+            let text_edit = egui::TextEdit::singleline(&mut self.input_text);
+            ui.add_sized([input_width, 22.0], text_edit);
             if !self.is_generating {
                 if ui.button("Send").clicked() {
                     self.send_message();
@@ -275,13 +333,14 @@ impl ChatApp {
         let streaming = self.streaming;
 
         // Extract client fields before spawning to avoid MutexGuard across await
-        let (base_url, system_prompt, conversation, http_client) = {
+        let (base_url, system_prompt, conversation, http_client, api_key) = {
             let c = self.client.lock().unwrap();
             (
                 c.base_url.clone(),
                 c.system_prompt.clone(),
                 c.conversation.clone(),
                 c.http_client.clone(),
+                c.api_key.clone(),
             )
         };
 
@@ -292,6 +351,7 @@ impl ChatApp {
                     system_prompt,
                     conversation,
                     http_client,
+                    api_key,
                     text_clone,
                     tx,
                 )
@@ -302,6 +362,7 @@ impl ChatApp {
                     system_prompt,
                     conversation,
                     http_client,
+                    api_key,
                     text_clone,
                     tx,
                 )
@@ -317,6 +378,7 @@ impl ChatApp {
         system_prompt: String,
         conversation: Arc<Mutex<Vec<crate::client::Message>>>,
         http_client: reqwest::Client,
+        api_key: Option<String>,
         text: String,
         tx: mpsc::Sender<AppEvent>,
     ) {
@@ -327,6 +389,7 @@ impl ChatApp {
             &system_prompt,
             conversation,
             &http_client,
+            api_key.as_deref(),
             &text,
             move |chunk| {
                 let _ = tx_clone.send(AppEvent::StreamChunk {
@@ -358,6 +421,7 @@ impl ChatApp {
         system_prompt: String,
         conversation: Arc<Mutex<Vec<crate::client::Message>>>,
         http_client: reqwest::Client,
+        api_key: Option<String>,
         text: String,
         tx: mpsc::Sender<AppEvent>,
     ) {
@@ -366,6 +430,7 @@ impl ChatApp {
             &system_prompt,
             conversation,
             &http_client,
+            api_key.as_deref(),
             &text,
         )
         .await;
@@ -495,7 +560,17 @@ impl ChatApp {
         client: &Arc<Mutex<ChatClient>>,
         config: &Arc<Mutex<Config>>,
     ) {
-        show_settings_dialog(ctx, &mut self.show_settings, server, client, config);
+        if self.show_settings && self.settings_dialog.is_none() {
+            let cfg = config.lock().unwrap();
+            self.settings_dialog = Some(SettingsDialog::new(&cfg));
+            drop(cfg);
+        }
+        if let Some(dialog) = self.settings_dialog.as_mut() {
+            dialog.show_dialog(ctx, server, client, config, &mut self.show_settings);
+            if !self.show_settings {
+                self.settings_dialog = None;
+            }
+        }
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {

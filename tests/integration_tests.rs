@@ -95,6 +95,7 @@ async fn test_chat_client_request() {
         "",
         conversation.clone(),
         &http_client,
+        None,
         "Hello",
     )
     .await;
@@ -131,6 +132,7 @@ async fn test_chat_client_error_handling() {
         "",
         conversation,
         &http_client,
+        None,
         "Hello",
     )
     .await;
@@ -205,6 +207,7 @@ async fn test_sse_parsing_end_to_end() {
         "",
         conversation.clone(),
         &http_client,
+        None,
         "Hello",
         move |chunk| {
             chunks_clone.lock().unwrap().push(chunk);
