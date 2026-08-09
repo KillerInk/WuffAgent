@@ -19,7 +19,6 @@ pub struct SessionsPanel {
 #[derive(Debug)]
 enum PanelAction {
     Rename { id: String, new_name: String },
-    Delete(String),
     Create(String),
 }
 
@@ -132,13 +131,6 @@ impl SessionsPanel {
                         let _ = sessions::save_session(&self.sessions_dir, &s);
                     }
                     self.refresh();
-                }
-                PanelAction::Delete(id) => {
-                    let _ = sessions::delete_session(&self.sessions_dir, &id);
-                    self.refresh();
-                    if self.selected_id.as_ref() == Some(&id) {
-                        self.selected_id = self.sessions.first().map(|s| s.id.clone());
-                    }
                 }
                 PanelAction::Create(name) => {
                     let session = sessions::create_session(&self.sessions_dir, &name);
