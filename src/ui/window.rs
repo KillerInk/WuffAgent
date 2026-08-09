@@ -124,10 +124,17 @@ impl ChatApp {
 
     fn setup_ui(&mut self, ctx: &egui::Context) {
         // Session sidebar — draw before other panels so it sits on the left
-        if let Some(ref mut panel) = self.sessions_panel {
-            if let Some(new_id) = panel.draw(ctx) {
-                self.switch_session(&new_id);
+        let switched_id: Option<String> = {
+            if let Some(ref mut panel) = self.sessions_panel {
+                panel.draw(ctx)
+            } else {
+                None
             }
+        };
+        if let Some(id) = switched_id {
+            self.switch_session(&id);
+        }
+        if let Some(ref mut panel) = self.sessions_panel {
             if panel.clear_action {
                 let mut cl = self.client.lock().unwrap();
                 cl.clear_session_messages();
