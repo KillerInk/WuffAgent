@@ -73,6 +73,9 @@ pub struct ChatApp {
 
     // Session sidebar
     pub(super) sessions_panel: Option<super::sessions_panel::SessionsPanel>,
+
+    // Save failure notification (shown in status bar until cleared)
+    pub(super) save_failure_message: Option<String>,
 }
 
 impl ChatApp {
@@ -84,12 +87,23 @@ impl ChatApp {
     ) -> Self {
         let cfg = config.lock().unwrap();
         let streaming = cfg.streaming;
-        let chat_history: Vec<ChatMessage> = cfg.chat_history.clone().into_iter().map(|m| ChatMessage {
-            role: m.role,
-            content: m.content,
-        }).collect();
+        let max_messages = cfg.max_messages;
         drop(cfg);
         let (tx, rx) = mpsc::channel();
+        
+        // Initialize sessions panel and load the current session
+        let sessions_panel = super::sessions_panel::SessionsPanel::new(&config.clone());
+        let mut chat_display: Vec<ChatMessage> = Vec::new();
+        {
+            let mut cl = client.lock().unwrap();
+            if let Some(session) = cl.load_session() {
+                chat_display = session.messages.iter().map(|m| ChatMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                }).collect();
+            }
+        }
+        
         Self {
             server,
             client,
@@ -97,7 +111,7 @@ impl ChatApp {
             tool_manager,
             pending_tx: Some(tx),
             pending_rx: Mutex::new(rx),
-            chat_display: chat_history,
+            chat_display,
             input_text: String::new(),
             is_generating: false,
             status: AppStatus::Stopped,
@@ -113,8 +127,9 @@ impl ChatApp {
             remote_n_ctx: 0,
             remote_n_ctx_arc: None,
             remote_n_ctx_handle: None,
-            max_display_messages: 100,
-            sessions_panel: Some(super::sessions_panel::SessionsPanel::new(&config.clone())),
+            max_display_messages: max_messages,
+            sessions_panel: Some(sessions_panel),
+            save_failure_message: None,
         }
     }
 
@@ -135,6 +150,7 @@ impl ChatApp {
             self.switch_session(&id);
         }
         if let Some(ref mut panel) = self.sessions_panel {
+            panel.update_notification(ctx);
             if panel.clear_action {
                 let mut cl = self.client.lock().unwrap();
                 cl.clear_session_messages();
@@ -286,10 +302,33 @@ impl ChatApp {
         if self.chat_display.len() > self.max_display_messages {
             self.chat_display.drain(..self.chat_display.len() - self.max_display_messages);
         }
+        // Save session after adding message; retry any prior failed saves first
+        let client = self.client.lock().unwrap();
+        client.retry_pending_saves();
+        drop(client);
+        if let Err(e) = self.client.lock().unwrap().save_session() {
+            self.save_failure_message = Some(format!("Save failed — will retry on next message"));
+            eprintln!("Failed to save session: {}", e);
+        } else {
+            self.save_failure_message = None;
+        }
     }
 
-    fn switch_session(&mut self, _session_id: &str) {
+    fn switch_session(&mut self, session_id: &str) {
+        // Retry any prior failed saves before switching
+        self.client.lock().unwrap().retry_pending_saves();
+        // Save current session before switching
+        if let Err(e) = self.client.lock().unwrap().save_session() {
+            self.save_failure_message = Some(format!("Save failed — will retry on next message"));
+            eprintln!("Failed to save session before switch: {}", e);
+        } else {
+            self.save_failure_message = None;
+        }
+        
         let mut cl = self.client.lock().unwrap();
+        // Update session_id before loading
+        let session_dir = cl.session_dir().clone();
+        cl.set_session(Some(session_id.to_string()), session_dir);
         if let Some(session) = cl.load_session() {
             self.chat_display = session.messages.iter().map(|m| ChatMessage {
                 role: m.role.clone(),
@@ -337,6 +376,17 @@ impl ChatApp {
         if let Err(e) = cfg.save() {
             eprintln!("Failed to save config: {}", e);
         }
+    }
+
+    /// Update the save-failure notification state each frame based on the client's flag.
+    fn update_save_failure_notification(&mut self) {
+        let client = self.client.lock().unwrap();
+        if client.has_save_failure() && self.save_failure_message.is_none() {
+            self.save_failure_message = Some("Save failed — will retry on next message".to_string());
+        } else if !client.has_save_failure() {
+            self.save_failure_message = None;
+        }
+        drop(client);
     }
 }
 
@@ -395,6 +445,8 @@ impl eframe::App for ChatApp {
 
         // Process any pending async results first
         self.process_pending_events();
+        // Update save-failure notification state
+        self.update_save_failure_notification();
         // Show settings dialog
         let server = self.server.clone();
         let client = self.client.clone();

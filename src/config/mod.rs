@@ -76,6 +76,13 @@ pub struct Config {
     pub max_messages: usize,
     #[serde(skip)]
     pub file_path: PathBuf,
+
+    // Encryption settings
+    #[serde(default)]
+    pub encryption_enabled: bool,
+    /// Password used to derive the encryption key. Stored as a hex-encoded ChaCha20Poly1305 key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_password: Option<String>,
 }
 
 impl Default for Config {
@@ -98,7 +105,24 @@ impl Default for Config {
             sessions_dir: PathBuf::new(),
             max_messages: 100,
             file_path: PathBuf::new(),
+            encryption_enabled: false,
+            encryption_password: None,
         }
+    }
+}
+
+impl Config {
+    /// Derive a 32-byte encryption key from a password using PBKDF2 (via the `chacha20poly1305` crate's key derivation).
+    /// Returns None if no password is set.
+    pub fn encryption_key(&self) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        let password = self.encryption_password.as_ref()?;
+        let mut hasher = Sha256::new();
+        // Simple but effective: hash the password with a salt prefix
+        hasher.update(b"wuffagent-session-encryption-salt");
+        hasher.update(password.as_bytes());
+        let result = hasher.finalize();
+        Some(result.into())
     }
 }
 

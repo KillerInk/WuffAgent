@@ -5,6 +5,28 @@ use std::path::Path;
 use crate::config::{Config, ConnectionType};
 use crate::server::ServerManager;
 use crate::client::ChatClient;
+use crate::sessions;
+
+/// Format a chrono DateTime<Utc> to a human-readable relative time string.
+fn relative_time(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(*dt);
+    let seconds = duration.num_seconds().abs();
+    if seconds < 10 {
+        "just now".to_string()
+    } else if seconds < 60 {
+        format!("{} sec ago", seconds)
+    } else if seconds < 3600 {
+        let minutes = seconds / 60;
+        format!("{} min ago", minutes)
+    } else if seconds < 86400 {
+        let hours = seconds / 3600;
+        format!("{} hours ago", hours)
+    } else {
+        let days = seconds / 86400;
+        format!("{} days ago", days)
+    }
+}
 
 #[cfg(feature = "rfd")]
 use rfd::FileDialog;
@@ -19,6 +41,7 @@ pub struct SettingsDialog {
     n_gpu_layers: i32,
     n_ctx: u32,
     threads: u32,
+    max_messages: usize,
     system_prompt: String,
     streaming: bool,
     theme: String,
@@ -36,6 +59,7 @@ impl SettingsDialog {
             n_gpu_layers: config.n_gpu_layers,
             n_ctx: config.n_ctx,
             threads: config.threads,
+            max_messages: config.max_messages,
             system_prompt: config.system_prompt.clone(),
             streaming: config.streaming,
             theme: config.theme.clone(),
@@ -64,6 +88,7 @@ impl SettingsDialog {
         let mut n_gpu_layers = self.n_gpu_layers;
         let mut n_ctx = self.n_ctx;
         let mut threads = self.threads;
+        let mut max_messages = self.max_messages;
         let mut system_prompt = self.system_prompt.clone();
         let mut streaming = self.streaming;
         let mut theme = self.theme.clone();
@@ -122,6 +147,9 @@ impl SettingsDialog {
 
                         // Threads
                         ui.add(egui::Slider::new(&mut threads, 1..=64).text("Threads"));
+
+                        // Max Messages
+                        ui.add(egui::Slider::new(&mut max_messages, 10..=1000).text("Max Messages"));
                     }
                     ConnectionType::Remote => {
                         // Remote URL
@@ -157,6 +185,41 @@ impl SettingsDialog {
                     if ui.selectable_value(&mut theme, "dark".to_string(), "Dark").clicked() {}
                     if ui.selectable_value(&mut theme, "light".to_string(), "Light").clicked() {}
                 });
+
+                ui.separator();
+
+                // Storage Info section
+                ui.heading("Storage Info");
+                ui.separator();
+                {
+                    let cfg = config.lock().unwrap();
+                    let sessions_dir = cfg.sessions_dir().clone();
+                    drop(cfg);
+                    let (count, total_size) = sessions::session_stats(&sessions_dir);
+                    ui.label(format!("Sessions directory: {}", sessions_dir.display()));
+                    ui.label(format!("Sessions: {}", count));
+                    let size_str = if total_size < 1024 {
+                        format!("{} B", total_size)
+                    } else if total_size < 1024 * 1024 {
+                        format!("{:.1} KB", total_size as f64 / 1024.0)
+                    } else {
+                        format!("{:.1} MB", total_size as f64 / (1024.0 * 1024.0))
+                    };
+                    ui.label(format!("Total size: {}", size_str));
+
+                    // Backup status info
+                    if let Ok(backups) = sessions::count_backups(&sessions_dir) {
+                        ui.label(format!("Backup files: {}", backups));
+                        if let Some(last_backup) = sessions::last_backup_time(&sessions_dir) {
+                            let rel = relative_time(&last_backup);
+                            ui.label(format!("Last backup: {}", rel));
+                        }
+                    }
+
+                    if ui.button("Open folder").clicked() {
+                        let _ = std::process::Command::new("explorer").arg(&sessions_dir).spawn();
+                    }
+                }
 
                 ui.separator();
 
@@ -201,6 +264,7 @@ impl SettingsDialog {
                         cfg.n_gpu_layers = n_gpu_layers;
                         cfg.n_ctx = n_ctx;
                         cfg.threads = threads;
+                        cfg.max_messages = max_messages;
                         cfg.system_prompt = system_prompt.clone();
                         cfg.streaming = streaming;
                         cfg.theme = theme.clone();
@@ -213,6 +277,7 @@ impl SettingsDialog {
                             cl.set_url(&new_url);
                             cl.set_api_key(cfg.remote_api_key.as_deref());
                             cl.set_system_prompt(&system_prompt);
+                            cl.set_max_messages(max_messages);
                             drop(cl);
                             *open = false;
                         }
@@ -274,6 +339,7 @@ impl SettingsDialog {
                                         cfg.n_gpu_layers = n_gpu;
                                         cfg.n_ctx = n_ctx_val;
                                         cfg.threads = threads_val;
+                                        cfg.max_messages = max_messages;
                                         cfg.streaming = streaming;
                                         cfg.system_prompt = sp.clone();
                                         if let Err(e) = cfg.save() {
@@ -321,6 +387,7 @@ impl SettingsDialog {
                         cfg.n_gpu_layers = n_gpu_layers;
                         cfg.n_ctx = n_ctx;
                         cfg.threads = threads;
+                        cfg.max_messages = max_messages;
                         cfg.system_prompt = system_prompt.clone();
                         cfg.streaming = streaming;
                         cfg.theme = theme.clone();
@@ -341,6 +408,7 @@ impl SettingsDialog {
         self.n_gpu_layers = n_gpu_layers;
         self.n_ctx = n_ctx;
         self.threads = threads;
+        self.max_messages = max_messages;
         self.system_prompt = system_prompt;
         self.streaming = streaming;
         self.theme = theme;

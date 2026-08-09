@@ -27,6 +27,11 @@ impl ChatApp {
             }
             ui.separator();
             ui.label(format!("Messages: {}", self.chat_display.len()));
+
+            if let Some(ref msg) = self.save_failure_message {
+                ui.separator();
+                ui.label(egui::RichText::new(msg).color(egui::Color32::YELLOW));
+            }
         });
     }
 

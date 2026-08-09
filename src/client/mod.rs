@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +35,13 @@ pub struct ChatClient {
     api_key: Option<String>,
     session_id: Option<String>,
     session_dir: PathBuf,
+    max_messages: usize,
+    /// Queue of pending save operations when a save fails.
+    save_queue: Arc<Mutex<VecDeque<()>>>,
+    /// Whether a save failure notification should be shown in the UI.
+    save_failed: Arc<Mutex<bool>>,
+    /// Encryption key for session files (32 bytes for ChaCha20Poly1305).
+    encryption_key: Option<[u8; 32]>,
 }
 
 impl ChatClient {
@@ -46,7 +54,15 @@ impl ChatClient {
             api_key: None,
             session_id: None,
             session_dir: PathBuf::new(),
+            max_messages: 100,
+            save_queue: Arc::new(Mutex::new(VecDeque::new())),
+            save_failed: Arc::new(Mutex::new(false)),
+            encryption_key: None,
         }
+    }
+
+    pub fn set_max_messages(&mut self, max_messages: usize) {
+        self.max_messages = max_messages;
     }
 
     pub fn set_url(&mut self, url: &str) {
@@ -109,10 +125,23 @@ impl ChatClient {
         self.session_dir = session_dir;
     }
 
+    pub fn set_encryption_key(&mut self, key: Option<[u8; 32]>) {
+        self.encryption_key = key;
+    }
+
+    pub fn session_dir(&self) -> &PathBuf {
+        &self.session_dir
+    }
+
     pub fn load_session(&mut self) -> Option<crate::sessions::Session> {
         let dir = self.session_dir.clone();
         let id = self.session_id.as_ref()?;
-        let session = crate::sessions::load_session(&dir, id)?;
+        let session = if let Some(key) = &self.encryption_key {
+            crate::sessions::decrypt_and_load_session(&dir, id, key)
+        } else {
+            crate::sessions::load_session(&dir, id)
+        };
+        let session = session?;
         let mut conv = self.conversation.lock().unwrap();
         *conv = session.messages.clone();
         if !session.system_prompt.is_empty() {
@@ -124,11 +153,94 @@ impl ChatClient {
     pub fn save_session(&self) -> Result<(), anyhow::Error> {
         let id = self.session_id.as_ref().ok_or_else(|| anyhow::anyhow!("no session id"))?;
         let conv = self.conversation.lock().unwrap();
-        let session = crate::sessions::load_session(&self.session_dir, id)
-            .ok_or_else(|| anyhow::anyhow!("session not found"))?;
-        let mut updated = session.clone();
-        updated.messages = conv.clone();
-        crate::sessions::save_session(&self.session_dir, &updated)
+        // Try loading the session; if it's encrypted, fall back to creating a new one
+        // (the key will be used to re-encrypt on the next save).
+        let mut session = if let Some(key) = &self.encryption_key {
+            crate::sessions::decrypt_and_load_session(&self.session_dir, id, key)
+                .or_else(|| crate::sessions::load_session(&self.session_dir, id))
+                .ok_or_else(|| anyhow::anyhow!("session not found"))?
+        } else {
+            crate::sessions::load_session(&self.session_dir, id)
+                .ok_or_else(|| anyhow::anyhow!("session not found"))?
+        };
+        session.messages = conv.clone();
+        // Retry with exponential backoff for transient failures
+        let mut retries = 0;
+        loop {
+            let save_result = if let Some(key) = &self.encryption_key {
+                crate::sessions::save_session_encrypted(&self.session_dir, &session, key)
+            } else {
+                crate::sessions::save_session_atomic(&self.session_dir, &session)
+            };
+            match save_result {
+                Ok(()) => {
+                    // Success: clear any pending queue and failure flag
+                    self.clear_save_queue();
+                    return Ok(());
+                }
+                Err(e) if retries < 3 => {
+                    retries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50u64.pow(retries as u32)));
+                    eprintln!("Session save attempt {} failed: {}, retrying...", retries, e);
+                }
+                Err(e) => {
+                    // All retries exhausted — enqueue for later retry and signal UI
+                    self.enqueue_save_failure(&e);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Enqueue a pending save and set the failure flag for UI notification.
+    pub fn enqueue_save_failure(&self, error: &anyhow::Error) {
+        let mut queue = self.save_queue.lock().unwrap();
+        queue.push_back(());
+        drop(queue);
+        let mut flagged = self.save_failed.lock().unwrap();
+        *flagged = true;
+        eprintln!("Session save failed, enqueued for retry: {}", error);
+    }
+
+    /// Try to retry any pending saves and clear the queue on success.
+    pub fn retry_pending_saves(&self) {
+        let mut queue = self.save_queue.lock().unwrap();
+        let count = queue.len();
+        if count == 0 {
+            return;
+        }
+        // Drain the queue and attempt saves
+        queue.clear();
+        drop(queue);
+
+        // Attempt a single save; if it succeeds, clear the failure flag
+        if let Err(e) = self.save_session() {
+            // Still failing — re-enqueue and keep the flag
+            self.enqueue_save_failure(&e);
+        } else {
+            let mut flagged = self.save_failed.lock().unwrap();
+            *flagged = false;
+        }
+    }
+
+    /// Returns true if there is a pending save failure notification to show.
+    pub fn has_save_failure(&self) -> bool {
+        *self.save_failed.lock().unwrap()
+    }
+
+    /// Clear the save failure flag (call after a successful save or user dismissal).
+    pub fn clear_save_failure(&self) {
+        let mut flagged = self.save_failed.lock().unwrap();
+        *flagged = false;
+    }
+
+    /// Clear the internal retry queue without attempting a save.
+    fn clear_save_queue(&self) {
+        let mut queue = self.save_queue.lock().unwrap();
+        queue.clear();
+        drop(queue);
+        let mut flagged = self.save_failed.lock().unwrap();
+        *flagged = false;
     }
 
     fn build_request(&self, prompt: &str, stream: bool, tools: Option<&[crate::tools::ToolDefinition]>) -> ChatRequest {
@@ -141,6 +253,17 @@ impl ChatClient {
                 tool_calls: None,
             });
         }
+
+        // Include conversation history, excluding any in-progress empty assistant message
+        let conv = self.conversation.lock().unwrap();
+        for msg in &*conv {
+            // Skip empty assistant messages that are being accumulated during streaming
+            if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
+                continue;
+            }
+            messages.push(msg.clone());
+        }
+        drop(conv);
 
         messages.push(Message {
             role: "user".to_string(),
@@ -221,7 +344,7 @@ impl ChatClient {
         });
         drop(conv);
 
-        self.trim_conversation(100);
+        self.trim_conversation(self.max_messages);
 
         Ok((content, usage))
     }
@@ -470,6 +593,40 @@ mod tests {
         let request = client.build_request("Hello", false, Some(&tools));
         assert!(request.tools.is_some());
         assert_eq!(request.tools.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_build_request_includes_history() {
+        let client = ChatClient::new("http://localhost:8080");
+        {
+            let mut conv = client.conversation().lock().unwrap();
+            conv.push(Message { role: "user".into(), content: "Hi there".into(), tool_calls: None });
+            conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), tool_calls: None });
+        }
+        let request = client.build_request("What's the weather?", false, None);
+        assert_eq!(request.messages.len(), 3);
+        assert_eq!(request.messages[0].role, "user");
+        assert_eq!(request.messages[0].content, "Hi there");
+        assert_eq!(request.messages[1].role, "assistant");
+        assert_eq!(request.messages[1].content, "Hello! How can I help?");
+        assert_eq!(request.messages[2].role, "user");
+        assert_eq!(request.messages[2].content, "What's the weather?");
+    }
+
+    #[test]
+    fn test_build_request_skips_empty_assistant_message() {
+        let client = ChatClient::new("http://localhost:8080");
+        {
+            let mut conv = client.conversation().lock().unwrap();
+            conv.push(Message { role: "user".into(), content: "Hi".into(), tool_calls: None });
+            conv.push(Message { role: "assistant".into(), content: String::new(), tool_calls: None });
+        }
+        let request = client.build_request("Follow up", false, None);
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].role, "user");
+        assert_eq!(request.messages[0].content, "Hi");
+        assert_eq!(request.messages[1].role, "user");
+        assert_eq!(request.messages[1].content, "Follow up");
     }
 
     #[test]

@@ -77,12 +77,13 @@ impl ChatApp {
         let tx = self.pending_tx.as_ref().unwrap().clone();
         let client = self.client.clone();
         let streaming = self.streaming;
+        let tool_defs = self.tool_manager.get_tool_definitions();
 
         let handle = tokio::spawn(async move {
             if streaming {
-                Self::do_streaming(client, text_clone, tx).await;
+                Self::do_streaming(client, text_clone, tx, tool_defs).await;
             } else {
-                Self::do_send_message(client, text_clone, tx).await;
+                Self::do_send_message(client, text_clone, tx, tool_defs).await;
             }
         });
 
@@ -93,16 +94,19 @@ impl ChatApp {
         client: Arc<Mutex<ChatClient>>,
         text: String,
         tx: mpsc::Sender<AppEvent>,
+        tool_defs: Vec<crate::tools::ToolDefinition>,
     ) {
         let tx_clone = tx.clone();
         let client_clone = client.lock().unwrap().clone();
-        let result = client_clone.stream_message_with_usage(&text, move |chunk| {
-            let _ = tx_clone.send(AppEvent::StreamChunk {
-                content: chunk.clone(),
-            });
-            Ok(())
-        })
-        .await;
+        let tools_ref: Vec<crate::tools::ToolDefinition> = tool_defs;
+        let result = client_clone
+            .stream_message_with_tools_and_usage(&text, Some(&tools_ref), move |chunk| {
+                let _ = tx_clone.send(AppEvent::StreamChunk {
+                    content: chunk.clone(),
+                });
+                Ok(())
+            })
+            .await;
 
         match result {
             Ok(usage) => {
@@ -124,9 +128,13 @@ impl ChatApp {
         client: Arc<Mutex<ChatClient>>,
         text: String,
         tx: mpsc::Sender<AppEvent>,
+        tool_defs: Vec<crate::tools::ToolDefinition>,
     ) {
         let client_clone = client.lock().unwrap().clone();
-        let result = client_clone.send_message(&text).await;
+        let tools_ref: Vec<crate::tools::ToolDefinition> = tool_defs;
+        let result = client_clone
+            .send_message_with_tools(&text, Some(&tools_ref))
+            .await;
 
         let _ = tx.send(match result {
             Ok((content, usage)) => AppEvent::MessageResult { content, usage },

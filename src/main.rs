@@ -103,12 +103,17 @@ fn main() -> eframe::Result {
     }
     let client = Arc::new(Mutex::new(ChatClient::new(&base_url)));
 
-    // Set API key and session for remote connections
+    // Set API key, session, and encryption key for the client
     {
         let mut cl = client.lock().unwrap();
         cl.set_api_key(api_key.as_deref());
         let cfg = config.lock().unwrap();
         cl.set_session(cfg.session_id.clone(), cfg.sessions_dir.clone());
+        if cfg.encryption_enabled {
+            if let Some(key) = cfg.encryption_key() {
+                cl.set_encryption_key(Some(key));
+            }
+        }
     }
 
     // Load the active session into the client conversation
