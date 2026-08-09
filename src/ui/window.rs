@@ -392,7 +392,20 @@ impl eframe::App for ChatApp {
         self.setup_ui(ctx);
     }
 
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.save(storage);
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        // Save config (existing)
+        let mut cfg = self.config.lock().unwrap();
+        cfg.streaming = self.streaming;
+        cfg.chat_history = self.chat_display.iter().map(|m| ConfigChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        }).collect();
+        if let Err(e) = cfg.save() {
+            eprintln!("Failed to save config: {}", e);
+        }
+        // Save current session
+        if let Err(e) = self.client.lock().unwrap().save_session() {
+            eprintln!("Failed to save session: {}", e);
+        }
     }
 }

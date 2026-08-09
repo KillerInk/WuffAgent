@@ -200,3 +200,38 @@ async fn test_sse_parsing_end_to_end() {
 
     let _ = server_handle.await;
 }
+
+#[tokio::test]
+async fn test_session_persistence() {
+    use wuffagent::sessions::{create_session, delete_session, load_session, save_session};
+    use wuffagent::types::Message;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let dir_path = dir.path();
+
+    let session = create_session(dir_path, "Test Session");
+    assert_eq!(session.name, "Test Session");
+    assert!(!session.id.is_empty());
+
+    let mut loaded = load_session(dir_path, &session.id).unwrap();
+    loaded.add_message(Message {
+        role: "user".to_string(),
+        content: "Hello".to_string(),
+        tool_calls: None,
+    });
+    loaded.add_message(Message {
+        role: "assistant".to_string(),
+        content: "Hi there!".to_string(),
+        tool_calls: None,
+    });
+    save_session(dir_path, &loaded).unwrap();
+
+    let reloaded = load_session(dir_path, &session.id).unwrap();
+    assert_eq!(reloaded.messages.len(), 2);
+    assert_eq!(reloaded.messages[0].content, "Hello");
+    assert_eq!(reloaded.messages[1].content, "Hi there!");
+
+    assert!(delete_session(dir_path, &session.id));
+    assert!(load_session(dir_path, &session.id).is_none());
+}
