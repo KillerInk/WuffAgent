@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use crate::client::ChatClient;
 use crate::config::{ChatMessage as ConfigChatMessage, Config};
 use crate::server::ServerManager;
+use crate::tools::ToolManager;
 use crate::ui::settings::SettingsDialog;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +36,7 @@ pub struct ChatApp {
     pub(super) server: Arc<ServerManager>,
     pub(super) client: Arc<Mutex<ChatClient>>,
     pub(super) config: Arc<Mutex<Config>>,
+    pub(super) tool_manager: Arc<ToolManager>,
     pub(super) pending_tx: Option<mpsc::Sender<AppEvent>>,
     pub(super) pending_rx: Mutex<mpsc::Receiver<AppEvent>>,
 
@@ -75,6 +77,7 @@ impl ChatApp {
         server: Arc<ServerManager>,
         client: Arc<Mutex<ChatClient>>,
         config: Arc<Mutex<Config>>,
+        tool_manager: Arc<ToolManager>,
     ) -> Self {
         let cfg = config.lock().unwrap();
         let streaming = cfg.streaming;
@@ -88,6 +91,7 @@ impl ChatApp {
             server,
             client,
             config,
+            tool_manager,
             pending_tx: Some(tx),
             pending_rx: Mutex::new(rx),
             chat_display: chat_history,
@@ -108,6 +112,10 @@ impl ChatApp {
             remote_n_ctx_handle: None,
             max_display_messages: 100,
         }
+    }
+
+    fn get_tool_definitions(&self) -> Vec<crate::tools::ToolDefinition> {
+        self.tool_manager.get_tool_definitions()
     }
 
     fn setup_ui(&mut self, ctx: &egui::Context) {

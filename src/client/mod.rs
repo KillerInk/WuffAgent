@@ -9,6 +9,8 @@ pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<crate::tools::ToolDefinition>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -74,7 +76,7 @@ impl ChatClient {
         self.conversation.lock().unwrap().clear();
     }
 
-    fn build_request(&self, prompt: &str, stream: bool) -> ChatRequest {
+    fn build_request(&self, prompt: &str, stream: bool, tools: Option<&[crate::tools::ToolDefinition]>) -> ChatRequest {
         let mut messages = Vec::new();
 
         if !self.system_prompt.is_empty() {
@@ -93,6 +95,7 @@ impl ChatClient {
             model: "local".to_string(),
             messages,
             stream,
+            tools: tools.map(|t| t.to_vec()),
         }
     }
 
@@ -100,7 +103,15 @@ impl ChatClient {
         &self,
         prompt: &str,
     ) -> Result<(String, Option<Usage>), Error> {
-        let request = self.build_request(prompt, false);
+        self.send_message_with_tools(prompt, None).await
+    }
+
+    pub async fn send_message_with_tools(
+        &self,
+        prompt: &str,
+        tools: Option<&[crate::tools::ToolDefinition]>,
+    ) -> Result<(String, Option<Usage>), Error> {
+        let request = self.build_request(prompt, false, tools);
         let body = serde_json::to_string(&request)?;
 
         let mut builder = self
@@ -199,9 +210,18 @@ impl ChatClient {
     pub async fn stream_message_with_usage(
         &self,
         prompt: &str,
+        callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
+    ) -> Result<Option<Usage>, Error> {
+        self.stream_message_with_tools_and_usage(prompt, None, callback).await
+    }
+
+    pub async fn stream_message_with_tools_and_usage(
+        &self,
+        prompt: &str,
+        tools: Option<&[crate::tools::ToolDefinition]>,
         mut callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
     ) -> Result<Option<Usage>, Error> {
-        let request = self.build_request(prompt, true);
+        let request = self.build_request(prompt, true, tools);
         let body = serde_json::to_string(&request)?;
 
         let mut builder = self
@@ -289,7 +309,7 @@ mod tests {
     #[test]
     fn test_build_request_no_system_prompt() {
         let client = ChatClient::new("http://localhost:8080");
-        let request = client.build_request("Hello", false);
+        let request = client.build_request("Hello", false, None);
         assert_eq!(request.model, "local");
         assert!(!request.stream);
         assert_eq!(request.messages.len(), 1);
@@ -301,7 +321,7 @@ mod tests {
     fn test_build_request_with_system_prompt() {
         let mut client = ChatClient::new("http://localhost:8080");
         client.set_system_prompt("You are helpful.");
-        let request = client.build_request("Hello", false);
+        let request = client.build_request("Hello", false, None);
         assert_eq!(request.model, "local");
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].role, "system");
@@ -313,9 +333,31 @@ mod tests {
     #[test]
     fn test_build_request_streaming() {
         let client = ChatClient::new("http://localhost:8080");
-        let request = client.build_request("Hello", true);
+        let request = client.build_request("Hello", true, None);
         assert!(request.stream);
         assert_eq!(request.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_build_request_with_tools() {
+        let client = ChatClient::new("http://localhost:8080");
+        let tools = vec![
+            crate::tools::ToolDefinition {
+                type_name: "function".to_string(),
+                function: crate::tools::ToolFunctionSpec {
+                    name: "test_tool".to_string(),
+                    description: "A test tool".to_string(),
+                    parameters: crate::tools::JsonSchema {
+                        type_name: "object".to_string(),
+                        properties: None,
+                        required: vec![],
+                    },
+                },
+            }
+        ];
+        let request = client.build_request("Hello", false, Some(&tools));
+        assert!(request.tools.is_some());
+        assert_eq!(request.tools.as_ref().unwrap().len(), 1);
     }
 
     #[test]

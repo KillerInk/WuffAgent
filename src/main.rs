@@ -3,6 +3,7 @@ pub mod client;
 pub mod config;
 pub mod server;
 pub mod ui;
+pub mod tools;
 
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +11,7 @@ use client::ChatClient;
 use config::Config;
 use eframe::egui;
 use server::ServerManager;
+use tools::{builtin, registry::ToolRegistry, ToolManager, TracingToolLogger};
 use ui::window::ChatApp;
 
 fn main() -> eframe::Result {
@@ -58,6 +60,27 @@ fn main() -> eframe::Result {
         ))
     };
 
+    // Initialize tool registry with builtins + dynamic plugin discovery
+    let logger = Arc::new(TracingToolLogger);
+    let discovery_paths: Vec<std::path::PathBuf> = vec![
+        dirs::config_dir().map(|d| d.join("wuffagent").join("plugins")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let registry = Arc::new(ToolRegistry::new(discovery_paths, logger));
+
+    // Register built-in tools
+    builtin::register_builtins(&registry).expect("Failed to register built-in tools");
+
+    // Discover and load dynamic plugins
+    if let Err(e) = registry.discover_plugins() {
+        eprintln!("Warning: failed to discover plugins: {}", e);
+    }
+
+    let tool_manager = Arc::new(ToolManager::new(registry));
+
     // Create chat client using config's base_url()
     let base_url;
     let api_key;
@@ -77,6 +100,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "WuffAgent",
         options,
-        Box::new(|_cc| Ok(Box::new(ChatApp::new(server, client, config)))),
+        Box::new(|_cc| Ok(Box::new(ChatApp::new(server, client, config, tool_manager)))),
     )
 }

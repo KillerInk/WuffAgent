@@ -24,6 +24,8 @@ dirs = "5.0"
 thiserror = "1.0"
 http = "1.1"
 rfd = { version = "0.14", optional = true }
+libloading = "0.9.0"
+chrono = { version = "0.4.45", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3.0"
