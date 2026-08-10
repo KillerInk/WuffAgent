@@ -25,6 +25,8 @@ impl Default for ConnectionType {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub timestamp: String,
 }
 
 impl From<Message> for ChatMessage {
@@ -32,6 +34,7 @@ impl From<Message> for ChatMessage {
         ChatMessage {
             role: m.role,
             content: m.content,
+            timestamp: m.timestamp,
         }
     }
 }
@@ -41,6 +44,7 @@ impl From<ChatMessage> for Message {
         Message {
             role: m.role,
             content: m.content,
+            timestamp: m.timestamp,
             tool_calls: None,
         }
     }
@@ -67,6 +71,8 @@ pub struct Config {
     pub system_prompt: String,
     pub streaming: bool,
     pub theme: String, // "dark" | "light"
+    #[serde(default)]
+    pub auto_scroll: bool,
     pub chat_history: Vec<ChatMessage>,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -100,6 +106,7 @@ impl Default for Config {
             system_prompt: String::new(),
             streaming: true,
             theme: "dark".to_string(),
+            auto_scroll: true,
             chat_history: Vec::new(),
             session_id: None,
             sessions_dir: PathBuf::new(),
@@ -291,8 +298,8 @@ mod tests {
         cfg.streaming = false;
         cfg.theme = "light".to_string();
         cfg.chat_history = vec![
-            ChatMessage { role: "user".to_string(), content: "Hello".to_string() },
-            ChatMessage { role: "assistant".to_string(), content: "Hi there!".to_string() },
+            ChatMessage { role: "user".to_string(), content: "Hello".to_string(), timestamp: String::new() },
+            ChatMessage { role: "assistant".to_string(), content: "Hi there!".to_string(), timestamp: String::new() },
         ];
         cfg.file_path = path.clone();
 

@@ -44,6 +44,7 @@ pub struct SettingsDialog {
     max_messages: usize,
     system_prompt: String,
     streaming: bool,
+    auto_scroll: bool,
     theme: String,
 }
 
@@ -62,6 +63,7 @@ impl SettingsDialog {
             max_messages: config.max_messages,
             system_prompt: config.system_prompt.clone(),
             streaming: config.streaming,
+            auto_scroll: config.auto_scroll,
             theme: config.theme.clone(),
         }
     }
@@ -91,6 +93,7 @@ impl SettingsDialog {
         let mut max_messages = self.max_messages;
         let mut system_prompt = self.system_prompt.clone();
         let mut streaming = self.streaming;
+        let mut auto_scroll = self.auto_scroll;
         let mut theme = self.theme.clone();
 
         egui::Window::new("Settings")
@@ -179,6 +182,9 @@ impl SettingsDialog {
                 // Streaming
                 ui.checkbox(&mut streaming, "Streaming");
 
+                // Auto scroll
+                ui.checkbox(&mut auto_scroll, "Auto scroll");
+
                 // Theme
                 ui.horizontal(|ui| {
                     ui.label("Theme:");
@@ -206,15 +212,6 @@ impl SettingsDialog {
                         format!("{:.1} MB", total_size as f64 / (1024.0 * 1024.0))
                     };
                     ui.label(format!("Total size: {}", size_str));
-
-                    // Backup status info
-                    if let Ok(backups) = sessions::count_backups(&sessions_dir) {
-                        ui.label(format!("Backup files: {}", backups));
-                        if let Some(last_backup) = sessions::last_backup_time(&sessions_dir) {
-                            let rel = relative_time(&last_backup);
-                            ui.label(format!("Last backup: {}", rel));
-                        }
-                    }
 
                     if ui.button("Open folder").clicked() {
                         let _ = std::process::Command::new("explorer").arg(&sessions_dir).spawn();
@@ -267,6 +264,7 @@ impl SettingsDialog {
                         cfg.max_messages = max_messages;
                         cfg.system_prompt = system_prompt.clone();
                         cfg.streaming = streaming;
+                        cfg.auto_scroll = auto_scroll;
                         cfg.theme = theme.clone();
                         if let Err(e) = cfg.save() {
                             ui.label(egui::RichText::new(format!("Failed to save config: {}", e)).color(egui::Color32::RED));
@@ -341,6 +339,7 @@ impl SettingsDialog {
                                         cfg.threads = threads_val;
                                         cfg.max_messages = max_messages;
                                         cfg.streaming = streaming;
+                                        cfg.auto_scroll = auto_scroll;
                                         cfg.system_prompt = sp.clone();
                                         if let Err(e) = cfg.save() {
                                             eprintln!("Failed to save updated config: {}", e);
@@ -390,6 +389,7 @@ impl SettingsDialog {
                         cfg.max_messages = max_messages;
                         cfg.system_prompt = system_prompt.clone();
                         cfg.streaming = streaming;
+                        cfg.auto_scroll = auto_scroll;
                         cfg.theme = theme.clone();
                         if let Err(e) = cfg.save() {
                             eprintln!("Failed to save config: {}", e);
@@ -411,6 +411,7 @@ impl SettingsDialog {
         self.max_messages = max_messages;
         self.system_prompt = system_prompt;
         self.streaming = streaming;
+        self.auto_scroll = auto_scroll;
         self.theme = theme;
     }
 }

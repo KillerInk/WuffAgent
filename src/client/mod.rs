@@ -133,6 +133,10 @@ impl ChatClient {
         &self.session_dir
     }
 
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
     pub fn load_session(&mut self) -> Option<crate::sessions::Session> {
         let dir = self.session_dir.clone();
         let id = self.session_id.as_ref()?;
@@ -250,6 +254,7 @@ impl ChatClient {
             messages.push(Message {
                 role: "system".to_string(),
                 content: self.system_prompt.clone(),
+                timestamp: String::new(),
                 tool_calls: None,
             });
         }
@@ -268,6 +273,7 @@ impl ChatClient {
         messages.push(Message {
             role: "user".to_string(),
             content: prompt.to_string(),
+            timestamp: String::new(),
             tool_calls: None,
         });
 
@@ -335,11 +341,13 @@ impl ChatClient {
         conv.push(Message {
             role: "user".to_string(),
             content: prompt.to_string(),
+            timestamp: String::new(),
             tool_calls: None,
         });
         conv.push(Message {
             role: "assistant".to_string(),
             content: content.clone(),
+            timestamp: String::new(),
             tool_calls: None,
         });
         drop(conv);
@@ -487,11 +495,13 @@ impl ChatClient {
             conv.push(Message {
                 role: "user".to_string(),
                 content: prompt.to_string(),
+                timestamp: String::new(),
                 tool_calls: None,
             });
             conv.push(Message {
                 role: "assistant".to_string(),
                 content: String::new(),
+                timestamp: String::new(),
                 tool_calls: None,
             });
         }
@@ -516,6 +526,39 @@ impl ChatClient {
         }
 
         Ok(last_usage)
+    }
+
+    /// Check for malformed tool calls in the conversation and return warnings.
+    /// A tool call is considered malformed if its arguments are not valid JSON.
+    pub fn check_tool_call_warnings(&self) -> Vec<(String, String)> {
+        let conv = self.conversation.lock().unwrap();
+        let mut warnings = Vec::new();
+        
+        for msg in conv.iter() {
+            if let Some(tool_calls) = &msg.tool_calls {
+                for tc in tool_calls {
+                    // Try to parse the arguments as JSON
+                    if tc.function.arguments.is_empty() {
+                        warnings.push((
+                            tc.function.name.clone(),
+                            "Empty arguments".to_string(),
+                        ));
+                    } else if !tc.function.arguments.starts_with('{') {
+                        warnings.push((
+                            tc.function.name.clone(),
+                            "Invalid JSON: arguments don't start with '{'".to_string(),
+                        ));
+                    } else if serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_err() {
+                        warnings.push((
+                            tc.function.name.clone(),
+                            format!("Malformed JSON arguments: {}", &tc.function.arguments[..tc.function.arguments.len().min(50)]),
+                        ));
+                    }
+                }
+            }
+        }
+        
+        warnings
     }
 }
 
@@ -600,8 +643,8 @@ mod tests {
         let client = ChatClient::new("http://localhost:8080");
         {
             let mut conv = client.conversation().lock().unwrap();
-            conv.push(Message { role: "user".into(), content: "Hi there".into(), tool_calls: None });
-            conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), tool_calls: None });
+            conv.push(Message { role: "user".into(), content: "Hi there".into(), timestamp: String::new(), tool_calls: None });
+            conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), timestamp: String::new(), tool_calls: None });
         }
         let request = client.build_request("What's the weather?", false, None);
         assert_eq!(request.messages.len(), 3);
@@ -618,8 +661,8 @@ mod tests {
         let client = ChatClient::new("http://localhost:8080");
         {
             let mut conv = client.conversation().lock().unwrap();
-            conv.push(Message { role: "user".into(), content: "Hi".into(), tool_calls: None });
-            conv.push(Message { role: "assistant".into(), content: String::new(), tool_calls: None });
+            conv.push(Message { role: "user".into(), content: "Hi".into(), timestamp: String::new(), tool_calls: None });
+            conv.push(Message { role: "assistant".into(), content: String::new(), timestamp: String::new(), tool_calls: None });
         }
         let request = client.build_request("Follow up", false, None);
         assert_eq!(request.messages.len(), 2);
@@ -689,6 +732,7 @@ mod tests {
         conv.push(Message {
             role: "assistant".to_string(),
             content: String::new(),
+            timestamp: String::new(),
             tool_calls: None,
         });
         drop(conv);
@@ -715,6 +759,7 @@ mod tests {
         conv.push(Message {
             role: "assistant".to_string(),
             content: String::new(),
+            timestamp: String::new(),
             tool_calls: None,
         });
         drop(conv);
@@ -748,6 +793,7 @@ mod tests {
         conv.push(Message {
             role: "assistant".to_string(),
             content: String::new(),
+            timestamp: String::new(),
             tool_calls: None,
         });
         drop(conv);
@@ -761,5 +807,78 @@ mod tests {
         let result = ChatClient::process_sse_line(sse_data, &mut cb, &client.conversation()).await;
         assert!(result.is_ok());
         assert!(captured.is_empty());
+    }
+
+    #[test]
+    fn test_check_tool_call_warnings_empty_args() {
+        let client = ChatClient::new("http://localhost:8080");
+        let mut conv = client.conversation().lock().unwrap();
+        conv.push(Message {
+            role: "assistant".to_string(),
+            content: "".to_string(),
+            timestamp: String::new(),
+            tool_calls: Some(vec![crate::types::ToolCall {
+                id: "tc1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::ToolFunction {
+                    name: "test_tool".to_string(),
+                    arguments: "".to_string(),
+                },
+            }]),
+        });
+        drop(conv);
+
+        let warnings = client.check_tool_call_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].0, "test_tool");
+        assert_eq!(warnings[0].1, "Empty arguments");
+    }
+
+    #[test]
+    fn test_check_tool_call_warnings_invalid_json() {
+        let client = ChatClient::new("http://localhost:8080");
+        let mut conv = client.conversation().lock().unwrap();
+        conv.push(Message {
+            role: "assistant".to_string(),
+            content: "".to_string(),
+            timestamp: String::new(),
+            tool_calls: Some(vec![crate::types::ToolCall {
+                id: "tc1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::ToolFunction {
+                    name: "test_tool".to_string(),
+                    arguments: "not json".to_string(),
+                },
+            }]),
+        });
+        drop(conv);
+
+        let warnings = client.check_tool_call_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].0, "test_tool");
+        assert!(warnings[0].1.contains("Invalid JSON"));
+    }
+
+    #[test]
+    fn test_check_tool_call_warnings_valid_json() {
+        let client = ChatClient::new("http://localhost:8080");
+        let mut conv = client.conversation().lock().unwrap();
+        conv.push(Message {
+            role: "assistant".to_string(),
+            content: "".to_string(),
+            timestamp: String::new(),
+            tool_calls: Some(vec![crate::types::ToolCall {
+                id: "tc1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::ToolFunction {
+                    name: "test_tool".to_string(),
+                    arguments: "{\"key\": \"value\"}".to_string(),
+                },
+            }]),
+        });
+        drop(conv);
+
+        let warnings = client.check_tool_call_warnings();
+        assert!(warnings.is_empty());
     }
 }

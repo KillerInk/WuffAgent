@@ -18,10 +18,13 @@ pub enum AppStatus {
     Error(String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 pub enum AppEvent {
@@ -30,6 +33,7 @@ pub enum AppEvent {
     StreamChunk { content: String },
     StreamComplete { content: String, usage: Option<crate::types::Usage> },
     StreamError { error: String },
+    ToolCallWarning { tool_name: String, message: String },
 }
 
 pub struct ChatApp {
@@ -76,6 +80,17 @@ pub struct ChatApp {
 
     // Save failure notification (shown in status bar until cleared)
     pub(super) save_failure_message: Option<String>,
+
+    // Auto-scroll state
+    pub(super) auto_scroll: bool,
+    pub(super) auto_scroll_at_bottom: bool,
+
+    // Pending image for drag-and-drop
+    pub(super) pending_image: Option<String>,
+
+    // Message editing state
+    pub(super) editing_message_index: Option<usize>,
+    pub(super) editing_message_content: String,
 }
 
 impl ChatApp {
@@ -88,6 +103,7 @@ impl ChatApp {
         let cfg = config.lock().unwrap();
         let streaming = cfg.streaming;
         let max_messages = cfg.max_messages;
+        let auto_scroll = cfg.auto_scroll;
         drop(cfg);
         let (tx, rx) = mpsc::channel();
         
@@ -100,6 +116,8 @@ impl ChatApp {
                 chat_display = session.messages.iter().map(|m| ChatMessage {
                     role: m.role.clone(),
                     content: m.content.clone(),
+                    timestamp: m.timestamp.clone(),
+                    image: None,
                 }).collect();
             }
         }
@@ -130,6 +148,11 @@ impl ChatApp {
             max_display_messages: max_messages,
             sessions_panel: Some(sessions_panel),
             save_failure_message: None,
+            auto_scroll,
+            auto_scroll_at_bottom: true,
+            pending_image: None,
+            editing_message_index: None,
+            editing_message_content: String::new(),
         }
     }
 
@@ -146,16 +169,26 @@ impl ChatApp {
                 None
             }
         };
-        if let Some(id) = switched_id {
-            self.switch_session(&id);
-        }
+        
+        // Handle clear action
         if let Some(ref mut panel) = self.sessions_panel {
             panel.update_notification(ctx);
-            if panel.clear_action {
+            if panel.clear_session_id.is_some() {
+                eprintln!("[Clear] window.rs: clear_session_id detected, clearing client and chat");
+                panel.clear_session_id = None;
+                // Clear the client's in-memory conversation
                 let mut cl = self.client.lock().unwrap();
                 cl.clear_session_messages();
-                panel.clear_action = false;
+                drop(cl);
+                // Update the chat display to reflect the cleared session
+                self.chat_display.clear();
+                eprintln!("[Clear] window.rs: cleared chat_display, len={}", self.chat_display.len());
             }
+        }
+        
+        // Switch session if needed (handles New button and history selection)
+        if let Some(id) = switched_id {
+            self.switch_session(&id);
         }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -289,15 +322,37 @@ impl ChatApp {
                     self.is_generating = false;
                     self.current_response.clear();
                 }
+                AppEvent::ToolCallWarning { tool_name, message } => {
+                    tracing::warn!(tool = tool_name, message = %message, "Tool call warning");
+                    // Show as a pending warning (similar to error but non-fatal)
+                    self.pending_error = Some(format!("[{}] {}", tool_name, message));
+                }
             }
         }
     }
 
     pub(super) fn add_message(&mut self, role: &str, content: &str) {
+        self.add_message_with_image(role, content, None);
+    }
+
+    pub(super) fn add_message_with_image(&mut self, role: &str, content: &str, image: Option<String>) {
+        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
         self.chat_display.push(ChatMessage {
             role: role.to_string(),
             content: content.to_string(),
+            timestamp: timestamp.clone(),
+            image,
         });
+        // Update the underlying session message with timestamp
+        {
+            let cl = self.client.lock().unwrap();
+            let mut conv = cl.conversation().lock().unwrap();
+            if let Some(last) = conv.last_mut() {
+                if last.role == role && last.content == content {
+                    last.timestamp = timestamp;
+                }
+            }
+        }
         // Truncate if too many messages
         if self.chat_display.len() > self.max_display_messages {
             self.chat_display.drain(..self.chat_display.len() - self.max_display_messages);
@@ -324,17 +379,24 @@ impl ChatApp {
         } else {
             self.save_failure_message = None;
         }
-        
+
         let mut cl = self.client.lock().unwrap();
         // Update session_id before loading
         let session_dir = cl.session_dir().clone();
         cl.set_session(Some(session_id.to_string()), session_dir);
-        if let Some(session) = cl.load_session() {
+        // Always update chat_display, even when load_session returns None (new session)
+        let loaded = cl.load_session();
+        if let Some(session) = loaded {
             self.chat_display = session.messages.iter().map(|m| ChatMessage {
                 role: m.role.clone(),
                 content: m.content.clone(),
+                timestamp: m.timestamp.clone(),
+                image: None,
             }).collect();
             cl.set_system_prompt(&session.system_prompt);
+        } else {
+            // New or empty session — clear the chat display
+            self.chat_display.clear();
         }
         drop(cl);
     }
@@ -368,10 +430,12 @@ impl ChatApp {
         // Save config on app close
         let mut cfg = self.config.lock().unwrap();
         cfg.streaming = self.streaming;
+        cfg.auto_scroll = self.auto_scroll;
         // Save chat history to config for persistence
         cfg.chat_history = self.chat_display.iter().map(|m| ConfigChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),
+            timestamp: m.timestamp.clone(),
         }).collect();
         if let Err(e) = cfg.save() {
             eprintln!("Failed to save config: {}", e);
@@ -460,10 +524,13 @@ impl eframe::App for ChatApp {
         // Save config (existing)
         let mut cfg = self.config.lock().unwrap();
         cfg.streaming = self.streaming;
+        cfg.auto_scroll = self.auto_scroll;
         cfg.chat_history = self.chat_display.iter().map(|m| ConfigChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),
+            timestamp: m.timestamp.clone(),
         }).collect();
+        // Note: images are not persisted in config chat_history (they're in session)
         if let Err(e) = cfg.save() {
             eprintln!("Failed to save config: {}", e);
         }

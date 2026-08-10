@@ -6,6 +6,8 @@ pub struct Message {
     pub role: String,
     #[serde(default)]
     pub content: String,
+    #[serde(default)]
+    pub timestamp: String,
     /// Tool call requests from the AI (non-null when the AI wants to invoke a tool).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,

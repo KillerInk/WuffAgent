@@ -23,6 +23,17 @@ impl ChatApp {
             ui.separator();
         }
 
+        // Show pending image preview
+        if self.pending_image.is_some() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("📷 Image attached").size(11.0).color(egui::Color32::GRAY));
+                if ui.button("✕").clicked() {
+                    self.pending_image = None;
+                }
+            });
+            ui.separator();
+        }
+
         // Input takes remaining space, button stays visible
         ui.horizontal(|ui| {
             ui.add_space(4.0);
@@ -40,6 +51,45 @@ impl ChatApp {
                 }
             }
         });
+        
+        // Handle drag-and-drop for images
+        self.handle_image_drop(ui);
+    }
+    
+    fn handle_image_drop(&mut self, ui: &mut egui::Ui) {
+        // Use egui's built-in drop target for files
+        let drop_zone = ui.allocate_space(egui::Vec2::new(ui.available_width(), 20.0));
+        
+        // Check for drop events using egui's drop target API
+        let response = ui.interact(drop_zone.1, ui.id(), egui::Sense::click());
+        
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        
+        // Check for dropped files
+        if let Some(drop) = ui.input(|i| i.raw.dropped_files.clone().into_iter().next()) {
+            if let Some(path) = drop.path {
+                self.process_dropped_file(path);
+            }
+        }
+    }
+    
+    fn process_dropped_file(&mut self, file_path: std::path::PathBuf) {
+        // Check if it's an image file
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff");
+        
+        if is_image {
+            if let Ok(bytes) = std::fs::read(&file_path) {
+                // Validate it's actually an image by trying to decode
+                if image::ImageFormat::from_extension(&ext).is_some() {
+                    let base64_img = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+                    self.pending_image = Some(base64_img);
+                    tracing::info!("Dropped image: {:?}", file_path);
+                }
+            }
+        }
     }
 
     fn validate_input(&self, text: &str) -> Result<(), String> {
@@ -61,7 +111,8 @@ impl ChatApp {
         }
 
         self.input_text.clear();
-        self.add_message("user", &text);
+        let image = self.pending_image.take();
+        self.add_message_with_image("user", &text, image);
 
         // Transition to generating state
         self.is_generating = true;
@@ -116,6 +167,12 @@ impl ChatApp {
                 };
                 if let Some(content) = content {
                     let _ = tx.send(AppEvent::StreamComplete { content, usage });
+                }
+                
+                // Check for malformed tool calls and send warnings
+                let warnings = client_clone.check_tool_call_warnings();
+                for (tool_name, message) in warnings {
+                    let _ = tx.send(AppEvent::ToolCallWarning { tool_name, message });
                 }
             }
             Err(e) => {

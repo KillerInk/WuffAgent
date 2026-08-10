@@ -101,104 +101,11 @@ pub fn save_session(dir: &Path, session: &Session) -> Result<(), anyhow::Error> 
 pub fn save_session_atomic(dir: &Path, session: &Session) -> Result<(), anyhow::Error> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("{}.json", session.id));
-    backup_before_save(dir, session.id.as_str())?;
     let content = serde_json::to_string_pretty(session)?;
     let temp_path = path.with_extension("tmp");
     fs::write(&temp_path, content)?;
     fs::rename(&temp_path, &path)?;
-    cleanup_backups(dir, session.id.as_str(), 5)?;
     Ok(())
-}
-
-/// Create a timestamped backup of the session file before overwriting it.
-/// Backup filename format: {session_id}.json.bak_YYYYMMDD_HHMMSS
-pub fn backup_before_save(dir: &Path, session_id: &str) -> Result<(), anyhow::Error> {
-    let source_path = dir.join(format!("{}.json", session_id));
-    if !source_path.exists() {
-        return Ok(());
-    }
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let backup_path = dir.join(format!("{}.json.bak_{}", session_id, timestamp));
-    if !backup_path.exists() {
-        fs::copy(&source_path, &backup_path)?;
-    }
-    Ok(())
-}
-
-/// Remove old backups for a session, keeping only the last `keep` backups.
-/// Backup filenames follow the pattern: {session_id}.json.bak_YYYYMMDD_HHMMSS
-pub fn cleanup_backups(dir: &Path, session_id: &str, keep: usize) -> Result<(), anyhow::Error> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    let pattern = format!("{}.json.bak_", session_id);
-    let mut backups: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with(&pattern) {
-                if let Ok(meta) = fs::metadata(&path) {
-                    if let Ok(time) = meta.modified() {
-                        backups.push((time, path));
-                    }
-                }
-            }
-        }
-    }
-    // Sort by modification time, newest first
-    backups.sort_by(|a, b| b.0.cmp(&a.0));
-    // Delete old backups beyond the keep limit
-    for (_, path) in backups.iter().skip(keep) {
-        fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
-/// Count the total number of backup files in the directory.
-pub fn count_backups(dir: &Path) -> Result<usize, anyhow::Error> {
-    if !dir.exists() {
-        return Ok(0);
-    }
-    let mut count = 0;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with(".bak_") || name.contains(".bak_") {
-                count += 1;
-            }
-        }
-    }
-    Ok(count)
-}
-
-/// Get the timestamp of the most recent backup file in the directory.
-pub fn last_backup_time(dir: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
-    if !dir.exists() {
-        return None;
-    }
-    let mut latest: Option<std::time::SystemTime> = None;
-    for entry in fs::read_dir(dir).ok()? {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.contains(".bak_") {
-                if let Ok(meta) = fs::metadata(&path) {
-                    if let Ok(time) = meta.modified() {
-                        latest = Some(match latest {
-                            Some(l) if time > l => time,
-                            _ => time,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    latest.map(|t| {
-        let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?;
-        chrono::DateTime::from_timestamp(secs.as_secs() as i64, 0)
-    })?
 }
 
 /// Save a session, encrypting it if the key is provided.
@@ -230,7 +137,35 @@ pub fn list_sessions(dir: &Path) -> Vec<Session> {
 
 pub fn delete_session(dir: &Path, id: &str) -> bool {
     let path = dir.join(format!("{}.json", id));
-    fs::remove_file(&path).is_ok()
+    if fs::remove_file(&path).is_err() {
+        return false;
+    }
+    // Also delete all backup files for this session
+    let pattern = format!("{}.json.bak_", id);
+    if dir.exists() {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                if let Some(name) = file_name.to_str() {
+                    if name.starts_with(&pattern) {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Clear all messages from a session while preserving the session itself.
+/// Returns true if the session was found and cleared, false otherwise.
+pub fn clear_session_messages(dir: &Path, id: &str) -> Result<(), anyhow::Error> {
+    let session = load_session(dir, id)
+        .ok_or_else(|| anyhow::anyhow!("session not found: {}", id))?;
+    let mut cleared = session;
+    cleared.messages.clear();
+    cleared.touch();
+    save_session_atomic(dir, &cleared)
 }
 
 pub fn create_session(dir: &Path, name: &str) -> Session {
