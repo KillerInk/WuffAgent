@@ -4,3 +4,4 @@ pub mod chat_area;
 pub mod input;
 pub mod status;
 pub mod sessions_panel;
+pub mod state;

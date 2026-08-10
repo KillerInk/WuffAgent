@@ -1,18 +1,19 @@
 use eframe::egui;
 
-use super::window::{AppStatus, ChatApp};
+use super::state::ChatApp;
+use super::window::AppStatus;
 
 impl ChatApp {
     pub(super) fn draw_status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let status_text = match &self.status {
+            let status_text = match &self.chat.status {
                 AppStatus::Stopped => "● Stopped".to_string(),
                 AppStatus::Connecting => "● Connecting...".to_string(),
                 AppStatus::Ready => "● Ready".to_string(),
                 AppStatus::Generating => "● Generating...".to_string(),
                 AppStatus::Error(e) => format!("● Error: {}", e),
             };
-            let status_color = match &self.status {
+            let status_color = match &self.chat.status {
                 AppStatus::Stopped => egui::Color32::GRAY,
                 AppStatus::Connecting => egui::Color32::BLUE,
                 AppStatus::Ready => egui::Color32::GREEN,
@@ -21,14 +22,14 @@ impl ChatApp {
             };
             ui.label(egui::RichText::new(&status_text).color(status_color));
 
-            if self.streaming {
+            if self.chat.streaming {
                 ui.separator();
                 ui.label("Streaming");
             }
             ui.separator();
-            ui.label(format!("Messages: {}", self.chat_display.len()));
+            ui.label(format!("Messages: {}", self.chat.messages.len()));
 
-            if let Some(ref msg) = self.save_failure_message {
+            if let Some(ref msg) = self.sessions.save_failure_message {
                 ui.separator();
                 ui.label(egui::RichText::new(msg).color(egui::Color32::YELLOW));
             }
@@ -70,9 +71,9 @@ impl ChatApp {
 
         ui.horizontal(|ui| {
             ui.label("Tokens:");
-            ui.label(self.token_count.to_string());
+            ui.label(self.chat.token_count.to_string());
             ui.label(" | Context: ");
-            ui.label(format!("{:.1}%", self.context_used));
+            ui.label(format!("{:.1}%", self.chat.context_used));
             ui.separator();
             ui.label(format!("Ctx: {} | GPU: {} | Threads: {}", n_ctx, n_gpu_layers, threads));
         });

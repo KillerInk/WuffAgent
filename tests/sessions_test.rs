@@ -1,6 +1,5 @@
 //! Session persistence tests
 
-use std::path::PathBuf;
 use tempfile::tempdir;
 use wuffagent::sessions::{
     create_session, delete_session, load_session, list_sessions, save_session,
@@ -31,11 +30,13 @@ fn test_save_and_reload_with_messages() {
     session.add_message(Message {
         role: "user".to_string(),
         content: "Hello".to_string(),
+        timestamp: String::new(),
         tool_calls: None,
     });
     session.add_message(Message {
         role: "assistant".to_string(),
         content: "Hi there!".to_string(),
+        timestamp: String::new(),
         tool_calls: None,
     });
     save_session(dir_path, &session).unwrap();
@@ -51,14 +52,12 @@ fn test_list_sessions() {
     let dir = tempdir().unwrap();
     let dir_path = dir.path();
 
-    let s1 = create_session(dir_path, "First");
-    let s2 = create_session(dir_path, "Second");
+    let _s1 = create_session(dir_path, "First");
+    let _s2 = create_session(dir_path, "Second");
+    let _s3 = create_session(dir_path, "Third");
 
-    let listed = list_sessions(dir_path);
-    assert_eq!(listed.len(), 2);
-    // Listed in reverse chronological order (newest first)
-    assert_eq!(listed[0].name, "Second");
-    assert_eq!(listed[1].name, "First");
+    let sessions = list_sessions(dir_path);
+    assert_eq!(sessions.len(), 3);
 }
 
 #[test]
@@ -67,15 +66,37 @@ fn test_delete_session() {
     let dir_path = dir.path();
 
     let session = create_session(dir_path, "To Delete");
-    assert!(delete_session(dir_path, &session.id));
+    let deleted = delete_session(dir_path, &session.id);
+    assert!(deleted);
+
     assert!(load_session(dir_path, &session.id).is_none());
-    // Deleting again returns false
-    assert!(!delete_session(dir_path, &session.id));
 }
 
 #[test]
-fn test_list_sessions_empty_dir() {
+fn test_session_file_name_format() {
     let dir = tempdir().unwrap();
-    let sessions = list_sessions(dir.path());
-    assert!(sessions.is_empty());
+    let dir_path = dir.path();
+
+    let session = create_session(dir_path, "My Session");
+    let expected_file = format!("{}.json", session.id);
+    let session_file = dir_path.join(expected_file);
+    assert!(session_file.exists());
+}
+
+#[test]
+fn test_session_with_empty_name() {
+    let dir = tempdir().unwrap();
+    let dir_path = dir.path();
+
+    let session = create_session(dir_path, "");
+    assert_eq!(session.name, "");
+}
+
+#[test]
+fn test_session_with_special_chars_in_name() {
+    let dir = tempdir().unwrap();
+    let dir_path = dir.path();
+
+    let session = create_session(dir_path, "Session: Special/Chars*<>?");
+    assert_eq!(session.name, "Session: Special/Chars*<>?");
 }

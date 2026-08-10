@@ -13,7 +13,7 @@ use config::Config;
 use eframe::egui;
 use server::ServerManager;
 use tools::{builtin, registry::ToolRegistry, ToolManager, TracingToolLogger};
-use ui::window::ChatApp;
+use ui::state::ChatApp;
 
 fn main() -> eframe::Result {
     // Create a Tokio runtime so tokio::spawn works inside the app

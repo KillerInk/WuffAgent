@@ -1,10 +1,7 @@
 use eframe::egui;
-use std::sync::{Arc, Mutex};
-use std::sync::mpsc;
 
-use crate::client::ChatClient;
-
-use super::window::{AppEvent, AppStatus, ChatApp};
+use super::state::ChatApp;
+use super::window::{AppEvent, AppStatus};
 
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
@@ -12,7 +9,7 @@ impl ChatApp {
 
         // Validate input length
         const MAX_MESSAGE_LENGTH: usize = 4000;
-        let input_len = self.input_text.len();
+        let input_len = self.chat.input_text.len();
         if input_len > MAX_MESSAGE_LENGTH {
             ui.horizontal(|ui| {
                 ui.colored_label(
@@ -24,11 +21,11 @@ impl ChatApp {
         }
 
         // Show pending image preview
-        if self.pending_image.is_some() {
+        if self.chat.pending_image.is_some() {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("📷 Image attached").size(11.0).color(egui::Color32::GRAY));
                 if ui.button("✕").clicked() {
-                    self.pending_image = None;
+                    self.chat.pending_image = None;
                 }
             });
             ui.separator();
@@ -39,9 +36,9 @@ impl ChatApp {
             ui.add_space(4.0);
             const BUTTON_WIDTH: f32 = 55.0;
             let input_width = (ui.available_width() - BUTTON_WIDTH - 4.0).max(0.0);
-            let text_edit = egui::TextEdit::singleline(&mut self.input_text);
+            let text_edit = egui::TextEdit::singleline(&mut self.chat.input_text);
             ui.add_sized([input_width, 22.0], text_edit);
-            if !self.is_generating {
+            if !self.chat.is_generating {
                 if ui.button("Send").clicked() {
                     self.send_message();
                 }
@@ -85,7 +82,7 @@ impl ChatApp {
                 // Validate it's actually an image by trying to decode
                 if image::ImageFormat::from_extension(&ext).is_some() {
                     let base64_img = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-                    self.pending_image = Some(base64_img);
+                    self.chat.pending_image = Some(base64_img);
                     tracing::info!("Dropped image: {:?}", file_path);
                 }
             }
@@ -104,107 +101,56 @@ impl ChatApp {
     }
 
     pub(super) fn send_message(&mut self) {
-        let text = self.input_text.trim().to_string();
-        if let Err(e) = self.validate_input(&text) {
-            self.pending_error = Some(e);
+        let input = self.chat.input_text.trim().to_string();
+        if let Err(e) = self.validate_input(&input) {
+            self.chat.status = AppStatus::Error(e.clone());
+            self.chat.pending_error = Some(e);
             return;
         }
 
-        self.input_text.clear();
-        let image = self.pending_image.take();
-        self.add_message_with_image("user", &text, image);
+        self.chat.input_text.clear();
+        self.start_streaming();
 
-        // Transition to generating state
-        self.is_generating = true;
-        self.current_response.clear();
-        self.status = AppStatus::Generating;
+        // Add user message to chat display and session
+        let image = self.chat.pending_image.take();
+        self.add_message_with_image("user", &input, image);
 
-        // Cancel any existing streaming task
-        if let Some(task) = self.streaming_task.take() {
-            task.abort();
-        }
-
-        let text_clone = text.clone();
-        let tx = self.pending_tx.as_ref().unwrap().clone();
+        // Clone tool definitions for the async task
+        let tool_defs = self.get_tool_definitions();
         let client = self.client.clone();
-        let streaming = self.streaming;
-        let tool_defs = self.tool_manager.get_tool_definitions();
+        let tx = self.pending_tx.clone();
 
-        let handle = tokio::spawn(async move {
-            if streaming {
-                Self::do_streaming(client, text_clone, tx, tool_defs).await;
-            } else {
-                Self::do_send_message(client, text_clone, tx, tool_defs).await;
+        // Use spawn_local since we're in a single-threaded Tokio runtime
+        // and ChatClient is not Send (contains non-Send Mutex guards)
+        let handle = tokio::task::spawn_local(async move {
+            let cl = client.lock().unwrap();
+            let result = cl.send_message_with_tools(&input, Some(&tool_defs)).await;
+            drop(cl);
+            
+            match result {
+                Ok((content, usage)) => {
+                    if let Some(tx) = &tx {
+                        let _ = tx.send(AppEvent::StreamComplete { content, usage });
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to send message: {}", e);
+                    if let Some(tx) = &tx {
+                        let _ = tx.send(AppEvent::StreamError { error: e.to_string() });
+                    }
+                }
             }
         });
 
-        self.streaming_task = Some(handle);
-    }
-
-    async fn do_streaming(
-        client: Arc<Mutex<ChatClient>>,
-        text: String,
-        tx: mpsc::Sender<AppEvent>,
-        tool_defs: Vec<crate::tools::ToolDefinition>,
-    ) {
-        let tx_clone = tx.clone();
-        let client_clone = client.lock().unwrap().clone();
-        let tools_ref: Vec<crate::tools::ToolDefinition> = tool_defs;
-        let result = client_clone
-            .stream_message_with_tools_and_usage(&text, Some(&tools_ref), move |chunk| {
-                let _ = tx_clone.send(AppEvent::StreamChunk {
-                    content: chunk.clone(),
-                });
-                Ok(())
-            })
-            .await;
-
-        match result {
-            Ok(usage) => {
-                let content = {
-                    let c = client_clone.conversation().lock().unwrap();
-                    c.last().map(|m| m.content.clone())
-                };
-                if let Some(content) = content {
-                    let _ = tx.send(AppEvent::StreamComplete { content, usage });
-                }
-                
-                // Check for malformed tool calls and send warnings
-                let warnings = client_clone.check_tool_call_warnings();
-                for (tool_name, message) in warnings {
-                    let _ = tx.send(AppEvent::ToolCallWarning { tool_name, message });
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(AppEvent::StreamError { error: e.to_string() });
-            }
-        }
-    }
-
-    async fn do_send_message(
-        client: Arc<Mutex<ChatClient>>,
-        text: String,
-        tx: mpsc::Sender<AppEvent>,
-        tool_defs: Vec<crate::tools::ToolDefinition>,
-    ) {
-        let client_clone = client.lock().unwrap().clone();
-        let tools_ref: Vec<crate::tools::ToolDefinition> = tool_defs;
-        let result = client_clone
-            .send_message_with_tools(&text, Some(&tools_ref))
-            .await;
-
-        let _ = tx.send(match result {
-            Ok((content, usage)) => AppEvent::MessageResult { content, usage },
-            Err(e) => AppEvent::MessageError { error: e.to_string() },
-        });
+        // Store the handle for potential cancellation
+        self.chat.streaming_task = Some(handle);
     }
 
     pub(super) fn stop_generation(&mut self) {
-        if let Some(task) = self.streaming_task.take() {
-            task.abort();
+        // Cancel the streaming task if it exists
+        if let Some(handle) = self.chat.streaming_task.take() {
+            handle.abort();
         }
-        self.is_generating = false;
-        self.current_response.clear();
-        self.status = AppStatus::Ready;
+        self.stop_streaming();
     }
 }

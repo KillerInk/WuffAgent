@@ -6,11 +6,12 @@ use tokio::task::JoinHandle;
 use crate::client::ChatClient;
 use crate::config::{ChatMessage as ConfigChatMessage, Config};
 use crate::server::ServerManager;
-use crate::tools::ToolManager;
 use crate::ui::settings::SettingsDialog;
+pub use crate::ui::state::ChatApp;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum AppStatus {
+    #[default]
     Stopped,
     Connecting,
     Ready,
@@ -36,134 +37,15 @@ pub enum AppEvent {
     ToolCallWarning { tool_name: String, message: String },
 }
 
-pub struct ChatApp {
-    pub(super) server: Arc<ServerManager>,
-    pub(super) client: Arc<Mutex<ChatClient>>,
-    pub(super) config: Arc<Mutex<Config>>,
-    pub(super) tool_manager: Arc<ToolManager>,
-    pub(super) pending_tx: Option<mpsc::Sender<AppEvent>>,
-    pub(super) pending_rx: Mutex<mpsc::Receiver<AppEvent>>,
-
-    // UI state
-    pub(super) chat_display: Vec<ChatMessage>,
-    pub(super) input_text: String,
-    pub(super) is_generating: bool,
-    pub(super) status: AppStatus,
-    pub(super) streaming: bool,
-    pub(super) show_settings: bool,
-    pub(super) settings_dialog: Option<SettingsDialog>,
-    pub(super) progress: f32,
-    pub(super) pending_error: Option<String>,
-
-    // For streaming
-    pub(super) current_response: String,
-    pub(super) streaming_task: Option<JoinHandle<()>>,
-
-    // Stats for bottom bar
-    pub(super) token_count: u32,
-    pub(super) context_used: f32,
-
-    // Remote server n_ctx (fetched from /props), 0 = not yet fetched
-    pub(super) remote_n_ctx: u32,
-
-    // Shared Arc for the background fetch task to update
-    pub(super) remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
-
-    // Shared handle for background remote n_ctx fetch task
-    pub(super) remote_n_ctx_handle: Option<JoinHandle<()>>,
-
-    // Max messages to keep in display (truncate for context window)
-    pub(super) max_display_messages: usize,
-
-    // Session sidebar
-    pub(super) sessions_panel: Option<super::sessions_panel::SessionsPanel>,
-
-    // Save failure notification (shown in status bar until cleared)
-    pub(super) save_failure_message: Option<String>,
-
-    // Auto-scroll state
-    pub(super) auto_scroll: bool,
-    pub(super) auto_scroll_at_bottom: bool,
-
-    // Pending image for drag-and-drop
-    pub(super) pending_image: Option<String>,
-
-    // Message editing state
-    pub(super) editing_message_index: Option<usize>,
-    pub(super) editing_message_content: String,
-}
-
 impl ChatApp {
-    pub fn new(
-        server: Arc<ServerManager>,
-        client: Arc<Mutex<ChatClient>>,
-        config: Arc<Mutex<Config>>,
-        tool_manager: Arc<ToolManager>,
-    ) -> Self {
-        let cfg = config.lock().unwrap();
-        let streaming = cfg.streaming;
-        let max_messages = cfg.max_messages;
-        let auto_scroll = cfg.auto_scroll;
-        drop(cfg);
-        let (tx, rx) = mpsc::channel();
-        
-        // Initialize sessions panel and load the current session
-        let sessions_panel = super::sessions_panel::SessionsPanel::new(&config.clone());
-        let mut chat_display: Vec<ChatMessage> = Vec::new();
-        {
-            let mut cl = client.lock().unwrap();
-            if let Some(session) = cl.load_session() {
-                chat_display = session.messages.iter().map(|m| ChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                    timestamp: m.timestamp.clone(),
-                    image: None,
-                }).collect();
-            }
-        }
-        
-        Self {
-            server,
-            client,
-            config: config.clone(),
-            tool_manager,
-            pending_tx: Some(tx),
-            pending_rx: Mutex::new(rx),
-            chat_display,
-            input_text: String::new(),
-            is_generating: false,
-            status: AppStatus::Stopped,
-            streaming,
-            show_settings: false,
-            settings_dialog: None,
-            progress: 0.0,
-            pending_error: None,
-            current_response: String::new(),
-            streaming_task: None,
-            token_count: 0,
-            context_used: 0.0,
-            remote_n_ctx: 0,
-            remote_n_ctx_arc: None,
-            remote_n_ctx_handle: None,
-            max_display_messages: max_messages,
-            sessions_panel: Some(sessions_panel),
-            save_failure_message: None,
-            auto_scroll,
-            auto_scroll_at_bottom: true,
-            pending_image: None,
-            editing_message_index: None,
-            editing_message_content: String::new(),
-        }
-    }
-
-    fn get_tool_definitions(&self) -> Vec<crate::tools::ToolDefinition> {
+    pub(super) fn get_tool_definitions(&self) -> Vec<crate::tools::ToolDefinition> {
         self.tool_manager.get_tool_definitions()
     }
 
     fn setup_ui(&mut self, ctx: &egui::Context) {
         // Session sidebar — draw before other panels so it sits on the left
         let switched_id: Option<String> = {
-            if let Some(ref mut panel) = self.sessions_panel {
+            if let Some(ref mut panel) = self.sessions.sessions_panel {
                 panel.draw(ctx)
             } else {
                 None
@@ -171,7 +53,7 @@ impl ChatApp {
         };
         
         // Handle clear action
-        if let Some(ref mut panel) = self.sessions_panel {
+        if let Some(ref mut panel) = self.sessions.sessions_panel {
             panel.update_notification(ctx);
             if panel.clear_session_id.is_some() {
                 eprintln!("[Clear] window.rs: clear_session_id detected, clearing client and chat");
@@ -181,8 +63,8 @@ impl ChatApp {
                 cl.clear_session_messages();
                 drop(cl);
                 // Update the chat display to reflect the cleared session
-                self.chat_display.clear();
-                eprintln!("[Clear] window.rs: cleared chat_display, len={}", self.chat_display.len());
+                self.chat.messages.clear();
+                eprintln!("[Clear] window.rs: cleared chat_display, len={}", self.chat.messages.len());
             }
         }
         
@@ -247,7 +129,6 @@ impl ChatApp {
         } else {
             egui::Visuals::light()
         };
-
         ctx.set_visuals(visuals);
     }
 
@@ -262,70 +143,65 @@ impl ChatApp {
             match event {
                 AppEvent::MessageResult { content, usage } => {
                     self.add_message("assistant", &content);
-                    self.is_generating = false;
-                    self.status = AppStatus::Ready;
+                    self.stop_streaming();
                     self.progress += 1.0;
                     let server_n_ctx = self.get_effective_n_ctx();
                     if let Some(u) = &usage {
-                        self.token_count = u.total_tokens;
-                        self.context_used = if server_n_ctx > 0 {
+                        self.chat.token_count = u.total_tokens;
+                        self.chat.context_used = if server_n_ctx > 0 {
                             (u.total_tokens as f32 / server_n_ctx as f32) * 100.0
                         } else {
                             0.0
                         };
                     } else {
                         // Fallback: estimate tokens from message content when server doesn't report usage
-                        self.token_count = Self::estimate_token_count(&content);
-                        self.context_used = if server_n_ctx > 0 {
-                            (self.token_count as f32 / server_n_ctx as f32) * 100.0
+                        self.chat.token_count = Self::estimate_token_count(&content);
+                        self.chat.context_used = if server_n_ctx > 0 {
+                            (self.chat.token_count as f32 / server_n_ctx as f32) * 100.0
                         } else {
                             0.0
                         };
                     }
                 }
                 AppEvent::MessageError { error } => {
-                    self.status = AppStatus::Error(error.clone());
-                    self.pending_error = Some(format!("Message failed: {}", error));
-                    self.is_generating = false;
-                    self.current_response.clear();
+                    self.chat.status = AppStatus::Error(error.clone());
+                    self.chat.pending_error = Some(format!("Message failed: {}", error));
+                    self.stop_streaming();
                 }
                 AppEvent::StreamChunk { content } => {
-                    self.current_response.push_str(&content);
+                    self.chat.current_response.push_str(&content);
                 }
                 AppEvent::StreamComplete { content, usage } => {
                     self.add_message("assistant", &content);
-                    self.current_response.clear();
-                    self.is_generating = false;
-                    self.status = AppStatus::Ready;
+                    self.stop_streaming();
                     self.progress += 1.0;
                     let server_n_ctx = self.get_effective_n_ctx();
                     if let Some(u) = &usage {
-                        self.token_count = u.total_tokens;
-                        self.context_used = if server_n_ctx > 0 {
+                        self.chat.token_count = u.total_tokens;
+                        self.chat.context_used = if server_n_ctx > 0 {
                             (u.total_tokens as f32 / server_n_ctx as f32) * 100.0
                         } else {
                             0.0
                         };
                     } else {
                         // Fallback: estimate tokens from message content when server doesn't report usage
-                        self.token_count = Self::estimate_token_count(&content);
-                        self.context_used = if server_n_ctx > 0 {
-                            (self.token_count as f32 / server_n_ctx as f32) * 100.0
+                        self.chat.token_count = Self::estimate_token_count(&content);
+                        self.chat.context_used = if server_n_ctx > 0 {
+                            (self.chat.token_count as f32 / server_n_ctx as f32) * 100.0
                         } else {
                             0.0
                         };
                     }
                 }
                 AppEvent::StreamError { error } => {
-                    self.status = AppStatus::Error(error.clone());
-                    self.pending_error = Some(format!("Stream failed: {}", error));
-                    self.is_generating = false;
-                    self.current_response.clear();
+                    self.chat.status = AppStatus::Error(error.clone());
+                    self.chat.pending_error = Some(format!("Stream failed: {}", error));
+                    self.stop_streaming();
                 }
                 AppEvent::ToolCallWarning { tool_name, message } => {
                     tracing::warn!(tool = tool_name, message = %message, "Tool call warning");
                     // Show as a pending warning (similar to error but non-fatal)
-                    self.pending_error = Some(format!("[{}] {}", tool_name, message));
+                    self.chat.pending_error = Some(format!("[{}] {}", tool_name, message));
                 }
             }
         }
@@ -337,7 +213,7 @@ impl ChatApp {
 
     pub(super) fn add_message_with_image(&mut self, role: &str, content: &str, image: Option<String>) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.chat_display.push(ChatMessage {
+        self.chat.messages.push(ChatMessage {
             role: role.to_string(),
             content: content.to_string(),
             timestamp: timestamp.clone(),
@@ -354,18 +230,18 @@ impl ChatApp {
             }
         }
         // Truncate if too many messages
-        if self.chat_display.len() > self.max_display_messages {
-            self.chat_display.drain(..self.chat_display.len() - self.max_display_messages);
+        if self.chat.messages.len() > self.sessions.max_display_messages {
+            self.chat.messages.drain(..self.chat.messages.len() - self.sessions.max_display_messages);
         }
         // Save session after adding message; retry any prior failed saves first
         let client = self.client.lock().unwrap();
         client.retry_pending_saves();
         drop(client);
         if let Err(e) = self.client.lock().unwrap().save_session() {
-            self.save_failure_message = Some(format!("Save failed — will retry on next message"));
+            self.sessions.save_failure_message = Some(format!("Save failed — will retry on next message"));
             eprintln!("Failed to save session: {}", e);
         } else {
-            self.save_failure_message = None;
+            self.sessions.save_failure_message = None;
         }
     }
 
@@ -374,10 +250,10 @@ impl ChatApp {
         self.client.lock().unwrap().retry_pending_saves();
         // Save current session before switching
         if let Err(e) = self.client.lock().unwrap().save_session() {
-            self.save_failure_message = Some(format!("Save failed — will retry on next message"));
+            self.sessions.save_failure_message = Some(format!("Save failed — will retry on next message"));
             eprintln!("Failed to save session before switch: {}", e);
         } else {
-            self.save_failure_message = None;
+            self.sessions.save_failure_message = None;
         }
 
         let mut cl = self.client.lock().unwrap();
@@ -387,7 +263,7 @@ impl ChatApp {
         // Always update chat_display, even when load_session returns None (new session)
         let loaded = cl.load_session();
         if let Some(session) = loaded {
-            self.chat_display = session.messages.iter().map(|m| ChatMessage {
+            self.chat.messages = session.messages.iter().map(|m| ChatMessage {
                 role: m.role.clone(),
                 content: m.content.clone(),
                 timestamp: m.timestamp.clone(),
@@ -396,14 +272,21 @@ impl ChatApp {
             cl.set_system_prompt(&session.system_prompt);
         } else {
             // New or empty session — clear the chat display
-            self.chat_display.clear();
+            self.chat.messages.clear();
         }
         drop(cl);
     }
 
-    fn handle_error(&mut self, err: &str) {
-        self.status = AppStatus::Error(err.to_string());
-        self.pending_error = Some(err.to_string());
+    pub(super) fn start_streaming(&mut self) {
+        self.chat.is_generating = true;
+        self.chat.status = AppStatus::Generating;
+        self.chat.current_response.clear();
+    }
+
+    pub(super) fn stop_streaming(&mut self) {
+        self.chat.is_generating = false;
+        self.chat.current_response.clear();
+        self.chat.status = AppStatus::Ready;
     }
 
     pub fn show_settings_dialog(
@@ -426,29 +309,13 @@ impl ChatApp {
         }
     }
 
-    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        // Save config on app close
-        let mut cfg = self.config.lock().unwrap();
-        cfg.streaming = self.streaming;
-        cfg.auto_scroll = self.auto_scroll;
-        // Save chat history to config for persistence
-        cfg.chat_history = self.chat_display.iter().map(|m| ConfigChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            timestamp: m.timestamp.clone(),
-        }).collect();
-        if let Err(e) = cfg.save() {
-            eprintln!("Failed to save config: {}", e);
-        }
-    }
-
     /// Update the save-failure notification state each frame based on the client's flag.
     fn update_save_failure_notification(&mut self) {
         let client = self.client.lock().unwrap();
-        if client.has_save_failure() && self.save_failure_message.is_none() {
-            self.save_failure_message = Some("Save failed — will retry on next message".to_string());
+        if client.has_save_failure() && self.sessions.save_failure_message.is_none() {
+            self.sessions.save_failure_message = Some("Save failed — will retry on next message".to_string());
         } else if !client.has_save_failure() {
-            self.save_failure_message = None;
+            self.sessions.save_failure_message = None;
         }
         drop(client);
     }
@@ -457,7 +324,7 @@ impl ChatApp {
 impl eframe::App for ChatApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Request repaint during streaming for real-time updates
-        if self.is_generating {
+        if self.chat.is_generating {
             ctx.request_repaint();
         }
 
@@ -523,9 +390,9 @@ impl eframe::App for ChatApp {
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         // Save config (existing)
         let mut cfg = self.config.lock().unwrap();
-        cfg.streaming = self.streaming;
-        cfg.auto_scroll = self.auto_scroll;
-        cfg.chat_history = self.chat_display.iter().map(|m| ConfigChatMessage {
+        cfg.streaming = self.chat.streaming;
+        cfg.auto_scroll = self.chat.auto_scroll;
+        cfg.chat_history = self.chat.messages.iter().map(|m| ConfigChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),
             timestamp: m.timestamp.clone(),
