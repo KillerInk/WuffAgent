@@ -7,7 +7,7 @@ use crate::config::{Config, ConnectionType};
 use crate::server::ServerManager;
 use crate::tools::ToolManager;
 
-use super::window::{AppEvent, AppStatus, ChatMessage};
+use crate::types::{AppEvent, AppStatus, ChatMessage};
 
 // Re-export EngineEvent for use in other modules
 pub use crate::client::engine::EngineEvent;

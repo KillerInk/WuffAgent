@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 use super::{ChatClient, Error as ClientError};
 use crate::tools::manager::ToolManager;
 use crate::types::Usage;
-use crate::ui::window::AppEvent;
+use crate::types::AppEvent;
 
 /// Errors that can occur during chat engine operations
 #[derive(Debug, thiserror::Error)]

@@ -1,11 +1,13 @@
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-// use rfd; // file dialog not available without feature
 
 use crate::config::Config;
 use crate::sessions;
 use super::theme::Theme;
+use super::sessions_actions::PanelAction;
+use super::sessions_utils::{relative_time, truncate};
+use super::sessions_actions::apply_actions;
 
 pub struct SessionsPanel {
     sessions: Vec<crate::sessions::Session>,
@@ -26,73 +28,6 @@ pub struct SessionsPanel {
     export_path: String,
     /// Path for import (set when user clicks Import).
     import_path: String,
-}
-
-#[derive(Debug)]
-enum PanelAction {
-    Rename { id: String, new_name: String },
-    Create(String),
-    Delete(String),
-    Export { session_id: String },
-    Import,
-}
-
-/// Format a chrono DateTime<Utc> to a human-readable relative time string
-/// like "just now", "5 min ago", "2 hours ago", "3 days ago".
-fn relative_time(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(*dt);
-    let seconds = duration.num_seconds().abs();
-
-    if seconds < 10 {
-        "just now".to_string()
-    } else if seconds < 60 {
-        format!("{} min ago", seconds / 60)
-    } else if seconds < 3600 {
-        let minutes = seconds / 60;
-        if minutes < 2 {
-            "1 min ago".to_string()
-        } else {
-            format!("{} min ago", minutes)
-        }
-    } else if seconds < 86400 {
-        let hours = seconds / 3600;
-        if hours < 2 {
-            "1 hour ago".to_string()
-        } else {
-            format!("{} hours ago", hours)
-        }
-    } else if seconds < 172800 {
-        "yesterday".to_string()
-    } else {
-        let days = seconds / 86400;
-        if days < 30 {
-            format!("{} days ago", days)
-        } else if days < 365 {
-            let months = days / 30;
-            if months < 2 {
-                "1 month ago".to_string()
-            } else {
-                format!("{} months ago", months)
-            }
-        } else {
-            let years = days / 365;
-            if years < 2 {
-                "1 year ago".to_string()
-            } else {
-                format!("{} years ago", years)
-            }
-        }
-    }
-}
-
-/// Truncate a string to at most `max_chars` characters, adding "..." if truncated.
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        s.to_string()
-    } else {
-        format!("{}...", s.chars().take(max_chars).collect::<String>())
-    }
 }
 
 impl SessionsPanel {
@@ -123,6 +58,30 @@ impl SessionsPanel {
         self.sessions = sessions::list_sessions(&self.sessions_dir);
     }
 
+    pub(super) fn sessions_dir(&self) -> &PathBuf {
+        &self.sessions_dir
+    }
+
+    pub(super) fn selected_id(&self) -> &Option<String> {
+        &self.selected_id
+    }
+
+    pub(super) fn selected_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.selected_id
+    }
+
+    pub(super) fn config(&self) -> &Mutex<Config> {
+        &self.config
+    }
+
+    pub(super) fn export_path(&self) -> &str {
+        &self.export_path
+    }
+
+    pub(super) fn import_path(&self) -> &str {
+        &self.import_path
+    }
+
     /// Show a brief notification message.
     pub fn show_notification(&mut self, msg: &str, success: bool) {
         self.notification = Some((msg.to_string(), success));
@@ -142,61 +101,6 @@ impl SessionsPanel {
 
     /// Render the session button with metadata: name, message count,
     /// last message preview, and relative timestamp.
-    fn draw_session_button(
-        ui: &mut egui::Ui,
-        session: &crate::sessions::Session,
-        is_selected: bool,
-        is_renaming: bool,
-        theme: &Theme,
-    ) -> egui::Response {
-        let count = session.messages.len();
-        let count_text = if count == 1 {
-            "1 message".to_string()
-        } else {
-            format!("{} messages", count)
-        };
-
-        let last_preview: String = session
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == "user" || m.role == "assistant")
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
-        let preview_truncated = truncate(&last_preview, 50);
-
-        let timestamp_text = relative_time(&session.updated_at);
-
-        // Build the button label with multiple lines.
-        let label = format!(
-            "{}\n{}  •  {}\n{}",
-            session.name,
-            count_text,
-            preview_truncated,
-            timestamp_text
-        );
-
-        // When renaming, show a subtle rename indicator in the label
-        let display_label = if is_renaming {
-            format!("{}\n🔄 rename", label)
-        } else {
-            label
-        };
-
-        let response = ui.add_sized(
-            ui.available_size_before_wrap(),
-            egui::Button::new(display_label)
-                .fill(if is_selected || is_renaming {
-                    egui::Color32::from_rgba_premultiplied(59, 130, 246, 38) // #3B82F6 @ 15%
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
-                .rounding(4.0)
-                .sense(egui::Sense::click())
-        );
-        response
-    }
-    
     fn draw_session_item(
         ui: &mut egui::Ui,
         session: &crate::sessions::Session,
@@ -210,7 +114,7 @@ impl SessionsPanel {
         } else {
             format!("{} messages", count)
         };
-        
+
         let last_preview: String = session
             .messages
             .iter()
@@ -219,9 +123,9 @@ impl SessionsPanel {
             .map(|m| m.content.clone())
             .unwrap_or_default();
         let preview_truncated = truncate(&last_preview, 50);
-        
+
         let timestamp_text = relative_time(&session.updated_at);
-        
+
         let label = format!(
             "{}\n{}  •  {}\n{}",
             session.name,
@@ -229,13 +133,13 @@ impl SessionsPanel {
             preview_truncated,
             timestamp_text
         );
-        
+
         let display_label = if is_renaming {
             format!("{}\n🔄 rename", label)
         } else {
             label
         };
-        
+
         let response = ui.add(egui::Button::new(display_label)
             .fill(if is_selected || is_renaming {
                 egui::Color32::from_rgba_premultiplied(59, 130, 246, 38) // #3B82F6 @ 15%
@@ -244,7 +148,7 @@ impl SessionsPanel {
             })
             .rounding(4.0)
             .sense(egui::Sense::click()));
-        
+
         response
     }
 
@@ -305,7 +209,7 @@ impl SessionsPanel {
                     self.creating = true;
                     self.new_name = String::new();
                 }
-                
+
                 // Delete button
                 let delete_btn = egui::Button::new("Delete")
                     .fill(theme.surface_light)
@@ -377,7 +281,7 @@ impl SessionsPanel {
 
                 // Session list
                 ui.add_space(4.0);
-                
+
                 // Collect actions to avoid borrowing self inside the loop
                 for session in &self.sessions {
                     let is_renaming = Some(&session.id) == self.renaming.as_ref();
@@ -402,7 +306,7 @@ impl SessionsPanel {
 
                     let is_selected = Some(&session.id) == self.selected_id.as_ref();
                     let response = Self::draw_session_item(ui, session, is_selected, is_renaming, &theme);
-                    
+
                     if response.clicked() {
                         selected_id = Some(session.id.clone());
                         self.selected_id = Some(session.id.clone());
@@ -482,67 +386,7 @@ impl SessionsPanel {
 
         // Apply actions after the UI closure to avoid borrow conflicts
         if let Some(act) = action {
-            match act {
-                PanelAction::Rename { id, new_name } => {
-                    if let Some(mut s) = sessions::load_session(&self.sessions_dir, &id) {
-                        s.name = new_name;
-                        let _ = sessions::save_session(&self.sessions_dir, &s);
-                    }
-                    self.refresh();
-                }
-                PanelAction::Create(name) => {
-                    let session = sessions::create_session(&self.sessions_dir, &name);
-                    self.selected_id = Some(session.id.clone());
-                    selected_id = Some(session.id.clone());
-                    // Update config so the new session is loaded on next app start
-                    {
-                        let mut cfg = self.config.lock().unwrap();
-                        cfg.session_id = Some(session.id.clone());
-                        if let Err(e) = cfg.save() {
-                            eprintln!("Failed to save config after creating session: {}", e);
-                        }
-                    }
-                    self.refresh();
-                }
-                PanelAction::Delete(id) => {
-                    sessions::delete_session(&self.sessions_dir, &id);
-                    if self.selected_id.as_deref() == Some(&id) {
-                        self.selected_id = None;
-                    }
-                    self.refresh();
-                }
-                PanelAction::Export { session_id } => {
-                    let output_path = if self.export_path.is_empty() {
-                        PathBuf::from(format!("{}.json", session_id))
-                    } else {
-                        PathBuf::from(&self.export_path)
-                    };
-                    match sessions::export_session(&self.sessions_dir, &session_id, &output_path) {
-                        Ok(()) => {
-                            self.show_notification(&format!("Exported to {}", output_path.display()), true);
-                        }
-                        Err(e) => {
-                            self.show_notification(&format!("Export failed: {}", e), false);
-                        }
-                    }
-                }
-                PanelAction::Import => {
-                    let input_path = if self.import_path.is_empty() {
-                        PathBuf::from("session.json")
-                    } else {
-                        PathBuf::from(&self.import_path)
-                    };
-                    match sessions::import_session(&self.sessions_dir, &input_path) {
-                        Ok(new_id) => {
-                            self.show_notification(&format!("Imported session: {}", new_id), true);
-                            self.refresh();
-                        }
-                        Err(e) => {
-                            self.show_notification(&format!("Import failed: {}", e), false);
-                        }
-                    }
-                }
-            }
+            return apply_actions(self, act);
         }
 
         selected_id

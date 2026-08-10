@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use super::state::ChatApp;
-use super::window::AppStatus;
+use crate::types::AppStatus;
 use super::theme::Theme;
 
 impl ChatApp {

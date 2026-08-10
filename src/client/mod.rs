@@ -1,34 +1,26 @@
-use futures::StreamExt;
 use std::sync::mpsc;
 use tracing;
 
 pub mod engine;
-use serde::{Deserialize, Serialize};
+pub mod http;
+pub mod sse;
+pub mod session;
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::types::{Message, Usage};
 
-#[derive(Serialize, Debug)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
-    pub stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<crate::tools::ToolDefinition>>,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Response {
-    pub choices: Vec<Choice>,
-    pub usage: Option<Usage>,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Choice {
-    pub message: Message,
-}
+// Re-export key types so the public API surface is unchanged
+pub use http::{build_request, send_message, build_stream_request, ChatRequest, Response, Choice};
+pub use sse::{process_sse_line, stream_message, stream_message_arc, add_streaming_messages};
+pub use session::{
+    save_session, load_session,
+    enqueue_save_failure, retry_pending_saves, has_save_failure,
+    clear_save_failure, clear_save_queue,
+    trim_conversation, clear_history, clear_session_messages,
+};
 
 #[derive(Clone)]
 pub struct ChatClient {
@@ -47,7 +39,7 @@ pub struct ChatClient {
     /// Encryption key for session files (32 bytes for ChaCha20Poly1305).
     encryption_key: Option<[u8; 32]>,
     /// Channel to send tool execution events to the UI.
-    tool_event_tx: Arc<Mutex<Option<mpsc::Sender<crate::ui::window::AppEvent>>>>,
+    tool_event_tx: Arc<Mutex<Option<mpsc::Sender<crate::types::AppEvent>>>>,
 }
 
 impl ChatClient {
@@ -68,7 +60,7 @@ impl ChatClient {
         }
     }
 
-    pub fn set_tool_event_sender(&self, tx: mpsc::Sender<crate::ui::window::AppEvent>) {
+    pub fn set_tool_event_sender(&self, tx: mpsc::Sender<crate::types::AppEvent>) {
         *self.tool_event_tx.lock().unwrap() = Some(tx);
     }
 
@@ -105,30 +97,25 @@ impl ChatClient {
     }
 
     pub fn clear_history(&self) {
-        self.conversation.lock().unwrap().clear();
+        session::clear_history(&self.conversation);
     }
 
     pub fn clear_session_messages(&mut self) {
-        self.conversation.lock().unwrap().clear();
-        if let Err(e) = self.save_session() {
-            eprintln!("Failed to save session after clear: {}", e);
-        }
+        session::clear_session_messages(
+            &self.conversation,
+            &|| save_session(
+                self.session_id.as_deref(),
+                &self.session_dir,
+                &self.conversation,
+                self.encryption_key.as_ref(),
+                &self.save_queue,
+                &self.save_failed,
+            ),
+        );
     }
 
     pub fn trim_conversation(&self, max_messages: usize) {
-        let mut conv = self.conversation.lock().unwrap();
-        if conv.len() <= max_messages {
-            return;
-        }
-        let system_idx = conv.iter().position(|m| m.role == "system");
-        let keep_from = if let Some(idx) = system_idx {
-            idx + 1
-        } else {
-            0
-        };
-        let trim_at = conv.len().saturating_sub(max_messages);
-        let start = keep_from.min(trim_at);
-        conv.drain(..start);
+        session::trim_conversation(&self.conversation, max_messages);
     }
 
     pub fn set_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {
@@ -149,154 +136,63 @@ impl ChatClient {
     }
 
     pub fn load_session(&mut self) -> Option<crate::sessions::Session> {
-        let dir = self.session_dir.clone();
-        let id = self.session_id.as_ref()?;
-        let session = if let Some(key) = &self.encryption_key {
-            crate::sessions::decrypt_and_load_session(&dir, id, key)
-        } else {
-            crate::sessions::load_session(&dir, id)
-        };
-        let session = session?;
-        let mut conv = self.conversation.lock().unwrap();
-        *conv = session.messages.clone();
-        if !session.system_prompt.is_empty() {
-            self.system_prompt = session.system_prompt.clone();
-        }
-        Some(session)
+        session::load_session(
+            self.session_id.as_deref(),
+            &self.session_dir,
+            &self.conversation,
+            &mut self.system_prompt,
+            self.encryption_key.as_ref(),
+        )
     }
 
     pub fn save_session(&self) -> Result<(), anyhow::Error> {
-        let id = self.session_id.as_ref().ok_or_else(|| anyhow::anyhow!("no session id"))?;
-        let conv = self.conversation.lock().unwrap();
-        // Try loading the session; if it's encrypted, fall back to creating a new one
-        // (the key will be used to re-encrypt on the next save).
-        let mut session = if let Some(key) = &self.encryption_key {
-            crate::sessions::decrypt_and_load_session(&self.session_dir, id, key)
-                .or_else(|| crate::sessions::load_session(&self.session_dir, id))
-                .ok_or_else(|| anyhow::anyhow!("session not found"))?
-        } else {
-            crate::sessions::load_session(&self.session_dir, id)
-                .ok_or_else(|| anyhow::anyhow!("session not found"))?
-        };
-        session.messages = conv.clone();
-        // Retry with exponential backoff for transient failures
-        let mut retries = 0;
-        loop {
-            let save_result = if let Some(key) = &self.encryption_key {
-                crate::sessions::save_session_encrypted(&self.session_dir, &session, key)
-            } else {
-                crate::sessions::save_session_atomic(&self.session_dir, &session)
-            };
-            match save_result {
-                Ok(()) => {
-                    // Success: clear any pending queue and failure flag
-                    self.clear_save_queue();
-                    return Ok(());
-                }
-                Err(e) if retries < 3 => {
-                    retries += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(50u64.pow(retries as u32)));
-                    eprintln!("Session save attempt {} failed: {}, retrying...", retries, e);
-                }
-                Err(e) => {
-                    // All retries exhausted — enqueue for later retry and signal UI
-                    self.enqueue_save_failure(&e);
-                    return Err(e);
-                }
-            }
-        }
+        save_session(
+            self.session_id.as_deref(),
+            &self.session_dir,
+            &self.conversation,
+            self.encryption_key.as_ref(),
+            &self.save_queue,
+            &self.save_failed,
+        )
     }
 
     /// Enqueue a pending save and set the failure flag for UI notification.
     pub fn enqueue_save_failure(&self, error: &anyhow::Error) {
-        let mut queue = self.save_queue.lock().unwrap();
-        queue.push_back(());
-        drop(queue);
-        let mut flagged = self.save_failed.lock().unwrap();
-        *flagged = true;
-        eprintln!("Session save failed, enqueued for retry: {}", error);
+        session::enqueue_save_failure(&self.save_queue, &self.save_failed, error);
     }
 
     /// Try to retry any pending saves and clear the queue on success.
     pub fn retry_pending_saves(&self) {
-        let mut queue = self.save_queue.lock().unwrap();
-        let count = queue.len();
-        if count == 0 {
-            return;
-        }
-        // Drain the queue and attempt saves
-        queue.clear();
-        drop(queue);
-
-        // Attempt a single save; if it succeeds, clear the failure flag
-        if let Err(e) = self.save_session() {
-            // Still failing — re-enqueue and keep the flag
-            self.enqueue_save_failure(&e);
-        } else {
-            let mut flagged = self.save_failed.lock().unwrap();
-            *flagged = false;
-        }
+        let _ = session::retry_pending_saves(
+            &self.save_queue,
+            &self.save_failed,
+            &|| save_session(
+                self.session_id.as_deref(),
+                &self.session_dir,
+                &self.conversation,
+                self.encryption_key.as_ref(),
+                &self.save_queue,
+                &self.save_failed,
+            ),
+        );
     }
 
     /// Returns true if there is a pending save failure notification to show.
     pub fn has_save_failure(&self) -> bool {
-        *self.save_failed.lock().unwrap()
+        session::has_save_failure(&self.save_failed)
     }
 
     /// Clear the save failure flag (call after a successful save or user dismissal).
     pub fn clear_save_failure(&self) {
-        let mut flagged = self.save_failed.lock().unwrap();
-        *flagged = false;
+        session::clear_save_failure(&self.save_failed);
     }
 
     /// Clear the internal retry queue without attempting a save.
     fn clear_save_queue(&self) {
-        let mut queue = self.save_queue.lock().unwrap();
-        queue.clear();
-        drop(queue);
-        let mut flagged = self.save_failed.lock().unwrap();
-        *flagged = false;
+        session::clear_save_queue(&self.save_queue, &self.save_failed);
     }
 
-    fn build_request(&self, prompt: &str, stream: bool, tools: Option<&[crate::tools::ToolDefinition]>) -> ChatRequest {
-        let mut messages = Vec::new();
-
-        if !self.system_prompt.is_empty() {
-            messages.push(Message {
-                role: "system".to_string(),
-                content: self.system_prompt.clone(),
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        }
-
-        // Include conversation history, excluding any in-progress empty assistant message
-        let conv = self.conversation.lock().unwrap();
-        for msg in &*conv {
-            // Skip empty assistant messages that are being accumulated during streaming
-            if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
-                continue;
-            }
-            messages.push(msg.clone());
-        }
-        drop(conv);
-
-        messages.push(Message {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-            timestamp: String::new(),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-
-        ChatRequest {
-            model: "local".to_string(),
-            messages,
-            stream,
-            tools: tools.map(|t| t.to_vec()),
-        }
-    }
+    // ── HTTP methods ──────────────────────────────────────────────────────────
 
     pub async fn send_message(
         &self,
@@ -310,55 +206,20 @@ impl ChatClient {
         prompt: &str,
         tools: Option<&[crate::tools::ToolDefinition]>,
     ) -> Result<(String, Option<Usage>), Error> {
-        let request = self.build_request(prompt, false, tools);
-        let body = serde_json::to_string(&request)?;
-        tracing::debug!(
-            "send_message (non-stream) request body:\n{}",
-            body
+        let request = build_request(
+            &self.system_prompt,
+            &self.conversation,
+            prompt,
+            false,
+            tools,
         );
-
-        let mut builder = self
-            .http_client
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .header("Content-Type", "application/json")
-            .body(body);
-        if let Some(ref key) = self.api_key {
-            builder = builder.header(
-                "Authorization",
-                format!("Bearer {}", key),
-            );
-        }
-
-        let resp = builder.send().await?;
-
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-
-        if !status.is_success() {
-            return Err(Error::Http(format!(
-                "Server returned {}: {}",
-                status, text
-            )));
-        }
-
-        tracing::debug!("send_message (non-stream) response body:\n{}", text);
-
-        let response: Response = serde_json::from_str(&text)?;
-
-        if response.choices.is_empty() {
-            return Err(Error::Stream("Empty response".to_string()));
-        }
-
-        let content = response.choices[0].message.content.clone();
-        let usage = response.usage.clone();
-        tracing::debug!(
-            "send_message (non-stream) assistant content (len={}): {:?}",
-            content.len(),
-            content.chars().take(200).collect::<String>()
-        );
+        let (content, usage) = send_message(
+            &self.http_client,
+            &self.base_url,
+            self.api_key.as_deref(),
+            &request,
+        )
+        .await?;
 
         // Update conversation history
         let mut conv = self.conversation.lock().unwrap();
@@ -383,210 +244,34 @@ impl ChatClient {
         Ok((content, usage))
     }
 
-    async fn process_sse_line(
-        line: &str,
-        callback: &mut impl FnMut(String) -> Result<(), Error>,
-        conversation: &Arc<Mutex<Vec<Message>>>,
-    ) -> Result<Option<Usage>, Error> {
-        if line.is_empty() || line == "data: [DONE]" {
-            return Ok(None);
-        }
-
-        if !line.starts_with("data: ") {
-            return Ok(None);
-        }
-
-        let data = &line["data: ".len()..];
-        // Log the raw SSE data for debugging tool call issues
-        if data.contains("tool_calls") || data.contains("function") {
-            tracing::debug!("process_sse_line raw SSE data: {}", &data[..data.len().min(500)]);
-        }
-        let chunk: serde_json::Value = serde_json::from_str(data)?;
-
-        if let Some(text) = chunk
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("delta"))
-            .and_then(|d| d.get("content"))
-            .and_then(|c| c.as_str())
-        {
-            if !text.is_empty() {
-                callback(text.to_string())?;
-
-                // Update conversation history
-                let mut conv = conversation.lock().unwrap();
-                if let Some(last) = conv.last_mut() {
-                    last.content.push_str(text);
-                }
-            }
-        }
-
-        // Handle tool_calls in streaming delta chunks
-        if let Some(tool_calls) = chunk
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("delta"))
-            .and_then(|d| d.get("tool_calls"))
-        {
-            if let Some(tc_array) = tool_calls.as_array() {
-                for tc_chunk in tc_array {
-                    // Extract id (may be null/missing in delta chunks after the first)
-                    let id = tc_chunk
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    // Extract index (used when id is not present)
-                    let index = tc_chunk.get("index").and_then(|v| v.as_u64());
-                    let func = tc_chunk.get("function");
-
-                    if let Some(func) = func {
-                        let name = func
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let args = func
-                            .get("arguments")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-
-                        tracing::debug!(
-                            "process_sse_line: tool_call id=? name={} args_len={} args_preview={:?}",
-                            name, args.len(),
-                            &args[..args.len().min(80)]
-                        );
-
-                        // Accumulate partial args from streaming
-                        let mut conv = conversation.lock().unwrap();
-                        if let Some(last) = conv.last_mut() {
-                            tracing::debug!(
-                                "process_sse_line: last message role={}, has_tool_calls={}, tool_calls_count={}",
-                                last.role,
-                                last.tool_calls.is_some(),
-                                last.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                            );
-                            if last.tool_calls.is_none() {
-                                last.tool_calls = Some(Vec::new());
-                            }
-                            let tcs = last.tool_calls.as_mut().unwrap();
-
-                            tracing::debug!(
-                                "process_sse_line: looking for tool_call id={:?} index={} tcs_len={}",
-                                id,
-                                index.unwrap_or(0),
-                                tcs.len()
-                            );
-
-                            // Try to find existing tool call by id first
-                            let found = if let Some(ref id) = id {
-                                tcs.iter_mut().find(|t| t.id == *id)
-                            } else {
-                                None
-                            };
-
-                            if let Some(tc) = found {
-                                // Accumulate args into existing tool call
-                                tc.function.arguments.push_str(&args);
-                                tracing::debug!(
-                                    "process_sse_line: accumulated args for tool_call id={} total_len={} args={:?}",
-                                    id.as_ref().unwrap(), tc.function.arguments.len(),
-                                    &tc.function.arguments[..tc.function.arguments.len().min(80)]
-                                );
-                            } else if let Some(idx) = index {
-                                // Find by index when id is not present
-                                if let Some(tc) = tcs.get_mut(idx as usize) {
-                                    tc.function.arguments.push_str(&args);
-                                    tracing::debug!(
-                                        "process_sse_line: accumulated args for tool_call index={} total_len={} args={:?}",
-                                        idx, tc.function.arguments.len(),
-                                        &tc.function.arguments[..tc.function.arguments.len().min(80)]
-                                    );
-                                } else if let Some(ref id) = id {
-                                    // Index doesn't exist yet but we have an id - create new tool call
-                                    tcs.push(crate::types::ToolCall {
-                                        id: id.to_string(),
-                                        call_type: "function".to_string(),
-                                        function: crate::types::ToolFunction {
-                                            name,
-                                            arguments: args.clone(),
-                                        },
-                                    });
-                                    tracing::debug!(
-                                        "process_sse_line: created new tool_call id={} at index={} args={:?}",
-                                        id, idx, args
-                                    );
-                                } else {
-                                    tracing::warn!(
-                                        "process_sse_line: failed to find tool_call at index={} (tcs_len={})",
-                                        idx, tcs.len()
-                                    );
-                                }
-                            } else if let Some(ref id) = id {
-                                // Create new tool call
-                                tcs.push(crate::types::ToolCall {
-                                    id: id.to_string(),
-                                    call_type: "function".to_string(),
-                                    function: crate::types::ToolFunction {
-                                        name,
-                                        arguments: args.clone(),
-                                    },
-                                });
-                                tracing::debug!(
-                                    "process_sse_line: created new tool_call id={} args={:?}",
-                                    id, args
-                                );
-                            } else {
-                                tracing::warn!(
-                                    "process_sse_line: skipping chunk with no id and no index"
-                                );
-                            }
-                            // If no id and no index, skip this chunk
-                        } else {
-                            tracing::warn!("process_sse_line: no last message in conversation");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Extract usage from the final chunk (when choices has no delta but has usage)
-        if let Some(usage) = chunk.get("usage").and_then(|u| serde_json::from_value(u.clone()).ok()) {
-            return Ok(Some(usage));
-        }
-
-        Ok(None)
-    }
-
     pub async fn stream_message_with_usage(
         &self,
         prompt: &str,
         callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
     ) -> Result<Option<Usage>, Error> {
-        self.stream_message_with_tools_and_usage(prompt, None, callback).await
+        self.stream_message_with_tools_and_usage(prompt, None, callback)
+            .await
     }
 
     pub async fn stream_message_with_tools_and_usage(
         &self,
         prompt: &str,
         tools: Option<&[crate::tools::ToolDefinition]>,
-        mut callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
+        callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
     ) -> Result<Option<Usage>, Error> {
-        let request = self.build_request(prompt, true, tools);
-        let body = serde_json::to_string(&request)?;
-
-        let mut builder = self
-            .http_client
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .body(body);
-        if let Some(ref key) = self.api_key {
-            builder = builder.header(
-                "Authorization",
-                format!("Bearer {}", key),
-            );
-        }
+        let request = build_request(
+            &self.system_prompt,
+            &self.conversation,
+            prompt,
+            true,
+            tools,
+        );
+        let builder = build_stream_request(
+            &self.http_client,
+            &self.base_url,
+            self.api_key.as_deref(),
+            &request,
+        );
 
         let resp = builder.send().await?;
 
@@ -600,44 +285,11 @@ impl ChatClient {
         }
 
         // Add user message to history
-        {
-            let mut conv = self.conversation.lock().unwrap();
-            conv.push(Message {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-            conv.push(Message {
-                role: "assistant".to_string(),
-                content: String::new(),
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        }
+        add_streaming_messages(&self.conversation, prompt);
 
-        let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
-        let mut last_usage: Option<Usage> = None;
-
-        while let Some(chunk) = stream.next().await {
-            let bytes = chunk?;
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-            // Process complete lines
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                if let Some(usage) = Self::process_sse_line(&line, &mut callback, &self.conversation).await? {
-                    last_usage = Some(usage);
-                }
-            }
-        }
-
-        Ok(last_usage)
+        // Box the callback to erase the concrete type, matching the original API
+        let mut boxed_cb = Box::new(callback);
+        sse::stream_message(resp, &self.conversation, &mut boxed_cb).await
     }
 
     /// Arc-based streaming method that clones necessary data before calling
@@ -710,50 +362,14 @@ impl ChatClient {
         tracing::debug!("stream_message (arc) streaming started");
 
         // Add user message to history
-        {
-            let mut conv = conversation.lock().unwrap();
-            conv.push(Message {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-            conv.push(Message {
-                role: "assistant".to_string(),
-                content: String::new(),
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        }
+        add_streaming_messages(&conversation, prompt);
 
-        let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
-        let mut last_usage: Option<Usage> = None;
-        let mut cb = callback;
-
-        while let Some(chunk) = stream.next().await {
-            let bytes = chunk?;
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                if line.starts_with("data: ") && !line.contains("[DONE]") {
-                    tracing::trace!("stream_message (arc) SSE line: {}", &line["data: ".len()..].chars().take(200).collect::<String>());
-                }
-
-                if let Some(usage) = Self::process_sse_line(&line, &mut cb, &conversation).await? {
-                    last_usage = Some(usage);
-                }
-            }
-        }
-
-        tracing::debug!("stream_message (arc) streaming completed, usage={:?}", last_usage);
-        Ok(last_usage)
+        // Box the callback to erase the concrete type
+        let mut boxed_cb = Box::new(callback);
+        sse::stream_message_arc(resp, &conversation, &mut boxed_cb).await
     }
+
+    // ── Tool call helpers ─────────────────────────────────────────────────────
 
     /// Check for malformed tool calls in the conversation and return warnings.
     /// A tool call is considered malformed if its arguments are not valid JSON.
@@ -811,7 +427,11 @@ impl ChatClient {
         &self,
         tool_manager: &crate::tools::ToolManager,
     ) -> Result<bool, Error> {
-        Self::execute_pending_tool_calls_arc(&std::sync::Arc::new(std::sync::Mutex::new(self.clone())), tool_manager).await
+        Self::execute_pending_tool_calls_arc(
+            &std::sync::Arc::new(std::sync::Mutex::new(self.clone())),
+            tool_manager,
+        )
+        .await
     }
 
     /// Internal version that takes an Arc<Mutex<ChatClient>> so the caller
@@ -848,7 +468,7 @@ impl ChatClient {
 
             // Send start event
             if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
-                let _ = tx.send(crate::ui::window::AppEvent::ToolCallStart {
+                let _ = tx.send(crate::types::AppEvent::ToolCallStart {
                     tool_name: tc.function.name.clone(),
                     call_id: tc.id.clone(),
                 });
@@ -881,7 +501,7 @@ impl ChatClient {
                     &tc.function.arguments[..tc.function.arguments.len().min(100)]
                 );
                 if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
-                    let _ = tx.send(crate::ui::window::AppEvent::ToolCallError {
+                    let _ = tx.send(crate::types::AppEvent::ToolCallError {
                         tool_name: tc.function.name.clone(),
                         call_id: tc.id.clone(),
                         error: "Failed to parse arguments".to_string(),
@@ -907,7 +527,7 @@ impl ChatClient {
                             crate::tools::lib::ToolOutput::Success(v) => v.to_string(),
                             crate::tools::lib::ToolOutput::Error(e) => e.clone(),
                         };
-                        let _ = tx.send(crate::ui::window::AppEvent::ToolCallComplete {
+                        let _ = tx.send(crate::types::AppEvent::ToolCallComplete {
                             tool_name: tc.function.name.clone(),
                             call_id: tc.id.clone(),
                             result: result_str,
@@ -916,7 +536,7 @@ impl ChatClient {
                 }
                 Err(e) => {
                     if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
-                        let _ = tx.send(crate::ui::window::AppEvent::ToolCallError {
+                        let _ = tx.send(crate::types::AppEvent::ToolCallError {
                             tool_name: tc.function.name.clone(),
                             call_id: tc.id.clone(),
                             error: e.to_string(),
@@ -982,7 +602,13 @@ mod tests {
     #[test]
     fn test_build_request_no_system_prompt() {
         let client = ChatClient::new("http://localhost:8080");
-        let request = client.build_request("Hello", false, None);
+        let request = build_request(
+            &client.system_prompt,
+            &client.conversation,
+            "Hello",
+            false,
+            None,
+        );
         assert_eq!(request.model, "local");
         assert!(!request.stream);
         assert_eq!(request.messages.len(), 1);
@@ -994,7 +620,13 @@ mod tests {
     fn test_build_request_with_system_prompt() {
         let mut client = ChatClient::new("http://localhost:8080");
         client.set_system_prompt("You are helpful.");
-        let request = client.build_request("Hello", false, None);
+        let request = build_request(
+            &client.system_prompt,
+            &client.conversation,
+            "Hello",
+            false,
+            None,
+        );
         assert_eq!(request.model, "local");
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].role, "system");
@@ -1006,7 +638,13 @@ mod tests {
     #[test]
     fn test_build_request_streaming() {
         let client = ChatClient::new("http://localhost:8080");
-        let request = client.build_request("Hello", true, None);
+        let request = build_request(
+            &client.system_prompt,
+            &client.conversation,
+            "Hello",
+            true,
+            None,
+        );
         assert!(request.stream);
         assert_eq!(request.messages.len(), 1);
     }
@@ -1028,7 +666,13 @@ mod tests {
                 },
             }
         ];
-        let request = client.build_request("Hello", false, Some(&tools));
+        let request = build_request(
+            &client.system_prompt,
+            &client.conversation,
+            "Hello",
+            false,
+            Some(&tools),
+        );
         assert!(request.tools.is_some());
         assert_eq!(request.tools.as_ref().unwrap().len(), 1);
     }
@@ -1037,11 +681,17 @@ mod tests {
     fn test_build_request_includes_history() {
         let client = ChatClient::new("http://localhost:8080");
         {
-            let mut conv = client.conversation().lock().unwrap();
-            conv.push(Message { role: "user".into(), content: "Hi there".into(), timestamp: String::new(), tool_calls: None });
-            conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), timestamp: String::new(), tool_calls: None });
+            let mut conv = client.conversation.lock().unwrap();
+            conv.push(Message { role: "user".into(), content: "Hi there".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None });
+                        conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None });
         }
-        let request = client.build_request("What's the weather?", false, None);
+        let request = build_request(
+            &client.system_prompt,
+            &client.conversation,
+            "What's the weather?",
+            false,
+            None,
+        );
         assert_eq!(request.messages.len(), 3);
         assert_eq!(request.messages[0].role, "user");
         assert_eq!(request.messages[0].content, "Hi there");
@@ -1055,11 +705,17 @@ mod tests {
     fn test_build_request_skips_empty_assistant_message() {
         let client = ChatClient::new("http://localhost:8080");
         {
-            let mut conv = client.conversation().lock().unwrap();
-            conv.push(Message { role: "user".into(), content: "Hi".into(), timestamp: String::new(), tool_calls: None });
-            conv.push(Message { role: "assistant".into(), content: String::new(), timestamp: String::new(), tool_calls: None });
+            let mut conv = client.conversation.lock().unwrap();
+            conv.push(Message { role: "user".into(), content: "Hi".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None });
+                        conv.push(Message { role: "assistant".into(), content: String::new(), timestamp: String::new(), tool_calls: None, tool_call_id: None });
         }
-        let request = client.build_request("Follow up", false, None);
+        let request = build_request(
+            &client.system_prompt,
+            &client.conversation,
+            "Follow up",
+            false,
+            None,
+        );
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].role, "user");
         assert_eq!(request.messages[0].content, "Hi");
@@ -1089,7 +745,7 @@ mod tests {
             captured.push(s);
             Ok(())
         };
-        let result = ChatClient::process_sse_line("", &mut cb, &client.conversation()).await;
+        let result = process_sse_line("", &mut cb, &client.conversation()).await;
         assert!(result.is_ok());
     }
 
@@ -1101,7 +757,7 @@ mod tests {
             captured.push(s);
             Ok(())
         };
-        let result = ChatClient::process_sse_line("data: [DONE]", &mut cb, &client.conversation()).await;
+        let result = process_sse_line("data: [DONE]", &mut cb, &client.conversation()).await;
         assert!(result.is_ok());
         assert!(captured.is_empty());
     }
@@ -1114,7 +770,7 @@ mod tests {
             captured.push(s);
             Ok(())
         };
-        let result = ChatClient::process_sse_line("id: 1", &mut cb, &client.conversation()).await;
+        let result = process_sse_line("id: 1", &mut cb, &client.conversation()).await;
         assert!(result.is_ok());
         assert!(captured.is_empty());
     }
@@ -1129,6 +785,7 @@ mod tests {
             content: String::new(),
             timestamp: String::new(),
             tool_calls: None,
+            tool_call_id: None,
         });
         drop(conv);
 
@@ -1138,7 +795,7 @@ mod tests {
             captured.push(s);
             Ok(())
         };
-        let result = ChatClient::process_sse_line(sse_data, &mut cb, &client.conversation()).await;
+        let result = process_sse_line(sse_data, &mut cb, &client.conversation()).await;
         assert!(result.is_ok());
         assert_eq!(captured, vec!["Hello"]);
         let c = client.conversation().lock().unwrap();
@@ -1156,6 +813,7 @@ mod tests {
             content: String::new(),
             timestamp: String::new(),
             tool_calls: None,
+            tool_call_id: None,
         });
         drop(conv);
 
@@ -1165,7 +823,7 @@ mod tests {
             captured.push(s);
             Ok(())
         };
-        ChatClient::process_sse_line(sse1, &mut cb, &client.conversation()).await.unwrap();
+        process_sse_line(sse1, &mut cb, &client.conversation()).await.unwrap();
 
         let sse2 = r#"data: {"choices":[{"delta":{"content":" world"}}]}"#;
         let mut captured2 = Vec::new();
@@ -1173,7 +831,7 @@ mod tests {
             captured2.push(s);
             Ok(())
         };
-        ChatClient::process_sse_line(sse2, &mut cb2, &client.conversation()).await.unwrap();
+        process_sse_line(sse2, &mut cb2, &client.conversation()).await.unwrap();
 
         assert_eq!(captured, vec!["Hello"]);
         assert_eq!(captured2, vec![" world"]);
@@ -1190,6 +848,7 @@ mod tests {
             content: String::new(),
             timestamp: String::new(),
             tool_calls: None,
+            tool_call_id: None,
         });
         drop(conv);
 
@@ -1199,7 +858,7 @@ mod tests {
             captured.push(s);
             Ok(())
         };
-        let result = ChatClient::process_sse_line(sse_data, &mut cb, &client.conversation()).await;
+        let result = process_sse_line(sse_data, &mut cb, &client.conversation()).await;
         assert!(result.is_ok());
         assert!(captured.is_empty());
     }
@@ -1220,6 +879,7 @@ mod tests {
                     arguments: "".to_string(),
                 },
             }]),
+            tool_call_id: None,
         });
         drop(conv);
 
@@ -1245,6 +905,7 @@ mod tests {
                     arguments: "not json".to_string(),
                 },
             }]),
+            tool_call_id: None,
         });
         drop(conv);
 
@@ -1270,6 +931,7 @@ mod tests {
                     arguments: "{\"key\": \"value\"}".to_string(),
                 },
             }]),
+            tool_call_id: None,
         });
         drop(conv);
 

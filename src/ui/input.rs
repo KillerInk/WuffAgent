@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use super::state::ChatApp;
-use super::window::{AppEvent, AppStatus};
+use crate::types::{AppEvent, AppStatus};
 use super::theme::Theme;
 use crate::client::engine::EngineEvent;
 
