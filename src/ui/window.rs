@@ -7,6 +7,7 @@ use crate::client::ChatClient;
 use crate::config::{ChatMessage as ConfigChatMessage, Config};
 use crate::server::ServerManager;
 use crate::ui::settings::SettingsDialog;
+use crate::ui::theme::Theme;
 pub use crate::ui::state::ChatApp;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -52,20 +53,8 @@ impl ChatApp {
             }
         };
         
-        // Handle clear action
         if let Some(ref mut panel) = self.sessions.sessions_panel {
             panel.update_notification(ctx);
-            if panel.clear_session_id.is_some() {
-                eprintln!("[Clear] window.rs: clear_session_id detected, clearing client and chat");
-                panel.clear_session_id = None;
-                // Clear the client's in-memory conversation
-                let mut cl = self.client.lock().unwrap();
-                cl.clear_session_messages();
-                drop(cl);
-                // Update the chat display to reflect the cleared session
-                self.chat.messages.clear();
-                eprintln!("[Clear] window.rs: cleared chat_display, len={}", self.chat.messages.len());
-            }
         }
         
         // Switch session if needed (handles New button and history selection)
@@ -73,14 +62,34 @@ impl ChatApp {
             self.switch_session(&id);
         }
 
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("menu_bar").resizable(false).show(ctx, |ui| {
+            ui.set_min_height(32.0);
+            ui.set_max_height(36.0);
+            
+            let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+            ui.visuals_mut().panel_fill = theme.background;
+            
             ui.horizontal(|ui| {
+                // App title with accent color
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.visuals_mut().override_text_color = Some(theme.primary);
                 ui.heading("WuffAgent");
+                ui.visuals_mut().override_text_color = None;
+                
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Theme").clicked() {
+                    // Theme toggle button
+                    let theme_btn = egui::Button::new("◐")
+                        .fill(theme.surface_light)
+                        .rounding(4.0);
+                    if ui.add(theme_btn).clicked() {
                         self.toggle_theme(ctx);
                     }
-                    if ui.button("Settings").clicked() {
+                    
+                    // Settings button
+                    let settings_btn = egui::Button::new("⚙")
+                        .fill(theme.surface_light)
+                        .rounding(4.0);
+                    if ui.add(settings_btn).clicked() {
                         self.show_settings = true;
                     }
                 });
@@ -89,6 +98,9 @@ impl ChatApp {
 
         // Bottom panels stack upward, so bottom_bar must be declared first to be at the bottom
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
+            let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+            ui.visuals_mut().panel_fill = theme.surface;
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
             self.draw_status_bar(ui);
             ui.separator();
             self.draw_bottom_bar(ui);
@@ -99,11 +111,15 @@ impl ChatApp {
             .default_height(50.0)
             .resizable(false)
             .show(ctx, |ui| {
+                let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+                ui.visuals_mut().panel_fill = theme.surface;
                 self.draw_input_area(ui);
             });
 
         // Chat area fills all remaining space between top bar and input panel
         egui::CentralPanel::default().show(ctx, |ui| {
+            let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+            ui.visuals_mut().panel_fill = theme.background;
             self.draw_chat_area(ui);
         });
     }
@@ -124,12 +140,9 @@ impl ChatApp {
             eprintln!("Failed to save theme: {}", e);
         }
 
-        let visuals = if new_theme == "dark" {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
-        ctx.set_visuals(visuals);
+        // Apply custom theme colors
+        let theme = Theme::from_name(&new_theme);
+        theme.apply(ctx);
     }
 
     fn process_pending_events(&mut self) {
@@ -297,13 +310,12 @@ impl ChatApp {
         config: &Arc<Mutex<Config>>,
     ) {
         if self.show_settings && self.settings_dialog.is_none() {
-            let cfg = config.lock().unwrap();
-            self.settings_dialog = Some(SettingsDialog::new(&cfg));
-            drop(cfg);
+            self.settings_dialog = Some(SettingsDialog::new(config));
         }
         if let Some(dialog) = self.settings_dialog.as_mut() {
-            dialog.show_dialog(ctx, server, client, config, &mut self.show_settings);
-            if !self.show_settings {
+            let closed = dialog.show(ctx, config);
+            if closed {
+                self.show_settings = false;
                 self.settings_dialog = None;
             }
         }

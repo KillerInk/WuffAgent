@@ -1,9 +1,11 @@
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+// use rfd; // file dialog not available without feature
 
 use crate::config::Config;
 use crate::sessions;
+use super::theme::Theme;
 
 pub struct SessionsPanel {
     sessions: Vec<crate::sessions::Session>,
@@ -14,10 +16,6 @@ pub struct SessionsPanel {
     rename_input: String,
     creating: bool,
     new_name: String,
-    /// Session id to clear (set after user confirms clear dialog).
-    pub(super) clear_session_id: Option<String>,
-    /// If Some, holds the pending clear confirmation dialog state: (id, name, last_message).
-    pending_clear: Option<(String, String, String)>,
     /// If Some, holds the pending delete confirmation dialog state: (id, name, last_message).
     pending_delete: Option<(String, String, String)>,
     /// Notification message shown briefly after an operation.
@@ -28,8 +26,6 @@ pub struct SessionsPanel {
     export_path: String,
     /// Path for import (set when user clicks Import).
     import_path: String,
-    /// Pending context menu to show: (session_id, center_point).
-    pending_menu: Option<(String, egui::Pos2)>,
 }
 
 #[derive(Debug)]
@@ -37,7 +33,6 @@ enum PanelAction {
     Rename { id: String, new_name: String },
     Create(String),
     Delete(String),
-    Clear(String),
     Export { session_id: String },
     Import,
 }
@@ -116,14 +111,11 @@ impl SessionsPanel {
             rename_input: String::new(),
             creating: false,
             new_name: String::new(),
-            clear_session_id: None,
-            pending_clear: None,
             pending_delete: None,
             notification: None,
             notification_start: 0.0,
             export_path: String::new(),
             import_path: String::new(),
-            pending_menu: None,
         }
     }
 
@@ -155,6 +147,7 @@ impl SessionsPanel {
         session: &crate::sessions::Session,
         is_selected: bool,
         is_renaming: bool,
+        theme: &Theme,
     ) -> egui::Response {
         let count = session.messages.len();
         let count_text = if count == 1 {
@@ -192,11 +185,14 @@ impl SessionsPanel {
 
         let response = ui.add_sized(
             ui.available_size_before_wrap(),
-            egui::Button::new(display_label).fill(if is_selected || is_renaming {
-                egui::Color32::from_rgb(50, 50, 100)
-            } else {
-                egui::Color32::TRANSPARENT
-            }).sense(egui::Sense::click())
+            egui::Button::new(display_label)
+                .fill(if is_selected || is_renaming {
+                    egui::Color32::from_rgba_premultiplied(59, 130, 246, 38) // #3B82F6 @ 15%
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .rounding(4.0)
+                .sense(egui::Sense::click())
         );
         response
     }
@@ -206,6 +202,7 @@ impl SessionsPanel {
         session: &crate::sessions::Session,
         is_selected: bool,
         is_renaming: bool,
+        theme: &Theme,
     ) -> egui::Response {
         let count = session.messages.len();
         let count_text = if count == 1 {
@@ -239,11 +236,14 @@ impl SessionsPanel {
             label
         };
         
-        let response = ui.add(egui::Button::new(display_label).fill(if is_selected || is_renaming {
-            egui::Color32::from_rgb(50, 50, 100)
-        } else {
-            egui::Color32::TRANSPARENT
-        }).sense(egui::Sense::click()));
+        let response = ui.add(egui::Button::new(display_label)
+            .fill(if is_selected || is_renaming {
+                egui::Color32::from_rgba_premultiplied(59, 130, 246, 38) // #3B82F6 @ 15%
+            } else {
+                egui::Color32::TRANSPARENT
+            })
+            .rounding(4.0)
+            .sense(egui::Sense::click()));
         
         response
     }
@@ -251,52 +251,15 @@ impl SessionsPanel {
     pub fn draw(&mut self, ctx: &egui::Context) -> Option<String> {
         let mut selected_id: Option<String> = None;
         let mut action: Option<PanelAction> = None;
-
-        // Show the clear confirmation dialog if pending
-        if let Some((id, name, last_message)) = self.pending_clear.take() {
-            let mut should_clear = None;
-            let _ = egui::Window::new("Clear Session")
-                .collapsible(false)
-                .resizable(false)
-                .movable(true)
-                .default_pos([300.0, 200.0])
-                .show(ctx, |ui| {
-                    ui.weak("Are you sure you want to clear this session?");
-                    ui.separator();
-                    ui.label(format!("Session: {}", name));
-                    if !last_message.is_empty() {
-                        let truncated = truncate(&last_message, 50);
-                        ui.weak(format!("Last message: {}", truncated));
-                    }
-                    ui.separator();
-                    ui.label("This will delete the session file and all backups.");
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("Clear").clicked() {
-                            should_clear = Some(true);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            should_clear = Some(false);
-                        }
-                    });
-                });
-            match should_clear {
-                Some(true) => {
-                    action = Some(PanelAction::Clear(id));
-                }
-                Some(false) | None => {
-                    self.pending_clear = None;
-                }
-            }
-        }
+        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
 
         // Show the delete confirmation dialog if pending
-        if let Some((id, name, last_message)) = self.pending_delete.take() {
-            let mut should_delete = None;
+        if let Some((id, name, last_message)) = self.pending_delete.clone() {
             egui::Window::new("Delete Session")
                 .collapsible(false)
                 .resizable(false)
                 .movable(true)
+                .default_pos([300.0, 200.0])
                 .show(ctx, |ui| {
                     ui.weak("Are you sure you want to delete this session?");
                     ui.separator();
@@ -308,46 +271,49 @@ impl SessionsPanel {
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button("Delete").clicked() {
-                            should_delete = Some(true);
+                            action = Some(PanelAction::Delete(id.clone()));
+                            self.pending_delete = None;
                         }
                         if ui.button("Cancel").clicked() {
-                            should_delete = Some(false);
+                            self.pending_delete = None;
                         }
                     });
                 });
-            match should_delete {
-                Some(true) => {
-                    action = Some(PanelAction::Delete(id));
-                }
-                Some(false) | None => {
-                    self.pending_delete = None;
-                }
-            }
         }
 
         egui::SidePanel::left("sessions_panel")
-            .default_width(200.0)
+            .default_width(220.0)
             .min_width(150.0)
-            .max_width(300.0)
+            .max_width(320.0)
             .show(ctx, |ui| {
-                ui.heading("Sessions");
+                let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+                ui.visuals_mut().panel_fill = theme.panel_bg;
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);
+                // Session heading with accent color
+                ui.spacing_mut().item_spacing.y = 8.0;
+                ui.label(egui::RichText::new("SESSIONS")
+                    .color(theme.text_secondary)
+                    .size(11.0)
+                    .strong());
                 ui.separator();
 
-                if ui.button("+ New").clicked() {
+                // New session button
+                let new_btn = egui::Button::new("+ New")
+                    .fill(theme.primary)
+                    .rounding(4.0);
+                if ui.add(new_btn).clicked() {
                     self.creating = true;
                     self.new_name = String::new();
                 }
-                if ui.button("Clear").clicked() {
-                    eprintln!("[Clear] Button clicked, selected_id={:?}, sessions_count={}", self.selected_id, self.sessions.len());
-                    // Prefer selected session from the panel; fall back to client's current session
+                
+                // Delete button
+                let delete_btn = egui::Button::new("Delete")
+                    .fill(theme.surface_light)
+                    .rounding(4.0);
+                if ui.add(delete_btn).clicked() {
                     let session_id = self.selected_id.clone();
-                    let session = self.sessions.iter().find(|s| Some(&s.id) == session_id.as_ref())
-                        .or_else(|| {
-                            // Try to find by client's current session id
-                            None
-                        });
+                    let session = self.sessions.iter().find(|s| Some(&s.id) == session_id.as_ref());
                     if let Some(session) = session {
-                        eprintln!("[Clear] Found session: id={}, name={}", session.id, session.name);
                         let last_msg: String = session
                             .messages
                             .iter()
@@ -355,26 +321,24 @@ impl SessionsPanel {
                             .find(|m| m.role == "user" || m.role == "assistant")
                             .map(|m| m.content.clone())
                             .unwrap_or_default();
-                        self.pending_clear = Some((
+                        self.pending_delete = Some((
                             session.id.clone(),
                             session.name.clone(),
                             last_msg,
                         ));
-                        eprintln!("[Clear] pending_clear set to Some");
                     } else {
-                        eprintln!("[Clear] No session found for selected_id={:?}", session_id);
                         self.show_notification("No session selected", false);
                     }
                 }
 
-                ui.separator();
+                ui.add_space(8.0);
 
                 // Show notification as a toast
                 if let Some((msg, success)) = &self.notification {
                     let color = if *success {
-                        egui::Color32::from_rgb(0, 180, 0)
+                        theme.success
                     } else {
-                        egui::Color32::from_rgb(220, 50, 50)
+                        theme.error
                     };
                     ui.colored_label(color, msg.clone());
                 }
@@ -411,6 +375,9 @@ impl SessionsPanel {
                     }
                 });
 
+                // Session list
+                ui.add_space(4.0);
+                
                 // Collect actions to avoid borrowing self inside the loop
                 for session in &self.sessions {
                     let is_renaming = Some(&session.id) == self.renaming.as_ref();
@@ -434,49 +401,7 @@ impl SessionsPanel {
                     }
 
                     let is_selected = Some(&session.id) == self.selected_id.as_ref();
-                    let response = Self::draw_session_item(ui, session, is_selected, is_renaming);
-                    
-                    // Right-click to open context menu with export option
-                    if response.secondary_clicked() {
-                        // Store the menu to show on next frame
-                        self.pending_menu = Some((session.id.clone(), response.rect.center()));
-                    }
-                    
-                    // Show the pending context menu
-                    if let Some((menu_session_id, center)) = self.pending_menu.take() {
-                        if menu_session_id == session.id {
-                            let menu_id = ui.make_persistent_id(format!("ctx_menu_{}", session.id));
-                            egui::popup::popup_above_or_below_widget(
-                                ui,
-                                menu_id,
-                                &response,
-                                egui::AboveOrBelow::Below,
-                                egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-                                |ui| {
-                                    ui.set_min_width(120.0);
-                                    if ui.button("Export").clicked() {
-                                        action = Some(PanelAction::Export {
-                                            session_id: session.id.clone(),
-                                        });
-                                    }
-                                    if ui.button("Delete").clicked() {
-                                        let last_msg: String = session
-                                            .messages
-                                            .iter()
-                                            .rev()
-                                            .find(|m| m.role == "user" || m.role == "assistant")
-                                            .map(|m| m.content.clone())
-                                            .unwrap_or_default();
-                                        self.pending_delete = Some((
-                                            session.id.clone(),
-                                            session.name.clone(),
-                                            last_msg,
-                                        ));
-                                    }
-                                },
-                            );
-                        }
-                    }
+                    let response = Self::draw_session_item(ui, session, is_selected, is_renaming, &theme);
                     
                     if response.clicked() {
                         selected_id = Some(session.id.clone());
@@ -497,33 +422,43 @@ impl SessionsPanel {
                 }
 
                 // Export/Import section
+                ui.add_space(12.0);
                 ui.separator();
-                ui.label("Export / Import");
+                ui.label(egui::RichText::new("EXPORT / IMPORT")
+                    .color(theme.text_secondary)
+                    .size(11.0)
+                    .strong());
                 ui.horizontal(|ui| {
-                    if ui.button("Export").clicked() {
+                    let export_btn = egui::Button::new("Export")
+                        .fill(theme.surface_light)
+                        .rounding(4.0);
+                    if ui.add(export_btn).clicked() {
                         if self.selected_id.is_some() {
                             action = Some(PanelAction::Export {
                                 session_id: self.selected_id.clone().unwrap(),
                             });
                         }
                     }
-                    if ui.button("Import").clicked() {
+                    let import_btn = egui::Button::new("Import")
+                        .fill(theme.surface_light)
+                        .rounding(4.0);
+                    if ui.add(import_btn).clicked() {
                         action = Some(PanelAction::Import);
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Export path:");
+                    ui.label(egui::RichText::new("Export path:").size(11.0).color(theme.text_secondary));
                     ui.text_edit_singleline(&mut self.export_path);
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Import path:");
+                    ui.label(egui::RichText::new("Import path:").size(11.0).color(theme.text_secondary));
                     ui.text_edit_singleline(&mut self.import_path);
                 });
 
                 if self.creating {
                     ui.separator();
                     ui.horizontal(|ui| {
-                        ui.label("Name:");
+                        ui.label(egui::RichText::new("Name:").size(11.0).color(theme.text_secondary));
                         let resp = ui.text_edit_singleline(&mut self.new_name);
                         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             if !self.new_name.trim().is_empty() {
@@ -575,21 +510,6 @@ impl SessionsPanel {
                         self.selected_id = None;
                     }
                     self.refresh();
-                }
-                PanelAction::Clear(id) => {
-                    eprintln!("[Clear] Action Clear triggered for id={}, sessions_dir={}", id, self.sessions_dir.display());
-                    match sessions::clear_session_messages(&self.sessions_dir, &id) {
-                        Ok(()) => {
-                            eprintln!("[Clear] clear_session_messages succeeded");
-                            self.clear_session_id = Some(id.clone());
-                            self.refresh();
-                            self.show_notification("Session cleared", true);
-                        }
-                        Err(e) => {
-                            eprintln!("[Clear] clear_session_messages failed: {}", e);
-                            self.show_notification(&format!("Clear failed: {}", e), false);
-                        }
-                    }
                 }
                 PanelAction::Export { session_id } => {
                     let output_path = if self.export_path.is_empty() {

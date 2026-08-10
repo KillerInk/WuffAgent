@@ -2,18 +2,21 @@ use eframe::egui;
 
 use super::state::ChatApp;
 use super::window::ChatMessage;
+use super::theme::Theme;
 
 impl ChatApp {
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
+        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+        
         // Show pending error as inline warning
-        if let Some(ref err) = self.chat.pending_error {
-            let err_clone = err.clone();
+        let pending_error = self.chat.pending_error.take();
+        if let Some(ref err) = pending_error {
             ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::RED, format!("Error: {}", err_clone));
-                if ui.button("Dismiss").clicked() {
-                    self.chat.pending_error = None;
-                }
+                ui.colored_label(theme.error, format!("⚠ Error: {}", err));
             });
+            if ui.button("Dismiss").clicked() {
+                // already taken above
+            }
             ui.separator();
         }
 
@@ -28,36 +31,34 @@ impl ChatApp {
             .stick_to_bottom(self.chat.auto_scroll)
             .show(ui, |ui| {
                 ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     for (i, msg) in messages.iter().enumerate() {
-                        self.draw_message(ui, msg, i);
+                        self.draw_message(ui, msg, i, &theme);
                     }
 
                     // Show current streaming response
                     let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
                     if self.chat.is_generating && !self.chat.current_response.is_empty() {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.spacing_mut().item_spacing.x = 4.0;
                             ui.label(egui::RichText::new(&streaming_ts)
-                                .color(egui::Color32::GRAY)
+                                .color(theme.text_dim)
                                 .size(11.0));
-                            ui.separator();
-                            ui.colored_label(egui::Color32::LIGHT_GREEN, "AI:");
-                            ui.separator();
+                            ui.colored_label(theme.primary, "AI:");
                             ui.add(egui::Label::new(
                                 egui::RichText::new(&self.chat.current_response)
-                                    .color(egui::Color32::from_rgb(150, 200, 150))
+                                    .color(theme.text_primary)
                             ));
                             ui.spinner();
                         });
                     } else if self.chat.is_generating && self.chat.current_response.is_empty() {
                         // Show spinner while waiting for first chunk
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.spacing_mut().item_spacing.x = 4.0;
                             ui.label(egui::RichText::new(&streaming_ts)
-                                .color(egui::Color32::GRAY)
+                                .color(theme.text_dim)
                                 .size(11.0));
-                            ui.separator();
-                            ui.colored_label(egui::Color32::LIGHT_GREEN, "AI:");
+                            ui.colored_label(theme.primary, "AI:");
                             ui.spinner();
                         });
                     }
@@ -70,13 +71,16 @@ impl ChatApp {
         let at_bottom = self.is_at_bottom(ui, scroll_id);
 
         if !at_bottom {
-            let button_size = egui::vec2(28.0, 28.0);
-            let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 8.0, 8.0);
+            let button_size = egui::vec2(32.0, 32.0);
+            let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 12.0, 12.0);
             let button_rect = egui::Rect::from_min_size(button_pos, button_size);
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(button_rect), |ui| {
                 ui.set_max_size(button_size);
                 ui.set_min_size(button_size);
-                if ui.button("↓").clicked() {
+                let scroll_btn = egui::Button::new("↓")
+                    .fill(theme.primary)
+                    .rounding(16.0);
+                if ui.add(scroll_btn).clicked() {
                     // Enable auto-scroll; stick_to_bottom will handle the rest
                     self.chat.auto_scroll = true;
                 }
@@ -98,79 +102,92 @@ impl ChatApp {
         ui: &mut egui::Ui,
         message: &ChatMessage,
         index: usize,
+        theme: &Theme,
     ) {
         let is_user = message.role == "user";
         let is_editing = self.chat.editing_message_index == Some(index);
         
-        // Use a scoped UI to constrain the width of the content
-        let max_content_width = (ui.available_width() - 80.0).max(100.0);
+        // Constrain content width (leaves room for avatar + margins)
+        let avatar_size = 28.0;
+        let avatar_margin = 16.0; // space from edges + gap to content
+        let max_content_width = (ui.available_width() - avatar_size - avatar_margin * 2.0).max(120.0);
         
-        // Handle right-click context menu for edit/delete
-        let response = ui.interact(ui.max_rect(), ui.id().with(index), egui::Sense::click());
-        if !is_editing && response.secondary_clicked() {
-            response.context_menu(|ui| {
-                ui.set_min_width(120.0);
-                if ui.button("Edit").clicked() {
-                    self.chat.editing_message_index = Some(index);
-                    self.chat.editing_message_content = message.content.clone();
-                }
-                if ui.button("Delete").clicked() {
-                    self.delete_message(index);
-                }
-            });
-        }
+        // Message bubble backgrounds with good contrast
+        let user_bubble_bg = egui::Color32::from_rgb(37, 99, 235); // dark blue for white text
+        let bubble_bg = if is_user {
+            user_bubble_bg
+        } else {
+            theme.surface_light
+        };
         
-        // Align based on role: user left, AI right
-        if is_user {
-            // User messages: left-aligned
-            ui.horizontal_wrapped(|ui| {
-                ui.scope(|ui| {
-                    ui.set_max_width(max_content_width);
-                    
-                    // Timestamp (small, gray)
-                    ui.label(egui::RichText::new(&message.timestamp)
-                        .color(egui::Color32::GRAY)
-                        .size(11.0));
-                    ui.separator();
-                    
-                    // Role (colored)
-                    ui.colored_label(egui::Color32::LIGHT_BLUE, "You:");
-                    ui.separator();
-                    
-                    // Content with wrapping
-                    ui.vertical(|ui| {
-                        if is_editing {
-                            // Edit mode: show text input
-                            ui.text_edit_multiline(&mut self.chat.editing_message_content);
-                        } else {
-                            ui.label(egui::RichText::new(&message.content));
+        // Add spacing between messages
+        ui.add_space(10.0);
+        
+        // Single horizontal layout: avatar | content
+        ui.horizontal(|ui| {
+            // Draw avatar
+            let avatar_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(avatar_size, avatar_size));
+            let avatar_color = if is_user { theme.primary } else { theme.accent };
+            let avatar_label = if is_user { "U" } else { "AI" };
+            let avatar_font = if is_user { 10.0 } else { 9.0 };
+            
+            ui.painter().circle(
+                avatar_rect.center(),
+                avatar_size / 2.0,
+                avatar_color,
+                egui::Stroke::NONE,
+            );
+            ui.painter().text(
+                avatar_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                avatar_label,
+                egui::FontId::new(avatar_font, egui::FontFamily::Monospace),
+                egui::Color32::WHITE,
+            );
+            
+            // Reserve space for avatar so content doesn't overlap
+            ui.allocate_space(egui::vec2(avatar_size, avatar_size));
+            ui.add_space(8.0); // gap between avatar and bubble
+            
+            // Content column (bubble + timestamp)
+            ui.scope(|ui| {
+                ui.set_max_width(max_content_width);
+                
+                // Handle right-click context menu for edit/delete
+                let response = ui.interact(ui.max_rect(), ui.id().with(index), egui::Sense::click());
+                if !is_editing && response.secondary_clicked() {
+                    response.context_menu(|menu_ui| {
+                        menu_ui.set_min_width(120.0);
+                        if menu_ui.button("Edit").clicked() {
+                            self.chat.editing_message_index = Some(index);
+                            self.chat.editing_message_content = message.content.clone();
                         }
-                        
-                        // Display image if present
-                        if let Some(ref img_data) = message.image {
-                            if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, img_data) {
-                                let img = egui::Image::from_bytes("image", decoded);
-                                let max_img_width = (ui.available_width() - 10.0).max(50.0);
-                                ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
-                            }
+                        if menu_ui.button("Delete").clicked() {
+                            self.delete_message(index);
                         }
                     });
-                });
-            });
-        } else {
-            // AI messages: right-aligned
-            ui.horizontal_wrapped(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                }
+                
+                ui.vertical(|ui| {
+                    // Message bubble
                     ui.scope(|ui| {
-                        ui.set_max_width(max_content_width);
+                        ui.visuals_mut().widgets.noninteractive.bg_fill = bubble_bg;
+                        ui.style_mut().visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+                        ui.style_mut().visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                         
-                        // Content with wrapping
-                        ui.vertical(|ui| {
+                        // Use a frame-like container for the bubble
+                        let bubble_inner_padding = egui::vec2(8.0, 6.0);
+                        let bubble_frame = egui::Frame::none()
+                            .fill(bubble_bg)
+                            .rounding(egui::Rounding::same(8.0))
+                            .inner_margin(egui::Margin::same(6.0));
+                        
+                        bubble_frame.show(ui, |ui| {
                             if is_editing {
-                                // Edit mode: show text input
                                 ui.text_edit_multiline(&mut self.chat.editing_message_content);
                             } else {
-                                // Display image if present (above text for AI)
+                                // Display image if present
                                 if let Some(ref img_data) = message.image {
                                     if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, img_data) {
                                         let img = egui::Image::from_bytes("image", decoded);
@@ -178,34 +195,41 @@ impl ChatApp {
                                         ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
                                     }
                                 }
-                                ui.label(egui::RichText::new(&message.content));
+                                // Message content with wrapping
+                                // User messages: white text on dark blue bubble for contrast
+                                // AI messages: dark text on light bubble for contrast
+                                let text_color = if is_user {
+                                    egui::Color32::WHITE
+                                } else {
+                                    theme.text_primary
+                                };
+                                let content_label = egui::Label::new(
+                                    egui::RichText::new(&message.content)
+                                        .color(text_color)
+                                ).wrap();
+                                ui.add(content_label);
                             }
                         });
-                        
-                        ui.separator();
-                        
-                        // Role (colored)
-                        ui.colored_label(egui::Color32::LIGHT_GREEN, "AI:");
-                        ui.separator();
-                        
-                        // Timestamp (small, gray)
+                    });
+                    
+                    // Timestamp aligned under bubble content, not under avatar
+                    ui.add_space(3.0);
+                    ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(&message.timestamp)
-                            .color(egui::Color32::GRAY)
-                            .size(11.0));
+                            .color(theme.text_dim)
+                            .size(9.0));
                     });
                 });
             });
-        }
+        });
         
         // Handle keyboard shortcuts when editing
         if is_editing {
             ui.ctx().input(|i| {
                 if i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl {
-                    // Ctrl+Enter to commit edit
                     self.commit_message_edit(index);
                 }
                 if i.key_pressed(egui::Key::Escape) {
-                    // Escape to cancel edit
                     self.chat.editing_message_index = None;
                     self.chat.editing_message_content.clear();
                 }

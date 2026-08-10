@@ -2,9 +2,11 @@ use eframe::egui;
 
 use super::state::ChatApp;
 use super::window::{AppEvent, AppStatus};
+use super::theme::Theme;
 
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
+        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
         ui.style_mut().spacing.item_spacing.y = 0.0;
 
         // Validate input length
@@ -13,7 +15,7 @@ impl ChatApp {
         if input_len > MAX_MESSAGE_LENGTH {
             ui.horizontal(|ui| {
                 ui.colored_label(
-                    egui::Color32::RED,
+                    theme.error,
                     format!("Message too long (max {} characters, current: {})", MAX_MESSAGE_LENGTH, input_len),
                 );
             });
@@ -23,7 +25,7 @@ impl ChatApp {
         // Show pending image preview
         if self.chat.pending_image.is_some() {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("📷 Image attached").size(11.0).color(egui::Color32::GRAY));
+                ui.label(egui::RichText::new("📷 Image attached").size(11.0).color(theme.text_secondary));
                 if ui.button("✕").clicked() {
                     self.chat.pending_image = None;
                 }
@@ -33,17 +35,33 @@ impl ChatApp {
 
         // Input takes remaining space, button stays visible
         ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            const BUTTON_WIDTH: f32 = 55.0;
-            let input_width = (ui.available_width() - BUTTON_WIDTH - 4.0).max(0.0);
-            let text_edit = egui::TextEdit::singleline(&mut self.chat.input_text);
-            ui.add_sized([input_width, 22.0], text_edit);
+            ui.add_space(8.0);
+            const BUTTON_WIDTH: f32 = 60.0;
+            let input_width = (ui.available_width() - BUTTON_WIDTH - 8.0).max(0.0);
+            
+            // Styled text input
+            let text_edit = egui::TextEdit::singleline(&mut self.chat.input_text)
+                .hint_text("Type a message...")
+                .vertical_align(egui::Align::Center);
+            ui.add_sized([input_width, 32.0], text_edit);
+            
+            ui.add_space(8.0);
+            
+            // Send or Stop button
             if !self.chat.is_generating {
-                if ui.button("Send").clicked() {
+                let send_btn = egui::Button::new("Send")
+                    .fill(theme.primary)
+                    .rounding(6.0)
+                    .min_size(egui::vec2(BUTTON_WIDTH, 28.0));
+                if ui.add(send_btn).clicked() {
                     self.send_message();
                 }
             } else {
-                if ui.button("Stop").clicked() {
+                let stop_btn = egui::Button::new("Stop")
+                    .fill(theme.error)
+                    .rounding(6.0)
+                    .min_size(egui::vec2(BUTTON_WIDTH, 28.0));
+                if ui.add(stop_btn).clicked() {
                     self.stop_generation();
                 }
             }
@@ -152,5 +170,7 @@ impl ChatApp {
             handle.abort();
         }
         self.stop_streaming();
+        self.chat.status = AppStatus::Ready;
+        self.chat.pending_error = None;
     }
 }

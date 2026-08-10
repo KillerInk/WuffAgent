@@ -2,36 +2,42 @@ use eframe::egui;
 
 use super::state::ChatApp;
 use super::window::AppStatus;
+use super::theme::Theme;
 
 impl ChatApp {
     pub(super) fn draw_status_bar(&self, ui: &mut egui::Ui) {
+        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+        
         ui.horizontal(|ui| {
-            let status_text = match &self.chat.status {
-                AppStatus::Stopped => "● Stopped".to_string(),
-                AppStatus::Connecting => "● Connecting...".to_string(),
-                AppStatus::Ready => "● Ready".to_string(),
-                AppStatus::Generating => "● Generating...".to_string(),
-                AppStatus::Error(e) => format!("● Error: {}", e),
-            };
+            ui.spacing_mut().item_spacing.x = 4.0;
+            
+            // Status indicator with colored dot
             let status_color = match &self.chat.status {
-                AppStatus::Stopped => egui::Color32::GRAY,
-                AppStatus::Connecting => egui::Color32::BLUE,
-                AppStatus::Ready => egui::Color32::GREEN,
-                AppStatus::Generating => egui::Color32::BLUE,
-                AppStatus::Error(_) => egui::Color32::RED,
+                AppStatus::Stopped => theme.text_secondary,
+                AppStatus::Connecting => theme.warning,
+                AppStatus::Ready => theme.success,
+                AppStatus::Generating => theme.primary,
+                AppStatus::Error(_) => theme.error,
             };
-            ui.label(egui::RichText::new(&status_text).color(status_color));
+            let status_text = match &self.chat.status {
+                AppStatus::Stopped => "● Stopped",
+                AppStatus::Connecting => "● Connecting...",
+                AppStatus::Ready => "● Ready",
+                AppStatus::Generating => "● Generating...",
+                AppStatus::Error(e) => return,
+            };
+            ui.label(egui::RichText::new(status_text).color(status_color).size(11.0));
 
             if self.chat.streaming {
-                ui.separator();
-                ui.label("Streaming");
+                ui.label(egui::RichText::new("Streaming").color(theme.accent).size(11.0));
             }
+            
             ui.separator();
-            ui.label(format!("Messages: {}", self.chat.messages.len()));
+            ui.label(egui::RichText::new(format!("Messages: {}", self.chat.messages.len())).color(theme.text_secondary).size(11.0));
 
             if let Some(ref msg) = self.sessions.save_failure_message {
                 ui.separator();
-                ui.label(egui::RichText::new(msg).color(egui::Color32::YELLOW));
+                ui.label(egui::RichText::new(msg).color(theme.warning).size(11.0));
             }
         });
     }
@@ -65,17 +71,43 @@ impl ChatApp {
     }
 
     pub(super) fn draw_bottom_bar(&self, ui: &mut egui::Ui) {
+        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
         let n_ctx = self.get_effective_n_ctx();
         let n_gpu_layers = self.server.get_n_gpu_layers();
         let threads = self.server.get_threads();
 
         ui.horizontal(|ui| {
-            ui.label("Tokens:");
-            ui.label(self.chat.token_count.to_string());
-            ui.label(" | Context: ");
-            ui.label(format!("{:.1}%", self.chat.context_used));
+            ui.spacing_mut().item_spacing.x = 4.0;
+            
+            // Token count pill
+            ui.add(egui::Label::new(
+                egui::RichText::new(format!("Tokens: {}", self.chat.token_count))
+                    .color(theme.text_secondary)
+                    .size(11.0)
+            ).wrap());
+            
+            // Context usage pill with color coding
+            let context_color = if self.chat.context_used > 80.0 {
+                theme.error
+            } else if self.chat.context_used > 60.0 {
+                theme.warning
+            } else {
+                theme.success
+            };
+            ui.add(egui::Label::new(
+                egui::RichText::new(format!("Ctx: {:.1}%", self.chat.context_used))
+                    .color(context_color)
+                    .size(11.0)
+            ).wrap());
+            
             ui.separator();
-            ui.label(format!("Ctx: {} | GPU: {} | Threads: {}", n_ctx, n_gpu_layers, threads));
+            
+            // Server specs
+            ui.add(egui::Label::new(
+                egui::RichText::new(format!("Ctx: {} | GPU: {} | Threads: {}", n_ctx, n_gpu_layers, threads))
+                    .color(theme.text_dim)
+                    .size(11.0)
+            ).wrap());
         });
     }
 }

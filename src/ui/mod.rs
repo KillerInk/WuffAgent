@@ -5,3 +5,4 @@ pub mod input;
 pub mod status;
 pub mod sessions_panel;
 pub mod state;
+pub mod theme;
