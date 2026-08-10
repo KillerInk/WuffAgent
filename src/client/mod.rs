@@ -1,4 +1,8 @@
 use futures::StreamExt;
+use std::sync::mpsc;
+use tracing;
+
+pub mod engine;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -42,6 +46,8 @@ pub struct ChatClient {
     save_failed: Arc<Mutex<bool>>,
     /// Encryption key for session files (32 bytes for ChaCha20Poly1305).
     encryption_key: Option<[u8; 32]>,
+    /// Channel to send tool execution events to the UI.
+    tool_event_tx: Arc<Mutex<Option<mpsc::Sender<crate::ui::window::AppEvent>>>>,
 }
 
 impl ChatClient {
@@ -58,7 +64,12 @@ impl ChatClient {
             save_queue: Arc::new(Mutex::new(VecDeque::new())),
             save_failed: Arc::new(Mutex::new(false)),
             encryption_key: None,
+            tool_event_tx: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_tool_event_sender(&self, tx: mpsc::Sender<crate::ui::window::AppEvent>) {
+        *self.tool_event_tx.lock().unwrap() = Some(tx);
     }
 
     pub fn set_max_messages(&mut self, max_messages: usize) {
@@ -256,6 +267,7 @@ impl ChatClient {
                 content: self.system_prompt.clone(),
                 timestamp: String::new(),
                 tool_calls: None,
+                tool_call_id: None,
             });
         }
 
@@ -275,6 +287,7 @@ impl ChatClient {
             content: prompt.to_string(),
             timestamp: String::new(),
             tool_calls: None,
+            tool_call_id: None,
         });
 
         ChatRequest {
@@ -299,6 +312,10 @@ impl ChatClient {
     ) -> Result<(String, Option<Usage>), Error> {
         let request = self.build_request(prompt, false, tools);
         let body = serde_json::to_string(&request)?;
+        tracing::debug!(
+            "send_message (non-stream) request body:\n{}",
+            body
+        );
 
         let mut builder = self
             .http_client
@@ -327,6 +344,8 @@ impl ChatClient {
             )));
         }
 
+        tracing::debug!("send_message (non-stream) response body:\n{}", text);
+
         let response: Response = serde_json::from_str(&text)?;
 
         if response.choices.is_empty() {
@@ -335,6 +354,11 @@ impl ChatClient {
 
         let content = response.choices[0].message.content.clone();
         let usage = response.usage.clone();
+        tracing::debug!(
+            "send_message (non-stream) assistant content (len={}): {:?}",
+            content.len(),
+            content.chars().take(200).collect::<String>()
+        );
 
         // Update conversation history
         let mut conv = self.conversation.lock().unwrap();
@@ -343,12 +367,14 @@ impl ChatClient {
             content: prompt.to_string(),
             timestamp: String::new(),
             tool_calls: None,
+            tool_call_id: None,
         });
         conv.push(Message {
             role: "assistant".to_string(),
             content: content.clone(),
             timestamp: String::new(),
             tool_calls: None,
+            tool_call_id: None,
         });
         drop(conv);
 
@@ -371,6 +397,10 @@ impl ChatClient {
         }
 
         let data = &line["data: ".len()..];
+        // Log the raw SSE data for debugging tool call issues
+        if data.contains("tool_calls") || data.contains("function") {
+            tracing::debug!("process_sse_line raw SSE data: {}", &data[..data.len().min(500)]);
+        }
         let chunk: serde_json::Value = serde_json::from_str(data)?;
 
         if let Some(text) = chunk
@@ -399,11 +429,17 @@ impl ChatClient {
             .and_then(|d| d.get("tool_calls"))
         {
             if let Some(tc_array) = tool_calls.as_array() {
-                if let Some(first) = tc_array.first() {
-                    if let (Some(id), Some(func)) = (
-                        first.get("id").and_then(|v| v.as_str()),
-                        first.get("function"),
-                    ) {
+                for tc_chunk in tc_array {
+                    // Extract id (may be null/missing in delta chunks after the first)
+                    let id = tc_chunk
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    // Extract index (used when id is not present)
+                    let index = tc_chunk.get("index").and_then(|v| v.as_u64());
+                    let func = tc_chunk.get("function");
+
+                    if let Some(func) = func {
                         let name = func
                             .get("name")
                             .and_then(|v| v.as_str())
@@ -415,25 +451,99 @@ impl ChatClient {
                             .unwrap_or("")
                             .to_string();
 
+                        tracing::debug!(
+                            "process_sse_line: tool_call id=? name={} args_len={} args_preview={:?}",
+                            name, args.len(),
+                            &args[..args.len().min(80)]
+                        );
+
                         // Accumulate partial args from streaming
                         let mut conv = conversation.lock().unwrap();
                         if let Some(last) = conv.last_mut() {
+                            tracing::debug!(
+                                "process_sse_line: last message role={}, has_tool_calls={}, tool_calls_count={}",
+                                last.role,
+                                last.tool_calls.is_some(),
+                                last.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                            );
                             if last.tool_calls.is_none() {
                                 last.tool_calls = Some(Vec::new());
                             }
                             let tcs = last.tool_calls.as_mut().unwrap();
-                            if let Some(tc) = tcs.iter_mut().find(|t| t.id == id) {
-                                tc.function.arguments.push_str(&args);
+
+                            tracing::debug!(
+                                "process_sse_line: looking for tool_call id={:?} index={} tcs_len={}",
+                                id,
+                                index.unwrap_or(0),
+                                tcs.len()
+                            );
+
+                            // Try to find existing tool call by id first
+                            let found = if let Some(ref id) = id {
+                                tcs.iter_mut().find(|t| t.id == *id)
                             } else {
+                                None
+                            };
+
+                            if let Some(tc) = found {
+                                // Accumulate args into existing tool call
+                                tc.function.arguments.push_str(&args);
+                                tracing::debug!(
+                                    "process_sse_line: accumulated args for tool_call id={} total_len={} args={:?}",
+                                    id.as_ref().unwrap(), tc.function.arguments.len(),
+                                    &tc.function.arguments[..tc.function.arguments.len().min(80)]
+                                );
+                            } else if let Some(idx) = index {
+                                // Find by index when id is not present
+                                if let Some(tc) = tcs.get_mut(idx as usize) {
+                                    tc.function.arguments.push_str(&args);
+                                    tracing::debug!(
+                                        "process_sse_line: accumulated args for tool_call index={} total_len={} args={:?}",
+                                        idx, tc.function.arguments.len(),
+                                        &tc.function.arguments[..tc.function.arguments.len().min(80)]
+                                    );
+                                } else if let Some(ref id) = id {
+                                    // Index doesn't exist yet but we have an id - create new tool call
+                                    tcs.push(crate::types::ToolCall {
+                                        id: id.to_string(),
+                                        call_type: "function".to_string(),
+                                        function: crate::types::ToolFunction {
+                                            name,
+                                            arguments: args.clone(),
+                                        },
+                                    });
+                                    tracing::debug!(
+                                        "process_sse_line: created new tool_call id={} at index={} args={:?}",
+                                        id, idx, args
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "process_sse_line: failed to find tool_call at index={} (tcs_len={})",
+                                        idx, tcs.len()
+                                    );
+                                }
+                            } else if let Some(ref id) = id {
+                                // Create new tool call
                                 tcs.push(crate::types::ToolCall {
                                     id: id.to_string(),
                                     call_type: "function".to_string(),
                                     function: crate::types::ToolFunction {
                                         name,
-                                        arguments: args,
+                                        arguments: args.clone(),
                                     },
                                 });
+                                tracing::debug!(
+                                    "process_sse_line: created new tool_call id={} args={:?}",
+                                    id, args
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "process_sse_line: skipping chunk with no id and no index"
+                                );
                             }
+                            // If no id and no index, skip this chunk
+                        } else {
+                            tracing::warn!("process_sse_line: no last message in conversation");
                         }
                     }
                 }
@@ -497,12 +607,14 @@ impl ChatClient {
                 content: prompt.to_string(),
                 timestamp: String::new(),
                 tool_calls: None,
+                tool_call_id: None,
             });
             conv.push(Message {
                 role: "assistant".to_string(),
                 content: String::new(),
                 timestamp: String::new(),
                 tool_calls: None,
+                tool_call_id: None,
             });
         }
 
@@ -525,6 +637,121 @@ impl ChatClient {
             }
         }
 
+        Ok(last_usage)
+    }
+
+    /// Arc-based streaming method that clones necessary data before calling
+    /// the async streaming, avoiding holding a MutexGuard across .await.
+    pub async fn stream_message_with_tools_and_usage_arc(
+        client: &Arc<Mutex<Self>>,
+        prompt: &str,
+        tools: Option<&[crate::tools::ToolDefinition]>,
+        callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
+    ) -> Result<Option<Usage>, Error> {
+        // Clone the data we need before calling the async method
+        let http_client = client.lock().unwrap().http_client.clone();
+        let base_url = client.lock().unwrap().base_url.clone();
+        let api_key = client.lock().unwrap().api_key.clone();
+        let conversation = client.lock().unwrap().conversation.clone();
+
+        // Build the request with the cloned data
+        let mut messages = Vec::new();
+        {
+            let c = client.lock().unwrap();
+            let conv = c.conversation.lock().unwrap();
+            for msg in &*conv {
+                if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
+                    continue;
+                }
+                messages.push(msg.clone());
+            }
+        }
+        messages.push(Message {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let request = ChatRequest {
+            model: "local".to_string(),
+            messages,
+            stream: true,
+            tools: tools.map(|t| t.to_vec()),
+        };
+        let body = serde_json::to_string(&request)?;
+        tracing::debug!(
+            "stream_message (arc) request body:\n{}",
+            body
+        );
+
+        let mut builder = http_client
+            .post(format!("{}/v1/chat/completions", base_url))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .body(body);
+        if let Some(ref key) = api_key {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let resp = builder.send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::debug!("stream_message (arc) response status {}: {}", status, text);
+            return Err(Error::Http(format!(
+                "Server returned {}: {}",
+                status, text
+            )));
+        }
+
+        tracing::debug!("stream_message (arc) streaming started");
+
+        // Add user message to history
+        {
+            let mut conv = conversation.lock().unwrap();
+            conv.push(Message {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+            conv.push(Message {
+                role: "assistant".to_string(),
+                content: String::new(),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut buffer = String::new();
+        let mut last_usage: Option<Usage> = None;
+        let mut cb = callback;
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.starts_with("data: ") && !line.contains("[DONE]") {
+                    tracing::trace!("stream_message (arc) SSE line: {}", &line["data: ".len()..].chars().take(200).collect::<String>());
+                }
+
+                if let Some(usage) = Self::process_sse_line(&line, &mut cb, &conversation).await? {
+                    last_usage = Some(usage);
+                }
+            }
+        }
+
+        tracing::debug!("stream_message (arc) streaming completed, usage={:?}", last_usage);
         Ok(last_usage)
     }
 
@@ -559,6 +786,174 @@ impl ChatClient {
         }
         
         warnings
+    }
+
+    /// Check if the last assistant message has pending tool calls.
+    pub fn has_pending_tool_calls(&self) -> bool {
+        let conv = self.conversation.lock().unwrap();
+        match conv.last() {
+            Some(msg) if msg.role == "assistant" && msg.tool_calls.is_some() => {
+                !msg.tool_calls.as_ref().unwrap().is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    /// Get the last assistant message from the conversation.
+    pub fn get_last_assistant_message(&self) -> Option<Message> {
+        let conv = self.conversation.lock().unwrap();
+        conv.iter().rev().find(|m| m.role == "assistant").cloned()
+    }
+
+    /// Execute pending tool calls in the conversation and add results.
+    /// Returns true if there were tool calls to execute, false otherwise.
+    pub async fn execute_pending_tool_calls(
+        &self,
+        tool_manager: &crate::tools::ToolManager,
+    ) -> Result<bool, Error> {
+        Self::execute_pending_tool_calls_arc(&std::sync::Arc::new(std::sync::Mutex::new(self.clone())), tool_manager).await
+    }
+
+    /// Internal version that takes an Arc<Mutex<ChatClient>> so the caller
+    /// can drop the lock before the async operation begins.
+    pub async fn execute_pending_tool_calls_arc(
+        client: &std::sync::Arc<std::sync::Mutex<Self>>,
+        tool_manager: &crate::tools::ToolManager,
+    ) -> Result<bool, Error> {
+        // Get tool calls from the last assistant message
+        let tool_calls = {
+            let client = client.lock().unwrap();
+            let conv = client.conversation.lock().unwrap();
+            match conv.last() {
+                Some(msg) if msg.role == "assistant" && msg.tool_calls.is_some() => {
+                    msg.tool_calls.clone()
+                }
+                _ => None,
+            }
+        };
+
+        let tool_calls = match tool_calls {
+            Some(tc) if !tc.is_empty() => tc,
+            _ => return Ok(false),
+        };
+
+        // Execute each tool call and add result messages
+        for tc in tool_calls {
+            tracing::debug!(
+                "execute_pending_tool_calls: tool={} call_id={} args={}",
+                tc.function.name,
+                tc.id,
+                tc.function.arguments
+            );
+
+            // Send start event
+            if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
+                let _ = tx.send(crate::ui::window::AppEvent::ToolCallStart {
+                    tool_name: tc.function.name.clone(),
+                    call_id: tc.id.clone(),
+                });
+            }
+
+            // Parse arguments
+            tracing::debug!(
+                "execute_pending_tool_calls: parsing args for tool={} call_id={} args={:?}",
+                tc.function.name,
+                tc.id,
+                &tc.function.arguments[..tc.function.arguments.len().min(200)]
+            );
+            // Try parsing as direct args first, then as wrapped in values
+            let params = if let Ok(p) = serde_json::from_str::<crate::tools::ToolParams>(&tc.function.arguments) {
+                p
+            } else if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
+                // Model sends direct args like {"expression":"2 + 2"}, wrap them
+                let mut values = std::collections::HashMap::new();
+                if let Some(obj) = args.as_object() {
+                    for (k, v) in obj {
+                        values.insert(k.clone(), v.clone());
+                    }
+                }
+                crate::tools::ToolParams { values }
+            } else {
+                tracing::warn!(
+                    "execute_pending_tool_calls: failed to parse args for tool={} call_id={} args={:?}",
+                    tc.function.name,
+                    tc.id,
+                    &tc.function.arguments[..tc.function.arguments.len().min(100)]
+                );
+                if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
+                    let _ = tx.send(crate::ui::window::AppEvent::ToolCallError {
+                        tool_name: tc.function.name.clone(),
+                        call_id: tc.id.clone(),
+                        error: "Failed to parse arguments".to_string(),
+                    });
+                }
+                continue;
+            };
+
+            // Execute the tool
+            let result = tool_manager.execute(&tc.function.name, params).await;
+            tracing::debug!(
+                "execute_pending_tool_calls: tool={} call_id={} result={:?}",
+                tc.function.name,
+                tc.id,
+                &result
+            );
+            
+            // Send complete or error event
+            match &result {
+                Ok(output) => {
+                    if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
+                        let result_str = match output {
+                            crate::tools::lib::ToolOutput::Success(v) => v.to_string(),
+                            crate::tools::lib::ToolOutput::Error(e) => e.clone(),
+                        };
+                        let _ = tx.send(crate::ui::window::AppEvent::ToolCallComplete {
+                            tool_name: tc.function.name.clone(),
+                            call_id: tc.id.clone(),
+                            result: result_str,
+                        });
+                    }
+                }
+                Err(e) => {
+                    if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
+                        let _ = tx.send(crate::ui::window::AppEvent::ToolCallError {
+                            tool_name: tc.function.name.clone(),
+                            call_id: tc.id.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Add result message to conversation
+            {
+                let client = client.lock().unwrap();
+                let mut conv = client.conversation.lock().unwrap();
+                if let Some(last) = conv.last_mut() {
+                    if last.role == "assistant" {
+                        // Remove the tool call from the last assistant message
+                        if let Some(tcs) = &mut last.tool_calls {
+                            tcs.retain(|t| t.id != tc.id);
+                        }
+                    }
+                }
+                conv.push(Message {
+                    role: "tool".to_string(),
+                    content: result.map_or_else(
+                        |e| e.to_string(),
+                        |r| match r {
+                            crate::tools::lib::ToolOutput::Success(v) => v.to_string(),
+                            crate::tools::lib::ToolOutput::Error(e) => e,
+                        }
+                    ),
+                    timestamp: String::new(),
+                    tool_calls: None,
+                    tool_call_id: Some(tc.id.clone()),
+                });
+            }
+        }
+
+        Ok(true)
     }
 }
 

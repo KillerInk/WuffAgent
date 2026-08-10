@@ -18,6 +18,10 @@ pub struct Theme {
     pub accent: egui::Color32,
     pub selected_bg: egui::Color32,
     pub panel_bg: egui::Color32,
+    // Chat bubble colors
+    pub user_bg: egui::Color32,
+    pub ai_bg: egui::Color32,
+    pub tool_bg: egui::Color32,
 }
 
 impl Theme {
@@ -49,6 +53,10 @@ impl Theme {
             accent: egui::Color32::from_rgb(96, 165, 250),
             selected_bg: egui::Color32::from_rgb(59, 130, 246),
             panel_bg: egui::Color32::from_rgb(22, 22, 22),
+            // Chat bubble colors
+            user_bg: egui::Color32::from_rgb(29, 58, 102),
+            ai_bg: egui::Color32::from_rgb(35, 35, 35),
+            tool_bg: egui::Color32::from_rgb(20, 40, 20),
         }
     }
 
@@ -72,6 +80,10 @@ impl Theme {
             accent: egui::Color32::from_rgb(79, 148, 255),
             selected_bg: egui::Color32::from_rgb(37, 99, 235),
             panel_bg: egui::Color32::from_rgb(255, 255, 255),
+            // Chat bubble colors
+            user_bg: egui::Color32::from_rgb(59, 130, 246),
+            ai_bg: egui::Color32::from_rgb(240, 240, 240),
+            tool_bg: egui::Color32::from_rgb(220, 237, 200),
         }
     }
 

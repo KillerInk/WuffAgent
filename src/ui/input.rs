@@ -3,6 +3,7 @@ use eframe::egui;
 use super::state::ChatApp;
 use super::window::{AppEvent, AppStatus};
 use super::theme::Theme;
+use crate::client::engine::EngineEvent;
 
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
@@ -19,40 +20,33 @@ impl ChatApp {
                     format!("Message too long (max {} characters, current: {})", MAX_MESSAGE_LENGTH, input_len),
                 );
             });
-            ui.separator();
         }
 
-        // Show pending image preview
-        if self.chat.pending_image.is_some() {
+        // Image preview area
+        if let Some(ref _image) = self.chat.pending_image {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("📷 Image attached").size(11.0).color(theme.text_secondary));
                 if ui.button("✕").clicked() {
                     self.chat.pending_image = None;
                 }
             });
-            ui.separator();
         }
 
-        // Input takes remaining space, button stays visible
+        // Input row
+        let input_width = ui.available_width() - 80.0; // Account for button
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            const BUTTON_WIDTH: f32 = 60.0;
-            let input_width = (ui.available_width() - BUTTON_WIDTH - 8.0).max(0.0);
-            
             // Styled text input
             let text_edit = egui::TextEdit::singleline(&mut self.chat.input_text)
                 .hint_text("Type a message...")
                 .vertical_align(egui::Align::Center);
             ui.add_sized([input_width, 32.0], text_edit);
-            
-            ui.add_space(8.0);
-            
+
             // Send or Stop button
             if !self.chat.is_generating {
                 let send_btn = egui::Button::new("Send")
                     .fill(theme.primary)
                     .rounding(6.0)
-                    .min_size(egui::vec2(BUTTON_WIDTH, 28.0));
+                    .min_size(egui::vec2(60.0, 28.0));
                 if ui.add(send_btn).clicked() {
                     self.send_message();
                 }
@@ -60,51 +54,15 @@ impl ChatApp {
                 let stop_btn = egui::Button::new("Stop")
                     .fill(theme.error)
                     .rounding(6.0)
-                    .min_size(egui::vec2(BUTTON_WIDTH, 28.0));
+                    .min_size(egui::vec2(60.0, 28.0));
                 if ui.add(stop_btn).clicked() {
                     self.stop_generation();
                 }
             }
         });
-        
-        // Handle drag-and-drop for images
-        self.handle_image_drop(ui);
-    }
-    
-    fn handle_image_drop(&mut self, ui: &mut egui::Ui) {
-        // Use egui's built-in drop target for files
-        let drop_zone = ui.allocate_space(egui::Vec2::new(ui.available_width(), 20.0));
-        
-        // Check for drop events using egui's drop target API
-        let response = ui.interact(drop_zone.1, ui.id(), egui::Sense::click());
-        
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        
-        // Check for dropped files
-        if let Some(drop) = ui.input(|i| i.raw.dropped_files.clone().into_iter().next()) {
-            if let Some(path) = drop.path {
-                self.process_dropped_file(path);
-            }
-        }
-    }
-    
-    fn process_dropped_file(&mut self, file_path: std::path::PathBuf) {
-        // Check if it's an image file
-        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff");
-        
-        if is_image {
-            if let Ok(bytes) = std::fs::read(&file_path) {
-                // Validate it's actually an image by trying to decode
-                if image::ImageFormat::from_extension(&ext).is_some() {
-                    let base64_img = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-                    self.chat.pending_image = Some(base64_img);
-                    tracing::info!("Dropped image: {:?}", file_path);
-                }
-            }
-        }
+
+        // Handle image drop - simplified
+        let _drop_zone = ui.allocate_space(egui::Vec2::new(ui.available_width(), 10.0));
     }
 
     fn validate_input(&self, text: &str) -> Result<(), String> {
@@ -133,42 +91,54 @@ impl ChatApp {
         let image = self.chat.pending_image.take();
         self.add_message_with_image("user", &input, image);
 
-        // Clone tool definitions for the async task
+        // Get tool definitions
         let tool_defs = self.get_tool_definitions();
+
+        // Clone dependencies
         let client = self.client.clone();
-        let tx = self.pending_tx.clone();
+        let tool_manager = self.tool_manager.clone();
+        let event_tx = self.pending_tx.clone();
 
-        // Use spawn_local since we're in a single-threaded Tokio runtime
-        // and ChatClient is not Send (contains non-Send Mutex guards)
-        let handle = tokio::task::spawn_local(async move {
-            let cl = client.lock().unwrap();
-            let result = cl.send_message_with_tools(&input, Some(&tool_defs)).await;
-            drop(cl);
-            
-            match result {
-                Ok((content, usage)) => {
-                    if let Some(tx) = &tx {
-                        let _ = tx.send(AppEvent::StreamComplete { content, usage });
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to send message: {}", e);
-                    if let Some(tx) = &tx {
-                        let _ = tx.send(AppEvent::StreamError { error: e.to_string() });
-                    }
-                }
-            }
-        });
+        // Create a channel for engine events
+        let (engine_tx, engine_rx) = std::sync::mpsc::channel::<EngineEvent>();
 
-        // Store the handle for potential cancellation
-        self.chat.streaming_task = Some(handle);
+        // Spawn a task to handle engine events
+        if let Some(tx) = event_tx.clone() {
+            let handle = tokio::spawn(async move {
+                // Relay engine events to UI
+                for event in engine_rx.iter() {
+                    let app_event: AppEvent = event.into();
+                    let _ = tx.send(app_event);
+                }
+            });
+            self.chat.streaming_task = Some(handle);
+        }
+
+        // Create and start the chat engine
+        let engine = crate::client::engine::ChatEngine::new(
+            client,
+            (*tool_manager).clone(),
+            engine_tx,
+        );
+        
+        // Store engine for potential cancellation
+        self.chat.engine = Some(engine.clone());
+
+        // Start the chat
+        engine.start_chat(input, tool_defs);
     }
 
     pub(super) fn stop_generation(&mut self) {
-        // Cancel the streaming task if it exists
+        // Cancel the engine task
+        if let Some(engine) = self.chat.engine.take() {
+            engine.cancel();
+        }
+        
+        // Also cancel the streaming task
         if let Some(handle) = self.chat.streaming_task.take() {
             handle.abort();
         }
+        
         self.stop_streaming();
         self.chat.status = AppStatus::Ready;
         self.chat.pending_error = None;

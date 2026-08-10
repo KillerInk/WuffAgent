@@ -5,6 +5,7 @@ use crate::tools::lib::{ToolError, ToolLogger, ToolOutput, ToolParams, ToolResul
 use crate::tools::registry::ToolRegistry;
 
 /// High-level orchestrator that exposes tool execution to the rest of the application.
+#[derive(Clone)]
 pub struct ToolManager {
     registry: Arc<ToolRegistry>,
     logger: Arc<dyn ToolLogger>,

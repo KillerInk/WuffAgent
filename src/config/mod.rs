@@ -46,6 +46,7 @@ impl From<ChatMessage> for Message {
             content: m.content,
             timestamp: m.timestamp,
             tool_calls: None,
+            tool_call_id: None,
         }
     }
 }

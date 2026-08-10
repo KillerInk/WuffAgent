@@ -177,7 +177,7 @@ impl ChatApp {
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                         
                         // Use a frame-like container for the bubble
-                        let bubble_inner_padding = egui::vec2(8.0, 6.0);
+                        let _bubble_inner_padding = egui::vec2(8.0, 6.0);
                         let bubble_frame = egui::Frame::none()
                             .fill(bubble_bg)
                             .rounding(egui::Rounding::same(8.0))
@@ -196,15 +196,31 @@ impl ChatApp {
                                     }
                                 }
                                 // Message content with wrapping
+                                // Tool messages: green/yellow tinted bubble
                                 // User messages: white text on dark blue bubble for contrast
                                 // AI messages: dark text on light bubble for contrast
+                                let is_tool = message.role == "tool";
+                                let _bubble_bg = if is_tool {
+                                    theme.tool_bg
+                                } else if is_user {
+                                    theme.user_bg
+                                } else {
+                                    theme.ai_bg
+                                };
                                 let text_color = if is_user {
                                     egui::Color32::WHITE
+                                } else if is_tool {
+                                    theme.text_primary
                                 } else {
                                     theme.text_primary
                                 };
+                                let tool_prefix = if is_tool {
+                                    format!("🔧 ")
+                                } else {
+                                    String::new()
+                                };
                                 let content_label = egui::Label::new(
-                                    egui::RichText::new(&message.content)
+                                    egui::RichText::new(format!("{}{}", tool_prefix, &message.content))
                                         .color(text_color)
                                 ).wrap();
                                 ui.add(content_label);

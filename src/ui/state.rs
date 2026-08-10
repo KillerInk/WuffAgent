@@ -9,6 +9,9 @@ use crate::tools::ToolManager;
 
 use super::window::{AppEvent, AppStatus, ChatMessage};
 
+// Re-export EngineEvent for use in other modules
+pub use crate::client::engine::EngineEvent;
+
 /// Chat-related state extracted from ChatApp
 #[derive(Default)]
 pub struct ChatState {
@@ -26,6 +29,7 @@ pub struct ChatState {
     pub(super) editing_message_content: String,
     pub(super) pending_error: Option<String>,
     pub(super) streaming_task: Option<JoinHandle<()>>,
+    pub(super) engine: Option<crate::client::engine::ChatEngine>,
 }
 
 /// Session-related state extracted from ChatApp
@@ -132,6 +136,7 @@ impl ChatApp {
                 editing_message_content: String::new(),
                 pending_error: None,
                 streaming_task: None,
+                engine: None,
             },
             sessions: SessionState {
                 sessions_panel: Some(sessions_panel),

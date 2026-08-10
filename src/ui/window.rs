@@ -1,7 +1,5 @@
 use eframe::egui;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use crate::client::ChatClient;
 use crate::config::{ChatMessage as ConfigChatMessage, Config};
@@ -36,6 +34,9 @@ pub enum AppEvent {
     StreamComplete { content: String, usage: Option<crate::types::Usage> },
     StreamError { error: String },
     ToolCallWarning { tool_name: String, message: String },
+    ToolCallStart { tool_name: String, call_id: String },
+    ToolCallComplete { tool_name: String, call_id: String, result: String },
+    ToolCallError { tool_name: String, call_id: String, error: String },
 }
 
 impl ChatApp {
@@ -216,7 +217,35 @@ impl ChatApp {
                     // Show as a pending warning (similar to error but non-fatal)
                     self.chat.pending_error = Some(format!("[{}] {}", tool_name, message));
                 }
+                AppEvent::ToolCallStart { tool_name, call_id } => {
+                    tracing::info!(tool = tool_name, call_id = %call_id, "Starting tool execution");
+                    self.add_tool_call_message(&tool_name, &call_id, "executing...");
+                }
+                AppEvent::ToolCallComplete { tool_name, call_id, result } => {
+                    tracing::info!(tool = tool_name, call_id = %call_id, "Tool execution complete");
+                    self.add_tool_call_message(&tool_name, &call_id, &result);
+                }
+                AppEvent::ToolCallError { tool_name, call_id, error } => {
+                    tracing::error!(tool = tool_name, call_id = %call_id, error = %error, "Tool execution error");
+                    self.add_tool_call_message(&tool_name, &call_id, &format!("Error: {}", error));
+                }
             }
+        }
+    }
+
+    /// Add a tool call message to the chat display.
+    fn add_tool_call_message(&mut self, tool_name: &str, call_id: &str, result: &str) {
+        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+        let content = format!("🔧 **{}** ({})\n```\n{}\n```", tool_name, call_id, result);
+        self.chat.messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content,
+            timestamp: timestamp.clone(),
+            image: None,
+        });
+        // Truncate if too many messages
+        if self.chat.messages.len() > self.sessions.max_display_messages {
+            self.chat.messages.drain(..self.chat.messages.len() - self.sessions.max_display_messages);
         }
     }
 
@@ -305,8 +334,8 @@ impl ChatApp {
     pub fn show_settings_dialog(
         &mut self,
         ctx: &egui::Context,
-        server: &Arc<ServerManager>,
-        client: &Arc<Mutex<ChatClient>>,
+        _server: &Arc<ServerManager>,
+        _client: &Arc<Mutex<ChatClient>>,
         config: &Arc<Mutex<Config>>,
     ) {
         if self.show_settings && self.settings_dialog.is_none() {
@@ -323,7 +352,13 @@ impl ChatApp {
 
     /// Update the save-failure notification state each frame based on the client's flag.
     fn update_save_failure_notification(&mut self) {
-        let client = self.client.lock().unwrap();
+        let client = match self.client.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("Mutex poisoned when checking save failure: {:?}", e);
+                return;
+            }
+        };
         if client.has_save_failure() && self.sessions.save_failure_message.is_none() {
             self.sessions.save_failure_message = Some("Save failed — will retry on next message".to_string());
         } else if !client.has_save_failure() {

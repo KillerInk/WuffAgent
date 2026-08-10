@@ -11,6 +11,9 @@ pub struct Message {
     /// Tool call requests from the AI (non-null when the AI wants to invoke a tool).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Reference to the tool call this result belongs to (for tool role messages).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// A single tool call requested by the AI.

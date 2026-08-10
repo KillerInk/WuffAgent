@@ -32,12 +32,14 @@ fn test_save_and_reload_with_messages() {
         content: "Hello".to_string(),
         timestamp: String::new(),
         tool_calls: None,
+        tool_call_id: None,
     });
     session.add_message(Message {
         role: "assistant".to_string(),
         content: "Hi there!".to_string(),
         timestamp: String::new(),
         tool_calls: None,
+        tool_call_id: None,
     });
     save_session(dir_path, &session).unwrap();
 

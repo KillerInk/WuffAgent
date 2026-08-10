@@ -215,12 +215,14 @@ async fn test_session_persistence() {
         content: "Hello".to_string(),
         timestamp: String::new(),
         tool_calls: None,
+        tool_call_id: None,
     });
     loaded.add_message(Message {
         role: "assistant".to_string(),
         content: "Hi there!".to_string(),
         timestamp: String::new(),
         tool_calls: None,
+        tool_call_id: None,
     });
     save_session(dir_path, &loaded).unwrap();
 
