@@ -5,6 +5,9 @@ use crate::types::ChatMessage;
 use super::theme::Theme;
 
 impl ChatApp {
+    /// Threshold in pixels to consider the user as "at bottom"
+    const SCROLL_BOTTOM_THRESHOLD: f32 = 10.0;
+
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
         let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
         
@@ -23,20 +26,71 @@ impl ChatApp {
         // Clone messages to avoid borrow checker issues
         let messages: Vec<ChatMessage> = self.chat.messages.clone();
 
+        // Load egui's persisted scroll state BEFORE rendering to know where the user was
+        let scroll_id = ui.id().with("chat_scroll");
+        let prev_egui_state = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id);
+        
+        // Determine if user was at bottom BEFORE this frame rendered new content
+        // We compare the persisted state's offset against the previous frame's content height
+        let was_at_bottom = self.compute_was_at_bottom(
+            prev_egui_state.as_ref(),
+            self.chat.prev_scroll_offset_y,
+            self.chat.prev_content_height,
+        );
+
+        // Determine whether to auto-scroll this frame
+        // Button click always scrolls to bottom; new messages only scroll if user was at bottom
+        let auto_scroll = self.chat.scroll_to_bottom_requested || was_at_bottom;
+
         // Use egui's built-in scroll area with id_salt
-        // egui automatically persists scroll state via stick_to_bottom
-        egui::ScrollArea::vertical()
+        // When button clicked, pre-set offset to max so stick_to_bottom works even without new content
+        let scroll_area = egui::ScrollArea::vertical()
             .id_salt("chat_scroll")
             .auto_shrink([false, true])
-            .stick_to_bottom(self.chat.auto_scroll)
-            .show(ui, |ui| {
+            .stick_to_bottom(auto_scroll);
+        let scroll_output = if self.chat.scroll_to_bottom_requested {
+            // Force scroll to bottom by setting offset to max content offset
+            scroll_area
+                .vertical_scroll_offset(self.chat.prev_content_height)
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                        for (i, msg) in messages.iter().enumerate() {
+                            self.draw_message(ui, msg, i, &theme);
+                        }
+                        let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        if self.chat.is_generating && !self.chat.current_response.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(egui::RichText::new(&streaming_ts)
+                                    .color(theme.text_dim)
+                                    .size(11.0));
+                                ui.colored_label(theme.primary, "AI:");
+                                ui.add(egui::Label::new(
+                                    egui::RichText::new(&self.chat.current_response)
+                                        .color(theme.text_primary)
+                                ));
+                                ui.spinner();
+                            });
+                        } else if self.chat.is_generating && self.chat.current_response.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(egui::RichText::new(&streaming_ts)
+                                    .color(theme.text_dim)
+                                    .size(11.0));
+                                ui.colored_label(theme.primary, "AI:");
+                                ui.spinner();
+                            });
+                        }
+                    });
+                })
+        } else {
+            scroll_area.show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     for (i, msg) in messages.iter().enumerate() {
                         self.draw_message(ui, msg, i, &theme);
                     }
-
-                    // Show current streaming response
                     let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
                     if self.chat.is_generating && !self.chat.current_response.is_empty() {
                         ui.horizontal(|ui| {
@@ -52,7 +106,6 @@ impl ChatApp {
                             ui.spinner();
                         });
                     } else if self.chat.is_generating && self.chat.current_response.is_empty() {
-                        // Show spinner while waiting for first chunk
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             ui.label(egui::RichText::new(&streaming_ts)
@@ -63,38 +116,98 @@ impl ChatApp {
                         });
                     }
                 });
-            });
+            })
+        };
 
-        // Show scroll-to-bottom button when not at bottom
-        // Use egui's built-in scroll state to detect position
-        let scroll_id = ui.id().with("chat_scroll");
-        let at_bottom = self.is_at_bottom(ui, scroll_id);
+        // Reset the scroll-to-bottom flag after this frame
+        self.chat.scroll_to_bottom_requested = false;
 
-        if !at_bottom {
-            let button_size = egui::vec2(32.0, 32.0);
-            let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 12.0, 12.0);
-            let button_rect = egui::Rect::from_min_size(button_pos, button_size);
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(button_rect), |ui| {
-                ui.set_max_size(button_size);
-                ui.set_min_size(button_size);
-                let scroll_btn = egui::Button::new("↓")
-                    .fill(theme.primary)
-                    .rounding(16.0);
-                if ui.add(scroll_btn).clicked() {
-                    // Enable auto-scroll; stick_to_bottom will handle the rest
-                    self.chat.auto_scroll = true;
-                }
-            });
+        // Update at_bottom from the output - use content_size vs offset from the rendered output
+        self.chat.at_bottom = self.is_at_bottom_from_output(&scroll_output);
+        
+        // Save our tracking state so next frame has fresh data
+        self.chat.prev_scroll_offset_y = scroll_output.state.offset.y;
+        self.chat.scroll_offset_y = scroll_output.state.offset.y;
+        self.chat.prev_content_height = scroll_output.content_size.y;
+
+        // Update button visibility and opacity
+        if self.chat.at_bottom {
+            // Fade out button
+            self.chat.button_opacity = (self.chat.button_opacity * 0.85).max(0.0);
+            if self.chat.button_opacity < 0.01 {
+                self.chat.button_visible = false;
+            }
+        } else {
+            // Show button and fade in
+            self.chat.button_visible = true;
+            self.chat.button_opacity = (self.chat.button_opacity + 0.12).min(1.0);
+        }
+
+        // Show scroll-to-bottom button when not at bottom and opacity > 0
+        if self.chat.button_visible && self.chat.button_opacity > 0.01 {
+            self.draw_scroll_to_bottom_button(ui, &theme);
         }
     }
 
-    fn is_at_bottom(&self, ui: &egui::Ui, scroll_id: egui::Id) -> bool {
-        if let Some(state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
-            let content_height = state.offset.y + ui.max_rect().height();
-            state.offset.y >= content_height - 1.0
-        } else {
-            true // No scroll state yet, assume at bottom
+    fn draw_scroll_to_bottom_button(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        let button_size = egui::vec2(36.0, 36.0);
+        let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 16.0, 16.0);
+        let button_rect = egui::Rect::from_min_size(button_pos, button_size);
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(button_rect), |ui| {
+            ui.set_max_size(button_size);
+            ui.set_min_size(button_size);
+            // Apply opacity via semi-transparent fill color (premultiplied alpha)
+            let alpha = (self.chat.button_opacity * 0.85 * 255.0) as u8;
+            let fill_color = egui::Color32::from_rgba_premultiplied(
+                theme.primary.r(),
+                theme.primary.g(),
+                theme.primary.b(),
+                alpha
+            );
+            let scroll_btn = egui::Button::new("↓")
+                .fill(fill_color)
+                .rounding(18.0);
+            if ui.add(scroll_btn).clicked() {
+                // Trigger auto-scroll on next frame
+                self.chat.scroll_to_bottom_requested = true;
+            }
+        });
+    }
+
+    /// Compute whether user was at bottom using the persisted egui state before render.
+    /// Compares the persisted scroll offset against the previous frame's content height.
+    fn compute_was_at_bottom(
+        &self,
+        prev_state: Option<&egui::containers::scroll_area::State>,
+        _prev_offset_y: f32,
+        prev_content_height: f32,
+    ) -> bool {
+        // If we have no prior state (first render), assume at bottom
+        if prev_state.is_none() {
+            return true;
         }
+        // If we have no prior content height (first render), assume at bottom
+        if prev_content_height == 0.0 {
+            return true;
+        }
+        // Use the at_bottom flag from last frame - it was computed correctly
+        // from the ScrollAreaOutput after the previous render
+        self.chat.at_bottom
+    }
+
+    /// Check if the scroll area is at the bottom using ScrollAreaOutput after render.
+    fn is_at_bottom_from_output(&self, output: &egui::containers::scroll_area::ScrollAreaOutput<()>) -> bool {
+        let content_height = output.content_size.y;
+        let viewport_height = output.inner_rect.height();
+        
+        // If content fits in viewport, no scrolling needed - at bottom
+        if content_height <= viewport_height {
+            return true;
+        }
+        
+        let max_offset = content_height - viewport_height;
+        let current_offset = output.state.offset.y;
+        current_offset >= max_offset - Self::SCROLL_BOTTOM_THRESHOLD
     }
 
     pub(super) fn draw_message(
@@ -214,16 +327,46 @@ impl ChatApp {
                                 } else {
                                     theme.text_primary
                                 };
-                                let tool_prefix = if is_tool {
-                                    format!("🔧 ")
+                                if is_tool {
+                                    // Parse tool message: "🔧 **tool_name** (call_id)\n```\nresult\n```"
+                                    let lines: Vec<&str> = message.content.lines().collect();
+                                    if lines.len() >= 3 {
+                                        // Header line (tool name + call_id)
+                                        ui.label(egui::RichText::new(lines[0])
+                                            .color(text_color)
+                                            .size(11.0));
+                                        ui.add_space(2.0);
+                                        // Find code fences
+                                        if lines.len() >= 3 && lines[1].starts_with("```") && lines.last().map_or(false, |l| l.starts_with("```")) {
+                                            // Code block: render header + fenced content
+                                            let code_lines: Vec<&str> = lines[2..lines.len()-1].to_vec();
+                                            let code_text = code_lines.join("\n");
+                                            egui::Frame::none()
+                                                .fill(egui::Color32::from_rgb(10, 10, 10))
+                                                .rounding(4.0)
+                                                .inner_margin(egui::Margin::same(6.0))
+                                                .show(ui, |ui| {
+                                                    ui.label(egui::RichText::new(code_text)
+                                                        .color(egui::Color32::from_rgb(200, 200, 200))
+                                                        .monospace());
+                                                });
+                                        } else {
+                                            // No fences, just render the whole content
+                                            ui.label(egui::RichText::new(message.content.clone())
+                                                .color(text_color));
+                                        }
+                                    } else {
+                                        // Short tool message, render as-is
+                                        ui.label(egui::RichText::new(message.content.clone())
+                                            .color(text_color));
+                                    }
                                 } else {
-                                    String::new()
-                                };
-                                let content_label = egui::Label::new(
-                                    egui::RichText::new(format!("{}{}", tool_prefix, &message.content))
-                                        .color(text_color)
-                                ).wrap();
-                                ui.add(content_label);
+                                    let content_label = egui::Label::new(
+                                        egui::RichText::new(message.content.clone())
+                                            .color(text_color)
+                                    ).wrap();
+                                    ui.add(content_label);
+                                }
                             }
                         });
                     });

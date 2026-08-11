@@ -23,7 +23,20 @@ pub struct ChatState {
     pub(super) current_response: String,
     pub(super) token_count: u32,
     pub(super) context_used: f32,
-    pub(super) auto_scroll: bool,
+    /// Whether to scroll to bottom on the next frame (set when new message arrives while at bottom)
+    pub(super) scroll_to_bottom_requested: bool,
+    /// Whether the scroll-to-bottom button should be visible
+    pub(super) button_visible: bool,
+    /// Fade animation for the button (0.0 to 1.0)
+    pub(super) button_opacity: f32,
+    /// Whether user is currently at the bottom of the chat
+    pub(super) at_bottom: bool,
+    /// Current scroll offset Y position (tracked across frames)
+    pub(super) scroll_offset_y: f32,
+    /// Previous frame's scroll offset Y position
+    pub(super) prev_scroll_offset_y: f32,
+    /// Previous frame's content height (for computing was_at_bottom)
+    pub(super) prev_content_height: f32,
     pub(super) pending_image: Option<String>,
     pub(super) editing_message_index: Option<usize>,
     pub(super) editing_message_content: String,
@@ -53,7 +66,6 @@ pub struct SettingsState {
     pub(super) max_messages: usize,
     pub(super) system_prompt: String,
     pub(super) streaming: bool,
-    pub(super) auto_scroll: bool,
     pub(super) theme: String,
 }
 
@@ -75,6 +87,7 @@ pub struct ChatApp {
     // UI flags
     pub(super) show_settings: bool,
     pub(super) settings_dialog: Option<super::settings::SettingsDialog>,
+    pub(super) presets_dialog: Option<super::presets_dialog::PresetsDialog>,
 
     // Remote server state
     pub(super) remote_n_ctx: u32,
@@ -95,9 +108,12 @@ impl ChatApp {
         let cfg = config.lock().unwrap();
         let streaming = cfg.streaming;
         let max_messages = cfg.max_messages;
-        let auto_scroll = cfg.auto_scroll;
         drop(cfg);
         let (tx, rx) = mpsc::channel();
+
+        // Connect the UI event channel to the client's tool event sender
+        // so that ToolCallStart/ToolCallComplete events reach the UI
+        client.lock().unwrap().set_tool_event_sender(tx.clone());
 
         // Initialize sessions panel and load the current session
         let sessions_panel = super::sessions_panel::SessionsPanel::new(&config.clone());
@@ -130,7 +146,13 @@ impl ChatApp {
                 current_response: String::new(),
                 token_count: 0,
                 context_used: 0.0,
-                auto_scroll,
+                scroll_to_bottom_requested: false,
+                button_visible: false,
+                button_opacity: 0.0,
+                at_bottom: true,
+                scroll_offset_y: 0.0,
+                prev_scroll_offset_y: 0.0,
+                prev_content_height: 0.0,
                 pending_image: None,
                 editing_message_index: None,
                 editing_message_content: String::new(),
@@ -146,6 +168,7 @@ impl ChatApp {
             settings: None,
             show_settings: false,
             settings_dialog: None,
+            presets_dialog: None,
             remote_n_ctx: 0,
             remote_n_ctx_arc: None,
             remote_n_ctx_handle: None,
