@@ -10,3 +10,4 @@ pub mod state;
 pub mod theme;
 pub mod event_handler;
 pub mod layout;
+pub mod presets_dialog;

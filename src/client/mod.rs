@@ -476,6 +476,12 @@ impl ChatClient {
 
             // Parse arguments
             tracing::debug!(
+                "execute_pending_tool_calls: tool={} call_id={} raw_args={}",
+                tc.function.name,
+                tc.id,
+                tc.function.arguments
+            );
+            tracing::debug!(
                 "execute_pending_tool_calls: parsing args for tool={} call_id={} args={:?}",
                 tc.function.name,
                 tc.id,
@@ -483,9 +489,19 @@ impl ChatClient {
             );
             // Try parsing as direct args first, then as wrapped in values
             let params = if let Ok(p) = serde_json::from_str::<crate::tools::ToolParams>(&tc.function.arguments) {
+                tracing::debug!(
+                    "execute_pending_tool_calls: parsed args as ToolParams for tool={} call_id={}",
+                    tc.function.name,
+                    tc.id
+                );
                 p
             } else if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
                 // Model sends direct args like {"expression":"2 + 2"}, wrap them
+                tracing::debug!(
+                    "execute_pending_tool_calls: parsed args as direct JSON values for tool={} call_id={}",
+                    tc.function.name,
+                    tc.id
+                );
                 let mut values = std::collections::HashMap::new();
                 if let Some(obj) = args.as_object() {
                     for (k, v) in obj {

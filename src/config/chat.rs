@@ -39,8 +39,6 @@ pub struct ChatSettings {
     pub system_prompt: String,
     pub streaming: bool,
     pub theme: String,
-    #[serde(default)]
-    pub auto_scroll: bool,
     pub chat_history: Vec<ChatMessage>,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -58,7 +56,6 @@ impl Default for ChatSettings {
             system_prompt: String::new(),
             streaming: true,
             theme: "dark".to_string(),
-            auto_scroll: true,
             chat_history: Vec::new(),
             session_id: None,
             max_messages: 100,

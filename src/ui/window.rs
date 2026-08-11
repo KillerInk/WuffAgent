@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::config::{ChatMessage as ConfigChatMessage, Config};
+use crate::config::{ChatMessage as ConfigChatMessage, Config, get_presets_path, PresetStore};
 pub use crate::ui::state::ChatApp;
 
 impl ChatApp {
@@ -12,13 +12,56 @@ impl ChatApp {
         config: &Arc<Mutex<Config>>,
     ) {
         if self.show_settings && self.settings_dialog.is_none() {
-            self.settings_dialog = Some(super::settings::SettingsDialog::new(config));
+            // Pass a shared flag so settings can signal us to open presets
+            let show_presets = Arc::new(Mutex::new(false));
+            self.settings_dialog =
+                Some(super::settings::SettingsDialog::new_with_presets_flag(config, show_presets));
         }
         if let Some(dialog) = self.settings_dialog.as_mut() {
             let closed = dialog.show(ctx, config);
             if closed {
                 self.show_settings = false;
                 self.settings_dialog = None;
+            }
+        }
+    }
+
+    pub fn show_presets_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        config: &Arc<Mutex<Config>>,
+    ) {
+        // Check if settings dialog signaled us to open presets via shared flag
+        if let Some(ref sd) = self.settings_dialog {
+            if let Ok(flag) = sd.show_presets.lock() {
+                if *flag {
+                    drop(flag);
+                    if let Ok(mut f) = sd.show_presets.lock() {
+                        *f = false;
+                    }
+                    if self.presets_dialog.is_none() {
+                        if let Ok(store) = PresetStore::load(&get_presets_path()) {
+                            self.presets_dialog =
+                                Some(super::presets_dialog::PresetsDialog::new(store));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(dialog) = self.presets_dialog.as_mut() {
+            let closed = dialog.show(ctx, config);
+            if closed {
+                // Persist store to disk before closing
+                if let Ok(path) = std::env::current_exe() {
+                    if let Some(dir) = path.parent() {
+                        let presets_path = dir.join("presets.json");
+                        if let Err(e) = dialog.store.save(&presets_path) {
+                            eprintln!("Failed to save presets: {}", e);
+                        }
+                    }
+                }
+                self.presets_dialog = None;
             }
         }
     }
@@ -86,6 +129,8 @@ impl eframe::App for ChatApp {
         let client = self.client.clone();
         let config = self.config.clone();
         self.show_settings_dialog(ctx, &server, &client, &config);
+        // Show presets dialog (may be triggered from settings)
+        self.show_presets_dialog(ctx, &config);
         // Draw main UI
         self.setup_ui(ctx);
     }
@@ -94,7 +139,6 @@ impl eframe::App for ChatApp {
         // Save config (existing)
         let mut cfg = self.config.lock().unwrap();
         cfg.streaming = self.chat.streaming;
-        cfg.auto_scroll = self.chat.auto_scroll;
         cfg.chat_history = self.chat.messages.iter().map(|m| ConfigChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),

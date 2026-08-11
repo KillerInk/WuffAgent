@@ -6,6 +6,24 @@ use crate::tools::lib::{Tool, ToolOutput, ToolParams, ToolSchema};
 /// A tool that performs read/write/list operations on the local filesystem.
 pub struct FileIOTool;
 
+/// Validates a path for safety, rejecting dangerous paths and path traversal patterns.
+fn validate_path(path: &str) -> Result<(), crate::tools::lib::ToolError> {
+    // Reject absolute paths to sensitive system directories
+    if path == "/etc" || path.starts_with("/etc/") || path == "/root" || path.starts_with("/root/") {
+        return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
+    }
+    // Reject Windows system directories
+    let lower = path.to_lowercase();
+    if lower == "c:\\windows" || lower.starts_with("c:\\windows\\") {
+        return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
+    }
+    // Reject path traversal patterns
+    if path.contains("..") {
+        return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
+    }
+    Ok(())
+}
+
 impl FileIOTool {
     pub fn new() -> Self {
         Self
@@ -73,6 +91,8 @@ impl Tool for FileIOTool {
         let action: String = params
             .get("action")
             .ok_or_else(|| crate::tools::lib::ToolError::InvalidParams("action is required".to_string()))?;
+
+        validate_path(&path)?;
 
         match action.as_str() {
             "read" => {

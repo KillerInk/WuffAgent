@@ -6,6 +6,7 @@ pub use self::chat::ChatMessage;
 pub use self::local::LocalConfig;
 pub use self::remote::RemoteConfig;
 pub use self::encryption::EncryptionSettings;
+pub use self::presets::{get_presets_path, LocalPreset, Preset, PresetError, PresetStore, RemotePreset};
 pub use paths::get_config_path;
 
 mod chat;
@@ -13,6 +14,7 @@ mod local;
 mod remote;
 mod encryption;
 mod paths;
+mod presets;
 #[cfg(test)]
 mod tests;
 
@@ -44,6 +46,7 @@ pub struct Config {
     pub threads: u32,
 
     // Remote-mode fields
+    #[serde(default)]
     pub remote_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_api_key: Option<String>,
@@ -52,8 +55,6 @@ pub struct Config {
     pub system_prompt: String,
     pub streaming: bool,
     pub theme: String,
-    #[serde(default)]
-    pub auto_scroll: bool,
     pub chat_history: Vec<ChatMessage>,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -92,7 +93,6 @@ impl Default for Config {
             system_prompt: String::new(),
             streaming: true,
             theme: "dark".to_string(),
-            auto_scroll: true,
             chat_history: Vec::new(),
             session_id: None,
             max_messages: 100,

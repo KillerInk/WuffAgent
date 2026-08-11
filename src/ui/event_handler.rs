@@ -36,6 +36,10 @@ impl ChatApp {
                             0.0
                         };
                     }
+                    // Auto-scroll if user is viewing the bottom
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
                 }
                 AppEvent::MessageError { error } => {
                     self.chat.status = AppStatus::Error(error.clone());
@@ -46,7 +50,9 @@ impl ChatApp {
                     self.chat.current_response.push_str(&content);
                 }
                 AppEvent::StreamComplete { content, usage } => {
-                    self.add_message("assistant", &content);
+                    if !content.is_empty() {
+                        self.add_message("assistant", &content);
+                    }
                     self.stop_streaming();
                     self.progress += 1.0;
                     let server_n_ctx = self.get_effective_n_ctx();
@@ -66,6 +72,10 @@ impl ChatApp {
                             0.0
                         };
                     }
+                    // Auto-scroll if user is viewing the bottom
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
                 }
                 AppEvent::StreamError { error } => {
                     self.chat.status = AppStatus::Error(error.clone());
@@ -80,14 +90,26 @@ impl ChatApp {
                 AppEvent::ToolCallStart { tool_name, call_id } => {
                     tracing::info!(tool = tool_name, call_id = %call_id, "Starting tool execution");
                     self.add_tool_call_message(&tool_name, &call_id, "executing...");
+                    // Auto-scroll if user is viewing the bottom
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
                 }
                 AppEvent::ToolCallComplete { tool_name, call_id, result } => {
                     tracing::info!(tool = tool_name, call_id = %call_id, "Tool execution complete");
                     self.add_tool_call_message(&tool_name, &call_id, &result);
+                    // Auto-scroll if user is viewing the bottom
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
                 }
                 AppEvent::ToolCallError { tool_name, call_id, error } => {
                     tracing::error!(tool = tool_name, call_id = %call_id, error = %error, "Tool execution error");
-                    self.add_tool_call_message(&tool_name, &call_id, &format!("Error: {}", error));
+                    self.add_tool_error_message(&tool_name, &call_id, &error);
+                    // Auto-scroll if user is viewing the bottom
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
                 }
             }
         }
@@ -97,6 +119,22 @@ impl ChatApp {
     fn add_tool_call_message(&mut self, tool_name: &str, call_id: &str, result: &str) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
         let content = format!("🔧 **{}** ({})\n```\n{}\n```", tool_name, call_id, result);
+        self.chat.messages.push(ChatMessage {
+            role: "tool".to_string(),
+            content,
+            timestamp: timestamp.clone(),
+            image: None,
+        });
+        // Truncate if too many messages
+        if self.chat.messages.len() > self.sessions.max_display_messages {
+            self.chat.messages.drain(..self.chat.messages.len() - self.sessions.max_display_messages);
+        }
+    }
+
+    /// Add a tool error message to the chat display with error styling.
+    fn add_tool_error_message(&mut self, tool_name: &str, call_id: &str, error: &str) {
+        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+        let content = format!("🔴 **{}** ({})\n```\nError: {}\n```", tool_name, call_id, error);
         self.chat.messages.push(ChatMessage {
             role: "tool".to_string(),
             content,

@@ -21,10 +21,19 @@ pub struct SettingsDialog {
     pub encryption_enabled: bool,
     pub encryption_password: String,
     pub max_messages: usize,
+    /// Shared flag to signal the app to open the presets dialog.
+    pub show_presets: Arc<Mutex<bool>>,
 }
 
 impl SettingsDialog {
     pub fn new(config: &Arc<Mutex<Config>>) -> Self {
+        Self::new_with_presets_flag(config, Arc::new(Mutex::new(false)))
+    }
+
+    pub fn new_with_presets_flag(
+        config: &Arc<Mutex<Config>>,
+        show_presets: Arc<Mutex<bool>>,
+    ) -> Self {
         let cfg = config.lock().unwrap();
         Self {
             server_path: cfg.server_path.clone(),
@@ -45,6 +54,7 @@ impl SettingsDialog {
             encryption_enabled: cfg.encryption_enabled,
             encryption_password: cfg.encryption_password.clone().unwrap_or_default(),
             max_messages: cfg.max_messages,
+            show_presets,
         }
     }
 
@@ -66,7 +76,6 @@ impl SettingsDialog {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Server path:").size(12.0).color(theme.text_secondary));
                         if ui.button("Browse...").clicked() {
-                            #[cfg(feature = "file-dialog")]
                             if let Some(path) = rfd::FileDialog::new()
                                 .add_filter("executable", &[""])
                                 .pick_file() {
@@ -78,7 +87,6 @@ impl SettingsDialog {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Model path:").size(12.0).color(theme.text_secondary));
                         if ui.button("Browse...").clicked() {
-                            #[cfg(feature = "file-dialog")]
                             if let Some(path) = rfd::FileDialog::new()
                                 .add_filter("gguf models", &["gguf"])
                                 .pick_file() {
@@ -163,6 +171,15 @@ impl SettingsDialog {
                         });
                     }
                 });
+
+                ui.separator();
+
+                // Presets button — signals the app to open the presets dialog
+                if ui.button("Presets...").clicked() {
+                    if let Ok(mut flag) = self.show_presets.lock() {
+                        *flag = true;
+                    }
+                }
 
                 ui.separator();
 
