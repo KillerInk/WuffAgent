@@ -70,8 +70,13 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                 SupervisorDecision::Complete { final_output } => {
                     tracing::info!("Pipeline complete. Output: {}", final_output);
                     all_results.extend(new_results);
+                    let output_str = match final_output.as_str() {
+                        Some(s) if !s.is_empty() => s.to_string(),
+                        _ => format!("{}", final_output),
+                    };
                     self.send_event(AppEvent::AgentPipelineComplete {
                         result_count: all_results.len(),
+                        final_output: output_str,
                     });
                     return Ok(all_results);
                 }

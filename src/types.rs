@@ -78,7 +78,7 @@ pub enum AppEvent {
     AgentTaskStarted { task_id: String, agent_type: String },
     AgentTaskCompleted { task_id: String, status: String, duration_ms: u64 },
     AgentFeedbackLoop { iteration: u32, action: String },
-    AgentPipelineComplete { result_count: usize },
+    AgentPipelineComplete { result_count: usize, final_output: String },
     AgentPipelineError { error: String },
     AgentPipelineCancelled,
 }

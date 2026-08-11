@@ -181,11 +181,16 @@ impl ChatApp {
                         self.chat.scroll_to_bottom_requested = true;
                     }
                 }
-                AppEvent::AgentPipelineComplete { result_count } => {
+                AppEvent::AgentPipelineComplete { result_count, final_output } => {
                     tracing::info!(result_count, "Agent pipeline complete");
                     self.add_message("system", &format!(
                         "🎉 **Pipeline complete**: {} results returned", result_count
                     ));
+                    if !final_output.is_empty() {
+                        self.add_message("assistant", &format!(
+                            "## Pipeline Output\n\n{}", final_output
+                        ));
+                    }
                     // Mark all remaining pending tasks as skipped
                     for task in &mut self.chat.pipeline.tasks {
                         if task.status == crate::ui::state::PipelineTaskStatus::Pending {
