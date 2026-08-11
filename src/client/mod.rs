@@ -22,6 +22,8 @@ pub use session::{
     trim_conversation, clear_history, clear_session_messages,
 };
 
+use crate::agents::traits::ChatClientLike;
+
 #[derive(Clone)]
 pub struct ChatClient {
     base_url: String,
@@ -948,5 +950,40 @@ mod tests {
 
         let warnings = client.check_tool_call_warnings();
         assert!(warnings.is_empty());
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatClientLike for ChatClient {
+    async fn send_message(&self, _messages: &[Message]) -> Result<String, String> {
+        let prompt = _messages.iter()
+            .filter(|m| m.role == "user" || m.role == "assistant")
+            .map(|m| m.content.as_str())
+            .collect::<Vec<&str>>()
+            .join("\n");
+        match self.send_message(&prompt).await {
+            Ok((response, _)) => Ok(response),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    async fn send_streaming(&self, _messages: &[Message]) -> Result<String, String> {
+        let prompt = _messages.iter()
+            .filter(|m| m.role == "user" || m.role == "assistant")
+            .map(|m| m.content.as_str())
+            .collect::<Vec<&str>>()
+            .join("\n");
+        // Call the internal HTTP streaming method directly (not the trait method)
+        let request = build_request(&self.system_prompt, &self.conversation, &prompt, true, None);
+        let builder = build_stream_request(&self.http_client, &self.base_url, self.api_key.as_deref(), &request);
+        let resp = builder.send().await.map_err(|e| e.to_string())?;
+        let mut callback = |chunk: String| -> Result<(), Error> { Ok(()) };
+        let _usage = stream_message_arc(resp, &self.conversation, &mut callback).await.map_err(|e| e.to_string())?;
+        // Extract the accumulated response from conversation (lock after await to avoid Send issue)
+        let conv = self.conversation.lock().unwrap();
+        let last_msg = conv.iter().rev().find(|m| m.role == "assistant" && !m.content.is_empty());
+        match last_msg {
+            Some(m) => Ok(m.content.clone()),
+            None => Err("No response from streaming".to_string()),
+        }
     }
 }

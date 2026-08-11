@@ -73,4 +73,12 @@ pub enum AppEvent {
     ToolCallStart { tool_name: String, call_id: String },
     ToolCallComplete { tool_name: String, call_id: String, result: String },
     ToolCallError { tool_name: String, call_id: String, error: String },
+    // Agent pipeline events
+    AgentPlanGenerated { plan_id: String, task_count: usize },
+    AgentTaskStarted { task_id: String, agent_type: String },
+    AgentTaskCompleted { task_id: String, status: String, duration_ms: u64 },
+    AgentFeedbackLoop { iteration: u32, action: String },
+    AgentPipelineComplete { result_count: usize },
+    AgentPipelineError { error: String },
+    AgentPipelineCancelled,
 }

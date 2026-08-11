@@ -1,0 +1,8 @@
+{
+    "name": "researcher",
+    "description": "Web search and information gathering worker",
+    "personality": "You are a research specialist. Your job is to find accurate information using web search and analyze files. Be thorough and cite your sources.",
+    "allowed_tools": ["web_search", "file_io"],
+    "priority": 1,
+    "max_concurrent": 2
+}

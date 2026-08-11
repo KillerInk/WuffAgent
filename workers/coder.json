@@ -1,0 +1,8 @@
+{
+    "name": "coder",
+    "description": "Code reading, writing, and refactoring worker",
+    "personality": "You are a coding specialist. Your job is to read, write, and modify source code files. Write clean, well-documented code following best practices.",
+    "allowed_tools": ["file_io"],
+    "priority": 2,
+    "max_concurrent": 2
+}

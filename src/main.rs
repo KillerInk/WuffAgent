@@ -5,6 +5,7 @@ pub mod server;
 pub mod ui;
 pub mod tools;
 pub mod sessions;
+pub mod agents;
 
 use std::sync::{Arc, Mutex};
 

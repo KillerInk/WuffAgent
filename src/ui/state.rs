@@ -12,6 +12,49 @@ use crate::types::{AppEvent, AppStatus, ChatMessage};
 // Re-export EngineEvent for use in other modules
 pub use crate::client::engine::EngineEvent;
 
+// Re-export agent types for use in other modules
+pub use crate::agents::AgentPipeline;
+
+/// A single task progress entry in the pipeline panel.
+#[derive(Clone, Debug)]
+pub struct PipelineTaskEntry {
+    pub id: String,
+    pub description: String,
+    pub status: PipelineTaskStatus,
+    pub agent_type: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum PipelineTaskStatus {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl std::fmt::Display for PipelineTaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipelineTaskStatus::Pending => write!(f, "pending"),
+            PipelineTaskStatus::Running => write!(f, "running"),
+            PipelineTaskStatus::Completed => write!(f, "completed"),
+            PipelineTaskStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// State of the agent pipeline panel.
+#[derive(Clone, Debug, Default)]
+pub struct PipelineState {
+    pub(super) active: bool,
+    pub(super) plan_id: String,
+    pub(super) iteration: u32,
+    pub(super) tasks: Vec<PipelineTaskEntry>,
+    pub(super) feedback_state: String,
+    pub(super) cancelled: bool,
+}
+
 /// Chat-related state extracted from ChatApp
 #[derive(Default)]
 pub struct ChatState {
@@ -43,6 +86,8 @@ pub struct ChatState {
     pub(super) pending_error: Option<String>,
     pub(super) streaming_task: Option<JoinHandle<()>>,
     pub(super) engine: Option<crate::client::engine::ChatEngine>,
+    /// Agent pipeline panel state
+    pub(super) pipeline: PipelineState,
 }
 
 /// Session-related state extracted from ChatApp
@@ -77,6 +122,9 @@ pub struct ChatApp {
 
     // UI progress
     pub(super) progress: f32,
+
+    // Agent pipeline (optional, initialized if /plan trigger is used)
+    pub(super) agent_pipeline: Option<Arc<AgentPipeline<ChatClient>>>,
 }
 
 impl ChatApp {
@@ -140,6 +188,7 @@ impl ChatApp {
                 pending_error: None,
                 streaming_task: None,
                 engine: None,
+                pipeline: PipelineState::default(),
             },
             sessions: SessionState {
                 sessions_panel: Some(sessions_panel),
@@ -153,6 +202,7 @@ impl ChatApp {
             remote_n_ctx_arc: None,
             remote_n_ctx_handle: None,
             progress: 0.0,
+            agent_pipeline: None,
         }
     }
 }

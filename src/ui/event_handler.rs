@@ -111,6 +111,100 @@ impl ChatApp {
                         self.chat.scroll_to_bottom_requested = true;
                     }
                 }
+                // Agent pipeline events
+                AppEvent::AgentPlanGenerated { plan_id, task_count } => {
+                    tracing::info!(plan_id = %plan_id, task_count, "Agent plan generated");
+                    self.add_message("system", &format!(
+                        "📋 **Plan generated**: {} — {} tasks to execute", plan_id, task_count
+                    ));
+                    self.chat.pipeline.active = true;
+                    self.chat.pipeline.plan_id = plan_id.clone();
+                    self.chat.pipeline.iteration = 0;
+                    // Create pending task entries
+                    self.chat.pipeline.tasks = (0..task_count)
+                        .map(|i| crate::ui::state::PipelineTaskEntry {
+                            id: format!("task-{}", i),
+                            description: format!("Task {}", i + 1),
+                            status: crate::ui::state::PipelineTaskStatus::Pending,
+                            agent_type: "general".to_string(),
+                        })
+                        .collect();
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
+                }
+                AppEvent::AgentTaskStarted { task_id, agent_type } => {
+                    tracing::info!(task_id = %task_id, agent_type = %agent_type, "Agent task started");
+                    self.add_message("system", &format!(
+                        "▶️ **Running**: [{}] ({})", task_id, agent_type
+                    ));
+                    // Update pipeline task status
+                    for task in &mut self.chat.pipeline.tasks {
+                        if task.id == task_id {
+                            task.status = crate::ui::state::PipelineTaskStatus::Running;
+                            task.agent_type = agent_type.clone();
+                            break;
+                        }
+                    }
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
+                }
+                AppEvent::AgentTaskCompleted { task_id, status, duration_ms } => {
+                    tracing::info!(task_id = %task_id, status = %status, duration_ms, "Agent task completed");
+                    self.add_message("system", &format!(
+                        "✅ **Completed**: [{}] — {} ({:.1}s)", task_id, status, duration_ms as f64 / 1000.0
+                    ));
+                    // Update pipeline task status
+                    for task in &mut self.chat.pipeline.tasks {
+                        if task.id == task_id {
+                            task.status = if status == "success" {
+                                crate::ui::state::PipelineTaskStatus::Completed
+                            } else {
+                                crate::ui::state::PipelineTaskStatus::Failed
+                            };
+                            break;
+                        }
+                    }
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
+                }
+                AppEvent::AgentFeedbackLoop { iteration, action } => {
+                    tracing::info!(iteration, action = %action, "Agent feedback loop");
+                    self.add_message("system", &format!(
+                        "🔄 **Feedback loop** iteration {}: {}", iteration, action
+                    ));
+                    self.chat.pipeline.iteration = iteration;
+                    self.chat.pipeline.feedback_state = action.clone();
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
+                }
+                AppEvent::AgentPipelineComplete { result_count } => {
+                    tracing::info!(result_count, "Agent pipeline complete");
+                    self.add_message("system", &format!(
+                        "🎉 **Pipeline complete**: {} results returned", result_count
+                    ));
+                    // Mark all remaining pending tasks as skipped
+                    for task in &mut self.chat.pipeline.tasks {
+                        if task.status == crate::ui::state::PipelineTaskStatus::Pending {
+                            task.status = crate::ui::state::PipelineTaskStatus::Completed;
+                        }
+                    }
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
+                }
+                AppEvent::AgentPipelineError { error } => {
+                    tracing::error!(error = %error, "Agent pipeline error");
+                    self.add_message("system", &format!("❌ **Pipeline error**: {}", error));
+                    self.chat.status = crate::types::AppStatus::Error(error);
+                }
+                AppEvent::AgentPipelineCancelled => {
+                    tracing::info!("Agent pipeline cancelled");
+                    self.chat.pipeline.cancelled = true;
+                }
             }
         }
     }

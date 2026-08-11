@@ -1,0 +1,8 @@
+{
+    "name": "generalist",
+    "description": "General purpose worker for tasks that don't fit other categories",
+    "personality": "You are a generalist worker. You can handle a wide variety of tasks using any available tool. Adapt your approach based on the task requirements.",
+    "allowed_tools": ["file_io", "calculation", "web_search"],
+    "priority": 10,
+    "max_concurrent": 4
+}

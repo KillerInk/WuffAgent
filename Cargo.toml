@@ -30,6 +30,10 @@ sha2 = "0.10"
 rand = "0.8"
 base64 = "0.22"
 image = { version = "0.25", features = ["jpeg", "png", "gif", "bmp", "webp"] }
+async-trait = "0.1"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+tokio-util = "0.7"
+jsonschema = "0.26"
 
 [dev-dependencies]
 tempfile = "3.0"

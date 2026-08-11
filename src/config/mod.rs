@@ -72,6 +72,10 @@ pub struct Config {
     pub encryption_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption_password: Option<String>,
+
+    // Agent pipeline configuration
+    #[serde(default)]
+    pub agent_config: crate::agents::config::AgentConfig,
 }
 
 fn default_max_messages() -> usize {
@@ -100,6 +104,7 @@ impl Default for Config {
             file_path: PathBuf::new(),
             encryption_enabled: false,
             encryption_password: None,
+            agent_config: crate::agents::config::AgentConfig::default(),
         }
     }
 }

@@ -82,6 +82,11 @@ impl ChatApp {
             let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
             ui.visuals_mut().panel_fill = theme.background;
             self.draw_chat_area(ui);
+            // Draw pipeline progress below chat (when active)
+            if self.chat.pipeline.active {
+                ui.add_space(8.0);
+                self.draw_pipeline_progress(ui, &theme);
+            }
         });
     }
 

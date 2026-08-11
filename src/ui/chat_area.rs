@@ -11,6 +11,12 @@ impl ChatApp {
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
         let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
         
+        // Draw agent pipeline panel at the top if active
+        if self.chat.pipeline.active {
+            self.draw_pipeline_panel(ui, &theme);
+            ui.separator();
+        }
+        
         // Show pending error as inline warning
         let pending_error = self.chat.pending_error.take();
         if let Some(ref err) = pending_error {
@@ -417,6 +423,133 @@ impl ChatApp {
         // Clear edit state
         self.chat.editing_message_index = None;
         self.chat.editing_message_content.clear();
+    }
+
+    /// Draw the agent pipeline panel with plan status, task progress, and feedback loop info.
+    pub(super) fn draw_pipeline_panel(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        // Snapshot pipeline state before the closure
+        let plan_id = self.chat.pipeline.plan_id.clone();
+        let iteration = self.chat.pipeline.iteration;
+        let cancelled = self.chat.pipeline.cancelled;
+        let tasks: Vec<_> = self.chat.pipeline.tasks.iter().collect();
+        let feedback_state = self.chat.pipeline.feedback_state.clone();
+        
+        // Panel header with cancel button
+        egui::Frame::none()
+            .fill(theme.surface_light)
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::same(8.0))
+            .stroke(egui::Stroke::new(1.0, theme.border))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                    // Title
+                    let title = format!(
+                        "🤖 Agent Pipeline — Plan: {} | Iteration: {}",
+                        plan_id, iteration
+                    );
+                    ui.label(egui::RichText::new(title)
+                        .color(theme.text_primary)
+                        .size(12.0)
+                        .strong());
+                    
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Cancel button
+                        if !cancelled {
+                            let cancel_btn = egui::Button::new("✕ Cancel")
+                                .fill(theme.error)
+                                .rounding(4.0);
+                            if ui.add(cancel_btn).clicked() {
+                                if let Some(ref pipeline) = self.agent_pipeline {
+                                    pipeline.cancel();
+                                }
+                                self.chat.pipeline.cancelled = true;
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("⏹ Cancelled")
+                                .color(theme.error)
+                                .size(11.0));
+                        }
+                    });
+                });
+                
+                ui.add_space(6.0);
+                
+                // Task progress list
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+                    for task in &tasks {
+                        let status_icon = match task.status {
+                            crate::ui::state::PipelineTaskStatus::Pending => "⬜",
+                            crate::ui::state::PipelineTaskStatus::Running => "🔄",
+                            crate::ui::state::PipelineTaskStatus::Completed => "✅",
+                            crate::ui::state::PipelineTaskStatus::Failed => "❌",
+                        };
+                        ui.label(egui::RichText::new(format!(
+                            "{} [{}] {}", status_icon, task.id, task.description
+                        )).size(11.0));
+                        if task.status == crate::ui::state::PipelineTaskStatus::Running {
+                            ui.spinner();
+                        }
+                    }
+                });
+                
+                ui.add_space(4.0);
+                
+                // Feedback loop status
+                if !feedback_state.is_empty() || iteration > 0 {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+                        ui.label(egui::RichText::new("🔄 Feedback:")
+                            .color(theme.text_secondary)
+                            .size(10.0));
+                        ui.label(egui::RichText::new(&feedback_state)
+                            .color(theme.accent)
+                            .size(10.0));
+                    });
+                }
+            });
+    }
+
+    /// Draw a compact pipeline progress bar below the chat.
+    pub(super) fn draw_pipeline_progress(&self, ui: &mut egui::Ui, theme: &Theme) {
+        let pipeline = &self.chat.pipeline;
+        if pipeline.tasks.is_empty() {
+            return;
+        }
+        let total = pipeline.tasks.len();
+        let completed = pipeline.tasks.iter()
+            .filter(|t| t.status == crate::ui::state::PipelineTaskStatus::Completed)
+            .count();
+        let failed = pipeline.tasks.iter()
+            .filter(|t| t.status == crate::ui::state::PipelineTaskStatus::Failed)
+            .count();
+        let running = pipeline.tasks.iter()
+            .filter(|t| t.status == crate::ui::state::PipelineTaskStatus::Running)
+            .count();
+        let _pending = total - completed - failed - running;
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+            ui.label(egui::RichText::new("Progress:")
+                .color(theme.text_secondary)
+                .size(10.0));
+            ui.add(egui::ProgressBar::new(completed as f32 / total.max(1) as f32));
+            ui.label(egui::RichText::new(format!(
+                "{}/{} tasks", completed, total
+            )).color(theme.text_secondary).size(10.0));
+            if running > 0 {
+                ui.spinner();
+            }
+            if failed > 0 {
+                ui.label(egui::RichText::new(format!("❌{}", failed))
+                    .color(theme.error).size(10.0));
+            }
+            if pipeline.cancelled {
+                ui.label(egui::RichText::new(" ⏹ Cancelled")
+                    .color(theme.error).size(10.0));
+            }
+        });
     }
 
     pub(super) fn delete_message(&mut self, index: usize) {

@@ -1,0 +1,8 @@
+{
+    "name": "executor",
+    "description": "Command execution, building, and deployment worker",
+    "personality": "You are an execution specialist. Your job is to run commands, build projects, and deploy artifacts. Be careful with destructive operations.",
+    "allowed_tools": ["file_io", "calculation", "web_search"],
+    "priority": 3,
+    "max_concurrent": 1
+}
