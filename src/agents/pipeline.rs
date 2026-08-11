@@ -7,7 +7,8 @@ use tracing;
 use super::planner::PlannerAgent;
 use super::supervisor::SupervisorAgent;
 use super::traits::{AgentError, ChatClientLike, PlannerAgent as PlannerAgentTrait, SupervisorAgent as SupervisorAgentTrait, SupervisorDecision};
-use super::types::AgentResult;
+use super::types::{AgentResult, Task, TaskStatus};
+use super::types::build_context;
 use crate::types::AppEvent;
 
 /// The top-level orchestrator that runs the full multi-agent pipeline.
@@ -48,6 +49,8 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
 
         let mut all_results = Vec::new();
         let mut iteration = 0u32;
+        // Track task IDs that have failed at least once to avoid infinite retry loops
+        let mut failed_task_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         loop {
             if self.cancel_token.is_cancelled() {
@@ -98,6 +101,10 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                         action: format!("refining: {} completed, {} failed", completed.len(), failed.len()),
                     });
 
+                    // Track failed task IDs to avoid infinite retry loops
+                    for result in &failed {
+                        failed_task_ids.insert(result.task_id.clone());
+                    }
                     let refined_plan = {
                         let planner = self.planner.lock().await;
                         PlannerAgentTrait::refine_plan(&*planner, &plan, &completed, &failed, &context).await?
@@ -106,8 +113,34 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                     all_results.extend(completed);
                 }
                 SupervisorDecision::Retry { tasks } => {
-                    tracing::info!("Retrying {} failed tasks", tasks.len());
-                    let retry_results = self.supervisor.retry_tasks(&tasks, &all_results).await?;
+                    // Filter out tasks that have already failed once — don't retry forever
+                    let retryable: Vec<Task> = tasks
+                        .iter()
+                        .filter(|t| !failed_task_ids.contains(&t.id))
+                        .cloned()
+                        .collect();
+                    if retryable.is_empty() {
+                        tracing::warn!("All retryable tasks have already failed, giving up");
+                        // Mark remaining as failed and complete
+                        for task in &tasks {
+                            failed_task_ids.insert(task.id.clone());
+                        }
+                        // Fall through to complete with what we have
+                        let final_output = build_context(&all_results);
+                        self.send_event(AppEvent::AgentPipelineComplete {
+                            result_count: all_results.len(),
+                            final_output: format!("{}", final_output),
+                        });
+                        return Ok(all_results);
+                    }
+                    tracing::info!("Retrying {} failed tasks ({} already failed before)", retryable.len(), tasks.len() - retryable.len());
+                    let retry_results = self.supervisor.retry_tasks(&retryable, &all_results).await?;
+                    // Track which tasks failed this round
+                    for result in &retry_results {
+                        if result.status == TaskStatus::Failed {
+                            failed_task_ids.insert(result.task_id.clone());
+                        }
+                    }
                     all_results.extend(retry_results);
                 }
                 SupervisorDecision::Continue { new_tasks } => {
