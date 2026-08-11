@@ -299,7 +299,7 @@ mod tests {
         let t1 = Task::new("first", AgentType::General, serde_json::json!({}));
         let t2 = Task::new("second", AgentType::General, serde_json::json!({}));
         let t3 = Task::new("third (depends on first)", AgentType::Coding, serde_json::json!({})) ;
-        let mut plan = ExecutionPlan::new("test", vec![t2, t1, t3]);
+        let mut plan = ExecutionPlan::new("test", vec![t2, t1.clone(), t3.clone()]);
         // Set up dependency: t3 depends on t1
         if let Some(task) = plan.tasks.iter_mut().find(|t| t.id == t3.id) {
             task.depends_on = Some(t1.id.clone());

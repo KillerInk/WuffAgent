@@ -114,6 +114,10 @@ pub struct ChatApp {
     pub(super) show_settings: bool,
     pub(super) settings_dialog: Option<super::settings::SettingsDialog>,
     pub(super) presets_dialog: Option<super::presets_dialog::PresetsDialog>,
+    pub(super) show_agent_config: bool,
+    pub(super) agent_config_dialog: Option<super::agent_config::AgentConfigDialog>,
+    /// Agent manager for add/edit/remove/list of worker configurations.
+    pub(super) agent_manager: Arc<Mutex<crate::agents::config::AgentManager>>,
 
     // Remote server state
     pub(super) remote_n_ctx: u32,
@@ -133,6 +137,7 @@ impl ChatApp {
         client: Arc<Mutex<ChatClient>>,
         config: Arc<Mutex<Config>>,
         tool_manager: Arc<ToolManager>,
+        agent_manager: Arc<Mutex<crate::agents::config::AgentManager>>,
     ) -> Self {
         let cfg = config.lock().unwrap();
         let streaming = cfg.streaming;
@@ -198,6 +203,9 @@ impl ChatApp {
             show_settings: false,
             settings_dialog: None,
             presets_dialog: None,
+            show_agent_config: false,
+            agent_config_dialog: None,
+            agent_manager,
             remote_n_ctx: 0,
             remote_n_ctx_arc: None,
             remote_n_ctx_handle: None,

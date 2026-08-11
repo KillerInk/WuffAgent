@@ -46,6 +46,14 @@ impl ChatApp {
                         self.toggle_theme(ctx);
                     }
 
+                    // Agent config button
+                    let agent_btn = egui::Button::new("🤖")
+                        .fill(theme.surface_light)
+                        .rounding(4.0);
+                    if ui.add(agent_btn).clicked() {
+                        self.show_agent_config = true;
+                    }
+
                     // Settings button
                     let settings_btn = egui::Button::new("⚙")
                         .fill(theme.surface_light)

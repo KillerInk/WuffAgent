@@ -1,8 +1,9 @@
 use jsonschema::Validator;
 use tracing;
+use uuid::Uuid;
 
 use super::traits::{Agent, AgentError, AgentRole, ChatClientLike};
-use super::types::{AgentId, AgentResult, ExecutionPlan, TaskStatus};
+use super::types::{AgentId, AgentResult, AgentType, ExecutionPlan, Task, TaskStatus};
 use crate::types::Message;
 
 /// JSON schema for validating LLM-generated plan responses.
@@ -38,17 +39,25 @@ static PLANNER_SYSTEM_PROMPT: &str = r#"
 You are a planning agent for a multi-agent orchestration system.
 Your job is to decompose user requests into executable tasks.
 
-Output a JSON ExecutionPlan with:
-- plan_id: unique identifier (format: "plan-<uuid>")
-- user_request: the original request
-- tasks: array of Task objects, each with:
-  - id: unique task id (format: "task-<uuid>")
-  - description: clear, actionable description
-  - agent_type: one of research, coding, implementation, general
-  - input: parameters needed (tool name, arguments, etc.) as a JSON object
-  - depends_on: parent task id or null
-  - max_retries: 3
-  - priority: integer (lower = first)
+OUTPUT FORMAT: Your ENTIRE response must be a single valid JSON object.
+Do NOT include any markdown, code fences, explanations, headings, or text outside the JSON.
+
+Return a JSON object with this exact structure:
+{
+  "plan_id": "plan-<uuid>",
+  "user_request": "<the original request>",
+  "tasks": [
+    {
+      "id": "task-<uuid>",
+      "description": "<clear actionable description>",
+      "agent_type": "research",
+      "input": {"tool": "<tool_name>", "arguments": {}},
+      "depends_on": null,
+      "max_retries": 3,
+      "priority": 0
+    }
+  ]
+}
 
 Rules:
 1. Break complex requests into atomic, independent tasks where possible.
@@ -57,6 +66,7 @@ Rules:
 4. Use agent_type matching the work: research for information gathering,
    coding for file manipulation, implementation for execution, general as fallback.
 5. Each task's input should contain the tool name and any required parameters.
+6. CRITICAL: Return ONLY the raw JSON object. No markdown, no code fences, no explanation, no headings.
 "#;
 
 /// LLM-driven Planner Agent.
@@ -97,14 +107,107 @@ impl<C: ChatClientLike> PlannerAgent<C> {
 
         if let Err(errors) = validator.validate(&plan_value) {
             let error_msgs: Vec<String> = validator.iter_errors(&plan_value).map(|e| e.to_string()).collect();
-            return Err(AgentError::PlanError(format!(
-                "Plan validation failed: {}",
-                error_msgs.join(", ")
-            )));
+            tracing::warn!("Plan JSON validation failed: {}", error_msgs.join(", "));
+            // Fall back to markdown parsing
+            return self.parse_markdown_plan(response);
         }
 
         let plan: ExecutionPlan = serde_json::from_value(plan_value)
             .map_err(|e| AgentError::PlanError(format!("Deserialization failed: {}", e)))?;
+        Ok(plan)
+    }
+
+    /// Fallback: parse a markdown-formatted plan into an ExecutionPlan.
+    fn parse_markdown_plan(&self, response: &str) -> Result<ExecutionPlan, AgentError> {
+        tracing::info!("Falling back to markdown plan parsing");
+
+        let lines: Vec<&str> = response.lines().collect();
+        let mut tasks = Vec::new();
+        let mut current_task_desc = String::new();
+        let mut in_task = false;
+        for line in &lines {
+            let trimmed = line.trim();
+
+            // Detect task items: numbered lists, bullet points, or "###" sections
+            if trimmed.starts_with(|c: char| c.is_ascii_digit()) && trimmed.contains('.') {
+                // Numbered list item like "1. Do something" or "1) Do something"
+                if let Some(rest) = trimmed.split_once(|c| c == '.' || c == ')') {
+                    let desc = rest.1.trim().to_string();
+                    if !desc.is_empty() {
+                        if !current_task_desc.is_empty() {
+                            tasks.push(Task::new(&current_task_desc, AgentType::General, serde_json::json!({})));
+                        }
+                        current_task_desc = desc;
+                        in_task = true;
+                        continue;
+                    }
+                }
+            }
+
+            // Bullet point items
+            if trimmed.starts_with('-') || trimmed.starts_with('*') {
+                let desc = trimmed[1..].trim().to_string();
+                if !desc.is_empty() {
+                    if !current_task_desc.is_empty() {
+                        tasks.push(Task::new(&current_task_desc, AgentType::General, serde_json::json!({})));
+                    }
+                    current_task_desc = desc;
+                    in_task = true;
+                    continue;
+                }
+            }
+
+            // Sub-items (indented under a task)
+            if in_task && (trimmed.starts_with("  ") || trimmed.starts_with("\t")) && !trimmed.is_empty() {
+                let sub = trimmed.trim();
+                if !sub.is_empty() {
+                    current_task_desc.push_str(" ");
+                    current_task_desc.push_str(sub);
+                }
+                continue;
+            }
+
+            // Phase headers or other headings signal end of current task
+            if trimmed.starts_with('#') || trimmed.is_empty() {
+                if in_task && !current_task_desc.is_empty() {
+                    tasks.push(Task::new(&current_task_desc, AgentType::General, serde_json::json!({})));
+                    current_task_desc = String::new();
+                    in_task = false;
+                }
+                continue;
+            }
+
+            // Regular text line — accumulate as task description
+            if in_task && !trimmed.is_empty() {
+                current_task_desc.push_str(" ");
+                current_task_desc.push_str(trimmed);
+            }
+        }
+
+        // Flush last task
+        if !current_task_desc.is_empty() {
+            tasks.push(Task::new(&current_task_desc, AgentType::General, serde_json::json!({})));
+        }
+
+        // If we found no tasks, use the whole response as a single task
+        if tasks.is_empty() {
+            let summary = response.lines()
+                .take(5)
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<&str>>()
+                .join(" ");
+            tasks.push(Task::new(&summary, AgentType::General, serde_json::json!({})));
+        }
+
+        let plan = ExecutionPlan {
+            plan_id: format!("plan-{}", Uuid::new_v4()),
+            user_request: response.to_string(),
+            tasks,
+            created_at: chrono::Utc::now(),
+            metadata: serde_json::json!({"source": "markdown_fallback"}),
+        };
+
         Ok(plan)
     }
 
@@ -141,7 +244,7 @@ impl<C: ChatClientLike> PlannerAgent<C> {
         }
 
         Err(last_error.unwrap_or_else(|| AgentError::PlanError(
-            "Failed to generate valid plan after retries".to_string()
+            "Failed to generate valid plan after retries. The LLM may not be producing structured JSON output. Consider using a different model or adjusting the prompt.".to_string()
         )))
     }
 
@@ -311,15 +414,61 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
     }
 }
 
-/// Extract JSON from a response that may be wrapped in markdown code blocks.
+/// Extract JSON from a response that may be wrapped in markdown code blocks or prose.
 fn extract_json_from_response(response: &str) -> String {
-    // Try to find JSON object in the response
-    if let Some(start) = response.find('{') {
-        if let Some(end) = response.rfind('}') {
-            if end > start {
-                return response[start..=end].to_string();
+    let s = response.trim();
+
+    // Strip markdown code fences if present
+    let s = if s.starts_with("```") {
+        let end = s.find("```").unwrap_or(s.len());
+        s["```".len()..end].trim()
+    } else {
+        s
+    };
+
+    // Find the outermost balanced JSON object using brace counting
+    let mut depth = 0;
+    let mut start: Option<usize> = None;
+    let mut end = None;
+
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
             }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if start.is_some() {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                // Skip over string contents (basic escape handling)
+                let mut j = i + 1;
+                while j < s.len() {
+                    let bytes = &s.as_bytes()[j..];
+                    if bytes.starts_with(b"\\") {
+                        j += 2;
+                    } else if bytes.starts_with(b"\"") {
+                        j += 1;
+                        break;
+                    } else {
+                        j += 1;
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    response.to_string()
+
+    match (start, end) {
+        (Some(start), Some(end)) if end > start => s[start..end].to_string(),
+        _ => s.to_string(),
+    }
 }

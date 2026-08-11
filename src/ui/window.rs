@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::config::{ChatMessage as ConfigChatMessage, Config, get_presets_path, PresetStore};
+use crate::tools::ToolManager;
 pub use crate::ui::state::ChatApp;
 
 impl ChatApp {
@@ -62,6 +63,25 @@ impl ChatApp {
                     }
                 }
                 self.presets_dialog = None;
+            }
+        }
+    }
+
+    pub fn show_agent_config_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        agent_manager: &Arc<Mutex<crate::agents::config::AgentManager>>,
+        tool_manager: &Arc<ToolManager>,
+    ) {
+        if self.show_agent_config && self.agent_config_dialog.is_none() {
+            self.agent_config_dialog =
+                Some(super::agent_config::AgentConfigDialog::new(agent_manager.clone(), tool_manager));
+        }
+        if let Some(dialog) = self.agent_config_dialog.as_mut() {
+            let closed = dialog.show(ctx, agent_manager);
+            if closed {
+                self.show_agent_config = false;
+                self.agent_config_dialog = None;
             }
         }
     }
@@ -131,6 +151,10 @@ impl eframe::App for ChatApp {
         self.show_settings_dialog(ctx, &server, &client, &config);
         // Show presets dialog (may be triggered from settings)
         self.show_presets_dialog(ctx, &config);
+        // Show agent config dialog
+        let agent_manager = self.agent_manager.clone();
+        let tool_manager = self.tool_manager.clone();
+        self.show_agent_config_dialog(ctx, &agent_manager, &tool_manager);
         // Draw main UI
         self.setup_ui(ctx);
     }

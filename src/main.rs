@@ -131,9 +131,30 @@ fn main() -> eframe::Result {
         let _ = cl.load_session();
     }
 
+    // Create AgentManager for runtime agent lifecycle
+    let config_path_clone = config_path.clone();
+    let config_workers_dir = config_path_clone
+        .parent()
+        .map(|p| p.join("workers"))
+        .unwrap_or_else(|| config_path_clone.clone());
+
+    // Also scan the project's workers/ directory for built-in agents
+    let mut agent_manager = agents::config::AgentManager::new(config_workers_dir.clone());
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let project_workers = exe_dir.parent().map(|p| p.join("workers"));
+            if let Some(ref workers) = project_workers {
+                if workers.exists() {
+                    agent_manager.add_search_dir(workers.clone());
+                }
+            }
+        }
+    }
+    let agent_manager = Arc::new(Mutex::new(agent_manager));
+
     eframe::run_native(
         "WuffAgent",
         options,
-        Box::new(|_cc| Ok(Box::new(ChatApp::new(server, client, config, tool_manager)))),
+        Box::new(|_cc| Ok(Box::new(ChatApp::new(server, client, config, tool_manager, agent_manager)))),
     )
 }

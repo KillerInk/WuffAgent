@@ -15,7 +15,7 @@ pub struct ResearchWorker {
     description: String,
     agent_type: AgentType,
     allowed_tools: Vec<String>,
-    personality: String,
+    system_prompt: String,
     tool_manager: Arc<Mutex<ToolManager>>,
 }
 
@@ -25,7 +25,7 @@ impl ResearchWorker {
         description: &str,
         agent_type: AgentType,
         allowed_tools: Vec<String>,
-        personality: &str,
+        system_prompt: &str,
         tool_manager: Arc<Mutex<ToolManager>>,
     ) -> Self {
         Self {
@@ -34,7 +34,7 @@ impl ResearchWorker {
             description: description.to_string(),
             agent_type,
             allowed_tools,
-            personality: personality.to_string(),
+            system_prompt: system_prompt.to_string(),
             tool_manager,
         }
     }
@@ -166,7 +166,7 @@ impl Agent for ResearchWorker {
     fn role(&self) -> crate::agents::traits::AgentRole {
         crate::agents::traits::AgentRole::CustomWorker(self.name.clone())
     }
-    fn instructions(&self) -> &str { &self.personality }
+    fn instructions(&self) -> &str { &self.system_prompt }
 }
 
 impl ResearchWorker {
