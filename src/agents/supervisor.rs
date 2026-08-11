@@ -65,7 +65,7 @@ impl SupervisorAgent {
             .find_best_worker(task, &self.worker_configs)
             .await
         {
-            if let Some(worker) = self.worker_registry.spawn(&name).await {
+            if let Some(worker) = self.worker_registry.spawn(&name) {
                 tracing::info!(
                     "Selected worker '{}' (type={:?}) for task '{}'",
                     name,
@@ -78,7 +78,7 @@ impl SupervisorAgent {
 
         // Fall back to default worker
         tracing::warn!("No suitable worker found for task '{}', using default", task.description);
-        if let Some(worker) = self.worker_registry.spawn("default").await {
+        if let Some(worker) = self.worker_registry.spawn("default") {
             return Ok((worker, "default".to_string()));
         }
 
@@ -179,11 +179,11 @@ impl SupervisorAgentTrait for SupervisorAgent {
                     let (worker_name, mut worker) = if let Some((name, _config)) =
                         registry.find_best_worker(&task_clone, &worker_configs).await
                     {
-                        match registry.spawn(&name).await {
+                        match registry.spawn(&name) {
                             Some(w) => (name.clone(), w),
                             None => {
                                 tracing::warn!("Failed to spawn worker '{}', falling back to 'default'", name);
-                                match registry.spawn("default").await {
+                                match registry.spawn("default") {
                                     Some(w) => ("default".to_string(), w),
                                     None => {
                                         tracing::error!("Failed to spawn fallback worker 'default'");
@@ -193,7 +193,7 @@ impl SupervisorAgentTrait for SupervisorAgent {
                             }
                         }
                     } else {
-                        match registry.spawn("default").await {
+                        match registry.spawn("default") {
                             Some(w) => ("default".to_string(), w),
                             None => {
                                 tracing::error!("Failed to spawn fallback worker 'default'");
@@ -302,7 +302,6 @@ impl SupervisorAgentTrait for SupervisorAgent {
             let mut worker = self
                 .worker_registry
                 .spawn("default")
-                .await
                 .ok_or_else(|| AgentError::AgentNotFound("default".to_string()))?;
 
             let result = worker.execute_task(task, &context).await?;

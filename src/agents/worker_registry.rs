@@ -1,8 +1,7 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tokio::sync::RwLock;
 use tracing;
 
 use super::traits::{AgentError, WorkerAgent};
@@ -25,35 +24,35 @@ impl WorkerRegistry {
     }
 
     /// Register a worker factory by name.
-    pub async fn register(
+    pub fn register(
         &self,
         name: &str,
         factory: impl Fn() -> Box<dyn WorkerAgent> + Send + Sync + 'static,
     ) {
         self.workers
             .write()
-            .await
+            .unwrap()
             .insert(name.to_string(), Arc::new(factory));
         tracing::info!("Registered worker: {}", name);
     }
 
     /// Spawn a worker by name.
-    pub async fn spawn(&self, name: &str) -> Option<Box<dyn WorkerAgent>> {
+    pub fn spawn(&self, name: &str) -> Option<Box<dyn WorkerAgent>> {
         self.workers
             .read()
-            .await
+            .unwrap()
             .get(name)
             .map(|f| f())
     }
 
     /// Check if a worker is registered.
-    pub async fn has(&self, name: &str) -> bool {
-        self.workers.read().await.contains_key(name)
+    pub fn has(&self, name: &str) -> bool {
+        self.workers.read().unwrap().contains_key(name)
     }
 
     /// Get all registered worker names.
-    pub async fn names(&self) -> Vec<String> {
-        self.workers.read().await.keys().cloned().collect()
+    pub fn names(&self) -> Vec<String> {
+        self.workers.read().unwrap().keys().cloned().collect()
     }
 
     /// Load workers from config and register them (skips disabled agents).
@@ -78,8 +77,7 @@ impl WorkerRegistry {
 
             self.register(&name, move || {
                 Box::new(GenericWorker::new(&name_closure, &desc_closure, tools_closure.clone(), &system_prompt_closure))
-            })
-            .await;
+            });
             count += 1;
         }
         tracing::info!("Loaded {} worker(s) from config", count);
@@ -94,10 +92,10 @@ impl WorkerRegistry {
     ) -> Result<usize, AgentError> {
         // Remove all registered names except builtins
         let builtin_names = vec!["default".to_string(), "executing".to_string()];
-        let all_names = self.names().await;
+        let all_names = self.names();
         for name in all_names {
             if !builtin_names.contains(&name) {
-                self.remove(&name).await;
+                self.remove(&name);
             }
         }
 
@@ -109,8 +107,8 @@ impl WorkerRegistry {
     }
 
     /// Remove a worker by name.
-    pub async fn remove(&self, name: &str) -> bool {
-        self.workers.write().await.remove(name).is_some()
+    pub fn remove(&self, name: &str) -> bool {
+        self.workers.write().unwrap().remove(name).is_some()
     }
 
     /// Find the best worker for a task based on tool requirements.
@@ -155,7 +153,7 @@ impl WorkerRegistry {
         }
 
         // Also consider built-in worker types
-        let worker_names = self.names().await;
+        let worker_names = self.names();
         for wname in &worker_names {
             let tool_overlap = if task_tool_names.is_empty() {
                 5
@@ -222,7 +220,6 @@ impl WorkerRegistry {
     }
 
     fn register_builtins(&mut self) {
-        // Register a default fallback worker
         self.register("default", || {
             Box::new(GenericWorker::new(
                 "default",
@@ -231,8 +228,6 @@ impl WorkerRegistry {
                 "You are a default worker.",
             ))
         });
-
-        // Register the executing worker (has tool_manager access)
         self.register("executing", || {
             Box::new(ExecutingWorker::new(
                 "executing",
@@ -244,8 +239,6 @@ impl WorkerRegistry {
                     "calculation".to_string(),
                 ],
                 "You are an executing worker.",
-                // Note: this factory is called without a ToolManager;
-                // the supervisor wires it up separately.
                 Arc::new(tokio::sync::Mutex::new(
                     crate::tools::ToolManager::new(
                         std::sync::Arc::new(crate::tools::registry::ToolRegistry::new(
@@ -268,19 +261,73 @@ impl Default for WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::types::AgentType;
 
-    #[tokio::test]
-    async fn test_register_and_spawn() {
+    #[test]
+    fn test_register_and_spawn() {
         let registry = WorkerRegistry::new();
         registry
-            .register("test", || Box::new(GenericWorker::new("test", "Test", vec![], "You are a test worker.")))
-            .await;
+            .register("test", || Box::new(GenericWorker::new("test", "Test", vec![], "You are a test worker.")));
 
-        assert!(registry.has("test").await);
-        assert!(!registry.has("nonexistent").await);
+        assert!(registry.has("test"));
+        assert!(!registry.has("nonexistent"));
 
-        let worker = registry.spawn("test").await;
+        let worker = registry.spawn("test");
         assert!(worker.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_builtin_default_spawnable() {
+        // Verify builtins are registered and spawnable immediately after construction
+        let registry = WorkerRegistry::new();
+        assert!(registry.has("default"), "builtin 'default' must be registered");
+        assert!(registry.has("executing"), "builtin 'executing' must be registered");
+
+        let worker = registry.spawn("default");
+        assert!(worker.is_some(), "spawn('default') must return Some");
+        let worker = worker.unwrap();
+        assert_eq!(worker.agent_type(), AgentType::General);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_after_load_from_configs() {
+        // Simulate runtime: new registry -> load configs -> spawn default
+        let registry = WorkerRegistry::new();
+        let configs = vec![
+            WorkerConfig {
+                name: "research".to_string(),
+                description: "Research worker".to_string(),
+                system_prompt: "You are a researcher.".to_string(),
+                allowed_tools: vec!["web_search".to_string()],
+                priority: 0,
+                max_concurrent: 1,
+                enabled: true,
+            },
+        ];
+        registry.load_from_configs(configs).await.unwrap();
+
+        assert!(registry.has("default"), "builtin must survive load_from_configs");
+        assert!(registry.has("research"), "loaded config must be registered");
+        assert!(registry.has("executing"), "builtin must survive load_from_configs");
+
+        let worker = registry.spawn("default");
+        assert!(worker.is_some(), "spawn('default') must still work after config load");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_default_with_arc_clone() {
+        // Simulate runtime: Arc<WorkerRegistry> clone then spawn
+        use std::sync::Arc;
+        let registry = Arc::new(WorkerRegistry::new());
+
+        assert!(registry.has("default"));
+        let worker = registry.spawn("default");
+        assert!(worker.is_some(), "spawn('default') via Arc must work");
+
+        // Clone the Arc (like supervisor does)
+        let cloned = registry.clone();
+        let worker2 = cloned.spawn("default");
+        assert!(worker2.is_some(), "spawn('default') via cloned Arc must work");
     }
 
     #[tokio::test]
@@ -324,5 +371,57 @@ mod tests {
 
         let result = registry.find_best_worker(&task, &Vec::new()).await;
         assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_find_best_worker_empty_configs_falls_back_to_builtin() {
+        // When no worker configs are loaded, find_best_worker should fall back to builtins
+        let registry = WorkerRegistry::new();
+        let empty: Vec<WorkerConfig> = Vec::new();
+
+        let task = super::super::types::Task {
+            id: "test-2".to_string(),
+            description: "List files in a directory".to_string(),
+            agent_type: super::super::types::AgentType::Research,
+            input: serde_json::json!({"tool": "list_directory", "arguments": {"path": "."}}),
+            depends_on: None,
+            max_retries: 3,
+            priority: 0,
+        };
+
+        let result = registry.find_best_worker(&task, &empty).await;
+        // Should find 'default' as fallback since it's the first builtin
+        assert!(result.is_some(), "find_best_worker must find fallback when configs are empty");
+        let (name, _) = result.unwrap();
+        // 'executing' scores higher than 'default' when tool overlap is considered (5 built-in tools vs 1)
+        assert!(name == "executing" || name == "default", "must fall back to a builtin, got {}", name);
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_spawn_best_worker_flow() {
+        // End-to-end test mimicking the supervisor's spawn_best_worker logic
+        use super::super::types::AgentType;
+
+        let registry = Arc::new(WorkerRegistry::new());
+        let configs: Vec<WorkerConfig> = Vec::new(); // no loaded configs
+
+        let task = super::super::types::Task {
+            id: "test-3".to_string(),
+            description: "Check for precision errors in SYCL code".to_string(),
+            agent_type: AgentType::Research,
+            input: serde_json::json!({"tool": "list_directory", "arguments": {"path": "."}}),
+            depends_on: None,
+            max_retries: 3,
+            priority: 0,
+        };
+
+        // This mirrors the supervisor's spawn_best_worker logic
+        let worker = if let Some((name, _config)) = registry.find_best_worker(&task, &configs).await {
+            registry.spawn(&name)
+        } else {
+            registry.spawn("default")
+        };
+
+        assert!(worker.is_some(), "supervisor must be able to spawn a worker");
     }
 }
