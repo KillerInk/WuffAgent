@@ -8,19 +8,35 @@ use super::traits::{AgentError, WorkerAgent};
 use super::worker::GenericWorker;
 use super::workers::generic::ExecutingWorker;
 use crate::agents::config::WorkerConfig;
+use crate::tools::registry::ToolRegistry;
+use crate::tools::lib::TracingToolLogger;
 
 /// Registry that maps worker names to factory functions.
 pub struct WorkerRegistry {
     workers: RwLock<HashMap<String, Arc<dyn Fn() -> Box<dyn WorkerAgent> + Send + Sync>>>,
+    /// Shared tool registry with builtins — all workers use this.
+    tool_registry: Arc<ToolRegistry>,
 }
 
 impl WorkerRegistry {
     pub fn new() -> Self {
+        let tool_registry = Arc::new(ToolRegistry::new(
+            vec![],
+            Arc::new(TracingToolLogger),
+        ));
+        // Register built-in tools so workers can actually use them
+        crate::tools::builtin::register_builtins(&tool_registry).expect("failed to register builtin tools");
         let mut registry = Self {
             workers: RwLock::new(HashMap::new()),
+            tool_registry,
         };
         registry.register_builtins();
         registry
+    }
+
+    /// Get a clone of the shared tool registry for use by workers.
+    pub fn tool_registry(&self) -> Arc<ToolRegistry> {
+        self.tool_registry.clone()
     }
 
     /// Register a worker factory by name.
@@ -220,7 +236,10 @@ impl WorkerRegistry {
     }
 
     fn register_builtins(&mut self) {
-        self.register("default", || {
+        let tool_mgr = Arc::new(tokio::sync::Mutex::new(
+            crate::tools::ToolManager::new(self.tool_registry.clone()),
+        ));
+        self.register("default", move || {
             Box::new(GenericWorker::new(
                 "default",
                 "Default fallback worker",
@@ -228,7 +247,7 @@ impl WorkerRegistry {
                 "You are a default worker.",
             ))
         });
-        self.register("executing", || {
+        self.register("executing", move || {
             Box::new(ExecutingWorker::new(
                 "executing",
                 "Executing worker with full tool access",
@@ -239,14 +258,7 @@ impl WorkerRegistry {
                     "calculation".to_string(),
                 ],
                 "You are an executing worker.",
-                Arc::new(tokio::sync::Mutex::new(
-                    crate::tools::ToolManager::new(
-                        std::sync::Arc::new(crate::tools::registry::ToolRegistry::new(
-                            vec![],
-                            std::sync::Arc::new(crate::tools::lib::TracingToolLogger),
-                        )),
-                    )
-                )),
+                tool_mgr.clone(),
             ))
         });
     }
