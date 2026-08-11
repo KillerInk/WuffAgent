@@ -42,7 +42,20 @@ pub fn apply_actions(
             panel.selected_id().clone()
         }
         PanelAction::Delete(id) => {
-            sessions::delete_session(panel.sessions_dir(), &id);
+            match sessions::delete_session(panel.sessions_dir(), &id) {
+                Ok(()) => {
+                    panel.show_notification(&format!("Session '{}' deleted", id), true);
+                }
+                Err(e) => {
+                    panel.show_notification(&format!("Failed to delete session: {}", e), false);
+                    // Still deselect if it was selected
+                    if panel.selected_id().as_deref() == Some(&id) {
+                        *panel.selected_id_mut() = None;
+                    }
+                    panel.refresh();
+                    return panel.selected_id().clone();
+                }
+            }
             if panel.selected_id().as_deref() == Some(&id) {
                 *panel.selected_id_mut() = None;
             }

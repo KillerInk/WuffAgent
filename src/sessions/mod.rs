@@ -140,26 +140,20 @@ pub fn list_sessions(dir: &Path) -> Vec<Session> {
     sessions
 }
 
-pub fn delete_session(dir: &Path, id: &str) -> bool {
+pub fn delete_session(dir: &Path, id: &str) -> Result<(), String> {
     let path = dir.join(format!("{}.json", id));
-    if fs::remove_file(&path).is_err() {
-        return false;
+    if !path.exists() {
+        return Err(format!("session file not found: {}", path.display()));
     }
-    // Also delete all backup files for this session
-    let pattern = format!("{}.json.bak_", id);
-    if dir.exists() {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let file_name = entry.file_name();
-                if let Some(name) = file_name.to_str() {
-                    if name.starts_with(&pattern) {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
-            }
-        }
+    fs::remove_file(&path).map_err(|e| format!("failed to delete session file: {}", e))?;
+
+    // Also delete backup files for this session (pattern: {id}.json.bak)
+    let backup_path = dir.join(format!("{}.json.bak", id));
+    if backup_path.exists() {
+        let _ = fs::remove_file(&backup_path);
     }
-    true
+
+    Ok(())
 }
 
 /// Clear all messages from a session while preserving the session itself.
@@ -470,9 +464,18 @@ mod tests {
         let dir = std::env::temp_dir().join("wuffagent_test_sessions4");
         let _ = fs::create_dir_all(&dir);
         let session = create_session(&dir, "To Delete");
-        let deleted = delete_session(&dir, &session.id);
-        assert!(deleted);
+        let result = delete_session(&dir, &session.id);
+        assert!(result.is_ok());
         assert!(load_session(&dir, &session.id).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_missing_session_returns_error() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions10");
+        let _ = fs::create_dir_all(&dir);
+        let result = delete_session(&dir, "nonexistent_id");
+        assert!(result.is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -499,7 +502,7 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let session = create_session(&dir, "To Delete");
         assert!(session_exists(&dir, &session.id));
-        delete_session(&dir, &session.id);
+        let _ = delete_session(&dir, &session.id);
         assert!(!session_exists(&dir, &session.id));
         let _ = fs::remove_dir_all(&dir);
     }
