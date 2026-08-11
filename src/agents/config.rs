@@ -148,6 +148,11 @@ impl AgentManager {
         }
     }
 
+    /// Returns the primary workers directory path.
+    pub fn workers_dir(&self) -> &PathBuf {
+        &self.workers_dir
+    }
+
     /// Add an additional directory to scan for existing agent configs.
     pub fn add_search_dir(&mut self, dir: PathBuf) {
         if !self.search_dirs.contains(&dir) {

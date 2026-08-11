@@ -148,15 +148,24 @@ fn main() -> eframe::Result {
 
     // Also scan the project's workers/ directory for built-in agents
     let mut agent_manager = agents::config::AgentManager::new(config_workers_dir.clone());
+
+    // Try multiple strategies to find the project's workers/ directory
+    let mut add_project_workers = |path: std::path::PathBuf| {
+        if path.exists() {
+            agent_manager.add_search_dir(path);
+        }
+    };
+
+    // 1. Relative to executable parent (works for installed binary)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            let project_workers = exe_dir.parent().map(|p| p.join("workers"));
-            if let Some(ref workers) = project_workers {
-                if workers.exists() {
-                    agent_manager.add_search_dir(workers.clone());
-                }
-            }
+            add_project_workers(exe_dir.parent().map(|p| p.join("workers")).unwrap_or_default());
         }
+    }
+
+    // 2. Relative to current working directory (works during development / cargo run)
+    if let Ok(cwd) = std::env::current_dir() {
+        add_project_workers(cwd.join("workers"));
     }
     let agent_manager = Arc::new(Mutex::new(agent_manager));
 

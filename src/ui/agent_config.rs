@@ -68,6 +68,7 @@ impl AgentConfigDialog {
             .collapsible(false)
             .resizable(true)
             .default_size([780.0, 540.0])
+            .open(&mut true)
             .show(ctx, |ui| {
                 ui.style_mut().spacing.item_spacing.y = 6.0;
 
@@ -80,6 +81,9 @@ impl AgentConfigDialog {
                                 self.agents = m.reload().unwrap_or_default();
                             }
                             self.clear_form();
+                        }
+                        if ui.button("X").clicked() {
+                            closed = true;
                         }
                     });
                 });
@@ -302,6 +306,14 @@ impl AgentConfigDialog {
             max_concurrent: self.max_concurrent,
             enabled: self.enabled,
         };
+
+        // Ensure the workers directory exists before saving
+        if let Ok(m) = agent_manager.lock() {
+            if let Err(e) = std::fs::create_dir_all(&m.workers_dir()) {
+                self.message = Some(format!("Failed to create workers directory: {}", e));
+                return false;
+            }
+        }
 
         let result = if self.is_new {
             agent_manager.lock().map(|m| m.add_agent(&config))
