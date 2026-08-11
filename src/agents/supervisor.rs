@@ -182,21 +182,21 @@ impl SupervisorAgentTrait for SupervisorAgent {
                         match registry.spawn(&name).await {
                             Some(w) => (name.clone(), w),
                             None => {
-                                tracing::warn!("Failed to spawn worker '{}', falling back to 'generalist'", name);
-                                match registry.spawn("generalist").await {
-                                    Some(w) => ("generalist".to_string(), w),
+                                tracing::warn!("Failed to spawn worker '{}', falling back to 'default'", name);
+                                match registry.spawn("default").await {
+                                    Some(w) => ("default".to_string(), w),
                                     None => {
-                                        tracing::error!("Failed to spawn fallback worker 'generalist'");
+                                        tracing::error!("Failed to spawn fallback worker 'default'");
                                         return ("unknown".to_string(), Err(AgentError::ConfigError("No available workers".to_string())));
                                     }
                                 }
                             }
                         }
                     } else {
-                        match registry.spawn("generalist").await {
-                            Some(w) => ("generalist".to_string(), w),
+                        match registry.spawn("default").await {
+                            Some(w) => ("default".to_string(), w),
                             None => {
-                                tracing::error!("Failed to spawn fallback worker 'generalist'");
+                                tracing::error!("Failed to spawn fallback worker 'default'");
                                 return ("unknown".to_string(), Err(AgentError::ConfigError("No available workers".to_string())));
                             }
                         }
