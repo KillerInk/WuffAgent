@@ -957,7 +957,7 @@ mod tests {
 impl ChatClientLike for ChatClient {
     async fn send_message(&self, _messages: &[Message]) -> Result<String, String> {
         let prompt = _messages.iter()
-            .filter(|m| m.role == "user" || m.role == "assistant")
+            .filter(|m| m.role == "system" || m.role == "user" || m.role == "assistant")
             .map(|m| m.content.as_str())
             .collect::<Vec<&str>>()
             .join("\n");
@@ -968,7 +968,7 @@ impl ChatClientLike for ChatClient {
     }
     async fn send_streaming(&self, _messages: &[Message]) -> Result<String, String> {
         let prompt = _messages.iter()
-            .filter(|m| m.role == "user" || m.role == "assistant")
+            .filter(|m| m.role == "system" || m.role == "user" || m.role == "assistant")
             .map(|m| m.content.as_str())
             .collect::<Vec<&str>>()
             .join("\n");

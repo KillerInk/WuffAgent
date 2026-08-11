@@ -179,9 +179,27 @@ impl SupervisorAgentTrait for SupervisorAgent {
                     let (worker_name, mut worker) = if let Some((name, _config)) =
                         registry.find_best_worker(&task_clone, &worker_configs).await
                     {
-                        (name.clone(), registry.spawn(&name).await.unwrap())
+                        match registry.spawn(&name).await {
+                            Some(w) => (name.clone(), w),
+                            None => {
+                                tracing::warn!("Failed to spawn worker '{}', falling back to 'generalist'", name);
+                                match registry.spawn("generalist").await {
+                                    Some(w) => ("generalist".to_string(), w),
+                                    None => {
+                                        tracing::error!("Failed to spawn fallback worker 'generalist'");
+                                        return ("unknown".to_string(), Err(AgentError::ConfigError("No available workers".to_string())));
+                                    }
+                                }
+                            }
+                        }
                     } else {
-                        ("default".to_string(), registry.spawn("default").await.unwrap())
+                        match registry.spawn("generalist").await {
+                            Some(w) => ("generalist".to_string(), w),
+                            None => {
+                                tracing::error!("Failed to spawn fallback worker 'generalist'");
+                                return ("unknown".to_string(), Err(AgentError::ConfigError("No available workers".to_string())));
+                            }
+                        }
                     };
 
                     // Send task started event

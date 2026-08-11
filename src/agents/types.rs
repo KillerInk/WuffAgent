@@ -20,12 +20,31 @@ impl std::fmt::Display for AgentId {
 }
 
 /// The type/category of a task.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum AgentType {
     Research,
     Coding,
     Implementation,
     General,
+}
+
+impl<'de> Deserialize<'de> for AgentType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "research" => Ok(AgentType::Research),
+            "coding" => Ok(AgentType::Coding),
+            "implementation" => Ok(AgentType::Implementation),
+            "general" => Ok(AgentType::General),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown agent type: {}",
+                s
+            ))),
+        }
+    }
 }
 
 impl Default for AgentType {
@@ -300,6 +319,7 @@ mod tests {
         let t2 = Task::new("second", AgentType::General, serde_json::json!({}));
         let t3 = Task::new("third (depends on first)", AgentType::Coding, serde_json::json!({})) ;
         let mut plan = ExecutionPlan::new("test", vec![t2, t1.clone(), t3.clone()]);
+        let t1_id = t1.id.clone();
         let t3_id = t3.id.clone();
         // Set up dependency: t3 depends on t1
         if let Some(task) = plan.tasks.iter_mut().find(|t| t.id == t3_id) {

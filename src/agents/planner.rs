@@ -218,9 +218,28 @@ impl<C: ChatClientLike> PlannerAgent<C> {
         max_retries: u32,
     ) -> Result<ExecutionPlan, AgentError> {
         let mut last_error = None;
+        let mut retry_errors: Vec<String> = Vec::new();
 
         for attempt in 0..=max_retries {
-            let messages = self.build_plan_messages(request, context);
+            let messages = if attempt == 0 {
+                self.build_plan_messages(request, context)
+            } else {
+                // Append feedback from previous failures so the LLM can self-correct
+                let feedback = retry_errors.join("\n");
+                let mut msgs = self.build_plan_messages(request, context);
+                msgs.push(Message {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Previous attempt failed. Fix these issues and return valid JSON again:\n{}",
+                        feedback
+                    ),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+                msgs
+            };
+
             let response = match self.call_llm(&messages).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -238,6 +257,7 @@ impl<C: ChatClientLike> PlannerAgent<C> {
                 Ok(plan) => return Ok(plan),
                 Err(e) => {
                     tracing::warn!("Plan validation failed (attempt {}): {}", attempt + 1, e);
+                    retry_errors.push(format!("Attempt {}: {}", attempt + 1, e));
                     last_error = Some(e);
                 }
             }
@@ -292,7 +312,7 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
         request: &str,
         context: Option<&serde_json::Value>,
     ) -> Result<ExecutionPlan, AgentError> {
-        self.generate_plan_with_retry(request, context, 2).await
+        self.generate_plan_with_retry(request, context, 3).await
     }
 
     async fn refine_plan(
@@ -418,57 +438,120 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
 fn extract_json_from_response(response: &str) -> String {
     let s = response.trim();
 
-    // Strip markdown code fences if present
-    let s = if s.starts_with("```") {
-        let end = s.find("```").unwrap_or(s.len());
-        s["```".len()..end].trim()
-    } else {
-        s
-    };
-
-    // Find the outermost balanced JSON object using brace counting
+    // Try to find balanced JSON using brace counting
     let mut depth = 0;
     let mut start: Option<usize> = None;
-    let mut end = None;
+    let mut end: Option<usize> = None;
+    let mut in_string = false;
+    let mut escape = false;
 
     for (i, ch) in s.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
         match ch {
-            '{' => {
+            '\\' if in_string => {
+                escape = true;
+            }
+            '"' => {
+                in_string = !in_string;
+            }
+            '{' if !in_string => {
                 if depth == 0 {
                     start = Some(i);
                 }
                 depth += 1;
             }
-            '}' => {
+            '}' if !in_string => {
                 depth -= 1;
-                if depth == 0 {
-                    if start.is_some() {
-                        end = Some(i + 1);
-                        break;
-                    }
-                }
-            }
-            '"' => {
-                // Skip over string contents (basic escape handling)
-                let mut j = i + 1;
-                while j < s.len() {
-                    let bytes = &s.as_bytes()[j..];
-                    if bytes.starts_with(b"\\") {
-                        j += 2;
-                    } else if bytes.starts_with(b"\"") {
-                        j += 1;
-                        break;
-                    } else {
-                        j += 1;
-                    }
+                if depth == 0 && start.is_some() {
+                    end = Some(i + 1);
+                    break;
                 }
             }
             _ => {}
         }
     }
 
-    match (start, end) {
-        (Some(start), Some(end)) if end > start => s[start..end].to_string(),
-        _ => s.to_string(),
+    if let (Some(start), Some(end)) = (start, end) {
+        if end > start {
+            return s[start..end].to_string();
+        }
+    }
+
+    // Fallback: try regex to find first { to last }
+    if let Some(m) = regex::Regex::new(r"\{[\s\S]*\}")
+        .ok()
+        .and_then(|r| r.find(s))
+    {
+        return m.as_str().to_string();
+    }
+
+    // Last resort: return trimmed input
+    s.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_json_pure_json() {
+        let input = r#"{"key": "value", "num": 42}"#;
+        assert_eq!(extract_json_from_response(input), input);
+    }
+
+    #[test]
+    fn test_extract_json_markdown_fence() {
+        let input = "```json\n{\"key\": \"value\"}\n```";
+        assert_eq!(extract_json_from_response(input), "{\"key\": \"value\"}");
+    }
+
+    #[test]
+    fn test_extract_json_with_prologue() {
+        let input = "Here is the plan:\n{\"plan_id\": \"abc\"}";
+        assert_eq!(extract_json_from_response(input), "{\"plan_id\": \"abc\"}");
+    }
+
+    #[test]
+    fn test_extract_json_with_epilogue() {
+        let input = "{\"plan_id\": \"abc\"}\nLet me know if you need changes.";
+        assert_eq!(extract_json_from_response(input), "{\"plan_id\": \"abc\"}");
+    }
+
+    #[test]
+    fn test_extract_json_nested_braces() {
+        let input = r#"{"tasks": [{"id": "1", "inner": {"a": 1}}]}"#;
+        assert_eq!(extract_json_from_response(input), input);
+    }
+
+    #[test]
+    fn test_extract_json_string_with_braces() {
+        let input = r#"{"msg": "use {foo} and {bar}", "num": 1}"#;
+        assert_eq!(extract_json_from_response(input), input);
+    }
+
+    #[test]
+    fn test_extract_json_empty_string() {
+        assert_eq!(extract_json_from_response(""), "");
+    }
+
+    #[test]
+    fn test_extract_json_no_braces() {
+        let input = "just plain text with no json";
+        assert_eq!(extract_json_from_response(input), input);
+    }
+
+    #[test]
+    fn test_extract_json_multiple_objects() {
+        let input = r#"{"a": 1} some text {"b": 2}"#;
+        assert_eq!(extract_json_from_response(input), r#"{"a": 1}"#);
+    }
+
+    #[test]
+    fn test_extract_json_escaped_quotes() {
+        let input = r#"{"msg": "she said \"hello {world}\"", "n": 2}"#;
+        assert_eq!(extract_json_from_response(input), input);
     }
 }
