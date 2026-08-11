@@ -39,7 +39,12 @@ impl ChatApp {
             let text_edit = egui::TextEdit::singleline(&mut self.chat.input_text)
                 .hint_text("Type a message...")
                 .vertical_align(egui::Align::Center);
-            ui.add_sized([input_width, 32.0], text_edit);
+            let response = ui.add_sized([input_width, 32.0], text_edit);
+            if response.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
+                if !self.chat.is_generating && !self.chat.input_text.trim().is_empty() {
+                    self.send_message();
+                }
+            }
 
             // Send or Stop button
             if !self.chat.is_generating {
