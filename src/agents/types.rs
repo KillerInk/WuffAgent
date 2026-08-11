@@ -110,7 +110,8 @@ pub struct ExecutionPlan {
     pub user_request: String,
     /// All tasks to be executed.
     pub tasks: Vec<Task>,
-    /// Timestamp when the plan was created.
+    /// Timestamp when the plan was created. Defaults to current time if omitted.
+    #[serde(default = "chrono::Utc::now")]
     pub created_at: DateTime<Utc>,
     /// Arbitrary metadata (e.g., confidence score, estimated steps).
     #[serde(default)]

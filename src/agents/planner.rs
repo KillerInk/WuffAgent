@@ -45,6 +45,7 @@ Do NOT include any markdown, code fences, explanations, headings, or text outsid
 Return a JSON object with this exact structure:
 {
   "plan_id": "plan-<uuid>",
+  "created_at": "<ISO 8601 timestamp, e.g. 2024-01-15T10:30:00Z>",
   "user_request": "<the original request>",
   "tasks": [
     {
