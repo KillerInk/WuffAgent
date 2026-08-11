@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use libloading::{Library, Symbol};
 
-use crate::tools::lib::{Tool, ToolError, ToolLogger, ToolMetadata, ToolResult};
+use crate::tools::lib::{PluginTool, Tool, ToolError, ToolLogger, ToolMetadata, ToolResult};
 
 /// A handle to a dynamically loaded plugin.
 pub struct PluginHandle {
@@ -14,7 +14,8 @@ pub struct PluginHandle {
 /// Signature of the plugin's entry point.
 // Plugin ABI: plugin exports this symbol to create a new tool instance.
 // The caller is responsible for managing the resulting Arc<dyn Tool>.
-type PluginCreateFn = unsafe extern "C" fn() -> *mut (dyn Tool + 'static);
+// Plugins should use PluginTool::from_box() to wrap their Tool before returning.
+type PluginCreateFn = unsafe extern "C" fn() -> PluginTool;
 
 impl PluginHandle {
     /// Load a plugin from the given path.
@@ -60,13 +61,10 @@ impl PluginHandle {
                     ToolError::PluginLoad(format!("Missing create symbol: {}", e))
                 })?;
             let raw = create_fn();
-            // SAFETY: The plugin is responsible for returning a valid Box<dyn Tool>.
-            let tool: Box<dyn Tool> = Box::from_raw(raw);
-            // Convert Box<dyn Tool> into Arc<dyn Tool> by moving the trait object.
-            let arc = unsafe {
-                let ptr: *mut dyn Tool = Box::into_raw(tool);
-                Arc::from_raw(ptr)
-            };
+            // SAFETY: The plugin is responsible for returning a valid PluginTool
+            // created via PluginTool::from_box(). We take ownership and convert.
+            let tool: Box<dyn Tool> = raw.into_box();
+            let arc = Arc::from_raw(Box::into_raw(tool));
             Ok(arc)
         }
     }

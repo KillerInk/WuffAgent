@@ -33,32 +33,3 @@ impl From<ChatMessage> for Message {
     }
 }
 
-/// Chat settings extracted from Config.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct ChatSettings {
-    pub system_prompt: String,
-    pub streaming: bool,
-    pub theme: String,
-    pub chat_history: Vec<ChatMessage>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default = "default_max_messages")]
-    pub max_messages: usize,
-}
-
-fn default_max_messages() -> usize {
-    100
-}
-
-impl Default for ChatSettings {
-    fn default() -> Self {
-        Self {
-            system_prompt: String::new(),
-            streaming: true,
-            theme: "dark".to_string(),
-            chat_history: Vec::new(),
-            session_id: None,
-            max_messages: 100,
-        }
-    }
-}

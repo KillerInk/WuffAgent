@@ -24,7 +24,7 @@ impl ChatApp {
                 AppStatus::Connecting => "● Connecting...",
                 AppStatus::Ready => "● Ready",
                 AppStatus::Generating => "● Generating...",
-                AppStatus::Error(e) => return,
+                AppStatus::Error(_) => return,
             };
             ui.label(egui::RichText::new(status_text).color(status_color).size(11.0));
 

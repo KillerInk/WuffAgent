@@ -143,6 +143,59 @@ pub trait Tool: Send + Sync {
     fn execute(&self, params: ToolParams) -> ToolResult<ToolOutput>;
 }
 
+// ─── FFI Plugin ABI ─────────────────────────────────────────────────────────
+
+/// Opaque FFI-safe wrapper for passing trait objects across the plugin boundary.
+/// Plugins box their Tool and return this wrapper; the host converts it back.
+/// Uses two raw pointers (vtable + data) to represent the wide *mut dyn Tool pointer.
+#[repr(C)]
+pub struct PluginTool {
+    vtable: *const (),
+    data: *mut std::ffi::c_void,
+}
+
+// SAFETY: PluginTool only stores pointers and is passed by value across FFI.
+// The host is responsible for ensuring the underlying Tool lives long enough.
+unsafe impl Send for PluginTool {}
+// SAFETY: Tool requires Send + Sync, and PluginTool merely wraps a Tool pointer.
+unsafe impl Sync for PluginTool {}
+
+impl PluginTool {
+    /// Create a new PluginTool from a Box<dyn Tool>.
+    pub fn from_box(tool: Box<dyn Tool>) -> Self {
+        // SAFETY: We split the wide pointer into its vtable and data components.
+        // Box::into_raw gives us *mut dyn Tool (128 bits on 64-bit).
+        // We use ptr::from_mut to get the raw components.
+        let raw: *mut dyn Tool = Box::into_raw(tool);
+        // SAFETY: A wide pointer is exactly two pointers (vtable, data) in memory.
+        let (vtable, data) = unsafe {
+            let slice: [*const (); 2] = std::mem::transmute(raw);
+            (slice[0], slice[1] as *mut std::ffi::c_void)
+        };
+        Self { vtable, data }
+    }
+
+    /// Convert this wrapper back into an owned Box<dyn Tool>.
+    /// # Safety
+    /// The caller must ensure the PluginTool was created via `from_box`
+    /// and has not been consumed yet.
+    pub unsafe fn into_box(self) -> Box<dyn Tool> {
+        // SAFETY: We reconstruct the wide pointer from its vtable and data components.
+        let raw: *mut dyn Tool = std::mem::transmute([self.vtable, self.data as *const ()]);
+        Box::from_raw(raw)
+    }
+}
+
+impl Drop for PluginTool {
+    fn drop(&mut self) {
+        // SAFETY: We own the pointer and are dropping it here.
+        unsafe {
+            let raw: *mut dyn Tool = std::mem::transmute([self.vtable, self.data as *const ()]);
+            drop(Box::from_raw(raw));
+        }
+    }
+}
+
 // ─── Logger Trait ───────────────────────────────────────────────────────────
 
 pub trait ToolLogger: Send + Sync {

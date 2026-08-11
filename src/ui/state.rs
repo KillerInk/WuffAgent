@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::client::ChatClient;
-use crate::config::{Config, ConnectionType};
+use crate::config::Config;
 use crate::server::ServerManager;
 use crate::tools::ToolManager;
 
@@ -52,23 +52,6 @@ pub struct SessionState {
     pub(super) max_display_messages: usize,
 }
 
-/// Settings-related state extracted from ChatApp
-pub struct SettingsState {
-    pub(super) connection_type: ConnectionType,
-    pub(super) remote_url: String,
-    pub(super) remote_api_key: String,
-    pub(super) server_path: String,
-    pub(super) model_path: String,
-    pub(super) port: u16,
-    pub(super) n_gpu_layers: i32,
-    pub(super) n_ctx: u32,
-    pub(super) threads: u32,
-    pub(super) max_messages: usize,
-    pub(super) system_prompt: String,
-    pub(super) streaming: bool,
-    pub(super) theme: String,
-}
-
 /// Main app state with extracted sub-structs
 pub struct ChatApp {
     // Core dependencies
@@ -82,8 +65,6 @@ pub struct ChatApp {
     // Extracted state structs
     pub(super) chat: ChatState,
     pub(super) sessions: SessionState,
-    pub(super) settings: Option<SettingsState>,
-
     // UI flags
     pub(super) show_settings: bool,
     pub(super) settings_dialog: Option<super::settings::SettingsDialog>,
@@ -165,7 +146,6 @@ impl ChatApp {
                 save_failure_message: None,
                 max_display_messages: max_messages,
             },
-            settings: None,
             show_settings: false,
             settings_dialog: None,
             presets_dialog: None,

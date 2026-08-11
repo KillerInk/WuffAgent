@@ -106,7 +106,6 @@ impl SessionsPanel {
         session: &crate::sessions::Session,
         is_selected: bool,
         is_renaming: bool,
-        theme: &Theme,
     ) -> egui::Response {
         let count = session.messages.len();
         let count_text = if count == 1 {
@@ -155,8 +154,6 @@ impl SessionsPanel {
     pub fn draw(&mut self, ctx: &egui::Context) -> Option<String> {
         let mut selected_id: Option<String> = None;
         let mut action: Option<PanelAction> = None;
-        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
-
         // Show the delete confirmation dialog if pending
         if let Some((id, name, last_message)) = self.pending_delete.clone() {
             egui::Window::new("Delete Session")
@@ -305,7 +302,7 @@ impl SessionsPanel {
                     }
 
                     let is_selected = Some(&session.id) == self.selected_id.as_ref();
-                    let response = Self::draw_session_item(ui, session, is_selected, is_renaming, &theme);
+                    let response = Self::draw_session_item(ui, session, is_selected, is_renaming);
 
                     if response.clicked() {
                         selected_id = Some(session.id.clone());

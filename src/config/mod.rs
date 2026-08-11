@@ -138,7 +138,7 @@ impl Config {
                 if !Path::new(&self.model_path).exists() {
                     return Err(Error::ModelPathNotFound(self.model_path.clone()));
                 }
-                if self.port < 1024 || self.port > 65535 {
+                if self.port < 1024 {
                     return Err(Error::InvalidPort(self.port));
                 }
                 if self.threads == 0 || self.threads > 64 {

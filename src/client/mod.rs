@@ -18,7 +18,7 @@ pub use sse::{process_sse_line, stream_message, stream_message_arc, add_streamin
 pub use session::{
     save_session, load_session,
     enqueue_save_failure, retry_pending_saves, has_save_failure,
-    clear_save_failure, clear_save_queue,
+    clear_save_failure,
     trim_conversation, clear_history, clear_session_messages,
 };
 
@@ -185,11 +185,6 @@ impl ChatClient {
     /// Clear the save failure flag (call after a successful save or user dismissal).
     pub fn clear_save_failure(&self) {
         session::clear_save_failure(&self.save_failed);
-    }
-
-    /// Clear the internal retry queue without attempting a save.
-    fn clear_save_queue(&self) {
-        session::clear_save_queue(&self.save_queue, &self.save_failed);
     }
 
     // ── HTTP methods ──────────────────────────────────────────────────────────
