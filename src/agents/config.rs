@@ -11,9 +11,9 @@ pub struct WorkerConfig {
     /// Human-readable description.
     #[serde(default)]
     pub description: String,
-    /// System prompt / personality for this worker.
-    #[serde(default)]
-    pub personality: String,
+    /// System prompt for this worker (backwards compat: also accepts "personality").
+    #[serde(default, alias = "personality")]
+    pub system_prompt: String,
     /// Tool names this worker is authorized to use.
     #[serde(default)]
     pub allowed_tools: Vec<String>,
@@ -23,6 +23,9 @@ pub struct WorkerConfig {
     /// Maximum concurrent tasks this worker can handle.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
+    /// Whether this worker is enabled.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 impl Default for WorkerConfig {
@@ -30,18 +33,47 @@ impl Default for WorkerConfig {
         Self {
             name: String::from("generic"),
             description: String::from("Generic worker"),
-            personality: String::from("You are a worker."),
+            system_prompt: String::from("You are a worker."),
             allowed_tools: Vec::new(),
             priority: 0,
             max_concurrent: 1,
+            enabled: true,
         }
     }
 }
+
+fn default_enabled() -> bool { true }
 
 fn default_priority() -> u32 { 0 }
 fn default_max_concurrent() -> usize { 1 }
 
 impl WorkerConfig {
+    /// Load all worker configs from a directory.
+    pub fn load_all_from_dir(dir: &Path) -> Result<Vec<Self>, crate::agents::AgentError> {
+        let mut workers = Vec::new();
+        if !dir.exists() {
+            return Ok(workers);
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to read workers directory: {}", e);
+                return Ok(workers);
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().map(|e| e == "json").unwrap_or(false) {
+                match Self::load_from_file(&path) {
+                    Ok(config) => workers.push(config),
+                    Err(e) => tracing::warn!("Failed to load {:?}: {}", path, e),
+                }
+            }
+        }
+        workers.sort_by_key(|w| w.priority);
+        Ok(workers)
+    }
+
     pub fn load_from_file(path: &Path) -> Result<Self, crate::agents::AgentError> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| crate::agents::AgentError::ConfigError(format!(
@@ -52,6 +84,24 @@ impl WorkerConfig {
                 "Failed to parse worker config from {:?}: {}", path, e
             )))?;
         Ok(config)
+    }
+
+    pub fn save_to_file(&self, path: &Path) -> Result<(), crate::agents::AgentError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| crate::agents::AgentError::ConfigError(format!(
+                    "Failed to create directory {:?}: {}", parent, e
+                )))?;
+        }
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
+                "Failed to serialize worker config: {}", e
+            )))?;
+        std::fs::write(path, content)
+            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
+                "Failed to write worker config to {:?}: {}", path, e
+            )))?;
+        Ok(())
     }
 
     /// Derive an AgentType from the worker's allowed tools and description.
@@ -76,6 +126,368 @@ impl WorkerConfig {
             return crate::agents::types::AgentType::Implementation;
         }
         crate::agents::types::AgentType::General
+    }
+}
+
+/// Manages the lifecycle of worker agent configurations: load, add, edit, remove, reload.
+///
+/// Agents are discovered from `search_dirs` (read-only scan), but new/edited agents
+/// are persisted to `workers_dir` (the primary config directory).
+pub struct AgentManager {
+    /// Primary directory where agents are saved/loaded from.
+    workers_dir: PathBuf,
+    /// Additional directories to scan for existing agents.
+    search_dirs: Vec<PathBuf>,
+}
+
+impl AgentManager {
+    pub fn new(workers_dir: PathBuf) -> Self {
+        Self {
+            workers_dir,
+            search_dirs: Vec::new(),
+        }
+    }
+
+    /// Add an additional directory to scan for existing agent configs.
+    pub fn add_search_dir(&mut self, dir: PathBuf) {
+        if !self.search_dirs.contains(&dir) {
+            self.search_dirs.push(dir);
+        }
+    }
+
+    /// Load agent configs from a single directory, deduplicating by name (first wins).
+    fn load_from_dir(&self, dir: &PathBuf, seen: &mut HashMap<String, ()>) -> Result<Vec<WorkerConfig>, crate::agents::AgentError> {
+        let mut workers = Vec::new();
+        if !dir.exists() {
+            return Ok(workers);
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to read directory {:?}: {}", dir, e);
+                return Ok(workers);
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().map(|e| e == "json").unwrap_or(false) {
+                match WorkerConfig::load_from_file(&path) {
+                    Ok(config) => {
+                        if seen.insert(config.name.clone(), ()).is_none() {
+                            tracing::info!(
+                                "Discovered agent: {} from {:?} (type={:?}, tools={:?})",
+                                config.name,
+                                dir,
+                                config.infer_agent_type(),
+                                config.allowed_tools
+                            );
+                            workers.push(config);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load worker config from {:?}: {}", path, e);
+                    }
+                }
+            }
+        }
+        Ok(workers)
+    }
+
+    /// Load all worker configs from workers_dir plus any search_dirs.
+    /// Agents from workers_dir take priority (loaded first, deduplication keeps first).
+    pub fn list_agents(&self) -> Result<Vec<WorkerConfig>, crate::agents::AgentError> {
+        let mut workers = Vec::new();
+        let mut seen = HashMap::new();
+
+        // Primary directory first
+        workers.extend(self.load_from_dir(&self.workers_dir, &mut seen)?);
+
+        // Additional search directories
+        for dir in &self.search_dirs {
+            if dir != &self.workers_dir {
+                workers.extend(self.load_from_dir(dir, &mut seen)?);
+            }
+        }
+
+        workers.sort_by_key(|w| w.priority);
+        Ok(workers)
+    }
+
+    /// Get a single agent config by name.
+    pub fn get_agent(&self, name: &str) -> Option<WorkerConfig> {
+        self.list_agents()
+            .ok()
+            .into_iter()
+            .flatten()
+            .find(|w| w.name == name)
+    }
+
+    /// Add a new agent config to the workers directory.
+    pub fn add_agent(&self, config: &WorkerConfig) -> Result<(), crate::agents::AgentError> {
+        let path = self.workers_dir.join(format!("{}.json", config.name));
+        config.save_to_file(&path)?;
+        tracing::info!("Added agent config: {}", config.name);
+        Ok(())
+    }
+
+    /// Edit an existing agent config (update in place).
+    pub fn edit_agent(&self, name: &str, config: &WorkerConfig) -> Result<(), crate::agents::AgentError> {
+        if config.name != name {
+            // Name changed — remove old file and save new one
+            self.remove_agent(name)?;
+        }
+        let path = self.workers_dir.join(format!("{}.json", config.name));
+        config.save_to_file(&path)?;
+        tracing::info!("Edited agent config: {}", config.name);
+        Ok(())
+    }
+
+    /// Remove an agent config from the workers directory.
+    pub fn remove_agent(&self, name: &str) -> Result<(), crate::agents::AgentError> {
+        let path = self.workers_dir.join(format!("{}.json", name));
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| crate::agents::AgentError::ConfigError(format!(
+                    "Failed to remove agent config {:?}: {}", path, e
+                )))?;
+            tracing::info!("Removed agent config: {}", name);
+        }
+        Ok(())
+    }
+
+    /// Reload all agent configs from disk (use after add/edit/remove).
+    pub fn reload(&self) -> Result<Vec<WorkerConfig>, crate::agents::AgentError> {
+        let workers = self.list_agents();
+        tracing::info!("Reloaded {} agent config(s) from {:?}", workers.as_ref().map(|w| w.len()).unwrap_or(0), self.workers_dir);
+        workers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_worker_config_infer_research() {
+        let config = WorkerConfig {
+            name: "researcher".to_string(),
+            description: "Web research and search".to_string(),
+            system_prompt: String::new(),
+            allowed_tools: vec!["web_search".to_string()],
+            priority: 0,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Research);
+    }
+
+    #[test]
+    fn test_worker_config_infer_coding() {
+        let config = WorkerConfig {
+            name: "coder".to_string(),
+            description: "Code file manipulation".to_string(),
+            system_prompt: String::new(),
+            allowed_tools: vec!["file_io".to_string()],
+            priority: 0,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Coding);
+    }
+
+    #[test]
+    fn test_worker_config_infer_implementation() {
+        let config = WorkerConfig {
+            name: "builder".to_string(),
+            description: "Build and deploy".to_string(),
+            system_prompt: String::new(),
+            allowed_tools: vec!["calculation".to_string(), "file_io".to_string()],
+            priority: 0,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Implementation);
+    }
+
+    #[test]
+    fn test_worker_config_infer_general() {
+        let config = WorkerConfig {
+            name: "general".to_string(),
+            description: "General purpose tasks".to_string(),
+            system_prompt: String::new(),
+            allowed_tools: vec!["file_io".to_string(), "web_search".to_string()],
+            priority: 0,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::General);
+    }
+
+    #[test]
+    fn test_worker_config_backwards_compat_personality() {
+        let json = r#"{"name":"test","description":"Desc","personality":"You are a test worker.","allowed_tools":["file_io"],"priority":0,"max_concurrent":1}"#;
+        let config: WorkerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.system_prompt, "You are a test worker.");
+        assert_eq!(config.name, "test");
+    }
+
+    #[test]
+    fn test_worker_config_save_and_load() {
+        let dir = std::env::temp_dir().join("wuffagent_test_agents");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config = WorkerConfig {
+            name: "test_agent".to_string(),
+            description: "A test agent".to_string(),
+            system_prompt: "You are a test agent.".to_string(),
+            allowed_tools: vec!["file_io".to_string()],
+            priority: 5,
+            max_concurrent: 2,
+            enabled: false,
+        };
+
+        let path = dir.join("test_agent.json");
+        config.save_to_file(&path).unwrap();
+
+        let loaded = WorkerConfig::load_from_file(&path).unwrap();
+        assert_eq!(loaded.name, "test_agent");
+        assert_eq!(loaded.system_prompt, "You are a test agent.");
+        assert_eq!(loaded.allowed_tools, vec!["file_io".to_string()]);
+        assert_eq!(loaded.priority, 5);
+        assert_eq!(loaded.max_concurrent, 2);
+        assert!(!loaded.enabled);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_agent_manager_crud() {
+        let dir = std::env::temp_dir().join("wuffagent_test_mgr");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mgr = AgentManager::new(dir.clone());
+
+        // Add
+        let config = WorkerConfig {
+            name: "mgr_test".to_string(),
+            description: "Manager test".to_string(),
+            system_prompt: "You are a mgr test.".to_string(),
+            allowed_tools: vec!["file_io".to_string()],
+            priority: 0,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        mgr.add_agent(&config).unwrap();
+        assert!(mgr.get_agent("mgr_test").is_some());
+
+        // List
+        let agents = mgr.list_agents().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "mgr_test");
+
+        // Edit
+        let mut edited = config.clone();
+        edited.description = "Updated description".to_string();
+        mgr.edit_agent("mgr_test", &edited).unwrap();
+        let loaded = mgr.get_agent("mgr_test").unwrap();
+        assert_eq!(loaded.description, "Updated description");
+
+        // Remove
+        mgr.remove_agent("mgr_test").unwrap();
+        assert!(mgr.get_agent("mgr_test").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_agent_manager_reload() {
+        let dir = std::env::temp_dir().join("wuffagent_test_reload");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mgr = AgentManager::new(dir.clone());
+        assert_eq!(mgr.reload().unwrap().len(), 0);
+
+        let config = WorkerConfig {
+            name: "reload_test".to_string(),
+            description: "Reload test".to_string(),
+            system_prompt: "Reload prompt".to_string(),
+            allowed_tools: vec![],
+            priority: 0,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        mgr.add_agent(&config).unwrap();
+        let loaded = mgr.reload().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "reload_test");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_agent_manager_multi_dir_search() {
+        let primary_dir = std::env::temp_dir().join("wuffagent_test_primary");
+        let search_dir = std::env::temp_dir().join("wuffagent_test_search");
+        let _ = std::fs::remove_dir_all(&primary_dir);
+        let _ = std::fs::remove_dir_all(&search_dir);
+        std::fs::create_dir_all(&primary_dir).unwrap();
+        std::fs::create_dir_all(&search_dir).unwrap();
+
+        // Place an agent in the search dir (simulating project workers/)
+        let search_agent = WorkerConfig {
+            name: "search_agent".to_string(),
+            description: "From search dir".to_string(),
+            system_prompt: "Search prompt".to_string(),
+            allowed_tools: vec!["web_search".to_string()],
+            priority: 5,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        search_agent.save_to_file(&search_dir.join("search_agent.json")).unwrap();
+
+        // Place an agent in the primary dir
+        let primary_agent = WorkerConfig {
+            name: "primary_agent".to_string(),
+            description: "From primary dir".to_string(),
+            system_prompt: "Primary prompt".to_string(),
+            allowed_tools: vec!["file_io".to_string()],
+            priority: 3,
+            max_concurrent: 2,
+            enabled: true,
+        };
+        primary_agent.save_to_file(&primary_dir.join("primary_agent.json")).unwrap();
+
+        // AgentManager with search dir
+        let mut mgr = AgentManager::new(primary_dir.clone());
+        mgr.add_search_dir(search_dir.clone());
+        let agents = mgr.list_agents().unwrap();
+        assert_eq!(agents.len(), 2);
+        assert!(agents.iter().any(|a| a.name == "primary_agent"));
+        assert!(agents.iter().any(|a| a.name == "search_agent"));
+
+        // Save should go to primary dir
+        let new_agent = WorkerConfig {
+            name: "new_agent".to_string(),
+            description: "New agent".to_string(),
+            system_prompt: "New prompt".to_string(),
+            allowed_tools: vec![],
+            priority: 0,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        mgr.add_agent(&new_agent).unwrap();
+        assert!(primary_dir.join("new_agent.json").exists());
+        assert!(!search_dir.join("new_agent.json").exists());
+
+        // Reload should find all 3
+        let agents = mgr.reload().unwrap();
+        assert_eq!(agents.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&primary_dir);
+        let _ = std::fs::remove_dir_all(&search_dir);
     }
 }
 
@@ -203,59 +615,3 @@ impl AgentConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_worker_config_infer_research() {
-        let config = WorkerConfig {
-            name: "researcher".to_string(),
-            description: "Web research and search".to_string(),
-            personality: String::new(),
-            allowed_tools: vec!["web_search".to_string()],
-            priority: 0,
-            max_concurrent: 1,
-        };
-        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Research);
-    }
-
-    #[test]
-    fn test_worker_config_infer_coding() {
-        let config = WorkerConfig {
-            name: "coder".to_string(),
-            description: "Code file manipulation".to_string(),
-            personality: String::new(),
-            allowed_tools: vec!["file_io".to_string()],
-            priority: 0,
-            max_concurrent: 1,
-        };
-        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Coding);
-    }
-
-    #[test]
-    fn test_worker_config_infer_implementation() {
-        let config = WorkerConfig {
-            name: "builder".to_string(),
-            description: "Build and deploy".to_string(),
-            personality: String::new(),
-            allowed_tools: vec!["calculation".to_string(), "file_io".to_string()],
-            priority: 0,
-            max_concurrent: 1,
-        };
-        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Implementation);
-    }
-
-    #[test]
-    fn test_worker_config_infer_general() {
-        let config = WorkerConfig {
-            name: "general".to_string(),
-            description: "General purpose tasks".to_string(),
-            personality: String::new(),
-            allowed_tools: vec!["file_io".to_string(), "web_search".to_string()],
-            priority: 0,
-            max_concurrent: 1,
-        };
-        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::General);
-    }
-}

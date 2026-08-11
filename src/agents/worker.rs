@@ -13,7 +13,7 @@ pub struct GenericWorker {
     name: String,
     description: String,
     allowed_tools: Vec<String>,
-    personality: String,
+    system_prompt: String,
 }
 
 impl GenericWorker {
@@ -21,14 +21,14 @@ impl GenericWorker {
         name: &str,
         description: &str,
         allowed_tools: Vec<String>,
-        personality: &str,
+        system_prompt: &str,
     ) -> Self {
         Self {
             id: AgentId::generate(),
             name: name.to_string(),
             description: description.to_string(),
             allowed_tools,
-            personality: personality.to_string(),
+            system_prompt: system_prompt.to_string(),
         }
     }
 }
@@ -87,5 +87,5 @@ impl Agent for GenericWorker {
     fn role(&self) -> super::traits::AgentRole {
         super::traits::AgentRole::CustomWorker(self.name.clone())
     }
-    fn instructions(&self) -> &str { &self.personality }
+    fn instructions(&self) -> &str { &self.system_prompt }
 }

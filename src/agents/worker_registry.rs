@@ -56,29 +56,55 @@ impl WorkerRegistry {
         self.workers.read().await.keys().cloned().collect()
     }
 
-    /// Load workers from config and register them.
+    /// Load workers from config and register them (skips disabled agents).
     pub async fn load_from_configs(
         &self,
         configs: Vec<WorkerConfig>,
     ) -> Result<usize, AgentError> {
         let mut count = 0;
         for config in configs {
+            if !config.enabled {
+                tracing::info!("Skipping disabled agent: {}", config.name);
+                continue;
+            }
             let name = config.name.clone();
             let desc = config.description.clone();
-            let personality = config.personality.clone();
+            let system_prompt = config.system_prompt.clone();
             let tools = config.allowed_tools.clone();
             let name_closure = name.clone();
             let desc_closure = desc.clone();
-            let personality_closure = personality.clone();
+            let system_prompt_closure = system_prompt.clone();
             let tools_closure = tools.clone();
 
             self.register(&name, move || {
-                Box::new(GenericWorker::new(&name_closure, &desc_closure, tools_closure.clone(), &personality_closure))
+                Box::new(GenericWorker::new(&name_closure, &desc_closure, tools_closure.clone(), &system_prompt_closure))
             })
             .await;
             count += 1;
         }
         tracing::info!("Loaded {} worker(s) from config", count);
+        Ok(count)
+    }
+
+    /// Remove all non-builtin registrations and reload from disk.
+    /// Returns the number of workers re-registered.
+    pub async fn reload(
+        &self,
+        workers_dir: &std::path::Path,
+    ) -> Result<usize, AgentError> {
+        // Remove all registered names except builtins
+        let builtin_names = vec!["default".to_string(), "executing".to_string()];
+        let all_names = self.names().await;
+        for name in all_names {
+            if !builtin_names.contains(&name) {
+                self.remove(&name).await;
+            }
+        }
+
+        // Reload from disk
+        let configs = WorkerConfig::load_all_from_dir(workers_dir)?;
+        let count = self.load_from_configs(configs).await?;
+        tracing::info!("Reloaded {} worker(s) from {:?}", count, workers_dir);
         Ok(count)
     }
 
@@ -176,10 +202,11 @@ impl WorkerRegistry {
                 let fallback_config = WorkerConfig {
                     name: first_name.clone(),
                     description: String::from("Fallback worker"),
-                    personality: String::from("You are a fallback worker."),
+                    system_prompt: String::from("You are a fallback worker."),
                     allowed_tools: vec!["file_io".to_string()],
                     priority: 999,
                     max_concurrent: 1,
+                    enabled: true,
                 };
                 return Some((first_name.clone(), fallback_config));
             }
@@ -263,18 +290,20 @@ mod tests {
             WorkerConfig {
                 name: "research".to_string(),
                 description: "Research worker".to_string(),
-                personality: "You are a researcher.".to_string(),
+                system_prompt: "You are a researcher.".to_string(),
                 allowed_tools: vec!["web_search".to_string()],
                 priority: 0,
                 max_concurrent: 1,
+                enabled: true,
             },
             WorkerConfig {
                 name: "coding".to_string(),
                 description: "Coding worker".to_string(),
-                personality: "You are a coder.".to_string(),
+                system_prompt: "You are a coder.".to_string(),
                 allowed_tools: vec!["file_io".to_string()],
                 priority: 1,
                 max_concurrent: 2,
+                enabled: true,
             },
         ];
 

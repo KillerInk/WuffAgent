@@ -11,3 +11,4 @@ pub mod theme;
 pub mod event_handler;
 pub mod layout;
 pub mod presets_dialog;
+pub mod agent_config;
