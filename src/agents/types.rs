@@ -299,16 +299,18 @@ mod tests {
         let t1 = Task::new("first", AgentType::General, serde_json::json!({}));
         let t2 = Task::new("second", AgentType::General, serde_json::json!({}));
         let t3 = Task::new("third (depends on first)", AgentType::Coding, serde_json::json!({})) ;
+        let t1_id = t1.id.clone();
+        let t3_id = t3.id.clone();
         let mut plan = ExecutionPlan::new("test", vec![t2, t1, t3]);
         // Set up dependency: t3 depends on t1
-        if let Some(task) = plan.tasks.iter_mut().find(|t| t.id == t3.id) {
-            task.depends_on = Some(t1.id.clone());
+        if let Some(task) = plan.tasks.iter_mut().find(|t| t.id == t3_id) {
+            task.depends_on = Some(t1_id.clone());
         }
         let ordered = plan.ordered_tasks();
         let ids: Vec<&str> = ordered.iter().map(|t| &t.id[..8]).collect();
         // t1 should come before t3
-        let t1_idx = ordered.iter().position(|t| t.id == t1.id).unwrap();
-        let t3_idx = ordered.iter().position(|t| t.id == t3.id).unwrap();
+        let t1_idx = ordered.iter().position(|t| t.id == t1_id).unwrap();
+        let t3_idx = ordered.iter().position(|t| t.id == t3_id).unwrap();
         assert!(t1_idx < t3_idx, "dependency t1 should come before t3");
     }
 

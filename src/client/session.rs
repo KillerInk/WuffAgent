@@ -20,13 +20,30 @@ pub fn save_session(
     let conv = conversation.lock().unwrap();
     // Try loading the session; if it's encrypted, fall back to creating a new one
     // (the key will be used to re-encrypt on the next save).
+    // If the file doesn't exist at all, create a new session so saves work.
     let mut session = if let Some(key) = encryption_key {
-        sessions::decrypt_and_load_session(session_dir, id, key)
-            .or_else(|| sessions::load_session(session_dir, id))
-            .ok_or_else(|| anyhow::anyhow!("session not found"))?
+        // Try decrypting first, then fall back to plain load
+        if let Some(s) = sessions::decrypt_and_load_session(session_dir, id, key) {
+            s
+        } else if let Some(s) = sessions::load_session(session_dir, id) {
+            s
+        } else if sessions::session_exists(session_dir, id) {
+            // File exists but decryption failed — re-raise the error
+            return Err(anyhow::anyhow!("session not found"));
+        } else {
+            tracing::warn!("Session file not found for id={}, creating new session", id);
+            crate::sessions::Session::new("Untitled")
+        }
     } else {
-        sessions::load_session(session_dir, id)
-            .ok_or_else(|| anyhow::anyhow!("session not found"))?
+        if let Some(s) = sessions::load_session(session_dir, id) {
+            s
+        } else if sessions::session_exists(session_dir, id) {
+            // File exists but parse failed — re-raise the error
+            return Err(anyhow::anyhow!("session not found"));
+        } else {
+            tracing::warn!("Session file not found for id={}, creating new session", id);
+            crate::sessions::Session::new("Untitled")
+        }
     };
     session.messages = conv.clone();
     // Retry with exponential backoff for transient failures

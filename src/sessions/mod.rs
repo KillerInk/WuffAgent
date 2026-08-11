@@ -16,6 +16,11 @@ pub fn sessions_dir(config_path: &Path) -> PathBuf {
 /// Magic bytes written at the start of an encrypted session file.
 const ENCRYPTION_MARKER: &[u8] = b"WUFFENC";
 
+/// Check whether a session file exists on disk for the given id.
+pub fn session_exists(dir: &Path, id: &str) -> bool {
+    dir.join(format!("{}.json", id)).exists()
+}
+
 pub fn load_session(dir: &Path, id: &str) -> Option<Session> {
     let path = dir.join(format!("{}.json", id));
     if path.exists() {
@@ -392,5 +397,163 @@ mod tar_builder {
             self.inner.write_all(&[0u8; 1024])?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Message;
+    use std::io::Write;
+
+    #[test]
+    fn test_create_and_load_session() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions");
+        let _ = fs::create_dir_all(&dir);
+        let session = create_session(&dir, "Test Session");
+        assert_eq!(session.name, "Test Session");
+        assert!(!session.id.is_empty());
+        assert!(session.messages.is_empty());
+
+        let loaded = load_session(&dir, &session.id).expect("session should exist");
+        assert_eq!(loaded.name, "Test Session");
+        assert_eq!(loaded.id, session.id);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_and_reload_with_messages() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions2");
+        let _ = fs::create_dir_all(&dir);
+        let mut session = create_session(&dir, "Chat");
+        session.add_message(Message {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        session.add_message(Message {
+            role: "assistant".to_string(),
+            content: "Hi there!".to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        save_session(&dir, &session).unwrap();
+
+        let reloaded = load_session(&dir, &session.id).unwrap();
+        assert_eq!(reloaded.messages.len(), 2);
+        assert_eq!(reloaded.messages[0].content, "Hello");
+        assert_eq!(reloaded.messages[1].content, "Hi there!");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_list_sessions() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions3");
+        let _ = fs::create_dir_all(&dir);
+        let _s1 = create_session(&dir, "First");
+        let _s2 = create_session(&dir, "Second");
+        let _s3 = create_session(&dir, "Third");
+
+        let sessions = list_sessions(&dir);
+        assert_eq!(sessions.len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_session() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions4");
+        let _ = fs::create_dir_all(&dir);
+        let session = create_session(&dir, "To Delete");
+        let deleted = delete_session(&dir, &session.id);
+        assert!(deleted);
+        assert!(load_session(&dir, &session.id).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_session_exists_true_after_create() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions5");
+        let _ = fs::create_dir_all(&dir);
+        let session = create_session(&dir, "Exists Test");
+        assert!(session_exists(&dir, &session.id));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_session_exists_false_for_missing() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions6");
+        let _ = fs::create_dir_all(&dir);
+        assert!(!session_exists(&dir, "nonexistent_session_id"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_session_exists_false_after_delete() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions7");
+        let _ = fs::create_dir_all(&dir);
+        let session = create_session(&dir, "To Delete");
+        assert!(session_exists(&dir, &session.id));
+        delete_session(&dir, &session.id);
+        assert!(!session_exists(&dir, &session.id));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_missing_session_returns_none() {
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions8");
+        let _ = fs::create_dir_all(&dir);
+        let result = load_session(&dir, "nonexistent_id");
+        assert!(result.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_session_creates_file_when_missing() {
+        // This test verifies the fix: saving a session whose file was deleted
+        // should create a new session automatically instead of erroring.
+        let dir = std::env::temp_dir().join("wuffagent_test_sessions9");
+        let _ = fs::create_dir_all(&dir);
+        let mut session = create_session(&dir, "Original");
+        session.add_message(Message {
+            role: "user".to_string(),
+            content: "Msg1".to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        save_session(&dir, &session).unwrap();
+
+        // Delete the session file to simulate corruption/loss
+        let session_id = session.id.clone();
+        let session_file = dir.join(format!("{}.json", session_id));
+        fs::remove_file(&session_file).unwrap();
+        assert!(!session_exists(&dir, &session_id));
+
+        // Now create a new session with a different id and save to it
+        let mut new_session = create_session(&dir, "Fresh Start");
+        new_session.add_message(Message {
+            role: "user".to_string(),
+            content: "New msg".to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        save_session(&dir, &new_session).unwrap();
+
+        // The new session should be loadable
+        let loaded = load_session(&dir, &new_session.id).expect("should load fresh session");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].content, "New msg");
+
+        // The old deleted session should not exist
+        assert!(!session_exists(&dir, &session_id));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

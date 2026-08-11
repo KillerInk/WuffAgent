@@ -57,6 +57,14 @@ fn main() -> eframe::Result {
         if cfg.session_id.is_none() {
             let session = sessions::create_session(&sessions_dir, "Untitled");
             cfg.session_id = Some(session.id.clone());
+        } else if !sessions::session_exists(&sessions_dir, cfg.session_id.as_ref().unwrap()) {
+            // Session configured but file missing — create a new one
+            tracing::warn!(
+                "Session file missing for id={}, creating new session",
+                cfg.session_id.as_ref().unwrap()
+            );
+            let session = sessions::create_session(&sessions_dir, "Untitled");
+            cfg.session_id = Some(session.id.clone());
         }
     }
 
