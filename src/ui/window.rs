@@ -166,7 +166,11 @@ impl eframe::App for ChatApp {
         cfg.chat_history = self.chat.messages.iter().map(|m| ConfigChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),
-            timestamp: m.timestamp.clone(),
+            timestamp: if m.timestamp.is_empty() {
+                chrono::Local::now().format("%H:%M:%S").to_string()
+            } else {
+                m.timestamp.clone()
+            },
         }).collect();
         // Note: images are not persisted in config chat_history (they're in session)
         if let Err(e) = cfg.save() {

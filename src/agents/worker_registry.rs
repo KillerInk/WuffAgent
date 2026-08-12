@@ -90,9 +90,13 @@ impl WorkerRegistry {
             let desc_closure = desc.clone();
             let system_prompt_closure = system_prompt.clone();
             let tools_closure = tools.clone();
+            let tool_mgr = self.tool_registry.clone();
 
             self.register(&name, move || {
-                Box::new(GenericWorker::new(&name_closure, &desc_closure, tools_closure.clone(), &system_prompt_closure))
+                let tm = Arc::new(tokio::sync::Mutex::new(
+                    crate::tools::ToolManager::new(tool_mgr.clone()),
+                ));
+                Box::new(GenericWorker::new(&name_closure, &desc_closure, tools_closure.clone(), &system_prompt_closure, tm))
             });
             count += 1;
         }
@@ -239,12 +243,14 @@ impl WorkerRegistry {
         let tool_mgr = Arc::new(tokio::sync::Mutex::new(
             crate::tools::ToolManager::new(self.tool_registry.clone()),
         ));
+        let tool_mgr_default = tool_mgr.clone();
         self.register("default", move || {
             Box::new(GenericWorker::new(
                 "default",
                 "Default fallback worker",
                 vec!["file_io".to_string()],
                 "You are a default worker.",
+                tool_mgr_default.clone(),
             ))
         });
         self.register("executing", move || {
@@ -278,8 +284,11 @@ mod tests {
     #[test]
     fn test_register_and_spawn() {
         let registry = WorkerRegistry::new();
+        let tool_mgr = Arc::new(tokio::sync::Mutex::new(
+            crate::tools::ToolManager::new(registry.tool_registry().clone()),
+        ));
         registry
-            .register("test", || Box::new(GenericWorker::new("test", "Test", vec![], "You are a test worker.")));
+            .register("test", move || Box::new(GenericWorker::new("test", "Test", vec![], "You are a test worker.", tool_mgr.clone())));
 
         assert!(registry.has("test"));
         assert!(!registry.has("nonexistent"));

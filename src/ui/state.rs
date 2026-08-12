@@ -155,10 +155,11 @@ impl ChatApp {
         {
             let mut cl = client.lock().unwrap();
             if let Some(session) = cl.load_session() {
+                let ts = chrono::Local::now().format("%H:%M:%S").to_string();
                 messages = session.messages.iter().map(|m| ChatMessage {
                     role: m.role.clone(),
                     content: m.content.clone(),
-                    timestamp: m.timestamp.clone(),
+                    timestamp: if m.timestamp.is_empty() { ts.clone() } else { m.timestamp.clone() },
                     image: None,
                 }).collect();
             }

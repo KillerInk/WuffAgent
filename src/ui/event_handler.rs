@@ -197,6 +197,7 @@ impl ChatApp {
                             task.status = crate::ui::state::PipelineTaskStatus::Completed;
                         }
                     }
+                    self.stop_streaming();
                     if self.chat.at_bottom {
                         self.chat.scroll_to_bottom_requested = true;
                     }
@@ -205,19 +206,31 @@ impl ChatApp {
                     tracing::error!(error = %error, "Agent pipeline error");
                     self.add_message("system", &format!("❌ **Pipeline error**: {}", error));
                     self.chat.status = crate::types::AppStatus::Error(error);
+                    self.stop_streaming();
                 }
                 AppEvent::AgentPipelineCancelled => {
                     tracing::info!("Agent pipeline cancelled");
                     self.chat.pipeline.cancelled = true;
+                    self.stop_streaming();
                 }
             }
+        }
+    }
+
+    /// Try to prettify a JSON string; returns the prettified string or the original if not valid JSON.
+    fn prettify_json(result: &str) -> String {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| result.to_string())
+        } else {
+            result.to_string()
         }
     }
 
     /// Add a tool call message to the chat display.
     fn add_tool_call_message(&mut self, tool_name: &str, call_id: &str, result: &str) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        let content = format!("🔧 **{}** ({})\n```\n{}\n```", tool_name, call_id, result);
+        let formatted_result = Self::prettify_json(result);
+        let content = format!("🔧 **{}** ({})\n```\n{}\n```", tool_name, call_id, formatted_result);
         self.chat.messages.push(ChatMessage {
             role: "tool".to_string(),
             content,
@@ -233,7 +246,8 @@ impl ChatApp {
     /// Add a tool error message to the chat display with error styling.
     fn add_tool_error_message(&mut self, tool_name: &str, call_id: &str, error: &str) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        let content = format!("🔴 **{}** ({})\n```\nError: {}\n```", tool_name, call_id, error);
+        let formatted_error = Self::prettify_json(error);
+        let content = format!("🔴 **{}** ({})\n```\nError: {}\n```", tool_name, call_id, formatted_error);
         self.chat.messages.push(ChatMessage {
             role: "tool".to_string(),
             content,
@@ -302,10 +316,11 @@ impl ChatApp {
         // Always update chat_display, even when load_session returns None (new session)
         let loaded = cl.load_session();
         if let Some(session) = loaded {
+            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
             self.chat.messages = session.messages.iter().map(|m| ChatMessage {
                 role: m.role.clone(),
                 content: m.content.clone(),
-                timestamp: m.timestamp.clone(),
+                timestamp: if m.timestamp.is_empty() { ts.clone() } else { m.timestamp.clone() },
                 image: None,
             }).collect();
             cl.set_system_prompt(&session.system_prompt);

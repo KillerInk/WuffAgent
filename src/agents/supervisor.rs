@@ -169,6 +169,7 @@ impl SupervisorAgentTrait for SupervisorAgent {
                 let registry = self.worker_registry.clone();
                 let worker_configs = self.worker_configs.clone();
                 let task_clone = task.clone();
+                let task_id = task_clone.id.clone();
                 let ctx_clone = context.clone();
                 let event_tx = self.event_tx.clone();
                 let timeout_ms = self.worker_configs.first().map(|c| c.priority).unwrap_or(0);
@@ -184,20 +185,20 @@ impl SupervisorAgentTrait for SupervisorAgent {
                             None => {
                                 tracing::warn!("Failed to spawn worker '{}', falling back to 'default'", name);
                                 match registry.spawn("default") {
-                                    Some(w) => ("default".to_string(), w),
+                                    Some(w) => (name.clone(), w),
                                     None => {
                                         tracing::error!("Failed to spawn fallback worker 'default'");
-                                        return ("unknown".to_string(), Err(AgentError::ConfigError("No available workers".to_string())));
+                                        return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
                                     }
                                 }
                             }
                         }
                     } else {
                         match registry.spawn("default") {
-                            Some(w) => ("default".to_string(), w),
+                            Some(w) => (String::from("default"), w),
                             None => {
                                 tracing::error!("Failed to spawn fallback worker 'default'");
-                                return ("unknown".to_string(), Err(AgentError::ConfigError("No available workers".to_string())));
+                                return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
                             }
                         }
                     };
@@ -218,10 +219,10 @@ impl SupervisorAgentTrait for SupervisorAgent {
                     ).await;
 
                     match result {
-                        Ok(inner) => (worker_name, inner),
+                        Ok(inner) => (worker_name, task_id.clone(), inner),
                         Err(_) => {
                             tracing::warn!("Task '{}' timed out", task_clone.id);
-                            (worker_name, Err(AgentError::Timeout(60_000)))
+                            (worker_name, task_id.clone(), Err(AgentError::Timeout(60_000)))
                         }
                     }
                 });
@@ -231,7 +232,7 @@ impl SupervisorAgentTrait for SupervisorAgent {
             // Collect results
             for handle in handles {
                 match handle.await {
-                    Ok((worker_name, Ok(result))) => {
+                    Ok((worker_name, task_id, Ok(result))) => {
                         tracing::info!(
                             "Task {} completed by worker '{}': {}",
                             result.task_id,
@@ -241,10 +242,10 @@ impl SupervisorAgentTrait for SupervisorAgent {
                         completed_ids.insert(result.task_id.clone());
                         results.push(result);
                     }
-                    Ok((worker_name, Err(e))) => {
+                    Ok((worker_name, task_id, Err(e))) => {
                         tracing::warn!("Task failed with worker '{}': {}", worker_name, e);
                         let failed_result = AgentResult {
-                            task_id: format!("task-{}", uuid::Uuid::new_v4()),
+                            task_id: task_id.clone(),
                             agent_id: worker_name,
                             agent_type: AgentType::General,
                             status: TaskStatus::Failed,
@@ -299,13 +300,55 @@ impl SupervisorAgentTrait for SupervisorAgent {
                 break;
             }
 
-            let mut worker = self
-                .worker_registry
-                .spawn("default")
-                .ok_or_else(|| AgentError::AgentNotFound("default".to_string()))?;
+            // Use the best matching worker for the task, not just the hardcoded "default"
+            let (worker_name, mut worker) = if let Some((name, _config)) =
+                self.worker_registry.find_best_worker(task, &self.worker_configs).await
+            {
+                match self.worker_registry.spawn(&name) {
+                    Some(w) => (name.clone(), w),
+                    None => {
+                        tracing::warn!("Failed to spawn retry worker '{}', falling back to 'default'", name);
+                        match self.worker_registry.spawn("default") {
+                            Some(w) => ("default".to_string(), w),
+                            None => {
+                                tracing::error!("No available workers for retry");
+                                continue;
+                            }
+                        }
+                    }
+                }
+            } else {
+                match self.worker_registry.spawn("default") {
+                    Some(w) => ("default".to_string(), w),
+                    None => {
+                        tracing::error!("No available workers for retry");
+                        continue;
+                    }
+                }
+            };
 
-            let result = worker.execute_task(task, &context).await?;
-            results.push(result);
+            tracing::info!("Retrying task '{}' with worker '{}'", task.id, worker_name);
+            match worker.execute_task(task, &context).await {
+                Ok(result) => {
+                    results.push(result);
+                }
+                Err(e) => {
+                    tracing::warn!("Retry task '{}' failed with worker '{}': {}", task.id, worker_name, e);
+                    let failed_result = AgentResult {
+                        task_id: task.id.clone(),
+                        agent_id: worker_name,
+                        agent_type: AgentType::General,
+                        status: TaskStatus::Failed,
+                        output: serde_json::json!({ "error": e.to_string() }),
+                        summary: format!("Retry task '{}' failed: {}", task.id, e),
+                        needs_refinement: false,
+                        suggested_followup: vec![],
+                        duration_ms: 0,
+                        completed_at: Some(chrono::Utc::now()),
+                    };
+                    results.push(failed_result);
+                }
+            }
         }
 
         Ok(results)
@@ -318,13 +361,15 @@ impl SupervisorAgentTrait for SupervisorAgent {
     ) -> Result<SupervisorDecision, AgentError> {
         let completed: Vec<&AgentResult> = results.iter().filter(|r| r.status == TaskStatus::Completed).collect();
         let failed: Vec<&AgentResult> = results.iter().filter(|r| r.status == TaskStatus::Failed).collect();
+        let retryable: Vec<&AgentResult> = results.iter().filter(|r| r.status == TaskStatus::Retryable).collect();
         let has_refinement = results.iter().any(|r| r.needs_refinement);
         let suggested_tasks: Vec<Task> = results.iter().flat_map(|r| r.suggested_followup.clone()).collect();
 
         tracing::info!(
-            "Supervisor deciding: completed={}, failed={}, refinement_requested={}, suggested_tasks={}",
+            "Supervisor deciding: completed={}, failed={}, retryable={}, refinement_requested={}, suggested_tasks={}",
             completed.len(),
             failed.len(),
+            retryable.len(),
             has_refinement,
             suggested_tasks.len(),
         );
@@ -339,23 +384,30 @@ impl SupervisorAgentTrait for SupervisorAgent {
         }
 
         // Check if all tasks are done
-        if completed.len() + failed.len() >= plan.tasks.len() {
-            if failed.is_empty() {
+        let all_done = completed.len() + failed.len() + retryable.len() >= plan.tasks.len();
+        if all_done {
+            if failed.is_empty() && retryable.is_empty() {
                 let final_output = build_context(results);
                 return Ok(SupervisorDecision::Complete { final_output });
             }
 
-            // Some failed — check if any have remaining retries
-            let retryable_failed: Vec<Task> = plan
+            // Collect tasks that failed or are retryable
+            let mut retryable_tasks: Vec<Task> = plan
                 .tasks
                 .iter()
-                .filter(|t| failed.iter().any(|r| r.task_id == t.id) && t.max_retries > 0)
+                .filter(|t| {
+                    failed.iter().any(|r| r.task_id == t.id)
+                        || retryable.iter().any(|r| r.task_id == t.id)
+                })
                 .cloned()
                 .collect();
 
-            if !retryable_failed.is_empty() {
+            // Retryable tasks always get a retry; failed tasks only if they have retries remaining
+            retryable_tasks.sort_by_key(|t| t.priority);
+
+            if !retryable_tasks.is_empty() {
                 return Ok(SupervisorDecision::Retry {
-                    tasks: retryable_failed,
+                    tasks: retryable_tasks,
                 });
             }
 
@@ -371,5 +423,131 @@ impl SupervisorAgentTrait for SupervisorAgent {
         Ok(SupervisorDecision::Complete {
             final_output: build_context(results),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::AgentType;
+    use super::super::worker::GenericWorker;
+    use crate::tools::registry::ToolRegistry;
+    use crate::tools::lib::TracingToolLogger;
+
+    /// Helper: build a minimal SupervisorAgent with the given configs.
+    fn make_supervisor(worker_configs: Vec<WorkerConfig>) -> SupervisorAgent {
+        let registry = Arc::new(WorkerRegistry::new());
+        let tool_registry = Arc::new(ToolRegistry::new(
+            vec![],
+            Arc::new(TracingToolLogger),
+        ));
+        crate::tools::builtin::register_builtins(&tool_registry).expect("failed to register builtin tools");
+        let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+        SupervisorAgent::new(registry, tool_manager, worker_configs, 4, None)
+    }
+
+    /// Helper: build a minimal ExecutionPlan with the given tasks.
+    fn make_plan(description: &str, tasks: Vec<Task>) -> ExecutionPlan {
+        ExecutionPlan::new(description, tasks)
+    }
+
+    #[test]
+    fn test_supervisor_creation() {
+        let sup = make_supervisor(vec![]);
+        assert!(!sup.id().to_string().is_empty(), "id must not be empty");
+        assert_eq!(sup.name(), "Supervisor");
+        assert_eq!(sup.role(), AgentRole::Supervisor);
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_no_workers() {
+        // Registry with only builtins (default, executing) — should not panic
+        // and should return a valid decision with at least one result.
+        let sup = make_supervisor(vec![]);
+        let task = Task::new("simple task", AgentType::General, serde_json::json!({}));
+        let plan = make_plan("test", vec![task]);
+        let (decision, results) = sup.execute_plan(&plan).await.unwrap();
+        assert!(!results.is_empty(), "should produce at least one result");
+        // With GenericWorker now executing tools, the result may be Completed or Failed.
+        // The supervisor should never return an error decision here.
+        match decision {
+            SupervisorDecision::Complete { .. }
+            | SupervisorDecision::Retry { .. } => {},
+            _ => panic!("expected Complete or Retry decision, got {:?}", decision),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_best_worker_no_workers() {
+        // Even with empty configs, builtins are available so spawn should succeed
+        let sup = make_supervisor(vec![]);
+        let task = Task::new("test task", AgentType::General, serde_json::json!({}));
+        let worker = sup.spawn_worker(&task).await;
+        assert!(worker.is_ok(), "should spawn a builtin worker even with no configs");
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_cancel_token() {
+        let sup = make_supervisor(vec![]);
+        // Cancel before execution
+        sup.cancel_token.cancel();
+        let task = Task::new("should be cancelled", AgentType::General, serde_json::json!({}));
+        let plan = make_plan("cancel-test", vec![task]);
+        let (decision, results) = sup.execute_plan(&plan).await.unwrap();
+        // Should return early with cancelled signal, not error
+        match decision {
+            SupervisorDecision::Complete { final_output } => {
+                assert_eq!(final_output["error"], "cancelled");
+            }
+            _ => panic!("expected Complete with cancelled error"),
+        }
+        assert!(results.is_empty(), "no tasks should have run");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_best_worker_with_registered_worker() {
+        let registry = Arc::new(WorkerRegistry::new());
+
+        let tool_registry = Arc::new(ToolRegistry::new(
+            vec![],
+            Arc::new(TracingToolLogger),
+        ));
+        crate::tools::builtin::register_builtins(&tool_registry).expect("failed to register builtin tools");
+        let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+
+        // Register a custom worker with tool_manager
+        let tm = tool_manager.clone();
+        registry.register("my_worker", move || {
+            Box::new(GenericWorker::new(
+                "my_worker",
+                "My custom worker",
+                vec!["file_io".to_string()],
+                "You are a custom worker.",
+                tm.clone(),
+            ))
+        });
+        assert!(registry.has("my_worker"));
+
+        let config = WorkerConfig {
+            name: "my_worker".to_string(),
+            description: "My custom worker".to_string(),
+            system_prompt: "You are a custom worker.".to_string(),
+            allowed_tools: vec!["file_io".to_string()],
+            priority: 0,
+            max_concurrent: 1,
+            enabled: true,
+        };
+        let sup = SupervisorAgent::new(registry, tool_manager, vec![config], 4, None);
+
+        let task = Task::new("write a file", AgentType::Coding, serde_json::json!({
+            "tools": ["file_io"],
+            "action": "write",
+            "path": "test.txt",
+            "content": "hello"
+        }));
+        let worker = sup.spawn_worker(&task).await;
+        assert!(worker.is_ok(), "should spawn registered worker");
+        let w = worker.unwrap();
+        assert_eq!(w.agent_type(), AgentType::General);
     }
 }

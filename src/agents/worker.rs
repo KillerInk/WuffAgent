@@ -1,6 +1,11 @@
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
+
 use super::traits::{Agent, AgentError};
 use super::types::AgentId;
-use super::types::{AgentResult, AgentType, Task};
+use super::types::{AgentResult, AgentType, Task, TaskStatus};
+use crate::tools::{ToolManager, ToolOutput};
 
 /// Base trait that all workers implement.
 /// Re-exported from traits for convenience.
@@ -14,6 +19,7 @@ pub struct GenericWorker {
     description: String,
     allowed_tools: Vec<String>,
     system_prompt: String,
+    tool_manager: Arc<Mutex<ToolManager>>,
 }
 
 impl GenericWorker {
@@ -22,6 +28,7 @@ impl GenericWorker {
         description: &str,
         allowed_tools: Vec<String>,
         system_prompt: &str,
+        tool_manager: Arc<Mutex<ToolManager>>,
     ) -> Self {
         Self {
             id: AgentId::generate(),
@@ -29,7 +36,21 @@ impl GenericWorker {
             description: description.to_string(),
             allowed_tools,
             system_prompt: system_prompt.to_string(),
+            tool_manager,
         }
+    }
+
+    /// Determine which tool to call based on task input.
+    fn determine_tool(&self, task: &Task) -> String {
+        if let Some(tool) = task.input.get("tool").and_then(|t| t.as_str()) {
+            return tool.to_string();
+        }
+        if let Some(action) = task.input.get("action").and_then(|a| a.as_str()) {
+            return action.to_string();
+        }
+        self.allowed_tools.first()
+            .cloned()
+            .unwrap_or_else(|| "file_io".to_string())
     }
 }
 
@@ -63,21 +84,106 @@ impl super::traits::WorkerAgent for GenericWorker {
             task.input
         );
 
-        // The actual tool execution is delegated to the supervisor which has
-        // access to the ToolManager. This worker returns a placeholder result
-        // that the supervisor will enrich.
-        Ok(AgentResult {
-            task_id: task.id.clone(),
-            agent_id: self.id.to_string(),
-            agent_type: self.agent_type(),
-            status: super::types::TaskStatus::Completed,
-            output: serde_json::Value::Object(serde_json::Map::new()),
-            summary: format!("Task '{}' completed by worker '{}'", task.description, self.name),
-            needs_refinement: false,
-            suggested_followup: vec![],
-            duration_ms: start.elapsed().as_millis() as u64,
-            completed_at: Some(chrono::Utc::now()),
-        })
+        // Determine which tool to call based on task input
+        let tool_name = self.determine_tool(task);
+
+        // Check authorization
+        if !self.allowed_tools.contains(&tool_name) {
+            tracing::warn!(
+                "Worker '{}' not authorized for tool '{}', using fallback",
+                self.name,
+                tool_name
+            );
+            // Fall back to first allowed tool
+            let _tool_name = self.allowed_tools.first()
+                .ok_or_else(|| AgentError::TaskFailure(
+                    format!("Worker '{}' has no allowed tools", self.name)
+                ))?
+                .clone();
+        }
+
+        // Build tool parameters from task input
+        let mut params = crate::tools::ToolParams::new();
+        if let serde_json::Value::Object(obj) = &task.input {
+            for (k, v) in obj {
+                params.values.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(dep_id) = &task.depends_on {
+            if let Some(parent_output) = context.get(dep_id) {
+                params.values.insert(format!("parent_{}", dep_id), parent_output.clone());
+            }
+        }
+
+        // Execute the tool
+        let tool_manager = self.tool_manager.lock().await;
+        let result = tool_manager.execute(&tool_name, params).await;
+        drop(tool_manager);
+
+        let duration = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(ToolOutput::Success(output)) => {
+                tracing::info!(
+                    "Worker '{}' completed task '{}' in {}ms",
+                    self.name,
+                    task.description,
+                    duration
+                );
+                Ok(AgentResult {
+                    task_id: task.id.clone(),
+                    agent_id: self.id.to_string(),
+                    agent_type: self.agent_type(),
+                    status: TaskStatus::Completed,
+                    output,
+                    summary: format!("Task '{}' completed by '{}'", task.description, self.name),
+                    needs_refinement: false,
+                    suggested_followup: vec![],
+                    duration_ms: duration,
+                    completed_at: Some(chrono::Utc::now()),
+                })
+            }
+            Ok(ToolOutput::Error(err)) => {
+                tracing::warn!(
+                    "Worker '{}' task '{}' returned error: {}",
+                    self.name,
+                    task.description,
+                    err
+                );
+                Ok(AgentResult {
+                    task_id: task.id.clone(),
+                    agent_id: self.id.to_string(),
+                    agent_type: self.agent_type(),
+                    status: TaskStatus::Failed,
+                    output: serde_json::json!({ "error": err }),
+                    summary: format!("Task '{}' failed: {}", task.description, err),
+                    needs_refinement: false,
+                    suggested_followup: vec![],
+                    duration_ms: duration,
+                    completed_at: Some(chrono::Utc::now()),
+                })
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Worker '{}' failed task '{}': {}",
+                    self.name,
+                    task.description,
+                    e
+                );
+                Ok(AgentResult {
+                    task_id: task.id.clone(),
+                    agent_id: self.id.to_string(),
+                    agent_type: self.agent_type(),
+                    status: TaskStatus::Failed,
+                    output: serde_json::json!({ "error": e.to_string() }),
+                    summary: format!("Task '{}' failed: {}", task.description, e),
+                    needs_refinement: false,
+                    suggested_followup: vec![],
+                    duration_ms: duration,
+                    completed_at: Some(chrono::Utc::now()),
+                })
+            }
+        }
     }
 }
 

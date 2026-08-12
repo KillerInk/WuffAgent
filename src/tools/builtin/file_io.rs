@@ -139,3 +139,182 @@ impl Tool for FileIOTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── Path Validation Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_path_rejects_etc() {
+        assert!(validate_path("/etc/passwd").is_err());
+        assert!(validate_path("/etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_windows_system() {
+        assert!(validate_path("C:\\Windows\\System32").is_err());
+        assert!(validate_path("c:\\windows").is_err());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_traversal() {
+        assert!(validate_path("../../etc/passwd").is_err());
+        assert!(validate_path("foo/..").is_err());
+    }
+
+    #[test]
+    fn test_validate_path_accepts_safe_paths() {
+        assert!(validate_path("/tmp").is_ok());
+        assert!(validate_path("./relative").is_ok());
+        assert!(validate_path("C:\\Users\\test").is_ok());
+    }
+
+    // ── Tool Execution Tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_file_io_read_missing_file() {
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!("nonexistent_file_12345.txt"));
+                m.insert("action".to_string(), json!("read"));
+                m
+            },
+        };
+        let result = tool.execute(params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_io_write_and_read() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        let content = "hello wuffagent test";
+
+        let tool = FileIOTool::new();
+
+        // Write
+        let write_params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("write"));
+                m.insert("content".to_string(), json!(content));
+                m
+            },
+        };
+        match tool.execute(write_params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(v["bytes_written"], content.len());
+                assert_eq!(v["success"], true);
+            }
+            _ => panic!("write should succeed"),
+        }
+
+        // Read back
+        let read_params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("read"));
+                m
+            },
+        };
+        match tool.execute(read_params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(v["content"], content);
+            }
+            _ => panic!("read should succeed"),
+        }
+    }
+
+    #[test]
+    fn test_file_io_list_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path();
+
+        // Create a couple of files inside the temp dir
+        fs::write(dir_path.join("a.txt"), "a").unwrap();
+        fs::write(dir_path.join("b.txt"), "b").unwrap();
+
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(dir_path.to_string_lossy().to_string()));
+                m.insert("action".to_string(), json!("list"));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(v)) => {
+                let entries: Vec<String> = serde_json::from_value(v["entries"].clone()).unwrap();
+                assert!(entries.iter().any(|e| e.contains("a.txt")));
+                assert!(entries.iter().any(|e| e.contains("b.txt")));
+            }
+            _ => panic!("list should succeed"),
+        }
+    }
+
+    #[test]
+    fn test_file_io_invalid_action() {
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!("/tmp"));
+                m.insert("action".to_string(), json!("delete"));
+                m
+            },
+        };
+        let result = tool.execute(params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_io_missing_path_param() {
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("action".to_string(), json!("read"));
+                m
+            },
+        };
+        let result = tool.execute(params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_io_missing_action_param() {
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!("/tmp"));
+                m
+            },
+        };
+        let result = tool.execute(params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_file_io_missing_content_for_write() {
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!("/tmp/test.txt"));
+                m.insert("action".to_string(), json!("write"));
+                m
+            },
+        };
+        let result = tool.execute(params);
+        assert!(result.is_err());
+    }
+}

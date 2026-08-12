@@ -229,33 +229,9 @@ async fn run_chat_loop(
             result?;
         }
 
-        // 5. Check if more tool calls are pending
-        {
-            let has_more = {
-                let guard = client.lock().unwrap();
-                guard.has_pending_tool_calls()
-            };
-            if !has_more {
-                // Get the final content from the last assistant message
-                let final_content = {
-                    let guard = client.lock().unwrap();
-                    guard
-                        .get_last_assistant_message()
-                        .map(|m| m.content)
-                        .unwrap_or_default()
-                };
-                tracing::info!(
-                    "run_chat_loop round={} loop exit (no more tool calls), final_content_len={}",
-                    round,
-                    final_content.len()
-                );
-                event_tx.send(EngineEvent::StreamComplete {
-                    content: final_content,
-                    usage,
-                })?;
-                return Ok(());
-            }
-        }
+        // 5. Execute succeeded — continue loop to send tool results back to LLM.
+        // The LLM will see the tool results and decide next steps (more tool calls
+        // or final response). We only exit when the LLM responds without tool calls.
 
         // 6. Max rounds check
         round += 1;

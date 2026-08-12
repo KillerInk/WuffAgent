@@ -334,44 +334,21 @@ impl ChatApp {
                                     theme.text_primary
                                 };
                                 if is_tool {
-                                    // Parse tool message: "🔧 **tool_name** (call_id)\n```\nresult\n```"
-                                    let lines: Vec<&str> = message.content.lines().collect();
-                                    if lines.len() >= 3 {
-                                        // Header line (tool name + call_id)
-                                        ui.label(egui::RichText::new(lines[0])
-                                            .color(text_color)
-                                            .size(11.0));
-                                        ui.add_space(2.0);
-                                        // Find code fences
-                                        if lines.len() >= 3 && lines[1].starts_with("```") && lines.last().map_or(false, |l| l.starts_with("```")) {
-                                            // Code block: render header + fenced content
-                                            let code_lines: Vec<&str> = lines[2..lines.len()-1].to_vec();
-                                            let code_text = code_lines.join("\n");
-                                            egui::Frame::none()
-                                                .fill(egui::Color32::from_rgb(10, 10, 10))
-                                                .rounding(4.0)
-                                                .inner_margin(egui::Margin::same(6.0))
-                                                .show(ui, |ui| {
-                                                    ui.label(egui::RichText::new(code_text)
-                                                        .color(egui::Color32::from_rgb(200, 200, 200))
-                                                        .monospace());
-                                                });
-                                        } else {
-                                            // No fences, just render the whole content
-                                            ui.label(egui::RichText::new(message.content.clone())
-                                                .color(text_color));
-                                        }
-                                    } else {
-                                        // Short tool message, render as-is
-                                        ui.label(egui::RichText::new(message.content.clone())
-                                            .color(text_color));
-                                    }
+                                    self.draw_tool_message(ui, message, &theme);
                                 } else {
                                     let content_label = egui::Label::new(
                                         egui::RichText::new(message.content.clone())
                                             .color(text_color)
                                     ).wrap();
                                     ui.add(content_label);
+                                    // Copy button for non-tool messages
+                                    ui.add_space(4.0);
+                                    let copy_btn = egui::Button::new("📋 Copy")
+                                        .rounding(4.0)
+                                        .sense(egui::Sense::click());
+                                    if ui.add(copy_btn).clicked() {
+                                        ui.ctx().copy_text(message.content.clone());
+                                    }
                                 }
                             }
                         });
@@ -423,6 +400,287 @@ impl ChatApp {
         // Clear edit state
         self.chat.editing_message_index = None;
         self.chat.editing_message_content.clear();
+    }
+
+    /// Parse a tool message and render it with smart formatting.
+    /// Tool messages have the format: "🔧 **tool_name** (call_id)\n```\nresult\n```"
+    fn draw_tool_message(&mut self, ui: &mut egui::Ui, message: &ChatMessage, theme: &Theme) {
+        let lines: Vec<&str> = message.content.lines().collect();
+        if lines.is_empty() {
+            return;
+        }
+
+        // Render header line (tool name + call_id)
+        ui.label(egui::RichText::new(lines[0])
+            .color(theme.text_primary)
+            .size(11.0));
+        ui.add_space(3.0);
+
+        // Extract the raw result text (between ``` fences if present)
+        let raw_result = if lines.len() >= 3 && lines[1].starts_with("```") && lines.last().map_or(false, |l| l.starts_with("```")) {
+            lines[2..lines.len()-1].join("\n")
+        } else {
+            message.content.clone()
+        };
+
+        // Try to parse as JSON for smart rendering
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw_result) {
+            self.draw_tool_json_result(ui, &json, &raw_result, theme);
+        } else {
+            // Fallback: render as monospace code block
+            self.draw_tool_plain_result(ui, &raw_result, theme);
+        }
+    }
+
+    /// Render a tool result that is valid JSON with smart field extraction.
+    fn draw_tool_json_result(&mut self, ui: &mut egui::Ui, json: &serde_json::Value, raw: &str, theme: &Theme) {
+        // Check for common structured patterns
+        if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+            // Has a path field — likely a file operation result
+            let is_file_read = json.get("content").is_some();
+            let is_file_write = json.get("bytes_written").is_some() || json.get("success").is_some();
+            let is_dir_list = json.get("entries").is_some();
+
+            if is_dir_list {
+                // Directory listing: show path badge + entries list
+                self.draw_tool_path_badge(ui, path, theme);
+                ui.add_space(4.0);
+                if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
+                    let max_entries = 50;
+                    let display_entries: Vec<&serde_json::Value> = entries.iter().take(max_entries).collect();
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(10, 10, 10))
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::same(6.0))
+                        .show(ui, |ui| {
+                            for entry in display_entries {
+                                if let Some(s) = entry.as_str() {
+                                    ui.label(egui::RichText::new(s)
+                                        .color(egui::Color32::from_rgb(180, 180, 180))
+                                        .monospace());
+                                }
+                            }
+                            if entries.len() > max_entries {
+                                ui.label(egui::RichText::new(format!("... and {} more entries", entries.len() - max_entries))
+                                    .color(theme.text_dim)
+                                    .size(10.0));
+                            }
+                        });
+                }
+            } else if is_file_read {
+                // File read: show path badge + content preview
+                self.draw_tool_path_badge(ui, path, theme);
+                ui.add_space(4.0);
+                if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                    let max_preview_len = 2000;
+                    if content.len() > max_preview_len {
+                        // Truncate long content but show a "show more" option
+                        let preview = &content[..max_preview_len];
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgb(10, 10, 10))
+                            .rounding(4.0)
+                            .inner_margin(egui::Margin::same(6.0))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(preview)
+                                    .color(egui::Color32::from_rgb(200, 200, 200))
+                                    .monospace());
+                            });
+                        ui.add_space(3.0);
+                        let btn = egui::Button::new(format!("Show full content ({} chars)", content.len()))
+                            .rounding(4.0);
+                        if ui.add(btn).clicked() {
+                            // Expand by storing full content in a temporary — for now just show truncated
+                            // We use a simple approach: add the full content as a new message-like entry
+                            // Actually, let's just show it inline by expanding the frame
+                            // Since we can't easily expand, we'll show a scrollable area
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgb(10, 10, 10))
+                                .rounding(4.0)
+                                .inner_margin(egui::Margin::same(6.0))
+                                .show(ui, |ui| {
+                                    egui::ScrollArea::vertical()
+                                        .max_height(300.0)
+                                        .show(ui, |ui| {
+                                            ui.label(egui::RichText::new(content)
+                                                .color(egui::Color32::from_rgb(200, 200, 200))
+                                                .monospace());
+                                        });
+                                });
+                        }
+                    } else {
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgb(10, 10, 10))
+                            .rounding(4.0)
+                            .inner_margin(egui::Margin::same(6.0))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(content)
+                                    .color(egui::Color32::from_rgb(200, 200, 200))
+                                    .monospace());
+                            });
+                    }
+                }
+            } else if is_file_write {
+                // File write: show compact success badge
+                self.draw_tool_path_badge(ui, path, theme);
+                ui.add_space(4.0);
+                if let Some(bytes) = json.get("bytes_written").and_then(|v| v.as_u64()) {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(theme.success, format!("✓ Written {} byte{}", bytes, if bytes == 1 { "" } else { "s" }));
+                    });
+                } else if let Some(success) = json.get("success").and_then(|v| v.as_bool()) {
+                    if success {
+                        ui.colored_label(theme.success, "✓ File written successfully");
+                    }
+                }
+            } else {
+                // Generic JSON with path — render as structured key-value
+                self.draw_tool_path_badge(ui, path, theme);
+                ui.add_space(4.0);
+                self.draw_tool_json_kv(ui, json, theme);
+            }
+        } else {
+            // No path field — check for other common patterns
+            if let Some(expr) = json.get("expression").and_then(|v| v.as_str()) {
+                if let Some(result) = json.get("result").and_then(|v| v.as_f64()) {
+                    // Calculation result
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(expr)
+                            .color(theme.text_secondary)
+                            .monospace());
+                        ui.label(egui::RichText::new(" = ").color(theme.text_dim));
+                        ui.colored_label(theme.success, format!("{}", result));
+                    });
+                } else {
+                    self.draw_tool_json_kv(ui, json, theme);
+                }
+            } else if json.is_object() {
+                // Generic JSON object — render as key-value pairs
+                self.draw_tool_json_kv(ui, json, theme);
+            } else {
+                // Array or scalar — fall back to plain rendering
+                self.draw_tool_plain_result(ui, raw, theme);
+            }
+        }
+
+        // Copy button at the bottom
+        ui.add_space(4.0);
+        let copy_btn = egui::Button::new("📋 Copy")
+            .rounding(4.0)
+            .sense(egui::Sense::click());
+        if ui.add(copy_btn).clicked() {
+            ui.ctx().copy_text(raw.to_string());
+        }
+    }
+
+    /// Render JSON as a key-value list.
+    fn draw_tool_json_kv(&self, ui: &mut egui::Ui, json: &serde_json::Value, theme: &Theme) {
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(10, 10, 10))
+            .rounding(4.0)
+            .inner_margin(egui::Margin::same(6.0))
+            .show(ui, |ui| {
+                match json {
+                    serde_json::Value::Object(map) => {
+                        for (key, value) in map {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("{}:", key))
+                                    .color(theme.text_secondary)
+                                    .monospace()
+                                    .size(11.0));
+                                let val_str = Self::json_value_to_string(value);
+                                ui.label(egui::RichText::new(val_str)
+                                    .color(egui::Color32::from_rgb(200, 200, 200))
+                                    .monospace()
+                                    .size(11.0));
+                            });
+                        }
+                    }
+                    serde_json::Value::Array(arr) => {
+                        for item in arr {
+                            ui.label(egui::RichText::new(Self::json_value_to_string(item))
+                                .color(egui::Color32::from_rgb(200, 200, 200))
+                                .monospace()
+                                .size(11.0));
+                        }
+                    }
+                    other => {
+                        ui.label(egui::RichText::new(Self::json_value_to_string(other))
+                            .color(egui::Color32::from_rgb(200, 200, 200))
+                            .monospace()
+                            .size(11.0));
+                    }
+                }
+            });
+    }
+
+    /// Convert a JSON value to a display string.
+    fn json_value_to_string(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => "null".to_string(),
+            serde_json::Value::Array(arr) => {
+                let items: Vec<String> = arr.iter().map(|v| Self::json_value_to_string(v)).collect();
+                format!("[{}]", items.join(", "))
+            }
+            serde_json::Value::Object(map) => {
+                let pairs: Vec<String> = map.iter()
+                    .map(|(k, v)| format!("{}: {}", k, Self::json_value_to_string(v)))
+                    .collect();
+                format!("{{{}}}", pairs.join(", "))
+            }
+        }
+    }
+
+    /// Draw a clickable file path badge.
+    fn draw_tool_path_badge(&self, ui: &mut egui::Ui, path: &str, theme: &Theme) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("📄").size(11.0));
+            // Path as a clickable button
+            let path_btn = egui::Button::new(egui::RichText::new(path)
+                .color(theme.accent)
+                .size(10.0)
+                .monospace());
+            if ui.add(path_btn).clicked() {
+                // Open parent directory in explorer
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    let parent_str = parent.to_string_lossy().to_string();
+                    #[cfg(windows)]
+                    {
+                        let _ = std::process::Command::new("explorer")
+                            .args(["/select,", &parent_str])
+                            .spawn();
+                    }
+                    #[cfg(unix)]
+                    {
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(parent_str)
+                            .spawn();
+                    }
+                }
+            }
+        });
+    }
+
+    /// Render a plain (non-JSON) tool result as a monospace code block.
+    fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, _theme: &Theme) {
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(10, 10, 10))
+            .rounding(4.0)
+            .inner_margin(egui::Margin::same(6.0))
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(text)
+                    .color(egui::Color32::from_rgb(200, 200, 200))
+                    .monospace());
+            });
+        ui.add_space(4.0);
+        let copy_btn = egui::Button::new("📋 Copy")
+            .rounding(4.0)
+            .sense(egui::Sense::click());
+        if ui.add(copy_btn).clicked() {
+            ui.ctx().copy_text(text.to_string());
+        }
     }
 
     /// Draw the agent pipeline panel with plan status, task progress, and feedback loop info.
