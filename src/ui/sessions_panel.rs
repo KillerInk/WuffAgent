@@ -58,6 +58,11 @@ impl SessionsPanel {
         self.sessions = sessions::list_sessions(&self.sessions_dir);
     }
 
+    /// Clear the selected session (used after deletion).
+    pub fn clear_session(&mut self) {
+        self.selected_id = None;
+    }
+
     pub(super) fn sessions_dir(&self) -> &PathBuf {
         &self.sessions_dir
     }
@@ -151,9 +156,10 @@ impl SessionsPanel {
         response
     }
 
-    pub fn draw(&mut self, ctx: &egui::Context) -> Option<String> {
+    pub fn draw(&mut self, ctx: &egui::Context) -> (Option<String>, bool) {
         let mut selected_id: Option<String> = None;
         let mut action: Option<PanelAction> = None;
+        let mut clear_client_session = false;
         // Show the delete confirmation dialog if pending
         if let Some((id, name, last_message)) = self.pending_delete.clone() {
             egui::Window::new("Delete Session")
@@ -383,9 +389,13 @@ impl SessionsPanel {
 
         // Apply actions after the UI closure to avoid borrow conflicts
         if let Some(act) = action {
-            return apply_actions(self, act);
+            let result = apply_actions(self, act);
+            // Return the selected_id for the caller to handle session switching
+            // Also propagate clear_client_session so the caller can clear the client state
+            clear_client_session = result.clear_client_session;
+            return (result.selected_id, clear_client_session);
         }
 
-        selected_id
+        (selected_id, clear_client_session)
     }
 }

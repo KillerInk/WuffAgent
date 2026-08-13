@@ -12,12 +12,19 @@ pub enum PanelAction {
     Import,
 }
 
+/// Result of applying a panel action.
+pub struct PanelActionResult {
+    /// The optionally newly-selected session id.
+    pub selected_id: Option<String>,
+    /// Whether the client session should also be cleared (happens on delete).
+    pub clear_client_session: bool,
+}
+
 /// Build the action handlers and apply them to the panel.
-/// Returns the optionally newly-selected session id.
 pub fn apply_actions(
     panel: &mut SessionsPanel,
     action: PanelAction,
-) -> Option<String> {
+) -> PanelActionResult {
     match action {
         PanelAction::Rename { id, new_name } => {
             if let Some(mut s) = sessions::load_session(panel.sessions_dir(), &id) {
@@ -25,7 +32,7 @@ pub fn apply_actions(
                 let _ = sessions::save_session(panel.sessions_dir(), &s);
             }
             panel.refresh();
-            panel.selected_id().clone()
+            PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false }
         }
         PanelAction::Create(name) => {
             let session = sessions::create_session(panel.sessions_dir(), &name);
@@ -39,12 +46,17 @@ pub fn apply_actions(
                 }
             }
             panel.refresh();
-            panel.selected_id().clone()
+            PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false }
         }
         PanelAction::Delete(id) => {
             match sessions::delete_session(panel.sessions_dir(), &id) {
                 Ok(()) => {
                     panel.show_notification(&format!("Session '{}' deleted", id), true);
+                    // Clear the panel's session ID
+                    panel.clear_session();
+                    // Also clear the config's session_id so the next session is loaded on restart
+                    panel.config().lock().unwrap().session_id = None;
+                    PanelActionResult { selected_id: None, clear_client_session: true }
                 }
                 Err(e) => {
                     panel.show_notification(&format!("Failed to delete session: {}", e), false);
@@ -53,14 +65,9 @@ pub fn apply_actions(
                         *panel.selected_id_mut() = None;
                     }
                     panel.refresh();
-                    return panel.selected_id().clone();
+                    return PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false };
                 }
             }
-            if panel.selected_id().as_deref() == Some(&id) {
-                *panel.selected_id_mut() = None;
-            }
-            panel.refresh();
-            panel.selected_id().clone()
         }
         PanelAction::Export { session_id } => {
             let output_path = if panel.export_path().is_empty() {
@@ -76,7 +83,7 @@ pub fn apply_actions(
                     panel.show_notification(&format!("Export failed: {}", e), false);
                 }
             }
-            panel.selected_id().clone()
+            PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false }
         }
         PanelAction::Import => {
             let input_path = if panel.import_path().is_empty() {
@@ -93,7 +100,7 @@ pub fn apply_actions(
                     panel.show_notification(&format!("Import failed: {}", e), false);
                 }
             }
-            panel.selected_id().clone()
+            PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false }
         }
     }
 }

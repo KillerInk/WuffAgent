@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::collections::HashSet;
 use std::sync::mpsc;
 
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
@@ -10,7 +9,6 @@ use super::types::{AgentId, AgentResult, AgentType, ExecutionPlan, Task, TaskSta
 use super::worker::WorkerAgent;
 use super::worker_registry::WorkerRegistry;
 use super::config::WorkerConfig;
-use crate::tools::ToolManager;
 use crate::types::AppEvent;
 use super::traits::{Agent, AgentError, AgentRole, SupervisorAgent as SupervisorAgentTrait, SupervisorDecision};
 
@@ -19,7 +17,6 @@ use super::traits::{Agent, AgentError, AgentRole, SupervisorAgent as SupervisorA
 pub struct SupervisorAgent {
     id: AgentId,
     worker_registry: Arc<WorkerRegistry>,
-    tool_manager: Arc<Mutex<ToolManager>>,
     max_parallel: usize,
     worker_configs: Vec<WorkerConfig>,
     cancel_token: Arc<CancellationToken>,
@@ -29,7 +26,6 @@ pub struct SupervisorAgent {
 impl SupervisorAgent {
     pub fn new(
         worker_registry: Arc<WorkerRegistry>,
-        tool_manager: Arc<Mutex<ToolManager>>,
         worker_configs: Vec<WorkerConfig>,
         max_parallel: usize,
         event_tx: Option<Arc<std::sync::Mutex<mpsc::Sender<AppEvent>>>>,
@@ -37,7 +33,6 @@ impl SupervisorAgent {
         Self {
             id: AgentId::generate(),
             worker_registry,
-            tool_manager,
             max_parallel,
             worker_configs,
             cancel_token: Arc::new(CancellationToken::new()),
@@ -84,6 +79,7 @@ impl SupervisorAgent {
 
         Err(AgentError::AgentNotFound("No available workers".to_string()))
     }
+
 }
 
 #[async_trait::async_trait]
@@ -174,33 +170,32 @@ impl SupervisorAgentTrait for SupervisorAgent {
                 let task_id = task_clone.id.clone();
                 let ctx_clone = context.clone();
                 let event_tx = self.event_tx.clone();
-                let timeout_ms = self.worker_configs.first().map(|c| c.priority).unwrap_or(0);
-                let _timeout_ms = timeout_ms; // ensure the value is used
 
                 let handle = tokio::spawn(async move {
-                    // Find best worker
-                    let (worker_name, mut worker) = if let Some((name, _config)) =
-                        registry.find_best_worker(&task_clone, &worker_configs).await
-                    {
-                        match registry.spawn(&name) {
-                            Some(w) => (name.clone(), w),
-                            None => {
-                                tracing::warn!("Failed to spawn worker '{}', falling back to 'default'", name);
-                                match registry.spawn("default") {
-                                    Some(w) => (name.clone(), w),
-                                    None => {
-                                        tracing::error!("Failed to spawn fallback worker 'default'");
-                                        return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
+                    // Find best worker using shared method
+                    let (worker_name, mut worker) = match registry.find_best_worker(&task_clone, &worker_configs).await {
+                        Some((name, _config)) => {
+                            match registry.spawn(&name) {
+                                Some(w) => (name.clone(), w),
+                                None => {
+                                    tracing::warn!("Failed to spawn worker '{}', falling back to 'default'", name);
+                                    match registry.spawn("default") {
+                                        Some(w) => (name.clone(), w),
+                                        None => {
+                                            tracing::error!("Failed to spawn fallback worker 'default'");
+                                            return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
+                                        }
                                     }
                                 }
                             }
                         }
-                    } else {
-                        match registry.spawn("default") {
-                            Some(w) => (String::from("default"), w),
-                            None => {
-                                tracing::error!("Failed to spawn fallback worker 'default'");
-                                return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
+                        None => {
+                            match registry.spawn("default") {
+                                Some(w) => (String::from("default"), w),
+                                None => {
+                                    tracing::error!("Failed to spawn fallback worker 'default'");
+                                    return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
+                                }
                             }
                         }
                     };
@@ -236,7 +231,7 @@ impl SupervisorAgentTrait for SupervisorAgent {
             // Collect results
             for handle in handles {
                 match handle.await {
-                    Ok((worker_name, task_id, Ok(result))) => {
+                    Ok((worker_name, _task_id, Ok(result))) => {
                         tracing::info!(
                             "Task {} completed by worker '{}': {}",
                             result.task_id,
@@ -316,29 +311,30 @@ impl SupervisorAgentTrait for SupervisorAgent {
                 break;
             }
 
-            // Use the best matching worker for the task, not just the hardcoded "default"
-            let (worker_name, mut worker) = if let Some((name, _config)) =
-                self.worker_registry.find_best_worker(task, &self.worker_configs).await
-            {
-                match self.worker_registry.spawn(&name) {
-                    Some(w) => (name.clone(), w),
-                    None => {
-                        tracing::warn!("Failed to spawn retry worker '{}', falling back to 'default'", name);
-                        match self.worker_registry.spawn("default") {
-                            Some(w) => ("default".to_string(), w),
-                            None => {
-                                tracing::error!("No available workers for retry");
-                                continue;
+            // Use the best matching worker for the task
+            let (worker_name, mut worker) = match self.worker_registry.find_best_worker(task, &self.worker_configs).await {
+                Some((name, _config)) => {
+                    match self.worker_registry.spawn(&name) {
+                        Some(w) => (name.clone(), w),
+                        None => {
+                            tracing::warn!("Failed to spawn retry worker '{}', falling back to 'default'", name);
+                            match self.worker_registry.spawn("default") {
+                                Some(w) => ("default".to_string(), w),
+                                None => {
+                                    tracing::error!("No available workers for retry");
+                                    continue;
+                                }
                             }
                         }
                     }
                 }
-            } else {
-                match self.worker_registry.spawn("default") {
-                    Some(w) => ("default".to_string(), w),
-                    None => {
-                        tracing::error!("No available workers for retry");
-                        continue;
+                None => {
+                    match self.worker_registry.spawn("default") {
+                        Some(w) => ("default".to_string(), w),
+                        None => {
+                            tracing::error!("No available workers for retry");
+                            continue;
+                        }
                     }
                 }
             };
@@ -475,8 +471,7 @@ mod tests {
         ));
         let invocation_registry = Arc::new(crate::agents::invocation_registry::AgentInvocationRegistry::new());
         crate::tools::builtin::register_builtins(&tool_registry, &invocation_registry).expect("failed to register builtin tools");
-        let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
-        SupervisorAgent::new(registry, tool_manager, worker_configs, 4, None)
+        SupervisorAgent::new(registry, worker_configs, 4, None)
     }
 
     /// Helper: build a minimal ExecutionPlan with the given tasks.
@@ -574,7 +569,7 @@ mod tests {
             can_invoke: vec![],
             handoff_enabled: false,
         };
-        let sup = SupervisorAgent::new(registry, tool_manager, vec![config], 4, None);
+        let sup = SupervisorAgent::new(registry, vec![config], 4, None);
 
         let task = Task::new("write a file", AgentType::Coding, serde_json::json!({
             "tools": ["file_io"],

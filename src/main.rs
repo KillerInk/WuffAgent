@@ -17,7 +17,8 @@ use tools::{builtin, registry::ToolRegistry, ToolManager, TracingToolLogger};
 use ui::state::ChatApp;
 use agents::{AgentRegistry, AgentEngine};
 
-fn main() -> eframe::Result {
+#[tokio::main]
+async fn main() -> eframe::Result {
     // Initialize tracing subscriber for debug logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -25,10 +26,6 @@ fn main() -> eframe::Result {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug")),
         )
         .init();
-
-    // Create a Tokio runtime so tokio::spawn works inside the app
-    let _rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = _rt.enter();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),

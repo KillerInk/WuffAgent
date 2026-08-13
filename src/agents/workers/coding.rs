@@ -75,7 +75,7 @@ impl WorkerAgent for CodingWorker {
                 self.name,
                 tool_name
             );
-            let tool_name = self.allowed_tools.first()
+            let _tool_name = self.allowed_tools.first()
                 .ok_or_else(|| AgentError::TaskFailure(
                     format!("Worker '{}' has no allowed tools", self.name)
                 ))?

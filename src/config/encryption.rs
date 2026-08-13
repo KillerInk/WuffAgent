@@ -38,6 +38,7 @@ impl EncryptionSettings {
 }
 
 /// Generate a random 32-byte encryption key.
+#[allow(dead_code)]
 pub fn generate_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
@@ -46,6 +47,7 @@ pub fn generate_key() -> [u8; 32] {
 
 /// Encrypt plaintext using ChaCha20Poly1305 with the given 32-byte key.
 /// Returns a base64-encoded string of [nonce || ciphertext].
+#[allow(dead_code)]
 pub fn encrypt(plaintext: &str, key: &[u8]) -> Result<String, anyhow::Error> {
     let cipher = ChaCha20Poly1305::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("failed to create cipher: {}", e))?;
@@ -70,6 +72,7 @@ pub fn encrypt(plaintext: &str, key: &[u8]) -> Result<String, anyhow::Error> {
 
 /// Decrypt a base64-encoded encrypted string using ChaCha20Poly1305 with the given key.
 /// Returns None if the key is wrong or the data is malformed.
+#[allow(dead_code)]
 pub fn decrypt(encrypted: &str, key: &[u8]) -> Result<String, anyhow::Error> {
     let raw = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,

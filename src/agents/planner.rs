@@ -110,7 +110,7 @@ impl<C: ChatClientLike> PlannerAgent<C> {
         let plan_value: serde_json::Value = serde_json::from_str(&json_str)
             .map_err(|e| AgentError::PlanError(format!("Invalid JSON: {}", e)))?;
 
-        if let Err(errors) = validator.validate(&plan_value) {
+        if let Err(_errors) = validator.validate(&plan_value) {
             let error_msgs: Vec<String> = validator.iter_errors(&plan_value).map(|e| e.to_string()).collect();
             tracing::warn!("Plan JSON validation failed: {}", error_msgs.join(", "));
             // Fall back to markdown parsing
@@ -278,7 +278,7 @@ impl<C: ChatClientLike> PlannerAgent<C> {
         request: &str,
         context: Option<&serde_json::Value>,
     ) -> Vec<Message> {
-        let mut messages = vec![
+        let messages = vec![
             Message {
                 role: "system".to_string(),
                 content: self.system_prompt.clone(),

@@ -1,7 +1,6 @@
 use eframe::egui;
 
 use super::state::ChatApp;
-use super::sessions_utils::truncate;
 use crate::types::ChatMessage;
 use super::theme::Theme;
 
@@ -406,6 +405,82 @@ impl ChatApp {
         }
     }
 
+    /// Produce a human-readable label for a tool call from its result JSON.
+    /// Returns e.g. "Read `path/to/file`" or "Write `path/to/file` (1234 bytes)"
+    pub(super) fn tool_call_header(tool_name: &str, result: &str) -> String {
+        // If result looks like it's already a wrapper JSON, extract the actual result
+        let actual_result = if result.starts_with('{') && result.contains("\"result\"") {
+            // It's a wrapper JSON, extract the result field
+            if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(result) {
+                wrapper.get("result").map(|v| v.to_string()).unwrap_or(result.to_string())
+            } else {
+                result.to_string()
+            }
+        } else {
+            result.to_string()
+        };
+
+        // First, try to parse as JSON and extract meaningful info
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&actual_result) {
+            // File I/O operations
+            if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+                if json.get("content").is_some() {
+                    return format!("{}: Read {}", tool_name, path);
+                }
+                if json.get("bytes_written").is_some() {
+                    return format!("{}: Write {}", tool_name, path);
+                }
+                if json.get("entries").is_some() {
+                    return format!("{}: List {}", tool_name, path);
+                }
+                if json.get("deleted").is_some() {
+                    return format!("{}: Delete {}", tool_name, path);
+                }
+                if json.get("created").is_some() {
+                    return format!("{}: Mkdir {}", tool_name, path);
+                }
+                if json.get("bytes_appended").is_some() {
+                    return format!("{}: Append {}", tool_name, path);
+                }
+                if json.get("lines_changed").is_some() {
+                    return format!("{}: Edit {}", tool_name, path);
+                }
+                if json.get("size").is_some() || json.get("is_file").is_some() || json.get("is_dir").is_some() {
+                    return format!("{}: Stat {}", tool_name, path);
+                }
+            }
+            // Calculation
+            if let (Some(expr), Some(_result)) = (
+                json.get("expression").and_then(|v| v.as_str()),
+                json.get("result"),
+            ) {
+                return format!("{}: Calc {}", tool_name, expr);
+            }
+            // Web search
+            if let Some(query) = json.get("query").and_then(|v| v.as_str()) {
+                return format!("{}: Search {}", tool_name, query);
+            }
+            if let Some(results) = json.get("results").and_then(|v| v.as_array()) {
+                return format!("{}: Search results ({} found)", tool_name, results.len());
+            }
+            // Agent call
+            if let (Some(target), Some(task)) = (
+                json.get("target").and_then(|v| v.as_str()),
+                json.get("task").and_then(|v| v.as_str()),
+            ) {
+                let short_task = if task.len() > 40 { &task[..40] } else { task };
+                return format!("{}: Agent {} -> {}", tool_name, target, short_task);
+            }
+        }
+        // If result is an error message, show it truncated
+        if actual_result.starts_with("Error:") || actual_result.starts_with("error:") {
+            let truncated = if actual_result.len() > 50 { &actual_result[..50] } else { &actual_result };
+            return format!("{}: {}", tool_name, truncated);
+        }
+        // Fallback: just show tool name
+        tool_name.to_string()
+    }
+
     pub(super) fn commit_message_edit(&mut self, index: usize) {
         let new_content = self.chat.editing_message_content.clone();
         // Update chat_display
@@ -430,32 +505,58 @@ impl ChatApp {
     }
 
     /// Parse a tool message and render it with smart formatting.
-    /// Tool messages have the format: "🔧 **tool_name** (call_id)\n```\nresult\n```"
+    /// Tool messages have the format: "header||call_id||result_json"
     fn draw_tool_message(&mut self, ui: &mut egui::Ui, message: &ChatMessage, theme: &Theme) {
-        let lines: Vec<&str> = message.content.lines().collect();
-        if lines.is_empty() {
+        // First check if this is a legacy format (starts with { or 🔧)
+        let is_legacy = message.content.starts_with('{') || message.content.starts_with('🔧');
+        
+        if is_legacy {
+            // Legacy format - parse as before
+            let lines: Vec<&str> = message.content.lines().collect();
+            if lines.is_empty() { return; }
+            ui.label(egui::RichText::new(lines[0])
+                .color(theme.text_primary).size(11.0));
+            ui.add_space(3.0);
+            let raw_result = if lines.len() >= 3 && lines[1].starts_with("```") && lines.last().map_or(false, |l| l.starts_with("```")) {
+                lines[2..lines.len()-1].join("\n")
+            } else {
+                message.content.clone()
+            };
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw_result) {
+                self.draw_tool_json_result(ui, &json, &raw_result, theme);
+            } else {
+                self.draw_tool_plain_result(ui, &raw_result, theme);
+            }
             return;
         }
 
-        // Render header line (tool name + call_id)
-        ui.label(egui::RichText::new(lines[0])
-            .color(theme.text_primary)
-            .size(11.0));
+        let parts: Vec<&str> = message.content.splitn(3, "||").collect();
+        if parts.is_empty() {
+            return;
+        }
+
+        let header = parts[0];
+        let _call_id = if parts.len() > 1 { Some(parts[1]) } else { None };
+        let raw_result = if parts.len() > 2 { parts[2] } else { message.content.as_str() };
+
+        // Render beautiful header
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(header)
+                .color(theme.text_primary)
+                .size(11.0));
+            if let Some(cid) = _call_id {
+                ui.label(egui::RichText::new(cid)
+                    .color(theme.text_dim)
+                    .size(9.0));
+            }
+        });
         ui.add_space(3.0);
 
-        // Extract the raw result text (between ``` fences if present)
-        let raw_result = if lines.len() >= 3 && lines[1].starts_with("```") && lines.last().map_or(false, |l| l.starts_with("```")) {
-            lines[2..lines.len()-1].join("\n")
+        // Render result with smart formatting
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_result) {
+            self.draw_tool_json_result(ui, &json, raw_result, theme);
         } else {
-            message.content.clone()
-        };
-
-        // Try to parse as JSON for smart rendering
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw_result) {
-            self.draw_tool_json_result(ui, &json, &raw_result, theme);
-        } else {
-            // Fallback: render as monospace code block
-            self.draw_tool_plain_result(ui, &raw_result, theme);
+            self.draw_tool_plain_result(ui, raw_result, theme);
         }
     }
 
@@ -495,54 +596,27 @@ impl ChatApp {
                         });
                 }
             } else if is_file_read {
-                // File read: show path badge + content preview
+                // File read: show path badge ONLY, hide content behind button
                 self.draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
                 if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
-                    let max_preview_len = 2000;
-                    if content.len() > max_preview_len {
-                        // Truncate long content but show a "show more" option
-                        let preview = truncate(content, max_preview_len);
+                    let char_count = content.len();
+                    // Always show a "Show content" button, hide the content by default
+                    let btn = egui::Button::new(format!("Show content ({} chars)", char_count))
+                        .rounding(4.0);
+                    if ui.add(btn).clicked() {
                         egui::Frame::none()
                             .fill(egui::Color32::from_rgb(10, 10, 10))
                             .rounding(4.0)
                             .inner_margin(egui::Margin::same(6.0))
                             .show(ui, |ui| {
-                                ui.label(egui::RichText::new(preview)
-                                    .color(egui::Color32::from_rgb(200, 200, 200))
-                                    .monospace());
-                            });
-                        ui.add_space(3.0);
-                        let btn = egui::Button::new(format!("Show full content ({} chars)", content.len()))
-                            .rounding(4.0);
-                        if ui.add(btn).clicked() {
-                            // Expand by storing full content in a temporary — for now just show truncated
-                            // We use a simple approach: add the full content as a new message-like entry
-                            // Actually, let's just show it inline by expanding the frame
-                            // Since we can't easily expand, we'll show a scrollable area
-                            egui::Frame::none()
-                                .fill(egui::Color32::from_rgb(10, 10, 10))
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::same(6.0))
-                                .show(ui, |ui| {
-                                    egui::ScrollArea::vertical()
-                                        .max_height(300.0)
-                                        .show(ui, |ui| {
-                                            ui.label(egui::RichText::new(content)
-                                                .color(egui::Color32::from_rgb(200, 200, 200))
-                                                .monospace());
-                                        });
-                                });
-                        }
-                    } else {
-                        egui::Frame::none()
-                            .fill(egui::Color32::from_rgb(10, 10, 10))
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::same(6.0))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new(content)
-                                    .color(egui::Color32::from_rgb(200, 200, 200))
-                                    .monospace());
+                                egui::ScrollArea::vertical()
+                                    .max_height(300.0)
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new(content)
+                                            .color(egui::Color32::from_rgb(200, 200, 200))
+                                            .monospace());
+                                    });
                             });
                     }
                 }
@@ -711,6 +785,7 @@ impl ChatApp {
     }
 
     /// Draw the agent pipeline panel with plan status, task progress, and feedback loop info.
+    #[allow(dead_code)]
     pub(super) fn draw_pipeline_panel(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         // Snapshot pipeline state before the closure
         let plan_id = self.chat.pipeline.plan_id.clone();
@@ -797,6 +872,7 @@ impl ChatApp {
     }
 
     /// Draw a compact pipeline progress bar below the chat.
+    #[allow(dead_code)]
     pub(super) fn draw_pipeline_progress(&self, ui: &mut egui::Ui, theme: &Theme) {
         let pipeline = &self.chat.pipeline;
         if pipeline.tasks.is_empty() {

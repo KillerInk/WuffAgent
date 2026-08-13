@@ -8,11 +8,6 @@ use super::super::traits::{Agent, AgentError};
 use super::super::types::AgentId;
 use super::super::WorkerAgent;
 
-/// Returns true if the error is fixable by the planner (e.g. missing tool params).
-fn error_is_fixable(e: &ToolError) -> bool {
-    e.is_fixable()
-}
-
 /// A worker that executes tasks by calling tools through a ToolManager.
 pub struct ExecutingWorker {
     id: AgentId,
@@ -83,7 +78,7 @@ impl WorkerAgent for ExecutingWorker {
                 tool_name
             );
             // Fall back to first allowed tool
-            let tool_name = self.allowed_tools.first()
+            let _tool_name = self.allowed_tools.first()
                 .ok_or_else(|| AgentError::TaskFailure(
                     format!("Worker '{}' has no allowed tools", self.name)
                 ))?

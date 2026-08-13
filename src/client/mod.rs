@@ -125,6 +125,13 @@ impl ChatClient {
         self.session_dir = session_dir;
     }
 
+    /// Clear the current session (set session_id to None).
+    /// Call this when a session is deleted to prevent it from being
+    /// recreated on the next save.
+    pub fn clear_session(&mut self) {
+        self.session_id = None;
+    }
+
     pub fn set_encryption_key(&mut self, key: Option<[u8; 32]>) {
         self.encryption_key = key;
     }
@@ -332,10 +339,6 @@ impl ChatClient {
             tools: tools.map(|t| t.to_vec()),
         };
         let body = serde_json::to_string(&request)?;
-        tracing::debug!(
-            "stream_message (arc) request body:\n{}",
-            body
-        );
 
         let mut builder = http_client
             .post(format!("{}/v1/chat/completions", base_url))
@@ -978,7 +981,7 @@ impl ChatClientLike for ChatClient {
         let request = build_request(&self.system_prompt, &self.conversation, &prompt, true, None);
         let builder = build_stream_request(&self.http_client, &self.base_url, self.api_key.as_deref(), &request);
         let resp = builder.send().await.map_err(|e| e.to_string())?;
-        let mut callback = |chunk: String, _is_thinking: bool| -> Result<(), Error> { Ok(()) };
+        let mut callback = |_chunk: String, _is_thinking: bool| -> Result<(), Error> { Ok(()) };
         let _usage = stream_message_arc(resp, &self.conversation, &mut callback).await.map_err(|e| e.to_string())?;
         // Extract the accumulated response from conversation (lock after await to avoid Send issue)
         let conv = self.conversation.lock().unwrap();

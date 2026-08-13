@@ -4,7 +4,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::tools::lib::{Tool, ToolError, ToolLogger, ToolMetadata, ToolSchema};
-use crate::tools::builtin::{CalculationTool, FileIOTool};
 
 /// Internal entry wrapping a loaded tool.
 pub struct ToolEntry {
