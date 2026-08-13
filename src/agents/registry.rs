@@ -220,7 +220,8 @@ mod tests {
     fn make_test_registry() -> ToolRegistry {
         let logger = Arc::new(crate::tools::lib::TracingToolLogger);
         let registry = ToolRegistry::new(vec![], logger);
-        builtin::register_builtins(&registry).expect("failed to register builtins");
+        let invocation_registry = crate::agents::invocation_registry::AgentInvocationRegistry::new();
+        builtin::register_builtins(&registry, &invocation_registry).expect("failed to register builtins");
         registry
     }
 

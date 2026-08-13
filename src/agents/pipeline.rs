@@ -307,7 +307,8 @@ mod tests {
             vec![],
             Arc::new(TracingToolLogger),
         ));
-        builtin::register_builtins(&tool_registry).expect("failed to register builtin tools");
+        let invocation_registry = Arc::new(crate::agents::invocation_registry::AgentInvocationRegistry::new());
+        builtin::register_builtins(&tool_registry, &invocation_registry).expect("failed to register builtin tools");
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
         Arc::new(SupervisorAgent::new(
             registry,
@@ -551,7 +552,8 @@ mod tests {
             vec![],
             Arc::new(TracingToolLogger),
         ));
-        builtin::register_builtins(&tool_registry).expect("failed to register builtin tools");
+        let invocation_registry = Arc::new(crate::agents::invocation_registry::AgentInvocationRegistry::new());
+        builtin::register_builtins(&tool_registry, &invocation_registry).expect("failed to register builtin tools");
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
         let supervisor = Arc::new(SupervisorAgent::new(
             registry,

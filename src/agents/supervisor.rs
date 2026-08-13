@@ -473,7 +473,8 @@ mod tests {
             vec![],
             Arc::new(TracingToolLogger),
         ));
-        crate::tools::builtin::register_builtins(&tool_registry).expect("failed to register builtin tools");
+        let invocation_registry = Arc::new(crate::agents::invocation_registry::AgentInvocationRegistry::new());
+        crate::tools::builtin::register_builtins(&tool_registry, &invocation_registry).expect("failed to register builtin tools");
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
         SupervisorAgent::new(registry, tool_manager, worker_configs, 4, None)
     }
@@ -545,7 +546,8 @@ mod tests {
             vec![],
             Arc::new(TracingToolLogger),
         ));
-        crate::tools::builtin::register_builtins(&tool_registry).expect("failed to register builtin tools");
+        let invocation_registry = Arc::new(crate::agents::invocation_registry::AgentInvocationRegistry::new());
+        crate::tools::builtin::register_builtins(&tool_registry, &invocation_registry).expect("failed to register builtin tools");
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
 
         // Register a custom worker with tool_manager
@@ -569,6 +571,8 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         let sup = SupervisorAgent::new(registry, tool_manager, vec![config], 4, None);
 

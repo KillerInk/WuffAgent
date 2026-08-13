@@ -16,6 +16,8 @@ pub struct WorkerRegistry {
     workers: RwLock<HashMap<String, Arc<dyn Fn() -> Box<dyn WorkerAgent> + Send + Sync>>>,
     /// Shared tool registry with builtins — all workers use this.
     tool_registry: Arc<ToolRegistry>,
+    /// Registry for inter-agent invocation.
+    invocation_registry: Arc<super::invocation_registry::AgentInvocationRegistry>,
 }
 
 impl WorkerRegistry {
@@ -24,11 +26,14 @@ impl WorkerRegistry {
             vec![],
             Arc::new(TracingToolLogger),
         ));
+        let invocation_registry = Arc::new(super::invocation_registry::AgentInvocationRegistry::new());
         // Register built-in tools so workers can actually use them
-        crate::tools::builtin::register_builtins(&tool_registry).expect("failed to register builtin tools");
+        crate::tools::builtin::register_builtins(&tool_registry, &invocation_registry)
+            .expect("failed to register builtin tools");
         let mut registry = Self {
             workers: RwLock::new(HashMap::new()),
             tool_registry,
+            invocation_registry,
         };
         registry.register_builtins();
         registry
@@ -39,16 +44,29 @@ impl WorkerRegistry {
         self.tool_registry.clone()
     }
 
+    /// Get the invocation registry for inter-agent calls.
+    pub fn invocation_registry(&self) -> Arc<super::invocation_registry::AgentInvocationRegistry> {
+        self.invocation_registry.clone()
+    }
+
     /// Register a worker factory by name.
     pub fn register(
         &self,
         name: &str,
         factory: impl Fn() -> Box<dyn WorkerAgent> + Send + Sync + 'static,
     ) {
+        let factory = Arc::new(factory);
         self.workers
             .write()
             .unwrap()
-            .insert(name.to_string(), Arc::new(factory));
+            .insert(name.to_string(), factory.clone());
+        // Also register as invokable by other agents
+        let name_clone = name.to_string();
+        let inv_reg = self.invocation_registry.clone();
+        inv_reg.register(&name_clone, Arc::new(super::invocation_registry::InvokableWorker::new(
+            &name_clone,
+            factory,
+        )));
         tracing::info!("Registered worker: {}", name);
     }
 
@@ -225,6 +243,8 @@ impl WorkerRegistry {
                     priority: 999,
                     max_concurrent: 1,
                     enabled: true,
+                    can_invoke: vec![],
+                    handoff_enabled: false,
                 };
                 return Some((first_name.clone(), fallback_config));
             }
@@ -323,6 +343,8 @@ mod tests {
                 priority: 0,
                 max_concurrent: 1,
                 enabled: true,
+                can_invoke: vec![],
+                handoff_enabled: false,
             },
         ];
         registry.load_from_configs(configs).await.unwrap();
@@ -363,6 +385,8 @@ mod tests {
                 priority: 0,
                 max_concurrent: 1,
                 enabled: true,
+                can_invoke: vec![],
+                handoff_enabled: false,
             },
             WorkerConfig {
                 name: "coding".to_string(),
@@ -372,6 +396,8 @@ mod tests {
                 priority: 1,
                 max_concurrent: 2,
                 enabled: true,
+                can_invoke: vec![],
+                handoff_enabled: false,
             },
         ];
 
@@ -388,6 +414,7 @@ mod tests {
             depends_on: None,
             max_retries: 3,
             priority: 0,
+            metadata: serde_json::Value::Object(serde_json::Map::new()),
         };
 
         let result = registry.find_best_worker(&task, &Vec::new()).await;
@@ -408,6 +435,7 @@ mod tests {
             depends_on: None,
             max_retries: 3,
             priority: 0,
+            metadata: serde_json::Value::Object(serde_json::Map::new()),
         };
 
         let result = registry.find_best_worker(&task, &empty).await;
@@ -434,6 +462,7 @@ mod tests {
             depends_on: None,
             max_retries: 3,
             priority: 0,
+            metadata: serde_json::Value::Object(serde_json::Map::new()),
         };
 
         // This mirrors the supervisor's spawn_best_worker logic

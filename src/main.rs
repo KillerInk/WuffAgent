@@ -102,7 +102,8 @@ fn main() -> eframe::Result {
     let registry = Arc::new(ToolRegistry::new(discovery_paths, logger));
 
     // Register built-in tools
-    builtin::register_builtins(&registry).expect("Failed to register built-in tools");
+    let invocation_registry = Arc::new(crate::agents::invocation_registry::AgentInvocationRegistry::new());
+    builtin::register_builtins(&registry, &invocation_registry).expect("Failed to register built-in tools");
 
     // Discover and load dynamic plugins
     if let Err(e) = registry.discover_plugins() {

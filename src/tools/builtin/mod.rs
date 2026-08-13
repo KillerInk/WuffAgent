@@ -1,16 +1,21 @@
 pub mod calculation;
 pub mod file_io;
 pub mod web_search;
+pub mod agent_call;
 
 pub use calculation::CalculationTool;
 pub use file_io::FileIOTool;
 pub use web_search::WebSearchTool;
+pub use agent_call::AgentCallTool;
 
 use crate::tools::lib::{ToolMetadata};
 use crate::tools::registry::ToolEntry;
 
 /// Register all built-in tools into the registry.
-pub fn register_builtins(registry: &crate::tools::registry::ToolRegistry) -> crate::tools::lib::ToolResult<()> {
+pub fn register_builtins(
+    registry: &crate::tools::registry::ToolRegistry,
+    invocation_registry: &crate::agents::invocation_registry::AgentInvocationRegistry,
+) -> crate::tools::lib::ToolResult<()> {
     registry.register(ToolEntry {
         tool: std::sync::Arc::new(WebSearchTool::new()),
         metadata: ToolMetadata {
@@ -39,6 +44,17 @@ pub fn register_builtins(registry: &crate::tools::registry::ToolRegistry) -> cra
             name: "calculation".to_string(),
             version: "1.0.0".to_string(),
             description: "Perform mathematical calculations".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+    })?;
+
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(AgentCallTool::new(std::sync::Arc::new(invocation_registry.clone()))),
+        metadata: ToolMetadata {
+            name: "agent_call".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Invoke another agent to execute a sub-task".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

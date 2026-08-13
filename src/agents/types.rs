@@ -84,6 +84,9 @@ pub struct Task {
     /// Priority ordering (lower number = higher priority).
     #[serde(default = "default_priority")]
     pub priority: u32,
+    /// Arbitrary metadata (e.g., invocation source, handoff info).
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 fn deserialize_depends_on<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -119,6 +122,7 @@ impl Task {
             depends_on: None,
             max_retries: default_max_retries(),
             priority: default_priority(),
+            metadata: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 }
@@ -233,6 +237,47 @@ pub struct AgentResult {
     pub duration_ms: u64,
     #[serde(default)]
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Metadata about an agent for discovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentMetadata {
+    /// Unique name of the agent.
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// The agent type.
+    pub agent_type: AgentType,
+    /// Tool names this agent is authorized to use.
+    pub allowed_tools: Vec<String>,
+}
+
+/// Parameters for invoking another agent via the agent_call tool.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentCallParams {
+    /// Name of the target agent to invoke.
+    pub target: String,
+    /// Description of the sub-task to execute.
+    pub task: String,
+    /// Input parameters for the sub-task.
+    #[serde(default)]
+    pub input: serde_json::Value,
+}
+
+impl AgentCallParams {
+    /// Convert to a Task that can be executed by the target agent.
+    pub fn to_task(&self, source_agent_id: &str) -> Task {
+        Task {
+            id: format!("handoff-{}-{}", source_agent_id, Uuid::new_v4()),
+            description: self.task.clone(),
+            agent_type: AgentType::General,
+            input: self.input.clone(),
+            depends_on: None,
+            max_retries: 1,
+            priority: 0,
+            metadata: serde_json::json!({ "invoked_by": source_agent_id }),
+        }
+    }
 }
 
 /// Task execution status.

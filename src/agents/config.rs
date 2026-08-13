@@ -26,6 +26,12 @@ pub struct WorkerConfig {
     /// Whether this worker is enabled.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Names of agents this worker can invoke via agent_call.
+    #[serde(default)]
+    pub can_invoke: Vec<String>,
+    /// Whether runtime handoffs are allowed.
+    #[serde(default = "default_handoff_enabled")]
+    pub handoff_enabled: bool,
 }
 
 impl Default for WorkerConfig {
@@ -38,9 +44,13 @@ impl Default for WorkerConfig {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: Vec::new(),
+            handoff_enabled: false,
         }
     }
 }
+
+fn default_handoff_enabled() -> bool { false }
 
 fn default_enabled() -> bool { true }
 
@@ -282,6 +292,8 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Research);
     }
@@ -296,6 +308,8 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Coding);
     }
@@ -310,6 +324,8 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Implementation);
     }
@@ -324,6 +340,8 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         // web_search maps to Research, so we use a tool that doesn't match any category
         assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Research);
@@ -351,6 +369,8 @@ mod tests {
             priority: 5,
             max_concurrent: 2,
             enabled: false,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
 
         let path = dir.join("test_agent.json");
@@ -384,6 +404,8 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         mgr.add_agent(&config).unwrap();
         assert!(mgr.get_agent("mgr_test").is_some());
@@ -424,6 +446,8 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         mgr.add_agent(&config).unwrap();
         let loaded = mgr.reload().unwrap();
@@ -451,6 +475,8 @@ mod tests {
             priority: 5,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         search_agent.save_to_file(&search_dir.join("search_agent.json")).unwrap();
 
@@ -463,6 +489,8 @@ mod tests {
             priority: 3,
             max_concurrent: 2,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         primary_agent.save_to_file(&primary_dir.join("primary_agent.json")).unwrap();
 
@@ -483,6 +511,8 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
         mgr.add_agent(&new_agent).unwrap();
         assert!(primary_dir.join("new_agent.json").exists());

@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use crate::types::Message;
 
-use super::types::{AgentId, AgentResult, AgentType, ExecutionPlan, Task};
+use super::types::{AgentId, AgentMetadata, AgentResult, AgentType, ExecutionPlan, Task};
 
 /// Error type for agent operations.
 #[derive(Debug, thiserror::Error)]
@@ -158,4 +160,38 @@ pub trait WorkerAgent: Agent {
 
     /// Human-readable name/description of this worker.
     fn description(&self) -> &str;
+}
+
+/// Trait for agents that can be invoked by other agents.
+#[async_trait::async_trait]
+pub trait AgentInvocation: Send + Sync {
+    /// Invoke this agent with a task and return results.
+    async fn invoke(
+        &self,
+        task: &Task,
+        context: &serde_json::Value,
+    ) -> AgentResultType<AgentResult>;
+
+    /// Get metadata about this agent for discovery.
+    fn metadata(&self) -> AgentMetadata;
+}
+
+/// Extension trait for WorkerAgent providing inter-agent capabilities.
+pub trait WorkerAgentExt: WorkerAgent {
+    /// Get the invocation registry for discovering other agents.
+    fn invocation_registry(&self) -> Option<Arc<super::invocation_registry::AgentInvocationRegistry>>;
+
+    /// Check if this agent can invoke a target agent by name.
+    fn can_invoke(&self, target_name: &str) -> bool {
+        self.invocation_registry()
+            .map(|reg| reg.has(target_name))
+            .unwrap_or(false)
+    }
+}
+
+/// Default implementation of WorkerAgentExt for any WorkerAgent.
+impl<T: WorkerAgent> WorkerAgentExt for T {
+    fn invocation_registry(&self) -> Option<Arc<super::invocation_registry::AgentInvocationRegistry>> {
+        None
+    }
 }

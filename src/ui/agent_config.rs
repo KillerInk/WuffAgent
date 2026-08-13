@@ -305,6 +305,8 @@ impl AgentConfigDialog {
             priority: self.priority,
             max_concurrent: self.max_concurrent,
             enabled: self.enabled,
+            can_invoke: vec![],
+            handoff_enabled: false,
         };
 
         // Ensure the workers directory exists before saving
