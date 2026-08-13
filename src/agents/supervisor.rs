@@ -84,6 +84,28 @@ impl SupervisorAgent {
 
         Err(AgentError::AgentNotFound("No available workers".to_string()))
     }
+
+    /// Shared worker spawning logic to avoid duplication.
+    async fn spawn_worker_for_task(
+        &self,
+        task: &Task,
+        registry: &WorkerRegistry,
+        worker_configs: &[WorkerConfig],
+    ) -> Result<(String, Box<dyn WorkerAgent>), AgentError> {
+        if let Some((name, _config)) = registry.find_best_worker(task, worker_configs).await {
+            match registry.spawn(&name) {
+                Some(w) => return Ok((name.clone(), w)),
+                None => {
+                    tracing::warn!("Failed to spawn worker '{}', falling back to 'default'", name);
+                }
+            }
+        }
+
+        match registry.spawn("default") {
+            Some(w) => Ok(("default".to_string(), w)),
+            None => Err(AgentError::ConfigError("No available workers".to_string())),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -174,33 +196,32 @@ impl SupervisorAgentTrait for SupervisorAgent {
                 let task_id = task_clone.id.clone();
                 let ctx_clone = context.clone();
                 let event_tx = self.event_tx.clone();
-                let timeout_ms = self.worker_configs.first().map(|c| c.priority).unwrap_or(0);
-                let _timeout_ms = timeout_ms; // ensure the value is used
 
                 let handle = tokio::spawn(async move {
-                    // Find best worker
-                    let (worker_name, mut worker) = if let Some((name, _config)) =
-                        registry.find_best_worker(&task_clone, &worker_configs).await
-                    {
-                        match registry.spawn(&name) {
-                            Some(w) => (name.clone(), w),
-                            None => {
-                                tracing::warn!("Failed to spawn worker '{}', falling back to 'default'", name);
-                                match registry.spawn("default") {
-                                    Some(w) => (name.clone(), w),
-                                    None => {
-                                        tracing::error!("Failed to spawn fallback worker 'default'");
-                                        return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
+                    // Find best worker using shared method
+                    let (worker_name, mut worker) = match registry.find_best_worker(&task_clone, &worker_configs).await {
+                        Some((name, _config)) => {
+                            match registry.spawn(&name) {
+                                Some(w) => (name.clone(), w),
+                                None => {
+                                    tracing::warn!("Failed to spawn worker '{}', falling back to 'default'", name);
+                                    match registry.spawn("default") {
+                                        Some(w) => (name.clone(), w),
+                                        None => {
+                                            tracing::error!("Failed to spawn fallback worker 'default'");
+                                            return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
+                                        }
                                     }
                                 }
                             }
                         }
-                    } else {
-                        match registry.spawn("default") {
-                            Some(w) => (String::from("default"), w),
-                            None => {
-                                tracing::error!("Failed to spawn fallback worker 'default'");
-                                return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
+                        None => {
+                            match registry.spawn("default") {
+                                Some(w) => (String::from("default"), w),
+                                None => {
+                                    tracing::error!("Failed to spawn fallback worker 'default'");
+                                    return (String::from("unknown"), task_id.clone(), Err(AgentError::ConfigError("No available workers".to_string())));
+                                }
                             }
                         }
                     };
@@ -316,29 +337,30 @@ impl SupervisorAgentTrait for SupervisorAgent {
                 break;
             }
 
-            // Use the best matching worker for the task, not just the hardcoded "default"
-            let (worker_name, mut worker) = if let Some((name, _config)) =
-                self.worker_registry.find_best_worker(task, &self.worker_configs).await
-            {
-                match self.worker_registry.spawn(&name) {
-                    Some(w) => (name.clone(), w),
-                    None => {
-                        tracing::warn!("Failed to spawn retry worker '{}', falling back to 'default'", name);
-                        match self.worker_registry.spawn("default") {
-                            Some(w) => ("default".to_string(), w),
-                            None => {
-                                tracing::error!("No available workers for retry");
-                                continue;
+            // Use the best matching worker for the task
+            let (worker_name, mut worker) = match self.worker_registry.find_best_worker(task, &self.worker_configs).await {
+                Some((name, _config)) => {
+                    match self.worker_registry.spawn(&name) {
+                        Some(w) => (name.clone(), w),
+                        None => {
+                            tracing::warn!("Failed to spawn retry worker '{}', falling back to 'default'", name);
+                            match self.worker_registry.spawn("default") {
+                                Some(w) => ("default".to_string(), w),
+                                None => {
+                                    tracing::error!("No available workers for retry");
+                                    continue;
+                                }
                             }
                         }
                     }
                 }
-            } else {
-                match self.worker_registry.spawn("default") {
-                    Some(w) => ("default".to_string(), w),
-                    None => {
-                        tracing::error!("No available workers for retry");
-                        continue;
+                None => {
+                    match self.worker_registry.spawn("default") {
+                        Some(w) => ("default".to_string(), w),
+                        None => {
+                            tracing::error!("No available workers for retry");
+                            continue;
+                        }
                     }
                 }
             };

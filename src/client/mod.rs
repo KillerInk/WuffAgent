@@ -125,6 +125,13 @@ impl ChatClient {
         self.session_dir = session_dir;
     }
 
+    /// Clear the current session (set session_id to None).
+    /// Call this when a session is deleted to prevent it from being
+    /// recreated on the next save.
+    pub fn clear_session(&mut self) {
+        self.session_id = None;
+    }
+
     pub fn set_encryption_key(&mut self, key: Option<[u8; 32]>) {
         self.encryption_key = key;
     }
@@ -332,10 +339,6 @@ impl ChatClient {
             tools: tools.map(|t| t.to_vec()),
         };
         let body = serde_json::to_string(&request)?;
-        tracing::debug!(
-            "stream_message (arc) request body:\n{}",
-            body
-        );
 
         let mut builder = http_client
             .post(format!("{}/v1/chat/completions", base_url))

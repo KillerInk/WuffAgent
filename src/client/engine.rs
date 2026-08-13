@@ -163,32 +163,12 @@ async fn run_chat_loop(
     let mut tools = initial_tools.map(|t| t.to_vec());
     let mut round = 0;
 
-    tracing::info!(
-        "run_chat_loop starting, round=0 prompt={} tool_count={}",
-        current_prompt,
-        tools.as_ref().map(|t| t.len()).unwrap_or(0)
-    );
-
     loop {
-        tracing::debug!(
-            "run_chat_loop iteration round={} prompt={} tool_count={}",
-            round,
-            current_prompt,
-            tools.as_ref().map(|t| t.len()).unwrap_or(0)
-        );
 
         // 1. Stream the request, forwarding chunks as events
         let (content, usage, has_tool_calls, thinking_content) =
             stream_request(client, &current_prompt, tools.as_ref().map(|t| t.as_slice()), event_tx)
                 .await?;
-
-        tracing::debug!(
-            "run_chat_loop round={} stream done, content_len={} has_tool_calls={} thinking_len={}",
-            round,
-            content.len(),
-            has_tool_calls,
-            thinking_content.len(),
-        );
 
         // 1.5. Emit thinking complete event if there was thinking content
         if !thinking_content.is_empty() {
@@ -312,12 +292,6 @@ async fn stream_request(
     let client_clone = client.clone();
     let prompt = prompt.to_string();
     let tools_clone = tools.map(|t| t.to_vec());
-
-    tracing::debug!(
-        "stream_request starting, prompt={} tool_count={}",
-        prompt,
-        tools_clone.as_ref().map(|t| t.len()).unwrap_or(0)
-    );
 
     // Call the streaming method using the Arc-based version to avoid
     // holding a MutexGuard across .await (MutexGuard is not Send)

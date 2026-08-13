@@ -5,11 +5,20 @@ use crate::tools::lib::{ToolError, ToolLogger, ToolOutput, ToolParams, ToolResul
 use crate::tools::registry::ToolRegistry;
 
 /// High-level orchestrator that exposes tool execution to the rest of the application.
-#[derive(Clone)]
 pub struct ToolManager {
     registry: Arc<ToolRegistry>,
     logger: Arc<dyn ToolLogger>,
     allowlist: Option<Vec<String>>,
+}
+
+impl Clone for ToolManager {
+    fn clone(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+        }
+    }
 }
 
 impl ToolManager {
@@ -43,6 +52,7 @@ impl ToolManager {
             }
         }
 
+        // Get the tool and execute it atomically
         let tool = self
             .registry
             .get(tool_name)

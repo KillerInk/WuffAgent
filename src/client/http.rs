@@ -80,10 +80,6 @@ pub async fn send_message(
     request: &ChatRequest,
 ) -> Result<(String, Option<Usage>), Error> {
     let body = serde_json::to_string(request)?;
-    tracing::debug!(
-        "send_message (non-stream) request body:\n{}",
-        body
-    );
 
     let mut builder = http_client
         .post(format!("{}/v1/chat/completions", base_url))
@@ -110,8 +106,6 @@ pub async fn send_message(
             status, text
         )));
     }
-
-    tracing::debug!("send_message (non-stream) response body:\n{}", text);
 
     let response: Response = serde_json::from_str(&text)?;
 

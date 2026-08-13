@@ -9,19 +9,40 @@ pub struct FileIOTool;
 
 /// Validates a path for safety, rejecting dangerous paths and path traversal patterns.
 fn validate_path(path: &str) -> Result<(), crate::tools::lib::ToolError> {
-    // Reject absolute paths to sensitive system directories
-    if path == "/etc" || path.starts_with("/etc/") || path == "/root" || path.starts_with("/root/") {
-        return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
-    }
-    // Reject Windows system directories
-    let lower = path.to_lowercase();
-    if lower == "c:\\windows" || lower.starts_with("c:\\windows\\") {
-        return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
-    }
-    // Reject path traversal patterns
+    // Reject obvious path traversal patterns in the raw path first
     if path.contains("..") {
         return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
     }
+
+    // Resolve the canonical path to detect path traversal
+    let canonical_path = match std::path::Path::new(path).canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // Still check for sensitive directories in the raw path
+            let lower = path.to_lowercase().replace('\\', "/");
+            if lower == "/etc" || lower.starts_with("/etc/") || lower == "/root" || lower.starts_with("/root/") {
+                return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
+            }
+            if lower == "c:/windows" || lower.starts_with("c:/windows/") {
+                return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
+            }
+            return Ok(());
+        }
+    };
+
+    // Reject absolute paths to sensitive system directories
+    let canonical_str = canonical_path.to_string_lossy().to_lowercase();
+    // Strip Windows \\?\ prefix from canonicalized paths
+    let canonical_normalized = canonical_str.trim_start_matches("\\?\\");
+    let canonical_normalized = canonical_normalized.replace('\\', "/");
+    if canonical_normalized == "/etc" || canonical_normalized.starts_with("/etc/") || canonical_normalized == "/root" || canonical_normalized.starts_with("/root/") {
+        return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
+    }
+    // Reject Windows system directories
+    if canonical_normalized == "c:/windows" || canonical_normalized.starts_with("c:/windows/") {
+        return Err(crate::tools::lib::ToolError::Execution("Path not allowed".to_string()));
+    }
+
     Ok(())
 }
 
@@ -296,6 +317,12 @@ impl FileIOTool {
 
             // Skip file header lines (--- / +++ / diff --git)
             if line.starts_with("--- ") || line.starts_with("+++ ") || line.starts_with("diff ") {
+                i += 1;
+                continue;
+            }
+
+            // Skip empty lines (e.g. leading/trailing newlines in diff string)
+            if line.is_empty() {
                 i += 1;
                 continue;
             }
@@ -1306,7 +1333,7 @@ mod tests {
         let path = tmp.path().to_string_lossy().to_string();
         fs::write(&path, "line1\nline2\nline3\n").unwrap();
 
-        let diff = "\
+        let diff = "
 --- a/test.txt
 +++ b/test.txt
 @@ -1,3 +1,3 @@
@@ -1342,7 +1369,7 @@ mod tests {
         let path = tmp.path().to_string_lossy().to_string();
         fs::write(&path, "line1\nline2\nline3\n").unwrap();
 
-        let diff = "\
+        let diff = "
 --- a/test.txt
 +++ b/test.txt
 @@ -1,3 +1,2 @@

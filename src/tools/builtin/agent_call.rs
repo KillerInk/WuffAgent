@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::tools::lib::{Tool, ToolOutput, ToolParams, ToolSchema, ToolError};
 use crate::agents::invocation_registry::AgentInvocationRegistry;
@@ -9,12 +10,38 @@ use crate::agents::types::{AgentCallParams, Task};
 /// When a worker calls this tool, it spawns the target agent to execute
 /// the specified sub-task and returns the result.
 pub struct AgentCallTool {
-    registry: std::sync::Arc<AgentInvocationRegistry>,
+    registry: Arc<AgentInvocationRegistry>,
+    /// Shared tokio runtime to avoid creating a new one for each call.
+    rt: std::sync::Mutex<Option<tokio::runtime::Runtime>>,
 }
 
 impl AgentCallTool {
-    pub fn new(registry: std::sync::Arc<AgentInvocationRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<AgentInvocationRegistry>) -> Self {
+        Self {
+            registry,
+            rt: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Get or create a shared tokio runtime.
+    fn get_runtime(&self) -> Result<tokio::runtime::Handle, ToolError> {
+        let mut rt_guard = self.rt.lock().map_err(|e| ToolError::Execution(format!("Failed to lock runtime: {}", e)))?;
+        
+        if rt_guard.is_none() {
+            *rt_guard = Some(tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| ToolError::Execution(format!("Failed to create runtime: {}", e)))?);
+        }
+        
+        // We need to get a handle to the runtime. Since we can't easily get a handle
+        // from a owned Runtime, we'll use a different approach: spawn on the current
+        // runtime if available, otherwise create a new one.
+        drop(rt_guard);
+        
+        // Try to get the current runtime handle
+        tokio::runtime::Handle::try_current()
+            .map_err(|_| ToolError::Execution("No tokio runtime available".to_string()))
     }
 
     /// Parse parameters from tool input.
@@ -103,13 +130,28 @@ impl Tool for AgentCallTool {
         // Empty context for tool-invoked calls
         let context = serde_json::Value::Object(serde_json::Map::new());
 
-        // Invoke the target agent synchronously via tokio runtime
+        // Try to use the current runtime if available
         let registry = self.registry.clone();
         let task_clone = task.clone();
         let context_clone = context.clone();
         let target = call_params.target.clone();
 
-        // Create a minimal tokio runtime to execute the async invocation synchronously
+        // Check if we're already in a tokio runtime
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // We're in a runtime, spawn the task
+            let join_handle = handle.spawn(async move {
+                match registry.invoke(&target, &task_clone, &context_clone).await {
+                    Ok(result) => Ok(ToolOutput::Success(result.output)),
+                    Err(e) => Ok(ToolOutput::Error(e.to_string())),
+                }
+            });
+            
+            // Block on the spawned task
+            return handle.block_on(join_handle)
+                .map_err(|e| ToolError::Execution(format!("Join error: {}", e)))?;
+        }
+
+        // No runtime available, create a temporary one
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -130,7 +172,7 @@ mod tests {
     #[test]
     fn test_parse_params() {
         let registry = AgentInvocationRegistry::new();
-        let tool = AgentCallTool::new(std::sync::Arc::new(registry));
+        let tool = AgentCallTool::new(Arc::new(registry));
 
         let mut params = ToolParams::new();
         params.values.insert("target".to_string(), serde_json::json!("researcher"));
@@ -145,7 +187,7 @@ mod tests {
     #[test]
     fn test_parse_params_missing_target() {
         let registry = AgentInvocationRegistry::new();
-        let tool = AgentCallTool::new(std::sync::Arc::new(registry));
+        let tool = AgentCallTool::new(Arc::new(registry));
 
         let mut params = ToolParams::new();
         params.values.insert("task".to_string(), serde_json::json!("Search for X"));

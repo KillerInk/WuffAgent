@@ -13,6 +13,9 @@ use crate::types::Message;
 // Re-export AgentChainEntry from sessions model
 pub use crate::sessions::model::AgentChainEntry;
 
+/// Maximum LLM iterations per loop (soft limit - agent can continue)
+const LLM_ITERATION_LIMIT: u32 = 20;
+
 /// The top-level engine that executes agent-driven requests.
 ///
 /// Routes requests to appropriate agents based on the registry,
@@ -161,23 +164,13 @@ impl AgentEngine {
             },
         ];
 
-        // Execute tool calls if any tools are allowed
-        if !agent_config.allowed_tools.is_empty() {
-            // Filter tool definitions to only allowed tools
-            let _tool_defs: Vec<_> = self.tool_manager
-                .get_tool_definitions()
-                .into_iter()
-                .filter(|t| agent_config.allowed_tools.contains(&t.function.name))
-                .collect();
-        }
-
-        // Run the LLM loop with tool calls
-        let result = self.run_llm_loop(&mut messages, &agent_config, depth, cancel_token).await?;
-
-        Ok(result)
+        // Run the LLM loop with tool calls - will continue even after iteration limit
+        self.run_llm_loop(&mut messages, &agent_config, depth, cancel_token).await
     }
 
     /// Run the LLM loop: call LLM, execute tool calls if present, repeat.
+    /// Tool failures are returned directly to the LLM for correction.
+    /// Continues working even after hitting iteration limit (no hard stop).
     async fn run_llm_loop(
         &self,
         messages: &mut Vec<Message>,
@@ -185,10 +178,10 @@ impl AgentEngine {
         depth: u32,
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {
-        let mut max_iterations = 20;
+        let mut iteration_count = 0u32;
         let start = Instant::now();
 
-        while max_iterations > 0 {
+        loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
             }
@@ -203,7 +196,16 @@ impl AgentEngine {
                 ));
             }
 
-            max_iterations -= 1;
+            iteration_count += 1;
+
+            // Log when approaching iteration limit
+            if iteration_count == LLM_ITERATION_LIMIT {
+                tracing::warn!(
+                    "[AGENT ENGINE] Agent '{}' reached iteration limit ({}) but will continue",
+                    agent_config.name,
+                    LLM_ITERATION_LIMIT
+                );
+            }
 
             // Call LLM
             let response = match self.llm_client.complete(messages).await {
@@ -212,9 +214,8 @@ impl AgentEngine {
             };
 
             // Check if response contains tool calls
-            // In this simplified engine, we parse for tool call patterns
             if let Some(tool_calls) = self.parse_tool_calls(&response) {
-                // Execute each tool call
+                // Execute each tool call - failures are passed back to LLM
                 for tool_call in tool_calls {
                     if cancel_token.is_cancelled() {
                         return Err("Cancelled".to_string());
@@ -225,12 +226,20 @@ impl AgentEngine {
                         .execute(&tool_call.function.name, serde_json::from_str(&tool_call.function.arguments).unwrap_or_default())
                         .await;
 
+                    // Pass result (success or failure) back to LLM
                     let result_str = match tool_result {
                         Ok(output) => {
                             let output_str = format!("{}", output);
                             output_str
                         }
-                        Err(e) => format!("Error: {}", e),
+                        Err(e) => {
+                            tracing::warn!(
+                                "[AGENT ENGINE] Tool '{}' failed: {}",
+                                tool_call.function.name,
+                                e
+                            );
+                            format!("Error: {}", e)
+                        }
                     };
 
                     // Add tool result to messages
@@ -249,31 +258,80 @@ impl AgentEngine {
                         tool_call_id: Some(tool_call.id.clone()),
                     });
                 }
-                // Continue loop with tool results
+                // Continue loop with tool results - LLM will try to fix errors
                 continue;
             }
 
             // No more tool calls, return the response
+            tracing::info!(
+                "[AGENT ENGINE] Agent '{}' completed in {} iterations",
+                agent_config.name,
+                iteration_count
+            );
             return Ok(response);
         }
-
-        Err("Maximum LLM iterations exceeded".to_string())
     }
 
     /// Parse tool calls from an LLM response.
-    /// This is a simplified parser — in production you'd use structured tool call handling.
+    /// Uses proper JSON parsing with error recovery.
     fn parse_tool_calls(&self, response: &str) -> Option<Vec<ToolCall>> {
-        // Look for JSON tool call patterns in the response
-        if let Some(start) = response.find('[') {
-            if let Some(end) = response.rfind(']') {
-                if end > start {
-                    let json_str = &response[start..=end];
-                    if let Ok(calls) = serde_json::from_str::<Vec<ToolCall>>(json_str) {
-                        return Some(calls);
+        // First, try to find a JSON array in the response
+        // Look for '[' and matching ']' while tracking nesting depth
+        let mut depth = 0;
+        let mut start: Option<usize> = None;
+        let mut end: Option<usize> = None;
+        let mut in_string = false;
+        let mut escape = false;
+
+        for (i, ch) in response.char_indices() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_string => {
+                    escape = true;
+                }
+                '"' => {
+                    in_string = !in_string;
+                }
+                '[' if !in_string => {
+                    if depth == 0 {
+                        start = Some(i);
                     }
+                    depth += 1;
+                }
+                ']' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 && start.is_some() {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(start), Some(end)) = (start, end) {
+            if end > start {
+                let json_str = &response[start..end];
+                if let Ok(calls) = serde_json::from_str::<Vec<ToolCall>>(json_str) {
+                    return Some(calls);
                 }
             }
         }
+
+        // Fallback: try to extract JSON from markdown code blocks
+        if let Some(start) = response.find("```") {
+            let rest = &response[start + 3..];
+            if let Some(end) = rest.find("```") {
+                let json_str = &rest[..end];
+                if let Ok(calls) = serde_json::from_str::<Vec<ToolCall>>(json_str) {
+                    return Some(calls);
+                }
+            }
+        }
+
         None
     }
 

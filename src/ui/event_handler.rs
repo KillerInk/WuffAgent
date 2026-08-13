@@ -287,8 +287,9 @@ impl ChatApp {
     /// Add a tool call message to the chat display.
     fn add_tool_call_message(&mut self, tool_name: &str, call_id: &str, result: &str) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        let formatted_result = Self::prettify_json(result);
-        let content = format!("🔧 **{}** ({})\n```\n{}\n```", tool_name, call_id, formatted_result);
+        // Store as simple structured format: "header|call_id|result_json"
+        let header = ChatApp::tool_call_header(tool_name, result);
+        let content = format!("{}||{}||{}", header, call_id, result);
         self.chat.messages.push(ChatMessage {
             role: "tool".to_string(),
             content,

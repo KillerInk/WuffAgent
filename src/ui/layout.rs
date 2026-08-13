@@ -6,11 +6,11 @@ use super::theme::Theme;
 impl ChatApp {
     pub(super) fn setup_ui(&mut self, ctx: &egui::Context) {
         // Session sidebar — draw before other panels so it sits on the left
-        let switched_id: Option<String> = {
+        let (switched_id, clear_client_session) = {
             if let Some(ref mut panel) = self.sessions.sessions_panel {
                 panel.draw(ctx)
             } else {
-                None
+                (None, false)
             }
         };
 
@@ -21,6 +21,11 @@ impl ChatApp {
         // Switch session if needed (handles New button and history selection)
         if let Some(id) = switched_id {
             self.switch_session(&id);
+        }
+
+        // Clear client session if a session was deleted (explicit flag from panel)
+        if clear_client_session {
+            self.client.lock().unwrap().clear_session();
         }
 
         egui::TopBottomPanel::top("menu_bar").resizable(false).show(ctx, |ui| {
