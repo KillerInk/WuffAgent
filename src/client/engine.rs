@@ -62,7 +62,7 @@ impl Default for EngineConfig {
         Self {
             send_timeout_secs: 60,
             tool_timeout_secs: 30,
-            max_tool_rounds: 10,
+            max_tool_rounds: 20,
         }
     }
 }
@@ -213,7 +213,7 @@ async fn run_chat_loop(
 
         // 2.5. Emit StreamComplete for the current content/response so far, before tool execution
         // This allows the UI to show the full content up to this point.
-        event_tx.send(EngineEvent::StreamComplete { content, usage })?;
+        event_tx.send(EngineEvent::StreamComplete { content: content.clone(), usage: usage.clone() })?;
 
         // 3. Validate tool calls before executing
         {
@@ -260,11 +260,13 @@ async fn run_chat_loop(
                 config.max_tool_rounds,
                 round
             );
-            return Err(EngineError::MaxRounds(config.max_tool_rounds));
+            // Send the last content as complete instead of error
+            event_tx.send(EngineEvent::StreamComplete { content, usage })?;
+            return Ok(());
         }
 
-        // 6. Continue with "Continue" prompt, don't re-send tools
-        current_prompt = "Continue".to_string();
+        // 6. Continue with explicit prompt to keep using tools if needed
+        current_prompt = "Please continue with your task. Use tools if needed, otherwise provide your final response.".to_string();
         
     }
 }
