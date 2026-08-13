@@ -138,6 +138,7 @@ impl super::traits::WorkerAgent for GenericWorker {
                     output,
                     summary: format!("Task '{}' completed by '{}'", task.description, self.name),
                     needs_refinement: false,
+                    fixable: false,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),
@@ -150,6 +151,8 @@ impl super::traits::WorkerAgent for GenericWorker {
                     task.description,
                     err
                 );
+                // Detect fixable errors (missing required params)
+                let fixable = err.contains("is required") || err.contains("required");
                 Ok(AgentResult {
                     task_id: task.id.clone(),
                     agent_id: self.id.to_string(),
@@ -158,6 +161,7 @@ impl super::traits::WorkerAgent for GenericWorker {
                     output: serde_json::json!({ "error": err }),
                     summary: format!("Task '{}' failed: {}", task.description, err),
                     needs_refinement: false,
+                    fixable,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),
@@ -170,6 +174,7 @@ impl super::traits::WorkerAgent for GenericWorker {
                     task.description,
                     e
                 );
+                let fixable = e.is_fixable();
                 Ok(AgentResult {
                     task_id: task.id.clone(),
                     agent_id: self.id.to_string(),
@@ -178,6 +183,7 @@ impl super::traits::WorkerAgent for GenericWorker {
                     output: serde_json::json!({ "error": e.to_string() }),
                     summary: format!("Task '{}' failed: {}", task.description, e),
                     needs_refinement: false,
+                    fixable,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),

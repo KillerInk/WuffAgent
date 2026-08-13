@@ -74,6 +74,8 @@ pub struct Task {
     /// Input data required to execute this task (tool parameters, context, etc.).
     pub input: serde_json::Value,
     /// Optional parent task ID — if set, this task depends on the parent completing first.
+    /// Accepts a single string or an array of strings in JSON; stored as the first element.
+    #[serde(deserialize_with = "deserialize_depends_on", default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<String>,
     /// Maximum number of retry attempts before marking as failed.
@@ -82,6 +84,26 @@ pub struct Task {
     /// Priority ordering (lower number = higher priority).
     #[serde(default = "default_priority")]
     pub priority: u32,
+}
+
+fn deserialize_depends_on<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => Ok(Some(s)),
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            if let Some(serde_json::Value::String(first)) = arr.first() {
+                Ok(Some(first.clone()))
+            } else {
+                Err(serde::de::Error::custom("depends_on array must contain strings"))
+            }
+        }
+        serde_json::Value::Array(_) => Ok(None),
+        _ => Err(serde::de::Error::custom("depends_on must be a string, array of strings, or null")),
+    }
 }
 
 fn default_max_retries() -> u32 { 3 }
@@ -200,6 +222,9 @@ pub struct AgentResult {
     /// Whether the Supervisor should ask the Planner to refine the plan.
     #[serde(default)]
     pub needs_refinement: bool,
+    /// Whether the error is fixable by the planner (e.g., missing tool parameters).
+    #[serde(default)]
+    pub fixable: bool,
     /// Follow-up tasks the worker suggests adding.
     #[serde(default)]
     pub suggested_followup: Vec<Task>,
@@ -344,6 +369,7 @@ mod tests {
             output: serde_json::json!({ "result": 42 }),
             summary: String::new(),
             needs_refinement: false,
+            fixable: false,
             suggested_followup: vec![],
             duration_ms: 100,
             completed_at: Some(Utc::now()),

@@ -11,12 +11,6 @@ impl ChatApp {
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
         let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
         
-        // Draw agent pipeline panel at the top if active
-        if self.chat.pipeline.active {
-            self.draw_pipeline_panel(ui, &theme);
-            ui.separator();
-        }
-        
         // Show pending error as inline warning
         let pending_error = self.chat.pending_error.take();
         if let Some(ref err) = pending_error {
@@ -65,6 +59,22 @@ impl ChatApp {
                             self.draw_message(ui, msg, i, &theme);
                         }
                         let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        if self.chat.is_generating && !self.chat.current_thinking.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(egui::RichText::new(&streaming_ts)
+                                    .color(theme.text_dim)
+                                    .size(11.0));
+                                ui.colored_label(theme.text_dim, "Thinking:");
+                                ui.add(egui::Label::new(
+                                    egui::RichText::new(&self.chat.current_thinking)
+                                        .color(theme.text_dim)
+                                        .italics()
+                                        .size(12.0)
+                                ));
+                                ui.spinner();
+                            });
+                        }
                         if self.chat.is_generating && !self.chat.current_response.is_empty() {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -78,7 +88,7 @@ impl ChatApp {
                                 ));
                                 ui.spinner();
                             });
-                        } else if self.chat.is_generating && self.chat.current_response.is_empty() {
+                        } else if self.chat.is_generating && self.chat.current_response.is_empty() && self.chat.current_thinking.is_empty() {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 ui.label(egui::RichText::new(&streaming_ts)
@@ -98,6 +108,22 @@ impl ChatApp {
                         self.draw_message(ui, msg, i, &theme);
                     }
                     let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                    if self.chat.is_generating && !self.chat.current_thinking.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(egui::RichText::new(&streaming_ts)
+                                .color(theme.text_dim)
+                                .size(11.0));
+                            ui.colored_label(theme.text_dim, "Thinking:");
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(&self.chat.current_thinking)
+                                    .color(theme.text_dim)
+                                    .italics()
+                                    .size(12.0)
+                            ));
+                            ui.spinner();
+                        });
+                    }
                     if self.chat.is_generating && !self.chat.current_response.is_empty() {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
@@ -111,7 +137,7 @@ impl ChatApp {
                             ));
                             ui.spinner();
                         });
-                    } else if self.chat.is_generating && self.chat.current_response.is_empty() {
+                    } else if self.chat.is_generating && self.chat.current_response.is_empty() && self.chat.current_thinking.is_empty() {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             ui.label(egui::RichText::new(&streaming_ts)
@@ -691,6 +717,8 @@ impl ChatApp {
         let cancelled = self.chat.pipeline.cancelled;
         let tasks: Vec<_> = self.chat.pipeline.tasks.iter().collect();
         let feedback_state = self.chat.pipeline.feedback_state.clone();
+        // Shorten plan ID for display (first 8 chars)
+        let plan_short = plan_id.chars().take(8).collect::<String>();
         
         // Panel header with cancel button
         egui::Frame::none()
@@ -701,10 +729,10 @@ impl ChatApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                    // Title
+                    // Title with shortened plan ID
                     let title = format!(
                         "🤖 Agent Pipeline — Plan: {} | Iteration: {}",
-                        plan_id, iteration
+                        plan_short, iteration
                     );
                     ui.label(egui::RichText::new(title)
                         .color(theme.text_primary)
@@ -718,10 +746,8 @@ impl ChatApp {
                                 .fill(theme.error)
                                 .rounding(4.0);
                             if ui.add(cancel_btn).clicked() {
-                                if let Some(ref pipeline) = self.agent_pipeline {
-                                    pipeline.cancel();
-                                }
-                                self.chat.pipeline.cancelled = true;
+                                self.agent_cancel_token.cancel();
+                                self.agent_chain_state.cancelled = true;
                             }
                         } else {
                             ui.label(egui::RichText::new("⏹ Cancelled")

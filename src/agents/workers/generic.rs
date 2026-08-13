@@ -2,11 +2,16 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::tools::{ToolManager, ToolParams, ToolOutput};
+use crate::tools::{ToolError, ToolManager, ToolParams, ToolOutput};
 use super::super::types::{AgentResult, AgentType, Task, TaskStatus};
 use super::super::traits::{Agent, AgentError};
 use super::super::types::AgentId;
 use super::super::WorkerAgent;
+
+/// Returns true if the error is fixable by the planner (e.g. missing tool params).
+fn error_is_fixable(e: &ToolError) -> bool {
+    e.is_fixable()
+}
 
 /// A worker that executes tasks by calling tools through a ToolManager.
 pub struct ExecutingWorker {
@@ -110,6 +115,7 @@ impl WorkerAgent for ExecutingWorker {
                     output: output,
                     summary: format!("Task '{}' completed by '{}'", task.description, self.name),
                     needs_refinement: false,
+                    fixable: false,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),
@@ -123,6 +129,8 @@ impl WorkerAgent for ExecutingWorker {
                     task.description,
                     err
                 );
+                // ToolOutput::Error wraps an InvalidParams error when params were invalid
+                let fixable = err.contains("is required") || err.contains("required");
                 Ok(AgentResult {
                     task_id: task.id.clone(),
                     agent_id: self.id.to_string(),
@@ -131,6 +139,7 @@ impl WorkerAgent for ExecutingWorker {
                     output: serde_json::json!({ "error": err }),
                     summary: format!("Task '{}' failed: {}", task.description, err),
                     needs_refinement: false,
+                    fixable,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),
@@ -138,6 +147,8 @@ impl WorkerAgent for ExecutingWorker {
             }
             Err(e) => {
                 let duration = start.elapsed().as_millis() as u64;
+                let fixable = matches!(&e, ToolError::InvalidParams(_));
+                let err_msg = e.to_string();
                 tracing::warn!(
                     "Worker '{}' failed task '{}': {}",
                     self.name,
@@ -149,9 +160,10 @@ impl WorkerAgent for ExecutingWorker {
                     agent_id: self.id.to_string(),
                     agent_type: self.agent_type.clone(),
                     status: TaskStatus::Failed,
-                    output: serde_json::json!({ "error": e.to_string() }),
+                    output: serde_json::json!({ "error": err_msg }),
                     summary: format!("Task '{}' failed: {}", task.description, e),
                     needs_refinement: false,
+                    fixable,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),

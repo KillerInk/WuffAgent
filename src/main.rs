@@ -15,6 +15,7 @@ use eframe::egui;
 use server::ServerManager;
 use tools::{builtin, registry::ToolRegistry, ToolManager, TracingToolLogger};
 use ui::state::ChatApp;
+use agents::{AgentRegistry, AgentEngine};
 
 fn main() -> eframe::Result {
     // Initialize tracing subscriber for debug logging
@@ -108,7 +109,7 @@ fn main() -> eframe::Result {
         eprintln!("Warning: failed to discover plugins: {}", e);
     }
 
-    let tool_manager = Arc::new(ToolManager::new(registry));
+    let tool_manager = Arc::new(ToolManager::new(registry.clone()));
 
     // Create chat client using config's base_url()
     let base_url;
@@ -139,39 +140,71 @@ fn main() -> eframe::Result {
         let _ = cl.load_session();
     }
 
-    // Create AgentManager for runtime agent lifecycle
+    // Create LLM client adapter for agents
+    let base_url_clone = base_url.clone();
+    let llm_client = Arc::new(agents::llm_client::ChatClientAdapter::new(
+        ChatClient::new(&base_url_clone),
+    ));
+
+    // Build search dirs for AgentRegistry: config agents/ + project workers/
     let config_path_clone = config_path.clone();
-    let config_workers_dir = config_path_clone
+    let config_agents_dir = config_path_clone
         .parent()
-        .map(|p| p.join("workers"))
+        .map(|p| p.join("agents"))
         .unwrap_or_else(|| config_path_clone.clone());
 
-    // Also scan the project's workers/ directory for built-in agents
-    let mut agent_manager = agents::config::AgentManager::new(config_workers_dir.clone());
+    let mut search_dirs = vec![config_agents_dir.clone()];
 
-    // Try multiple strategies to find the project's workers/ directory
-    let mut add_project_workers = |path: std::path::PathBuf| {
+    // Also scan legacy workers/ directory for migration
+    let mut add_workers_dir = |path: std::path::PathBuf| {
         if path.exists() {
-            agent_manager.add_search_dir(path);
+            search_dirs.push(path);
         }
     };
 
     // 1. Relative to executable parent (works for installed binary)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            add_project_workers(exe_dir.parent().map(|p| p.join("workers")).unwrap_or_default());
+            add_workers_dir(exe_dir.parent().map(|p| p.join("workers")).unwrap_or_default());
         }
     }
 
     // 2. Relative to current working directory (works during development / cargo run)
     if let Ok(cwd) = std::env::current_dir() {
-        add_project_workers(cwd.join("workers"));
+        add_workers_dir(cwd.join("workers"));
     }
-    let agent_manager = Arc::new(Mutex::new(agent_manager));
+
+    // Create AgentRegistry (replaces AgentManager)
+    let agent_registry = match AgentRegistry::load(search_dirs.clone(), &registry) {
+        Ok(reg) => {
+            tracing::info!("Loaded {} agents from {:?}", reg.agent_count(), search_dirs);
+            reg
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load agents: {}, using empty registry", e);
+            AgentRegistry::default()
+        }
+    };
+    let agent_registry = Arc::new(agent_registry);
+
+    // Create AgentEngine
+    let agent_engine = AgentEngine::new(
+        agent_registry.clone(),
+        llm_client,
+        tool_manager.clone(),
+        5, // max_depth
+    );
+    let agent_engine = Arc::new(agent_engine);
 
     eframe::run_native(
         "WuffAgent",
         options,
-        Box::new(|_cc| Ok(Box::new(ChatApp::new(server, client, config, tool_manager, agent_manager)))),
+        Box::new(|_cc| Ok(Box::new(ChatApp::new(
+            server,
+            client,
+            config,
+            tool_manager,
+            agent_engine,
+        )))),
     )
 }

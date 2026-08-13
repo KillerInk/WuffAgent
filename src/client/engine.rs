@@ -40,6 +40,10 @@ pub enum EngineEvent {
     ToolCallComplete { tool_name: String, call_id: String, result: String },
     /// A tool call errored
     ToolCallError { tool_name: String, call_id: String, error: String },
+    /// A chunk of model thinking/reasoning content (e.g. Claude-style)
+    ThinkingChunk { content: String },
+    /// Thinking/reasoning phase is complete
+    ThinkingComplete { content: String },
 }
 
 /// Configuration for the chat engine
@@ -174,16 +178,27 @@ async fn run_chat_loop(
         );
 
         // 1. Stream the request, forwarding chunks as events
-        let (content, usage, has_tool_calls) =
+        let (content, usage, has_tool_calls, thinking_content) =
             stream_request(client, &current_prompt, tools.as_ref().map(|t| t.as_slice()), event_tx)
                 .await?;
 
         tracing::debug!(
-            "run_chat_loop round={} stream done, content_len={} has_tool_calls={}",
+            "run_chat_loop round={} stream done, content_len={} has_tool_calls={} thinking_len={}",
             round,
             content.len(),
-            has_tool_calls
+            has_tool_calls,
+            thinking_content.len(),
         );
+
+        // 1.5. Emit thinking complete event if there was thinking content
+        if !thinking_content.is_empty() {
+            tracing::info!(
+                "run_chat_loop round={} thinking complete, thinking_len={}",
+                round,
+                thinking_content.len()
+            );
+            event_tx.send(EngineEvent::ThinkingComplete { content: thinking_content })?;
+        }
 
         // 2. Check for tool calls in the response
         if !has_tool_calls {
@@ -195,6 +210,10 @@ async fn run_chat_loop(
             event_tx.send(EngineEvent::StreamComplete { content, usage })?;
             return Ok(());
         }
+
+        // 2.5. Emit StreamComplete for the current content/response so far, before tool execution
+        // This allows the UI to show the full content up to this point.
+        event_tx.send(EngineEvent::StreamComplete { content, usage })?;
 
         // 3. Validate tool calls before executing
         {
@@ -218,7 +237,7 @@ async fn run_chat_loop(
             }
         }
 
-        // 4. Execute pending tool calls — must not hold MutexGuard across .await
+        // 3. Execute pending tool calls — must not hold MutexGuard across .await
         {
             tracing::debug!("run_chat_loop round={} executing pending tool calls", round);
             let client_clone = client.clone();
@@ -229,11 +248,11 @@ async fn run_chat_loop(
             result?;
         }
 
-        // 5. Execute succeeded — continue loop to send tool results back to LLM.
+        // 4. Execute succeeded — continue loop to send tool results back to LLM.
         // The LLM will see the tool results and decide next steps (more tool calls
         // or final response). We only exit when the LLM responds without tool calls.
 
-        // 6. Max rounds check
+        // 5. Max rounds check
         round += 1;
         if round >= config.max_tool_rounds {
             tracing::warn!(
@@ -244,33 +263,45 @@ async fn run_chat_loop(
             return Err(EngineError::MaxRounds(config.max_tool_rounds));
         }
 
-        // 7. Continue with "Continue" prompt, don't re-send tools
+        // 6. Continue with "Continue" prompt, don't re-send tools
         current_prompt = "Continue".to_string();
-        tools = None;
+        
     }
 }
 
 /// Stream a request and forward chunks as EngineEvent::StreamChunk.
-/// Returns (accumulated_content, usage, has_tool_calls).
+/// Returns (accumulated_content, usage, has_tool_calls, accumulated_thinking).
 async fn stream_request(
     client: &Arc<Mutex<ChatClient>>,
     prompt: &str,
     tools: Option<&[crate::tools::ToolDefinition]>,
     event_tx: &mpsc::Sender<EngineEvent>,
-) -> Result<(String, Option<Usage>, bool), EngineError> {
+) -> Result<(String, Option<Usage>, bool, String), EngineError> {
     let streamed_content = Arc::new(Mutex::new(String::new()));
     let streamed_content_clone = streamed_content.clone();
+    let thinking_content = Arc::new(Mutex::new(String::new()));
+    let thinking_content_clone = thinking_content.clone();
     let event_tx_clone = event_tx.clone();
 
-    let callback = move |chunk: String| -> Result<(), ClientError> {
+    let callback = move |chunk: String, is_thinking: bool| -> Result<(), ClientError> {
         if !chunk.is_empty() {
-            let mut content = streamed_content_clone.lock().unwrap();
-            content.push_str(&chunk);
-            drop(content);
+            if is_thinking {
+                let mut thinking = thinking_content_clone.lock().unwrap();
+                thinking.push_str(&chunk);
+                drop(thinking);
 
-            let _ = event_tx_clone.send(EngineEvent::StreamChunk {
-                content: chunk,
-            });
+                let _ = event_tx_clone.send(EngineEvent::ThinkingChunk {
+                    content: chunk,
+                });
+            } else {
+                let mut content = streamed_content_clone.lock().unwrap();
+                content.push_str(&chunk);
+                drop(content);
+
+                let _ = event_tx_clone.send(EngineEvent::StreamChunk {
+                    content: chunk,
+                });
+            }
         }
         Ok(())
     };
@@ -309,7 +340,8 @@ async fn stream_request(
     );
 
     let content = streamed_content.lock().unwrap().clone();
-    Ok((content, usage_from_stream, has_tool_calls))
+    let thinking = thinking_content.lock().unwrap().clone();
+    Ok((content, usage_from_stream, has_tool_calls, thinking))
 }
 
 /// Convert EngineEvent to AppEvent for UI
@@ -342,6 +374,8 @@ impl From<EngineEvent> for AppEvent {
                 call_id,
                 error,
             },
+            EngineEvent::ThinkingChunk { content } => AppEvent::StreamThinkingChunk { content },
+            EngineEvent::ThinkingComplete { content } => AppEvent::StreamThinkingComplete { content },
         }
     }
 }

@@ -8,9 +8,11 @@ use super::Error;
 
 /// Process a single SSE line and update the conversation.
 /// Returns Some(Usage) when the final usage chunk is encountered.
+/// The callback receives (content, is_thinking) where `is_thinking` indicates
+/// whether this chunk is part of the model's thinking/reasoning output.
 pub async fn process_sse_line(
     line: &str,
-    callback: &mut impl FnMut(String) -> Result<(), Error>,
+    callback: &mut impl FnMut(String, bool) -> Result<(), Error>,
     conversation: &Arc<Mutex<Vec<Message>>>,
 ) -> Result<Option<Usage>, Error> {
     if line.is_empty() || line == "data: [DONE]" {
@@ -36,13 +38,27 @@ pub async fn process_sse_line(
         .and_then(|c| c.as_str())
     {
         if !text.is_empty() {
-            callback(text.to_string())?;
+            callback(text.to_string(), false)?;
 
             // Update conversation history
             let mut conv = conversation.lock().unwrap();
             if let Some(last) = conv.last_mut() {
                 last.content.push_str(text);
             }
+        }
+    }
+
+    // Handle thinking content in streaming delta chunks (e.g. Claude-style reasoning)
+    if let Some(thinking) = chunk
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("thinking"))
+        .and_then(|t| t.as_str())
+    {
+        if !thinking.is_empty() {
+            tracing::debug!("process_sse_line: thinking chunk received, len={}", thinking.len());
+            callback(thinking.to_string(), true)?;
         }
     }
 
@@ -188,7 +204,7 @@ pub async fn process_sse_line(
 pub async fn stream_message(
     resp: reqwest::Response,
     conversation: &Arc<Mutex<Vec<Message>>>,
-    callback: &mut (impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static),
+    callback: &mut (impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static),
 ) -> Result<Option<Usage>, Error> {
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
@@ -218,7 +234,7 @@ pub async fn stream_message(
 pub async fn stream_message_arc(
     resp: reqwest::Response,
     conversation: &Arc<Mutex<Vec<Message>>>,
-    callback: &mut (impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static),
+    callback: &mut (impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static),
 ) -> Result<Option<Usage>, Error> {
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();

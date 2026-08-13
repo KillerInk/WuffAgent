@@ -73,9 +73,56 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption_password: Option<String>,
 
-    // Agent pipeline configuration
-    #[serde(default)]
+    // Agent pipeline configuration (legacy, migrated to agents/ directory)
+    #[serde(default, deserialize_with = "deserialize_agent_config")]
     pub agent_config: crate::agents::config::AgentConfig,
+}
+
+/// Deserialize `agent_config` with migration support.
+/// If old-style fields exist, migrate them to `agents/general.json` and clear.
+fn deserialize_agent_config<'de, D>(deserializer: D) -> Result<crate::agents::config::AgentConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct LegacyAgentConfig {
+        #[serde(default)]
+        system_prompt: String,
+        #[serde(default)]
+        allowed_tools: Vec<String>,
+    }
+
+    let legacy = LegacyAgentConfig::deserialize(deserializer)?;
+
+    if !legacy.system_prompt.is_empty() || !legacy.allowed_tools.is_empty() {
+        // Migration: write to agents/general.json
+        let config_path = get_config_path();
+        let agents_dir = config_path
+            .parent()
+            .map(|p| p.join("agents"))
+            .unwrap_or_else(|| config_path.clone());
+
+        fs::create_dir_all(&agents_dir).ok();
+        let general_path = agents_dir.join("general.json");
+
+        let config = crate::agents::config::AgentConfig {
+            name: "general".to_string(),
+            description: "General purpose agent (migrated from config)".to_string(),
+            system_prompt: legacy.system_prompt,
+            allowed_tools: legacy.allowed_tools,
+            enabled: true,
+            max_depth: 5,
+            recovery_policy: crate::agents::config::RecoveryPolicy::FailFast,
+            ..Default::default()
+        };
+
+        if let Ok(content) = serde_json::to_string_pretty(&config) {
+            fs::write(general_path, content).ok();
+            tracing::info!("Migrated agent_config to agents/general.json");
+        }
+    }
+
+    Ok(crate::agents::config::AgentConfig::default())
 }
 
 fn default_max_messages() -> usize {

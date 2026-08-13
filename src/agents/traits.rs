@@ -101,6 +101,12 @@ pub enum SupervisorDecision {
     Retry { tasks: Vec<Task> },
     /// Add new tasks suggested by workers.
     Continue { new_tasks: Vec<Task> },
+    /// Tool parameter errors that the Planner can fix by regenerating the plan with correct params.
+    NeedsFix {
+        failed: Vec<AgentResult>,
+        completed: Vec<AgentResult>,
+        context: serde_json::Value,
+    },
 }
 
 /// Supervisor Agent — spawns and coordinates Worker Agents.

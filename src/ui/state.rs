@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::client::ChatClient;
 use crate::config::Config;
@@ -61,9 +62,11 @@ pub struct ChatState {
     pub(super) messages: Vec<ChatMessage>,
     pub(super) input_text: String,
     pub(super) is_generating: bool,
+    pub(super) is_pipeline_running: bool,
     pub(super) status: AppStatus,
     pub(super) streaming: bool,
     pub(super) current_response: String,
+    pub(super) current_thinking: String,
     pub(super) token_count: u32,
     pub(super) context_used: f32,
     /// Whether to scroll to bottom on the next frame (set when new message arrives while at bottom)
@@ -97,6 +100,15 @@ pub struct SessionState {
     pub(super) max_display_messages: usize,
 }
 
+/// State for the agent chain UI panel.
+#[derive(Default)]
+pub struct AgentChainState {
+    pub(super) active: bool,
+    pub(super) entries: Vec<crate::sessions::model::AgentChainEntry>,
+    pub(super) current_agent: Option<String>,
+    pub(super) cancelled: bool,
+}
+
 /// Main app state with extracted sub-structs
 pub struct ChatApp {
     // Core dependencies
@@ -119,6 +131,13 @@ pub struct ChatApp {
     /// Agent manager for add/edit/remove/list of worker configurations.
     pub(super) agent_manager: Arc<Mutex<crate::agents::config::AgentManager>>,
 
+    // Agent engine (replaces agent_pipeline)
+    pub(super) agent_engine: Arc<crate::agents::AgentEngine>,
+    pub(super) agent_cancel_token: Arc<CancellationToken>,
+    pub(super) agent_chain_state: AgentChainState,
+    /// Which chain entries are expanded for result preview.
+    pub(super) agent_chain_expanded: Vec<usize>,
+
     // Remote server state
     pub(super) remote_n_ctx: u32,
     pub(super) remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
@@ -126,9 +145,6 @@ pub struct ChatApp {
 
     // UI progress
     pub(super) progress: f32,
-
-    // Agent pipeline (optional, initialized if /plan trigger is used)
-    pub(super) agent_pipeline: Option<Arc<AgentPipeline<ChatClient>>>,
 }
 
 impl ChatApp {
@@ -137,7 +153,7 @@ impl ChatApp {
         client: Arc<Mutex<ChatClient>>,
         config: Arc<Mutex<Config>>,
         tool_manager: Arc<ToolManager>,
-        agent_manager: Arc<Mutex<crate::agents::config::AgentManager>>,
+        agent_engine: Arc<crate::agents::AgentEngine>,
     ) -> Self {
         let cfg = config.lock().unwrap();
         let streaming = cfg.streaming;
@@ -176,9 +192,11 @@ impl ChatApp {
                 messages,
                 input_text: String::new(),
                 is_generating: false,
+                is_pipeline_running: false,
                 status: AppStatus::Stopped,
                 streaming,
                 current_response: String::new(),
+                current_thinking: String::new(),
                 token_count: 0,
                 context_used: 0.0,
                 scroll_to_bottom_requested: false,
@@ -206,12 +224,22 @@ impl ChatApp {
             presets_dialog: None,
             show_agent_config: false,
             agent_config_dialog: None,
-            agent_manager,
+            agent_manager: Arc::new(Mutex::new(crate::agents::config::AgentManager::new(
+                config_path_parent(&config).join("workers"),
+            ))),
             remote_n_ctx: 0,
             remote_n_ctx_arc: None,
             remote_n_ctx_handle: None,
             progress: 0.0,
-            agent_pipeline: None,
+            agent_engine,
+            agent_cancel_token: Arc::new(CancellationToken::new()),
+            agent_chain_state: AgentChainState::default(),
+            agent_chain_expanded: Vec::new(),
         }
     }
+}
+
+fn config_path_parent(config: &Arc<Mutex<Config>>) -> std::path::PathBuf {
+    let cfg = config.lock().unwrap();
+    cfg.file_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
 }

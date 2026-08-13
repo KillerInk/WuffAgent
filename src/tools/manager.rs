@@ -9,6 +9,7 @@ use crate::tools::registry::ToolRegistry;
 pub struct ToolManager {
     registry: Arc<ToolRegistry>,
     logger: Arc<dyn ToolLogger>,
+    allowlist: Option<Vec<String>>,
 }
 
 impl ToolManager {
@@ -16,6 +17,16 @@ impl ToolManager {
         Self {
             registry,
             logger: Arc::new(TracingToolLogger),
+            allowlist: None,
+        }
+    }
+
+    /// Create a new ToolManager that shares the same registry but restricts tools to the given allowlist.
+    pub fn with_allowlist(&self, names: &[String]) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            logger: self.logger.clone(),
+            allowlist: Some(names.to_vec()),
         }
     }
 
@@ -25,6 +36,13 @@ impl ToolManager {
         tool_name: &str,
         params: ToolParams,
     ) -> ToolResult<ToolOutput> {
+        // Check allowlist first
+        if let Some(ref allowlist) = self.allowlist {
+            if !allowlist.contains(&tool_name.to_string()) {
+                return Err(ToolError::NotFound(tool_name.to_string()));
+            }
+        }
+
         let tool = self
             .registry
             .get(tool_name)
@@ -57,8 +75,22 @@ impl ToolManager {
     }
 
     /// Get all tool definitions in OpenAI-compatible format for function calling.
+    /// Filters by allowlist when present.
     pub fn get_tool_definitions(&self) -> Vec<crate::tools::lib::ToolDefinition> {
-        self.registry.to_tool_definitions()
+        let mut defs = self.registry.to_tool_definitions();
+        if let Some(ref allowlist) = self.allowlist {
+            defs.retain(|d| allowlist.contains(&d.function.name));
+        }
+        defs
+    }
+
+    /// Get the list of allowed tool names, if an allowlist is set.
+    pub fn get_allowed_tools(&self) -> Vec<String> {
+        if let Some(ref allowlist) = self.allowlist {
+            allowlist.clone()
+        } else {
+            self.registry.list().iter().map(|e| e.metadata.name.clone()).collect()
+        }
     }
 
     /// Add a discovery path and rescan for plugins.

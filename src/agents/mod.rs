@@ -1,6 +1,7 @@
 pub mod types;
 pub mod traits;
 pub mod config;
+pub mod llm_client;
 pub mod worker;
 pub mod worker_registry;
 pub mod workers;
@@ -8,13 +9,18 @@ pub mod planner;
 pub mod supervisor;
 pub mod pipeline;
 pub mod feedback;
+pub mod registry;
+pub mod engine;
 
 pub use types::*;
 pub use traits::*;
 pub use config::*;
+pub use llm_client::{ChatClientAdapter, LlmClient};
 pub use worker::WorkerAgent as BaseWorkerAgent;
 pub use worker_registry::WorkerRegistry;
 pub use planner::PlannerAgent;
 pub use supervisor::SupervisorAgent;
 pub use pipeline::AgentPipeline;
 pub use feedback::FeedbackLoop;
+pub use registry::AgentRegistry;
+pub use engine::AgentEngine;

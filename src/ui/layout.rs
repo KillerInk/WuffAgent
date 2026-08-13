@@ -90,12 +90,17 @@ impl ChatApp {
             let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
             ui.visuals_mut().panel_fill = theme.background;
             self.draw_chat_area(ui);
-            // Draw pipeline progress below chat (when active)
-            if self.chat.pipeline.active {
-                ui.add_space(8.0);
-                self.draw_pipeline_progress(ui, &theme);
-            }
         });
+
+        // Agent chain side panel — shown when chain is active or has entries
+        if self.agent_chain_panel_shown() {
+            egui::SidePanel::right("agent_chain_panel")
+                .default_width(280.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    self.draw_agent_chain_panel(ui);
+                });
+        }
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {

@@ -1,18 +1,9 @@
-use std::sync::{Arc, Mutex};
-use std::sync::mpsc;
-use tokio::sync::Mutex as TokioMutex;
-
 use eframe::egui;
 
 use super::state::ChatApp;
 use crate::types::{AppEvent, AppStatus};
 use super::theme::Theme;
-use crate::client::engine::EngineEvent;
-use crate::client::ChatClient;
-use crate::tools::ToolManager;
-use crate::config;
-use crate::agents;
-use crate::agents::AgentPipeline;
+use crate::ui::state::EngineEvent;
 
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
@@ -50,10 +41,21 @@ impl ChatApp {
                 .vertical_align(egui::Align::Center);
             let response = ui.add_sized([input_width, 32.0], text_edit);
             if response.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
-                if !self.chat.is_generating && !self.chat.input_text.trim().is_empty() {
+                if !self.chat.is_generating && !self.chat.is_pipeline_running && !self.chat.input_text.trim().is_empty() {
                     let input = self.chat.input_text.trim().to_string();
-                    if input.starts_with("/plan ") {
-                        self.send_plan_request(&input["/plan ".len()..].trim());
+                    if input.starts_with("/plan") {
+                        // Extract the request after "/plan" (skip "/plan " or "/plan" with no space)
+                        let request = if input.len() > "/plan".len() {
+                            input["/plan".len()..].trim().to_string()
+                        } else {
+                            String::new()
+                        };
+                        if request.is_empty() {
+                            self.chat.status = AppStatus::Error("Please provide a request after /plan".to_string());
+                            self.chat.pending_error = Some("Please provide a request after /plan".to_string());
+                        } else {
+                            self.send_plan_request(&request);
+                        }
                     } else {
                         self.send_message();
                     }
@@ -61,13 +63,29 @@ impl ChatApp {
             }
 
             // Send or Stop button
-            if !self.chat.is_generating {
+            if !self.chat.is_generating && !self.chat.is_pipeline_running {
                 let send_btn = egui::Button::new("Send")
                     .fill(theme.primary)
                     .rounding(6.0)
                     .min_size(egui::vec2(60.0, 28.0));
                 if ui.add(send_btn).clicked() {
-                    self.send_message();
+                    let input = self.chat.input_text.trim().to_string();
+                    if input.starts_with("/plan") {
+                        // Extract the request after "/plan" (skip "/plan " or "/plan" with no space)
+                        let request = if input.len() > "/plan".len() {
+                            input["/plan".len()..].trim().to_string()
+                        } else {
+                            String::new()
+                        };
+                        if request.is_empty() {
+                            self.chat.status = AppStatus::Error("Please provide a request after /plan".to_string());
+                            self.chat.pending_error = Some("Please provide a request after /plan".to_string());
+                        } else {
+                            self.send_plan_request(&request);
+                        }
+                    } else {
+                        self.send_message();
+                    }
                 }
             } else {
                 let stop_btn = egui::Button::new("Stop")
@@ -96,12 +114,15 @@ impl ChatApp {
     }
 
     pub(super) fn send_message(&mut self) {
+        self.chat.is_pipeline_running = false;
         let input = self.chat.input_text.trim().to_string();
         if let Err(e) = self.validate_input(&input) {
             self.chat.status = AppStatus::Error(e.clone());
             self.chat.pending_error = Some(e);
             return;
         }
+
+        tracing::info!("[CHAT PATH] send_message called with: {}", input);
 
         self.chat.input_text.clear();
         self.start_streaming();
@@ -147,104 +168,61 @@ impl ChatApp {
         engine.start_chat(input, tool_defs);
     }
 
-    /// Send a /plan request to the multi-agent pipeline.
+    /// Send a /plan request to the agent engine.
     pub(super) fn send_plan_request(&mut self, request: &str) {
-        if let Err(e) = self.validate_input(request) {
-            self.chat.status = AppStatus::Error(e.clone());
-            self.chat.pending_error = Some(e);
-            return;
-        }
-
+        tracing::info!("[AGENT ENGINE] send_plan_request called with: {}", request);
+        
         self.chat.input_text.clear();
         self.start_streaming();
-
-        // Add user message to chat display
         self.add_message("user", &format!("/plan {}", request));
-
+        
+        // Reset agent chain state
+        self.agent_chain_state = super::state::AgentChainState::default();
+        self.agent_chain_state.active = true;
+        self.chat.is_pipeline_running = true;
+        
         // Clone dependencies
-        let client = self.client.clone();
-        let tool_manager = self.tool_manager.clone();
+        let engine = self.agent_engine.clone();
+        let cancel_token = self.agent_cancel_token.clone();
         let event_tx = self.pending_tx.clone();
-
-        // Initialize pipeline if not already done
-        if self.agent_pipeline.is_none() {
-            if let Ok(pipeline) = self.initialize_pipeline(client, tool_manager, event_tx) {
-                self.agent_pipeline = Some(Arc::new(pipeline));
-            }
-        }
-
-        // Run the pipeline
-        if let Some(pipeline) = &self.agent_pipeline {
-            let pipeline = pipeline.clone();
-            let request = request.to_string();
-            tokio::spawn(async move {
-                tracing::info!("Running agent pipeline for: {}", request);
-                match pipeline.execute(&request).await {
-                    Ok(results) => {
-                        tracing::info!("Pipeline completed with {} results", results.len());
-                        // Results are already sent as events by the pipeline
-                    }
-                    Err(e) => {
-                        tracing::error!("Pipeline failed: {}", e);
-                        // Error is already sent as event by the pipeline
+        let request = request.to_string();
+        
+        // Spawn async task
+        tokio::spawn(async move {
+            tracing::info!("[AGENT ENGINE] Running agent engine for: {}", request);
+            
+            // Execute with cancellation support
+            let result = tokio::select! {
+                result = engine.execute(&request, &cancel_token) => result,
+                _ = cancel_token.cancelled() => {
+                    Ok(String::from("[CANCELLED]"))
+                }
+            };
+            
+            match result {
+                Ok(response) => {
+                    tracing::info!("[AGENT ENGINE] Completed with {} chars", response.len());
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(AppEvent::AgentEngineComplete {
+                            response,
+                        });
                     }
                 }
-            });
-        }
-    }
-
-    /// Initialize the agent pipeline. Called once on first /plan request.
-    fn initialize_pipeline(
-        &mut self,
-        client: Arc<Mutex<ChatClient>>,
-        tool_manager: Arc<ToolManager>,
-        event_tx: Option<mpsc::Sender<AppEvent>>,
-    ) -> Result<AgentPipeline<ChatClient>, String> {
-
-        // Load agent config
-        let config_path = config::get_config_path();
-        let agent_config = match agents::config::AgentConfig::load(&config_path) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                tracing::warn!("Failed to load agent config: {}, using defaults", e);
-                agents::config::AgentConfig::default()
+                Err(e) => {
+                    tracing::error!("[AGENT ENGINE] Failed: {}", e);
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(AppEvent::AgentEngineError {
+                            error: e.to_string(),
+                        });
+                    }
+                }
             }
-        };
-
-        // Load worker configs
-        let worker_configs = match agent_config.load_workers() {
-            Ok(configs) => configs,
-            Err(e) => {
-                tracing::warn!("Failed to load worker configs: {}", e);
-                Vec::new()
+            
+            // Reset pipeline running state
+            if let Some(ref tx) = event_tx {
+                let _ = tx.send(AppEvent::AgentEngineStopped);
             }
-        };
-
-        // Create worker registry and load configs
-        let registry = agents::WorkerRegistry::new();
-        tokio::runtime::Handle::current().block_on(registry.load_from_configs(worker_configs))
-            .map_err(|e| format!("Failed to load workers: {}", e))?;
-
-        // Create supervisor
-        let event_tx_for_supervisor = event_tx.as_ref().map(|tx| Arc::new(Mutex::new(tx.clone())));
-        let supervisor = Arc::new(agents::SupervisorAgent::new(
-            Arc::new(registry),
-            Arc::new(TokioMutex::new((*tool_manager).clone())),
-            Vec::new(), // configs already loaded into registry
-            agent_config.max_parallel_workers,
-            event_tx_for_supervisor,
-        ));
-
-        // Create planner - extract the inner ChatClient from Arc<Mutex<ChatClient>>
-        let chat_client = client.lock().map_err(|e| format!("Failed to lock client: {}", e))?.clone();
-        let planner = agents::PlannerAgent::new(chat_client);
-
-        // Create pipeline
-        Ok(AgentPipeline::new(
-            planner,
-            supervisor,
-            event_tx.map(|tx| Arc::new(Mutex::new(tx))),
-        ))
+        });
     }
 
     pub(super) fn stop_generation(&mut self) {
@@ -257,6 +235,11 @@ impl ChatApp {
         if let Some(handle) = self.chat.streaming_task.take() {
             handle.abort();
         }
+        
+        tracing::info!("[CANCEL] Stopping all generation");
+        
+        // Cancel agent engine
+        self.agent_cancel_token.cancel();
         
         self.stop_streaming();
         self.chat.status = AppStatus::Ready;

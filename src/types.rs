@@ -73,12 +73,28 @@ pub enum AppEvent {
     ToolCallStart { tool_name: String, call_id: String },
     ToolCallComplete { tool_name: String, call_id: String, result: String },
     ToolCallError { tool_name: String, call_id: String, error: String },
+    // Thinking output events (e.g. Claude-style reasoning)
+    StreamThinkingChunk { content: String },
+    StreamThinkingComplete { content: String },
     // Agent pipeline events
-    AgentPlanGenerated { plan_id: String, task_count: usize },
-    AgentTaskStarted { task_id: String, agent_type: String },
+    AgentPlanGenerated { plan_id: String, task_count: usize, user_request: String, task_descriptions: Vec<String> },
+    AgentTaskStarted { task_id: String, task_description: String, agent_type: String },
     AgentTaskCompleted { task_id: String, status: String, duration_ms: u64 },
     AgentFeedbackLoop { iteration: u32, action: String },
     AgentPipelineComplete { result_count: usize, final_output: String },
     AgentPipelineError { error: String },
     AgentPipelineCancelled,
+    /// A tool error occurred during a task execution — send to planner for plan refinement.
+    AgentToolError { tool_name: String, task_id: String, error: String },
+    // Agent engine events
+    AgentEngineComplete { response: String },
+    AgentEngineError { error: String },
+    AgentEngineStopped,
+    // Agent chain events
+    AgentChainStarted { agent_name: String, depth: u32 },
+    AgentChainCompleted { agent_name: String, result: String, depth: u32 },
+    AgentChainError { agent_name: String, error: String, depth: u32 },
+    AgentChainCancelled { agent_name: String },
+    AgentChainComplete { response: String, entries: Vec<crate::sessions::model::AgentChainEntry> },
+    AgentChainStopped,
 }

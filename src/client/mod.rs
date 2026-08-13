@@ -254,7 +254,7 @@ impl ChatClient {
         &self,
         prompt: &str,
         tools: Option<&[crate::tools::ToolDefinition]>,
-        callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
+        mut callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
     ) -> Result<Option<Usage>, Error> {
         let request = build_request(
             &self.system_prompt,
@@ -284,8 +284,10 @@ impl ChatClient {
         // Add user message to history
         add_streaming_messages(&self.conversation, prompt);
 
-        // Box the callback to erase the concrete type, matching the original API
-        let mut boxed_cb = Box::new(callback);
+        // Box the callback to erase the concrete type and adapt signature
+        let mut boxed_cb = Box::new(move |chunk: String, _is_thinking: bool| -> Result<(), Error> {
+            (callback)(chunk)
+        });
         sse::stream_message(resp, &self.conversation, &mut boxed_cb).await
     }
 
@@ -295,7 +297,7 @@ impl ChatClient {
         client: &Arc<Mutex<Self>>,
         prompt: &str,
         tools: Option<&[crate::tools::ToolDefinition]>,
-        callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
+        callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
     ) -> Result<Option<Usage>, Error> {
         // Clone the data we need before calling the async method
         let http_client = client.lock().unwrap().http_client.clone();
@@ -754,7 +756,7 @@ mod tests {
     async fn test_process_sse_line_empty() {
         let client = ChatClient::new("http://localhost:8080");
         let mut captured = Vec::new();
-        let mut cb = |s: String| -> Result<(), Error> {
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
             captured.push(s);
             Ok(())
         };
@@ -766,7 +768,7 @@ mod tests {
     async fn test_process_sse_line_done() {
         let client = ChatClient::new("http://localhost:8080");
         let mut captured = Vec::new();
-        let mut cb = |s: String| -> Result<(), Error> {
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
             captured.push(s);
             Ok(())
         };
@@ -779,7 +781,7 @@ mod tests {
     async fn test_process_sse_line_non_data() {
         let client = ChatClient::new("http://localhost:8080");
         let mut captured = Vec::new();
-        let mut cb = |s: String| -> Result<(), Error> {
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
             captured.push(s);
             Ok(())
         };
@@ -804,7 +806,7 @@ mod tests {
 
         let sse_data = r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#;
         let mut captured = Vec::new();
-        let mut cb = |s: String| -> Result<(), Error> {
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
             captured.push(s);
             Ok(())
         };
@@ -832,7 +834,7 @@ mod tests {
 
         let sse1 = r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#;
         let mut captured = Vec::new();
-        let mut cb = |s: String| -> Result<(), Error> {
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
             captured.push(s);
             Ok(())
         };
@@ -840,7 +842,7 @@ mod tests {
 
         let sse2 = r#"data: {"choices":[{"delta":{"content":" world"}}]}"#;
         let mut captured2 = Vec::new();
-        let mut cb2 = |s: String| -> Result<(), Error> {
+        let mut cb2 = |s: String, _is_thinking: bool| -> Result<(), Error> {
             captured2.push(s);
             Ok(())
         };
@@ -867,7 +869,7 @@ mod tests {
 
         let sse_data = r#"data: {"choices":[{"delta":{"content":""}}]}"#;
         let mut captured = Vec::new();
-        let mut cb = |s: String| -> Result<(), Error> {
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
             captured.push(s);
             Ok(())
         };
@@ -976,7 +978,7 @@ impl ChatClientLike for ChatClient {
         let request = build_request(&self.system_prompt, &self.conversation, &prompt, true, None);
         let builder = build_stream_request(&self.http_client, &self.base_url, self.api_key.as_deref(), &request);
         let resp = builder.send().await.map_err(|e| e.to_string())?;
-        let mut callback = |chunk: String| -> Result<(), Error> { Ok(()) };
+        let mut callback = |chunk: String, _is_thinking: bool| -> Result<(), Error> { Ok(()) };
         let _usage = stream_message_arc(resp, &self.conversation, &mut callback).await.map_err(|e| e.to_string())?;
         // Extract the accumulated response from conversation (lock after await to avoid Send issue)
         let conv = self.conversation.lock().unwrap();

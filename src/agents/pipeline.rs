@@ -40,7 +40,7 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
         &self,
         user_request: &str,
     ) -> Result<Vec<AgentResult>, AgentError> {
-        tracing::info!("Pipeline starting for request: {}", user_request);
+        tracing::info!("[PIPELINE] Pipeline starting for request: {}", user_request);
 
         let mut plan = {
             let planner = self.planner.lock().await;
@@ -115,7 +115,9 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                     all_results.extend(completed);
                 }
                 SupervisorDecision::Retry { tasks } => {
-                    // Filter out tasks that have exhausted their max_retries
+                    iteration += 1;
+                    // Increment retry counts for ALL tasks in the retry batch BEFORE executing,
+                    // so that tasks that fail again on this retry will also be correctly tracked.
                     let retryable: Vec<Task> = tasks
                         .iter()
                         .filter(|t| {
@@ -126,7 +128,6 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                         .collect();
                     if retryable.is_empty() {
                         tracing::warn!("All retryable tasks have exhausted their max_retries, giving up");
-                        // Fall through to complete with what we have
                         let final_output = build_context(&all_results);
                         self.send_event(AppEvent::AgentPipelineComplete {
                             result_count: all_results.len(),
@@ -136,8 +137,13 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                     }
                     let already_failed = tasks.len() - retryable.len();
                     tracing::info!("Retrying {} failed tasks ({} already exhausted retries)", retryable.len(), already_failed);
+                    // Pre-increment retry counts for all retryable tasks so they are properly tracked.
+                    for task in &retryable {
+                        let count = task_retry_counts.entry(task.id.clone()).or_insert(0);
+                        *count += 1;
+                    }
                     let retry_results = self.supervisor.retry_tasks(&retryable, &all_results).await?;
-                    // Increment retry counts for tasks that failed this round
+                    // Increment retry counts for tasks that failed this round (they already have the pre-increment).
                     for result in &retry_results {
                         if result.status == TaskStatus::Failed {
                             let count = task_retry_counts.entry(result.task_id.clone()).or_insert(0);
@@ -146,7 +152,62 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                     }
                     all_results.extend(retry_results);
                 }
+                SupervisorDecision::NeedsFix {
+                    failed,
+                    completed,
+                    context,
+                } => {
+                    // Count how many times each failed task has already been attempted
+                    for result in &failed {
+                        let count = task_retry_counts.entry(result.task_id.clone()).or_insert(0);
+                        *count += 1;
+                    }
+                    // Filter out tasks that have exhausted their max_retries
+                    let fixable: Vec<_> = failed
+                        .iter()
+                        .filter(|r| {
+                            let attempts = task_retry_counts.get(&r.task_id).copied().unwrap_or(0);
+                            // Check against the CURRENT plan's task, which may have a different max_retries
+                            plan.tasks.iter()
+                                .find(|t| t.id == r.task_id)
+                                .map(|t| attempts < t.max_retries)
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    if fixable.is_empty() {
+                        tracing::warn!(
+                            "All fixable tasks have exhausted their max_retries, completing with partial results"
+                        );
+                        // Complete with partial results, like the Retry handler does
+                        let final_output = build_context(&all_results);
+                        self.send_event(AppEvent::AgentPipelineComplete {
+                            result_count: all_results.len(),
+                            final_output: format!("{}", final_output),
+                        });
+                        all_results.extend(failed);
+                        return Ok(all_results);
+                    }
+                    iteration += 1;
+                    tracing::info!(
+                        "Fixing plan: {} completed, {} fixable failures, iteration {}/{}",
+                        completed.len(),
+                        fixable.len(),
+                        iteration,
+                        self.max_iterations
+                    );
+                    self.send_event(AppEvent::AgentFeedbackLoop {
+                        iteration,
+                        action: format!("fixing: {} completed, {} fixable errors", completed.len(), fixable.len()),
+                    });
+                    let refined_plan = {
+                        let planner = self.planner.lock().await;
+                        PlannerAgentTrait::refine_plan(&*planner, &plan, &completed, &failed, &context).await?
+                    };
+                    plan = refined_plan;
+                    all_results.extend(completed);
+                }
                 SupervisorDecision::Continue { new_tasks } => {
+                    iteration += 1;
                     tracing::info!("Adding {} suggested follow-up tasks", new_tasks.len());
                     plan.tasks.extend(new_tasks);
                 }

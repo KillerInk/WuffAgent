@@ -111,6 +111,8 @@ impl SupervisorAgentTrait for SupervisorAgent {
         self.send_event(AppEvent::AgentPlanGenerated {
             plan_id: plan.plan_id.clone(),
             task_count: plan.tasks.len(),
+            user_request: plan.user_request.clone(),
+            task_descriptions: plan.tasks.iter().map(|t| t.description.clone()).collect(),
         });
 
         let ordered = plan.ordered_tasks();
@@ -203,11 +205,13 @@ impl SupervisorAgentTrait for SupervisorAgent {
                         }
                     };
 
+                    let task_description = task_clone.description.clone();
                     // Send task started event
                     if let Some(tx) = &event_tx {
                         if let Ok(tx) = tx.lock() {
                             let _ = tx.send(AppEvent::AgentTaskStarted {
                                 task_id: task_clone.id.clone(),
+                                task_description: task_description,
                                 agent_type: worker_name.clone(),
                             });
                         }
@@ -244,18 +248,30 @@ impl SupervisorAgentTrait for SupervisorAgent {
                     }
                     Ok((worker_name, task_id, Err(e))) => {
                         tracing::warn!("Task failed with worker '{}': {}", worker_name, e);
+                        let err_msg = e.to_string();
                         let failed_result = AgentResult {
                             task_id: task_id.clone(),
                             agent_id: worker_name,
                             agent_type: AgentType::General,
                             status: TaskStatus::Failed,
-                            output: serde_json::json!({ "error": e.to_string() }),
+                            output: serde_json::json!({ "error": err_msg }),
                             summary: format!("Task failed: {}", e),
                             needs_refinement: false,
+                            fixable: err_msg.contains("is required") || err_msg.contains("required"),
                             suggested_followup: vec![],
                             duration_ms: 0,
                             completed_at: Some(chrono::Utc::now()),
                         };
+                        // Emit tool error event for planner to fix
+                        if let Some(tx) = &self.event_tx {
+                            if let Ok(tx) = tx.lock() {
+                                let _ = tx.send(AppEvent::AgentToolError {
+                                    tool_name: "unknown".to_string(),
+                                    task_id: task_id.clone(),
+                                    error: err_msg.clone(),
+                                });
+                            }
+                        }
                         completed_ids.insert(failed_result.task_id.clone());
                         results.push(failed_result);
                     }
@@ -342,6 +358,7 @@ impl SupervisorAgentTrait for SupervisorAgent {
                         output: serde_json::json!({ "error": e.to_string() }),
                         summary: format!("Retry task '{}' failed: {}", task.id, e),
                         needs_refinement: false,
+                        fixable: e.to_string().contains("is required") || e.to_string().contains("required"),
                         suggested_followup: vec![],
                         duration_ms: 0,
                         completed_at: Some(chrono::Utc::now()),
@@ -386,6 +403,21 @@ impl SupervisorAgentTrait for SupervisorAgent {
         // Check if all tasks are done
         let all_done = completed.len() + failed.len() + retryable.len() >= plan.tasks.len();
         if all_done {
+            // Check for fixable errors — these need the planner to regenerate with correct params
+            let fixable_errors: Vec<AgentResult> = failed
+                .iter()
+                .filter(|r| r.fixable)
+                .cloned()
+                .cloned()
+                .collect();
+            if !fixable_errors.is_empty() {
+                return Ok(SupervisorDecision::NeedsFix {
+                    failed: fixable_errors,
+                    completed: completed.iter().cloned().cloned().collect(),
+                    context: build_context(results),
+                });
+            }
+
             if failed.is_empty() && retryable.is_empty() {
                 let final_output = build_context(results);
                 return Ok(SupervisorDecision::Complete { final_output });
@@ -472,8 +504,9 @@ mod tests {
         // The supervisor should never return an error decision here.
         match decision {
             SupervisorDecision::Complete { .. }
-            | SupervisorDecision::Retry { .. } => {},
-            _ => panic!("expected Complete or Retry decision, got {:?}", decision),
+            | SupervisorDecision::Retry { .. }
+            | SupervisorDecision::NeedsFix { .. } => {},
+            _ => panic!("expected Complete, Retry or NeedsFix decision, got {:?}", decision),
         }
     }
 

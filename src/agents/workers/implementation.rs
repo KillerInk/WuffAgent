@@ -105,6 +105,7 @@ impl WorkerAgent for ImplementationWorker {
                     output,
                     summary: format!("Task '{}' completed by '{}'", task.description, self.name),
                     needs_refinement: false,
+                    fixable: false,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),
@@ -118,6 +119,7 @@ impl WorkerAgent for ImplementationWorker {
                     task.description,
                     err
                 );
+                let fixable = err.contains("is required") || err.contains("required");
                 Ok(AgentResult {
                     task_id: task.id.clone(),
                     agent_id: self.id.to_string(),
@@ -126,6 +128,7 @@ impl WorkerAgent for ImplementationWorker {
                     output: serde_json::json!({ "error": err }),
                     summary: format!("Task '{}' failed: {}", task.description, err),
                     needs_refinement: false,
+                    fixable,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),
@@ -139,6 +142,7 @@ impl WorkerAgent for ImplementationWorker {
                     task.description,
                     e
                 );
+                let fixable = e.to_string().contains("is required") || e.to_string().contains("required");
                 Ok(AgentResult {
                     task_id: task.id.clone(),
                     agent_id: self.id.to_string(),
@@ -147,6 +151,7 @@ impl WorkerAgent for ImplementationWorker {
                     output: serde_json::json!({ "error": e.to_string() }),
                     summary: format!("Task '{}' failed: {}", task.description, e),
                     needs_refinement: false,
+                    fixable,
                     suggested_followup: vec![],
                     duration_ms: duration,
                     completed_at: Some(chrono::Utc::now()),

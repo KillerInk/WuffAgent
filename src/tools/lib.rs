@@ -23,6 +23,14 @@ pub enum ToolError {
     Json(#[from] serde_json::Error),
 }
 
+impl ToolError {
+    /// Returns true if this error is likely fixable by the planner
+    /// regenerating the task with correct parameters.
+    pub fn is_fixable(&self) -> bool {
+        matches!(self, ToolError::InvalidParams(_))
+    }
+}
+
 pub type ToolResult<T> = Result<T, ToolError>;
 
 // ─── Schema Types ───────────────────────────────────────────────────────────

@@ -1,0 +1,387 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use tracing;
+
+use super::config::{AgentConfig, RecoveryPolicy, WorkerConfig};
+use super::traits::AgentError;
+use crate::tools::registry::ToolRegistry;
+
+/// Registry of all available agents, loaded from JSON config files.
+/// Provides routing prompt caching for efficient agent selection.
+pub struct AgentRegistry {
+    agents: HashMap<String, AgentConfig>,
+    routing_prompt: String,
+    prompt_dirty: bool,
+}
+
+impl AgentRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            agents: HashMap::new(),
+            routing_prompt: String::new(),
+            prompt_dirty: true,
+        }
+    }
+
+    /// Load agents from the given directories.
+    /// Scans both `agents/` and legacy `workers/` directories.
+    /// First-seen name wins for deduplication.
+    pub fn load(search_dirs: Vec<PathBuf>, global_registry: &ToolRegistry) -> Result<Self, AgentError> {
+        let mut agents = HashMap::new();
+
+        for dir in search_dirs {
+            if !dir.exists() {
+                continue;
+            }
+
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("Failed to read directory {:?}: {}", dir, e);
+                    continue;
+                }
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map(|e| e == "json").unwrap_or(false) {
+                    match Self::load_agent_config(&path, global_registry) {
+                        Ok(config) => {
+                            if agents.insert(config.name.clone(), config).is_some() {
+                                tracing::warn!(
+                                    "Agent '{}' already loaded, skipping duplicate from {:?}",
+                                    path.file_name().unwrap_or_default().to_string_lossy(),
+                                    dir
+                                );
+                            } else {
+                                tracing::info!("Loaded agent: {} from {:?}", path.file_name().unwrap_or_default().to_string_lossy(), dir);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load {:?}: {}", path, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut registry = Self {
+            agents,
+            routing_prompt: String::new(),
+            prompt_dirty: true,
+        };
+        registry.build_routing_prompt_internal();
+        Ok(registry)
+    }
+
+    /// Load a single agent config from a JSON file.
+    /// Tries new AgentConfig format first, falls back to legacy WorkerConfig.
+    pub fn load_agent_config(path: &Path, global_registry: &ToolRegistry) -> Result<AgentConfig, AgentError> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| AgentError::ConfigError(format!(
+                "Failed to read config from {:?}: {}", path, e
+            )))?;
+
+        // Try new AgentConfig format first
+        if let Ok(config) = serde_json::from_str::<AgentConfig>(&content) {
+            Self::validate_config(global_registry, &config)?;
+            return Ok(config);
+        }
+
+        // Fallback: legacy WorkerConfig format — migrate to AgentConfig
+        let legacy: WorkerConfig = serde_json::from_str(&content)
+            .map_err(|e| AgentError::ConfigError(format!(
+                "Failed to parse config from {:?} as either AgentConfig or WorkerConfig: {}", path, e
+            )))?;
+
+        tracing::info!(
+            "Migrating legacy worker config '{}' from {:?} to AgentConfig",
+            legacy.name,
+            path.file_name().unwrap_or_default()
+        );
+
+        let config = AgentConfig {
+            name: legacy.name,
+            description: legacy.description,
+            system_prompt: legacy.system_prompt,
+            allowed_tools: legacy.allowed_tools,
+            enabled: legacy.enabled,
+            max_depth: 5,
+            recovery_policy: RecoveryPolicy::default(),
+            max_plan_iterations: 5,
+            max_parallel_workers: 4,
+            task_timeout_ms: 60_000,
+            auto_refine: true,
+            workers_dir: PathBuf::from(""),
+            custom_prompts: HashMap::new(),
+        };
+
+        Self::validate_config(global_registry, &config)?;
+        Ok(config)
+    }
+
+    /// Get an agent config by name.
+    pub fn get_agent(&self, name: &str) -> Option<&AgentConfig> {
+        self.agents.get(name)
+    }
+
+    /// Returns the number of agents in the registry.
+    pub fn agent_count(&self) -> usize {
+        self.agents.len()
+    }
+
+    /// Returns all agents in the registry (for internal use).
+    pub(crate) fn get_all_agents(&self) -> Vec<&AgentConfig> {
+        self.agents.values().collect()
+    }
+
+    /// Returns the cached routing prompt (read-only access).
+    pub(crate) fn routing_prompt(&self) -> &str {
+        &self.routing_prompt
+    }
+
+    /// Build the routing prompt that describes all agents for LLM selection.
+    /// Caches the result; use `invalidate_routing_prompt()` after mutations.
+    pub fn build_routing_prompt(&mut self) -> &str {
+        if self.prompt_dirty {
+            self.routing_prompt = self.build_routing_prompt_internal();
+            self.prompt_dirty = false;
+        }
+        &self.routing_prompt
+    }
+
+    /// Invalidate the cached routing prompt.
+    pub fn invalidate_routing_prompt(&mut self) {
+        self.prompt_dirty = true;
+    }
+
+    /// Internal build — constructs the routing prompt from all enabled agents.
+    fn build_routing_prompt_internal(&mut self) -> String {
+        let mut prompt = String::from("You are a multi-agent system router. Choose the best agent for each task.\n\n");
+        prompt.push_str("Available agents:\n");
+
+        let mut agents: Vec<_> = self.agents.values().filter(|a| a.enabled).collect();
+        agents.sort_by_key(|a| a.name.clone());
+
+        for agent in agents {
+            let tools = if agent.allowed_tools.is_empty() {
+                "none".to_string()
+            } else {
+                agent.allowed_tools.join(", ")
+            };
+            prompt.push_str(&format!(
+                "- **{}**: {} [tools: {}]\n",
+                agent.name, agent.description, tools
+            ));
+        }
+
+        prompt.push_str("\nRespond with a JSON array of objects with keys: agent, task.\n");
+        prompt
+    }
+
+    /// Validate that all tools referenced by an agent config exist in the global registry.
+    pub fn validate_config(
+        global_registry: &ToolRegistry,
+        config: &AgentConfig,
+    ) -> Result<(), AgentError> {
+        for tool_name in &config.allowed_tools {
+            if global_registry.get(tool_name).is_none() {
+                tracing::warn!(
+                    "Agent '{}' references unknown tool: {}",
+                    config.name,
+                    tool_name
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for AgentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Error type for agent registry operations.
+/// Re-exported from traits for convenience.
+pub use super::traits::AgentError as RegistryError;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::tools::builtin;
+
+    fn make_test_registry() -> ToolRegistry {
+        let logger = Arc::new(crate::tools::lib::TracingToolLogger);
+        let registry = ToolRegistry::new(vec![], logger);
+        builtin::register_builtins(&registry).expect("failed to register builtins");
+        registry
+    }
+
+    #[test]
+    fn test_registry_new_is_empty() {
+        let registry = AgentRegistry::new();
+        assert_eq!(registry.agent_count(), 0);
+    }
+
+    #[test]
+    fn test_load_agent_config_new_format() {
+        let tool_registry = make_test_registry();
+        let dir = std::env::temp_dir().join("wuffagent_test_registry_new");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config = AgentConfig {
+            name: "test_agent".to_string(),
+            description: "A test agent".to_string(),
+            system_prompt: "Be helpful.".to_string(),
+            allowed_tools: vec!["file_io".to_string()],
+            enabled: true,
+            max_depth: 3,
+            recovery_policy: RecoveryPolicy::Retry,
+            max_plan_iterations: 3,
+            max_parallel_workers: 2,
+            task_timeout_ms: 30_000,
+            auto_refine: false,
+            workers_dir: dir.clone(),
+            custom_prompts: HashMap::new(),
+        };
+        let path = dir.join("test_agent.json");
+        let content = serde_json::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, content).unwrap();
+
+        let loaded = AgentRegistry::load_agent_config(&path, &tool_registry).unwrap();
+        assert_eq!(loaded.name, "test_agent");
+        assert_eq!(loaded.max_depth, 3);
+        assert_eq!(loaded.recovery_policy, RecoveryPolicy::Retry);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_agent_config_legacy_fallback() {
+        let tool_registry = make_test_registry();
+        let dir = std::env::temp_dir().join("wuffagent_test_registry_legacy");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write a legacy WorkerConfig format
+        let legacy_json = r#"{
+            "name": "legacy_agent",
+            "description": "A legacy worker",
+            "personality": "You are legacy.",
+            "allowed_tools": ["calculation"],
+            "priority": 0,
+            "max_concurrent": 1,
+            "enabled": true
+        }"#;
+        let path = dir.join("legacy_agent.json");
+        std::fs::write(&path, legacy_json).unwrap();
+
+        let loaded = AgentRegistry::load_agent_config(&path, &tool_registry).unwrap();
+        assert_eq!(loaded.name, "legacy_agent");
+        assert_eq!(loaded.system_prompt, "You are legacy.");
+        assert_eq!(loaded.max_depth, 5); // default from migration
+        assert_eq!(loaded.recovery_policy, RecoveryPolicy::default());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_from_directory() {
+        let tool_registry = make_test_registry();
+        let dir = std::env::temp_dir().join("wuffagent_test_registry_load");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config1 = AgentConfig {
+            name: "agent_a".to_string(),
+            description: "Agent A".to_string(),
+            allowed_tools: vec![],
+            ..Default::default()
+        };
+        let config2 = AgentConfig {
+            name: "agent_b".to_string(),
+            description: "Agent B".to_string(),
+            allowed_tools: vec!["file_io".to_string()],
+            enabled: false,
+            ..Default::default()
+        };
+        std::fs::write(
+            dir.join("agent_a.json"),
+            serde_json::to_string_pretty(&config1).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("agent_b.json"),
+            serde_json::to_string_pretty(&config2).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = AgentRegistry::load(vec![dir.clone()], &tool_registry).unwrap();
+        assert_eq!(registry.agent_count(), 2);
+        assert!(registry.get_agent("agent_a").is_some());
+        assert!(registry.get_agent("agent_b").is_some());
+        assert!(registry.get_agent("nonexistent").is_none());
+
+        // Routing prompt should be cached
+        let prompt = registry.build_routing_prompt();
+        assert!(prompt.contains("agent_a"));
+        // agent_b is disabled, so it should NOT appear in the routing prompt
+        assert!(!prompt.contains("agent_b"));
+        let prompt_ptr = prompt.as_ptr();
+        drop(prompt);
+        // Second call should use cache (no panic, same pointer)
+        let prompt2 = registry.build_routing_prompt();
+        let prompt2_ptr = prompt2.as_ptr();
+        assert_eq!(prompt_ptr, prompt2_ptr);
+
+        drop(registry);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_routing_prompt_invalidation() {
+        let tool_registry = make_test_registry();
+        let dir = std::env::temp_dir().join("wuffagent_test_registry_invalidate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config = AgentConfig {
+            name: "dynamic_agent".to_string(),
+            description: "Dynamic".to_string(),
+            enabled: true,
+            ..Default::default()
+        };
+        std::fs::write(
+            dir.join("dynamic_agent.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = AgentRegistry::load(vec![dir.clone()], &tool_registry).unwrap();
+        let prompt1 = registry.build_routing_prompt();
+        assert!(prompt1.contains("dynamic_agent"));
+
+        // Invalidate and add a new agent
+        registry.invalidate_routing_prompt();
+        let config2 = AgentConfig {
+            name: "another_agent".to_string(),
+            description: "Another".to_string(),
+            enabled: true,
+            ..Default::default()
+        };
+        registry.agents.insert("another_agent".to_string(), config2);
+        let prompt2 = registry.build_routing_prompt();
+        assert!(prompt2.contains("another_agent"));
+        assert!(prompt2.contains("dynamic_agent"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

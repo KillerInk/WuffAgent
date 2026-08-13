@@ -25,7 +25,7 @@ static PLAN_SCHEMA: &str = r#"
           "description": { "type": "string" },
           "agent_type": { "enum": ["research", "coding", "implementation", "general"] },
           "input": { "type": "object" },
-          "depends_on": { "type": ["string", "null"] },
+          "depends_on": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" }, "minItems": 1 }, { "type": "null" }] },
           "max_retries": { "type": "integer" },
           "priority": { "type": "integer" }
         }
@@ -60,14 +60,18 @@ Return a JSON object with this exact structure:
   ]
 }
 
-Rules:
-1. Break complex requests into atomic, independent tasks where possible.
-2. Set depends_on only when a task strictly needs another's output.
-3. Prefer parallel execution (no dependencies) for efficiency.
-4. Use agent_type matching the work: research for information gathering,
+CRITICAL RULES:
+1. NEVER generate a plan with only 1 task for a non-trivial request. Break it into multiple steps.
+2. Each task must have COMPLETE parameters — always include required fields like 'path', 'action', etc.
+3. For analysis tasks, create a chain: list → read files → analyze. Each step depends on the previous.
+4. Set depends_on when a task needs output from a previous task.
+5. Prefer parallel execution (no dependencies) for independent tasks.
+6. Use agent_type matching the work: research for information gathering,
    coding for file manipulation, implementation for execution, general as fallback.
-5. Each task's input should contain the tool name and any required parameters.
-6. CRITICAL: Return ONLY the raw JSON object. No markdown, no code fences, no explanation, no headings.
+7. Each task's input must contain the tool name AND all required parameters:
+   {"tool": "file_io", "action": "list", "path": "/some/path"}
+8. CRITICAL: Return ONLY the raw JSON object. No markdown, no code fences, no explanation.
+9. After completing all tasks, the user's objective MUST be fully satisfied. If not, add more tasks.
 "#;
 
 /// LLM-driven Planner Agent.
@@ -329,7 +333,14 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
             .collect();
         let failed_summary: Vec<String> = failed
             .iter()
-            .map(|r| format!("{}: {} (status: {})", r.task_id, r.summary, r.status))
+            .map(|r| {
+                let error_detail = r.output.get("error").and_then(|e| e.as_str()).unwrap_or("");
+                if r.fixable {
+                    format!("{}: {} (FIXABLE - tool parameter error: {})", r.task_id, r.summary, error_detail)
+                } else {
+                    format!("{}: {} (status: {})", r.task_id, r.summary, r.status)
+                }
+            })
             .collect();
 
         let messages = vec![
@@ -348,7 +359,13 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
                      Completed tasks: {}\n\
                      Failed tasks: {}\n\
                      Context: {}\n\n\
-                     Return a new ExecutionPlan with adjustments.",
+                     IMPORTANT INSTRUCTIONS:\n\
+                     1. Tasks marked FIXABLE have tool parameter errors. You MUST include all required parameters.\n\
+                     2. If completed tasks show partial results, create NEW tasks to continue the work.\n\
+                     3. For analysis tasks, chain steps: list directory → read files → analyze content.\n\
+                     4. Each task input must be a complete JSON with tool name and ALL required parameters.\n\
+                     5. Return a NEW ExecutionPlan — do NOT reuse the old plan_id.\n\
+                     6. The goal is to FULLY satisfy the user's request. Add tasks until it is.",
                      plan.user_request,
                      completed_summary.join(", "),
                      failed_summary.join(", "),

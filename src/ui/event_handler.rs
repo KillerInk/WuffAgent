@@ -111,20 +111,33 @@ impl ChatApp {
                         self.chat.scroll_to_bottom_requested = true;
                     }
                 }
+                // Thinking output events (e.g. Claude-style reasoning)
+                AppEvent::StreamThinkingChunk { content } => {
+                    self.chat.current_thinking.push_str(&content);
+                }
+                AppEvent::StreamThinkingComplete { content } => {
+                    tracing::info!("Thinking complete, content_len={}", content.len());
+                    // Auto-scroll if user is viewing the bottom
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
+                }
                 // Agent pipeline events
-                AppEvent::AgentPlanGenerated { plan_id, task_count } => {
+                AppEvent::AgentPlanGenerated { plan_id, task_count, user_request, task_descriptions } => {
                     tracing::info!(plan_id = %plan_id, task_count, "Agent plan generated");
+                    // Shorten plan ID for display (first 8 chars)
+                    let plan_short = plan_id.chars().take(8).collect::<String>();
                     self.add_message("system", &format!(
-                        "📋 **Plan generated**: {} — {} tasks to execute", plan_id, task_count
+                        "📋 **Plan created** (`{}`): {}", plan_short, user_request
                     ));
                     self.chat.pipeline.active = true;
                     self.chat.pipeline.plan_id = plan_id.clone();
                     self.chat.pipeline.iteration = 0;
-                    // Create pending task entries
-                    self.chat.pipeline.tasks = (0..task_count)
-                        .map(|i| crate::ui::state::PipelineTaskEntry {
-                            id: format!("task-{}", i),
-                            description: format!("Task {}", i + 1),
+                    // Create task entries with proper IDs and descriptions
+                    self.chat.pipeline.tasks = task_descriptions.iter().enumerate()
+                        .map(|(i, desc)| crate::ui::state::PipelineTaskEntry {
+                            id: format!("T{}", i + 1),
+                            description: desc.clone(),
                             status: crate::ui::state::PipelineTaskStatus::Pending,
                             agent_type: "general".to_string(),
                         })
@@ -133,10 +146,10 @@ impl ChatApp {
                         self.chat.scroll_to_bottom_requested = true;
                     }
                 }
-                AppEvent::AgentTaskStarted { task_id, agent_type } => {
+                AppEvent::AgentTaskStarted { task_id, task_description, agent_type } => {
                     tracing::info!(task_id = %task_id, agent_type = %agent_type, "Agent task started");
                     self.add_message("system", &format!(
-                        "▶️ **Running**: [{}] ({})", task_id, agent_type
+                        "▶️ **Running**: {}", task_description
                     ));
                     // Update pipeline task status
                     for task in &mut self.chat.pipeline.tasks {
@@ -173,7 +186,7 @@ impl ChatApp {
                 AppEvent::AgentFeedbackLoop { iteration, action } => {
                     tracing::info!(iteration, action = %action, "Agent feedback loop");
                     self.add_message("system", &format!(
-                        "🔄 **Feedback loop** iteration {}: {}", iteration, action
+                        "🔄 **Round {}**: {}", iteration, action
                     ));
                     self.chat.pipeline.iteration = iteration;
                     self.chat.pipeline.feedback_state = action.clone();
@@ -198,6 +211,7 @@ impl ChatApp {
                         }
                     }
                     self.stop_streaming();
+                    self.chat.is_pipeline_running = false;
                     if self.chat.at_bottom {
                         self.chat.scroll_to_bottom_requested = true;
                     }
@@ -212,6 +226,50 @@ impl ChatApp {
                     tracing::info!("Agent pipeline cancelled");
                     self.chat.pipeline.cancelled = true;
                     self.stop_streaming();
+                    self.chat.is_pipeline_running = false;
+                }
+                AppEvent::AgentToolError { tool_name, task_id, error } => {
+                    tracing::warn!(tool_name = %tool_name, task_id = %task_id, error = %error, "Agent tool error");
+                    self.add_message("system", &format!(
+                        "⚠️ **Tool error** in [{}]: tool='{}' — {}", task_id, tool_name, error
+                    ));
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
+                }
+                // Agent engine events
+                AppEvent::AgentEngineComplete { response } => {
+                    tracing::info!(response_len = response.len(), "Agent engine complete");
+                    self.add_message("system", "✅ **Agent execution complete**");
+                    if !response.is_empty() {
+                        self.add_message("assistant", &response);
+                    }
+                    self.chat.is_pipeline_running = false;
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
+                }
+                AppEvent::AgentEngineError { error } => {
+                    tracing::error!(error = %error, "Agent engine error");
+                    self.add_message("system", &format!("❌ **Agent error**: {}", error));
+                    self.chat.status = AppStatus::Error(error);
+                    self.chat.is_pipeline_running = false;
+                }
+                AppEvent::AgentEngineStopped => {
+                    tracing::info!("Agent engine stopped");
+                    self.chat.is_pipeline_running = false;
+                }
+                // Agent chain events — delegate to chain panel processor
+                AppEvent::AgentChainStarted { .. }
+                | AppEvent::AgentChainCompleted { .. }
+                | AppEvent::AgentChainError { .. }
+                | AppEvent::AgentChainCancelled { .. }
+                | AppEvent::AgentChainComplete { .. }
+                | AppEvent::AgentChainStopped => {
+                    self.process_chain_event(&event);
+                    if self.chat.at_bottom {
+                        self.chat.scroll_to_bottom_requested = true;
+                    }
                 }
             }
         }
@@ -339,6 +397,7 @@ impl ChatApp {
 
     pub(super) fn stop_streaming(&mut self) {
         self.chat.is_generating = false;
+        self.chat.is_pipeline_running = false;
         self.chat.current_response.clear();
         self.chat.status = AppStatus::Ready;
     }

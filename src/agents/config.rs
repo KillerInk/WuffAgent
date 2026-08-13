@@ -497,9 +497,38 @@ mod tests {
     }
 }
 
-/// Global agent pipeline configuration.
+/// Recovery policy for agent task failures.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RecoveryPolicy {
+    #[default]
+    FailFast,
+    Retry,
+    ContinueWithFallback,
+}
+
+/// Per-agent configuration, loaded from a JSON file in the agents directory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentConfig {
+    /// Unique name/identifier for this agent.
+    pub name: String,
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: String,
+    /// System prompt for this agent (also accepts legacy "personality" key).
+    #[serde(default, alias = "personality")]
+    pub system_prompt: String,
+    /// Tool names this agent is authorized to use.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Whether this agent is enabled.
+    #[serde(default = "default_enabled_agent")]
+    pub enabled: bool,
+    /// Maximum recursion depth for agent calls.
+    #[serde(default = "default_max_depth")]
+    pub max_depth: u32,
+    /// Recovery policy when a task fails.
+    #[serde(default)]
+    pub recovery_policy: RecoveryPolicy,
     /// Maximum feedback loop iterations before giving up.
     #[serde(default = "default_max_iterations")]
     pub max_plan_iterations: u32,
@@ -520,6 +549,8 @@ pub struct AgentConfig {
     pub custom_prompts: HashMap<String, String>,
 }
 
+fn default_enabled_agent() -> bool { true }
+fn default_max_depth() -> u32 { 5 }
 fn default_max_iterations() -> u32 { 5 }
 fn default_max_parallel() -> usize { 4 }
 fn default_task_timeout_ms() -> u64 { 60_000 }
@@ -534,6 +565,13 @@ fn default_workers_dir() -> PathBuf {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            name: String::from("general"),
+            description: String::from("General purpose agent"),
+            system_prompt: String::new(),
+            allowed_tools: Vec::new(),
+            enabled: true,
+            max_depth: 5,
+            recovery_policy: RecoveryPolicy::default(),
             max_plan_iterations: 5,
             max_parallel_workers: 4,
             task_timeout_ms: 60_000,
