@@ -24,10 +24,6 @@ pub async fn process_sse_line(
     }
 
     let data = &line["data: ".len()..];
-    // Log the raw SSE data for debugging tool call issues
-    if data.contains("tool_calls") || data.contains("function") {
-        tracing::debug!("process_sse_line raw SSE data: {}", &data[..data.len().min(500)]);
-    }
     let chunk: Value = serde_json::from_str(data)?;
 
     if let Some(text) = chunk
@@ -57,7 +53,6 @@ pub async fn process_sse_line(
         .and_then(|t| t.as_str())
     {
         if !thinking.is_empty() {
-            tracing::debug!("process_sse_line: thinking chunk received, len={}", thinking.len());
             callback(thinking.to_string(), true)?;
         }
     }
@@ -92,32 +87,13 @@ pub async fn process_sse_line(
                         .unwrap_or("")
                         .to_string();
 
-                    tracing::debug!(
-                        "process_sse_line: tool_call id=? name={} args_len={} args_preview={:?}",
-                        name, args.len(),
-                        &args[..args.len().min(80)]
-                    );
-
                     // Accumulate partial args from streaming
                     let mut conv = conversation.lock().unwrap();
                     if let Some(last) = conv.last_mut() {
-                        tracing::debug!(
-                            "process_sse_line: last message role={}, has_tool_calls={}, tool_calls_count={}",
-                            last.role,
-                            last.tool_calls.is_some(),
-                            last.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                        );
                         if last.tool_calls.is_none() {
                             last.tool_calls = Some(Vec::new());
                         }
                         let tcs = last.tool_calls.as_mut().unwrap();
-
-                        tracing::debug!(
-                            "process_sse_line: looking for tool_call id={:?} index={} tcs_len={}",
-                            id,
-                            index.unwrap_or(0),
-                            tcs.len()
-                        );
 
                         // Try to find existing tool call by id first
                         let found = if let Some(ref id) = id {
@@ -129,20 +105,10 @@ pub async fn process_sse_line(
                         if let Some(tc) = found {
                             // Accumulate args into existing tool call
                             tc.function.arguments.push_str(&args);
-                            tracing::debug!(
-                                "process_sse_line: accumulated args for tool_call id={} total_len={} args={:?}",
-                                id.as_ref().unwrap(), tc.function.arguments.len(),
-                                &tc.function.arguments[..tc.function.arguments.len().min(80)]
-                            );
                         } else if let Some(idx) = index {
                             // Find by index when id is not present
                             if let Some(tc) = tcs.get_mut(idx as usize) {
                                 tc.function.arguments.push_str(&args);
-                                tracing::debug!(
-                                    "process_sse_line: accumulated args for tool_call index={} total_len={} args={:?}",
-                                    idx, tc.function.arguments.len(),
-                                    &tc.function.arguments[..tc.function.arguments.len().min(80)]
-                                );
                             } else if let Some(ref id) = id {
                                 // Index doesn't exist yet but we have an id - create new tool call
                                 tcs.push(crate::types::ToolCall {
@@ -153,10 +119,6 @@ pub async fn process_sse_line(
                                         arguments: args.clone(),
                                     },
                                 });
-                                tracing::debug!(
-                                    "process_sse_line: created new tool_call id={} at index={} args={:?}",
-                                    id, idx, args
-                                );
                             } else {
                                 tracing::warn!(
                                     "process_sse_line: failed to find tool_call at index={} (tcs_len={})",
@@ -173,10 +135,6 @@ pub async fn process_sse_line(
                                     arguments: args.clone(),
                                 },
                             });
-                            tracing::debug!(
-                                "process_sse_line: created new tool_call id={} args={:?}",
-                                id, args
-                            );
                         } else {
                             tracing::warn!(
                                 "process_sse_line: skipping chunk with no id and no index"
@@ -249,9 +207,6 @@ pub async fn stream_message_arc(
             let line = buffer[..newline_pos].to_string();
             buffer = buffer[newline_pos + 1..].to_string();
 
-            if line.starts_with("data: ") && !line.contains("[DONE]") {
-                tracing::trace!("stream_message (arc) SSE line: {}", &line["data: ".len()..].chars().take(200).collect::<String>());
-            }
 
             if let Some(usage) = process_sse_line(&line, &mut cb, conversation).await? {
                 last_usage = Some(usage);

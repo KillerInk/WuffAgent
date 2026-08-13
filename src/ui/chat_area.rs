@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use super::state::ChatApp;
+use super::sessions_utils::truncate;
 use crate::types::ChatMessage;
 use super::theme::Theme;
 
@@ -501,7 +502,7 @@ impl ChatApp {
                     let max_preview_len = 2000;
                     if content.len() > max_preview_len {
                         // Truncate long content but show a "show more" option
-                        let preview = &content[..max_preview_len];
+                        let preview = truncate(content, max_preview_len);
                         egui::Frame::none()
                             .fill(egui::Color32::from_rgb(10, 10, 10))
                             .rounding(4.0)

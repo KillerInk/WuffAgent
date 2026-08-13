@@ -200,12 +200,21 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "WuffAgent",
         options,
-        Box::new(|_cc| Ok(Box::new(ChatApp::new(
-            server,
-            client,
-            config,
-            tool_manager,
-            agent_engine,
-        )))),
+        Box::new(|cc| {
+            // Use egui's built-in default fonts which include:
+            // - Ubuntu-Light (primary proportional font)
+            // - NotoEmoji-Regular (emoji + special chars, scaled to 0.81)
+            // - emoji-icon-font (additional icon/emoji coverage, scaled to 0.90)
+            // - Hack (monospace)
+            // No customization needed - these already cover all special chars used in the UI
+            cc.egui_ctx.set_fonts(egui::FontDefinitions::default());
+            Ok(Box::new(ChatApp::new(
+                server,
+                client,
+                config,
+                tool_manager,
+                agent_engine,
+            )))
+        }),
     )
 }

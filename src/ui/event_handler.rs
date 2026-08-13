@@ -88,7 +88,7 @@ impl ChatApp {
                     self.chat.pending_error = Some(format!("[{}] {}", tool_name, message));
                 }
                 AppEvent::ToolCallStart { tool_name, call_id } => {
-                    tracing::info!(tool = tool_name, call_id = %call_id, "Starting tool execution");
+                    tracing::debug!(tool = tool_name, call_id = %call_id, "Starting tool execution");
                     self.add_tool_call_message(&tool_name, &call_id, "executing...");
                     // Auto-scroll if user is viewing the bottom
                     if self.chat.at_bottom {
@@ -96,7 +96,7 @@ impl ChatApp {
                     }
                 }
                 AppEvent::ToolCallComplete { tool_name, call_id, result } => {
-                    tracing::info!(tool = tool_name, call_id = %call_id, "Tool execution complete");
+                    tracing::debug!(tool = tool_name, call_id = %call_id, "Tool execution complete");
                     self.add_tool_call_message(&tool_name, &call_id, &result);
                     // Auto-scroll if user is viewing the bottom
                     if self.chat.at_bottom {
