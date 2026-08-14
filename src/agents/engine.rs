@@ -71,7 +71,7 @@ impl AgentEngine {
         // If no agents, fall back to a general LLM call
         if enabled_agents.is_empty() {
             tracing::warn!("[AGENT ENGINE] No enabled agents, falling back to direct LLM call");
-            return self.direct_llm_call(request, &cancel_token).await;
+            return self.direct_llm_call(request, cancel_token).await;
         }
 
         // Route the request to the best agent
@@ -96,7 +96,7 @@ impl AgentEngine {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("[AGENT ENGINE] Routing LLM call failed: {}", e);
-                return self.direct_llm_call(request, &cancel_token).await;
+                return self.direct_llm_call(request, cancel_token).await;
             }
         };
 
@@ -105,7 +105,7 @@ impl AgentEngine {
         tracing::info!("[AGENT ENGINE] Routed to agent: {}", agent_name);
 
         // Execute with the selected agent
-        self.execute_with_agent(request, &agent_name, 0, &cancel_token).await
+        self.execute_with_agent(request, &agent_name, 0, cancel_token).await
     }
 
     /// Execute a request with a specific agent, with depth tracking.

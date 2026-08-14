@@ -337,8 +337,8 @@ impl FileIOTool {
                     let target_idx = ns.saturating_sub(1); // 1-indexed to 0-indexed
                     if target_idx > file_line_idx {
                         // Copy lines that are not part of this hunk
-                        for idx in file_line_idx..target_idx {
-                            result_lines.push(file_lines[idx].to_string());
+                        for line in &file_lines[file_line_idx..target_idx] {
+                            result_lines.push(line.to_string());
                         }
                         file_line_idx = target_idx;
                     }

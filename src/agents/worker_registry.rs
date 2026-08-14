@@ -12,8 +12,10 @@ use crate::tools::registry::ToolRegistry;
 use crate::tools::lib::TracingToolLogger;
 
 /// Registry that maps worker names to factory functions.
+type WorkerFactory = Arc<dyn Fn() -> Box<dyn WorkerAgent> + Send + Sync>;
+
 pub struct WorkerRegistry {
-    workers: RwLock<HashMap<String, Arc<dyn Fn() -> Box<dyn WorkerAgent> + Send + Sync>>>,
+    workers: RwLock<HashMap<String, WorkerFactory>>,
     /// Shared tool registry with builtins — all workers use this.
     tool_registry: Arc<ToolRegistry>,
     /// Registry for inter-agent invocation.
@@ -129,7 +131,7 @@ impl WorkerRegistry {
         workers_dir: &std::path::Path,
     ) -> Result<usize, AgentError> {
         // Remove all registered names except builtins
-        let builtin_names = vec!["default".to_string(), "executing".to_string()];
+        let builtin_names = ["default".to_string(), "executing".to_string()];
         let all_names = self.names();
         for name in all_names {
             if !builtin_names.contains(&name) {
@@ -252,7 +254,7 @@ impl WorkerRegistry {
         }
 
         // Sort by score descending
-        candidates.sort_by(|a, b| b.2.cmp(&a.2));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.2));
 
         // Return the best candidate
         let (best_name, best_config, _) = &candidates[0];

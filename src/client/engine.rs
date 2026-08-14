@@ -167,7 +167,7 @@ async fn run_chat_loop(
 
         // 1. Stream the request, forwarding chunks as events
         let (content, usage, has_tool_calls, thinking_content) =
-            stream_request(client, &current_prompt, tools.as_ref().map(|t| t.as_slice()), event_tx)
+            stream_request(client, &current_prompt, tools.as_deref(), event_tx)
                 .await?;
 
         // 1.5. Emit thinking complete event if there was thinking content

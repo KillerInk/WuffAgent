@@ -47,7 +47,7 @@ impl SettingsDialog {
             theme: cfg.theme.clone(),
             connection_type: match &cfg.connection_type {
                 ConnectionType::Local => "local".to_string(),
-                ConnectionType::Remote { .. } => "remote".to_string(),
+                ConnectionType::Remote => "remote".to_string(),
             },
             remote_url: cfg.remote_url.clone(),
             remote_api_key: cfg.remote_api_key.clone().unwrap_or_default(),

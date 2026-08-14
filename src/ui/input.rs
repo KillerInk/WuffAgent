@@ -40,16 +40,12 @@ impl ChatApp {
                 .hint_text("Type a message... (use /plan to trigger multi-agent pipeline)")
                 .vertical_align(egui::Align::Center);
             let response = ui.add_sized([input_width, 32.0], text_edit);
-            if response.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
-                if !self.chat.is_generating && !self.chat.is_pipeline_running && !self.chat.input_text.trim().is_empty() {
+            if response.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
+                && !self.chat.is_generating && !self.chat.is_pipeline_running && !self.chat.input_text.trim().is_empty() {
                     let input = self.chat.input_text.trim().to_string();
-                    if input.starts_with("/plan") {
+                    if let Some(rest) = input.strip_prefix("/plan") {
                         // Extract the request after "/plan" (skip "/plan " or "/plan" with no space)
-                        let request = if input.len() > "/plan".len() {
-                            input["/plan".len()..].trim().to_string()
-                        } else {
-                            String::new()
-                        };
+                        let request = rest.trim().to_string();
                         if request.is_empty() {
                             self.chat.status = AppStatus::Error("Please provide a request after /plan".to_string());
                             self.chat.pending_error = Some("Please provide a request after /plan".to_string());
@@ -60,7 +56,6 @@ impl ChatApp {
                         self.send_message();
                     }
                 }
-            }
 
             // Send or Stop button
             if !self.chat.is_generating && !self.chat.is_pipeline_running {
@@ -70,13 +65,9 @@ impl ChatApp {
                     .min_size(egui::vec2(60.0, 28.0));
                 if ui.add(send_btn).clicked() {
                     let input = self.chat.input_text.trim().to_string();
-                    if input.starts_with("/plan") {
+                    if let Some(rest) = input.strip_prefix("/plan") {
                         // Extract the request after "/plan" (skip "/plan " or "/plan" with no space)
-                        let request = if input.len() > "/plan".len() {
-                            input["/plan".len()..].trim().to_string()
-                        } else {
-                            String::new()
-                        };
+                        let request = rest.trim().to_string();
                         if request.is_empty() {
                             self.chat.status = AppStatus::Error("Please provide a request after /plan".to_string());
                             self.chat.pending_error = Some("Please provide a request after /plan".to_string());

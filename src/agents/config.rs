@@ -120,17 +120,17 @@ impl WorkerConfig {
         let tool_names: Vec<&str> = self.allowed_tools.iter().map(|s| s.as_str()).collect();
 
         // Heuristic: infer agent type from tool names and description
-        if tool_names.iter().any(|t| *t == "web_search")
+        if tool_names.contains(&"web_search")
             || desc_lower.contains("research") || desc_lower.contains("search")
         {
             return crate::agents::types::AgentType::Research;
         }
-        if tool_names.iter().any(|t| *t == "file_io")
+        if tool_names.contains(&"file_io")
             || desc_lower.contains("code") || desc_lower.contains("write") || desc_lower.contains("read")
         {
             return crate::agents::types::AgentType::Coding;
         }
-        if tool_names.iter().any(|t| *t == "calculation")
+        if tool_names.contains(&"calculation")
             || desc_lower.contains("execute") || desc_lower.contains("build") || desc_lower.contains("deploy")
         {
             return crate::agents::types::AgentType::Implementation;
@@ -618,7 +618,7 @@ impl AgentConfig {
         let workers_dir = config_path
             .parent()
             .map(|p| p.join("workers"))
-            .unwrap_or_else(|| default_workers_dir());
+            .unwrap_or_else(default_workers_dir);
 
         // Check if there's an agent-specific config file
         let agent_config_path = config_path.parent().map(|p| p.join("agent.json"));
@@ -648,7 +648,7 @@ impl AgentConfig {
             return Ok(workers);
         }
 
-        let mut entries = match std::fs::read_dir(&self.workers_dir) {
+        let entries = match std::fs::read_dir(&self.workers_dir) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("Failed to read workers directory: {}", e);
@@ -656,7 +656,7 @@ impl AgentConfig {
             }
         };
 
-        while let Some(entry) = entries.next() {
+        for entry in entries {
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {

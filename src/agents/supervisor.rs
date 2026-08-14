@@ -141,8 +141,7 @@ impl SupervisorAgentTrait for SupervisorAgent {
                     None => true,
                     Some(dep_id) => completed_ids.contains(dep_id),
                 })
-                .cloned()
-                .take(self.max_parallel)
+                .take(self.max_parallel).cloned()
                 .collect();
 
             if ready.is_empty() {
@@ -206,7 +205,7 @@ impl SupervisorAgentTrait for SupervisorAgent {
                         if let Ok(tx) = tx.lock() {
                             let _ = tx.send(AppEvent::AgentTaskStarted {
                                 task_id: task_clone.id.clone(),
-                                task_description: task_description,
+                                task_description,
                                 agent_type: worker_name.clone(),
                             });
                         }

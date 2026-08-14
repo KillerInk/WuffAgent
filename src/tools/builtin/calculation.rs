@@ -149,12 +149,12 @@ impl Parser {
                 Some(Token::Plus) => {
                     self.advance();
                     let right = self.parse_term()?;
-                    left = left + right;
+                    left += right;
                 }
                 Some(Token::Minus) => {
                     self.advance();
                     let right = self.parse_term()?;
-                    left = left - right;
+                    left -= right;
                 }
                 _ => break,
             }
@@ -169,7 +169,7 @@ impl Parser {
                 Some(Token::Mul) => {
                     self.advance();
                     let right = self.parse_factor()?;
-                    left = left * right;
+                    left *= right;
                 }
                 Some(Token::Div) => {
                     self.advance();
@@ -177,7 +177,7 @@ impl Parser {
                     if right == 0.0 {
                         return Err("Division by zero".to_string());
                     }
-                    left = left / right;
+                    left /= right;
                 }
                 _ => break,
             }

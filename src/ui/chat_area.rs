@@ -354,13 +354,11 @@ impl ChatApp {
                                 };
                                 let text_color = if is_user {
                                     egui::Color32::WHITE
-                                } else if is_tool {
-                                    theme.text_primary
                                 } else {
                                     theme.text_primary
                                 };
                                 if is_tool {
-                                    self.draw_tool_message(ui, message, &theme);
+                                    self.draw_tool_message(ui, message, theme);
                                 } else {
                                     let content_label = egui::Label::new(
                                         egui::RichText::new(message.content.clone())
@@ -517,7 +515,7 @@ impl ChatApp {
             ui.label(egui::RichText::new(lines[0])
                 .color(theme.text_primary).size(11.0));
             ui.add_space(3.0);
-            let raw_result = if lines.len() >= 3 && lines[1].starts_with("```") && lines.last().map_or(false, |l| l.starts_with("```")) {
+            let raw_result = if lines.len() >= 3 && lines[1].starts_with("```") && lines.last().is_some_and(|l| l.starts_with("```")) {
                 lines[2..lines.len()-1].join("\n")
             } else {
                 message.content.clone()
@@ -722,7 +720,7 @@ impl ChatApp {
             serde_json::Value::Bool(b) => b.to_string(),
             serde_json::Value::Null => "null".to_string(),
             serde_json::Value::Array(arr) => {
-                let items: Vec<String> = arr.iter().map(|v| Self::json_value_to_string(v)).collect();
+                let items: Vec<String> = arr.iter().map(Self::json_value_to_string).collect();
                 format!("[{}]", items.join(", "))
             }
             serde_json::Value::Object(map) => {

@@ -107,7 +107,7 @@ impl WorkerAgent for ExecutingWorker {
                     agent_id: self.id.to_string(),
                     agent_type: self.agent_type.clone(),
                     status: TaskStatus::Completed,
-                    output: output,
+                    output,
                     summary: format!("Task '{}' completed by '{}'", task.description, self.name),
                     needs_refinement: false,
                     fixable: false,

@@ -21,10 +21,12 @@ impl std::fmt::Display for AgentId {
 
 /// The type/category of a task.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Default)]
 pub enum AgentType {
     Research,
     Coding,
     Implementation,
+    #[default]
     General,
 }
 
@@ -47,9 +49,6 @@ impl<'de> Deserialize<'de> for AgentType {
     }
 }
 
-impl Default for AgentType {
-    fn default() -> Self { AgentType::General }
-}
 
 impl std::fmt::Display for AgentType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

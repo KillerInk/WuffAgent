@@ -41,9 +41,7 @@ async fn main() -> eframe::Result {
         }
         Err(e) => {
             eprintln!("Failed to load config: {}, using defaults", e);
-            let mut default_cfg = Config::default();
-            default_cfg.file_path = config_path.clone();
-            Arc::new(Mutex::new(default_cfg))
+            Arc::new(Mutex::new(Config { file_path: config_path.clone(), ..Default::default() }))
         }
     };
 

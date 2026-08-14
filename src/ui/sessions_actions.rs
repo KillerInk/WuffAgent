@@ -65,7 +65,7 @@ pub fn apply_actions(
                         *panel.selected_id_mut() = None;
                     }
                     panel.refresh();
-                    return PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false };
+                    PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false }
                 }
             }
         }

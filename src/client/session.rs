@@ -1,16 +1,15 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::sessions;
 use crate::types::Message;
 
 /// Session save/load/encrypt/decrypt orchestration for ChatClient.
-
+///
 /// Save the current conversation to the active session.
 pub fn save_session(
     session_id: Option<&str>,
-    session_dir: &PathBuf,
+    session_dir: &std::path::Path,
     conversation: &Arc<Mutex<Vec<Message>>>,
     encryption_key: Option<&[u8; 32]>,
     save_queue: &Arc<Mutex<VecDeque<()>>>,
@@ -81,7 +80,7 @@ pub fn save_session(
 /// Returns the loaded Session if found, or None.
 pub fn load_session(
     session_id: Option<&str>,
-    session_dir: &PathBuf,
+    session_dir: &std::path::Path,
     conversation: &Arc<Mutex<Vec<Message>>>,
     system_prompt: &mut String,
     encryption_key: Option<&[u8; 32]>,

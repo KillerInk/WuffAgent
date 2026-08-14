@@ -262,8 +262,8 @@ impl SessionsPanel {
                         }
                     }
                     // Enter to confirm rename
-                    if i.key_pressed(egui::Key::Enter) {
-                        if self.renaming.is_some() {
+                    if i.key_pressed(egui::Key::Enter)
+                        && self.renaming.is_some() {
                             let new_name = self.rename_input.trim().to_string();
                             if !new_name.is_empty() {
                                 action = Some(PanelAction::Rename {
@@ -274,7 +274,6 @@ impl SessionsPanel {
                             self.renaming = None;
                             self.rename_input.clear();
                         }
-                    }
                     // Escape to cancel rename
                     if i.key_pressed(egui::Key::Escape) && self.renaming.is_some() {
                         self.renaming = None;
@@ -339,13 +338,12 @@ impl SessionsPanel {
                     let export_btn = egui::Button::new("Export")
                         .fill(theme.surface_light)
                         .rounding(4.0);
-                    if ui.add(export_btn).clicked() {
-                        if self.selected_id.is_some() {
+                    if ui.add(export_btn).clicked()
+                        && self.selected_id.is_some() {
                             action = Some(PanelAction::Export {
                                 session_id: self.selected_id.clone().unwrap(),
                             });
                         }
-                    }
                     let import_btn = egui::Button::new("Import")
                         .fill(theme.surface_light)
                         .rounding(4.0);
@@ -367,13 +365,12 @@ impl SessionsPanel {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Name:").size(11.0).color(theme.text_secondary));
                         let resp = ui.text_edit_singleline(&mut self.new_name);
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            if !self.new_name.trim().is_empty() {
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            && !self.new_name.trim().is_empty() {
                                 action = Some(PanelAction::Create(self.new_name.clone()));
                                 self.new_name.clear();
                                 self.creating = false;
                             }
-                        }
                         if ui.button("Create").clicked() && !self.new_name.trim().is_empty() {
                             action = Some(PanelAction::Create(self.new_name.clone()));
                             self.new_name.clear();

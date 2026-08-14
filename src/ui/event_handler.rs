@@ -350,7 +350,7 @@ impl ChatApp {
         client.retry_pending_saves();
         drop(client);
         if let Err(e) = self.client.lock().unwrap().save_session() {
-            self.sessions.save_failure_message = Some(format!("Save failed — will retry on next message"));
+            self.sessions.save_failure_message = Some("Save failed — will retry on next message".to_string());
             eprintln!("Failed to save session: {}", e);
         } else {
             self.sessions.save_failure_message = None;
@@ -362,7 +362,7 @@ impl ChatApp {
         self.client.lock().unwrap().retry_pending_saves();
         // Save current session before switching
         if let Err(e) = self.client.lock().unwrap().save_session() {
-            self.sessions.save_failure_message = Some(format!("Save failed — will retry on next message"));
+            self.sessions.save_failure_message = Some("Save failed — will retry on next message".to_string());
             eprintln!("Failed to save session before switch: {}", e);
         } else {
             self.sessions.save_failure_message = None;

@@ -19,18 +19,15 @@ mod presets;
 mod tests;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum ConnectionType {
     #[serde(rename = "local")]
+    #[default]
     Local,
     #[serde(rename = "remote")]
     Remote,
 }
 
-impl Default for ConnectionType {
-    fn default() -> Self {
-        Self::Local
-    }
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {

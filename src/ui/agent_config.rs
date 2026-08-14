@@ -258,11 +258,9 @@ impl AgentConfigDialog {
                 if ui
                     .add(egui::Button::new("Save").fill(theme.primary).rounding(6.0))
                     .clicked()
-                {
-                    if self.save(agent_manager) {
+                    && self.save(agent_manager) {
                         *closed = true;
                     }
-                }
                 if ui
                     .add(egui::Button::new("Cancel")
                         .fill(theme.surface_light)
@@ -271,8 +269,8 @@ impl AgentConfigDialog {
                 {
                     *closed = true;
                 }
-                if !self.is_new && self.selected_index >= 0 {
-                    if ui
+                if !self.is_new && self.selected_index >= 0
+                    && ui
                         .add(egui::Button::new("Delete")
                             .fill(theme.error)
                             .rounding(6.0))
@@ -280,7 +278,6 @@ impl AgentConfigDialog {
                     {
                         self.delete_agent(agent_manager);
                     }
-                }
             });
         } else {
             // No agent selected — show info
@@ -311,7 +308,7 @@ impl AgentConfigDialog {
 
         // Ensure the workers directory exists before saving
         if let Ok(m) = agent_manager.lock() {
-            if let Err(e) = std::fs::create_dir_all(&m.workers_dir()) {
+            if let Err(e) = std::fs::create_dir_all(m.workers_dir()) {
                 self.message = Some(format!("Failed to create workers directory: {}", e));
                 return false;
             }
@@ -423,8 +420,8 @@ impl AgentConfigDialog {
         }
     }
 
-    fn sync_tools_from_agent(&mut self, allowed: &Vec<String>) {
-        self.allowed_tools = allowed.clone();
+    fn sync_tools_from_agent(&mut self, allowed: &[String]) {
+        self.allowed_tools = allowed.to_vec();
         // Reset checkboxes to match
         self.tool_checkboxes = self
             .available_tools

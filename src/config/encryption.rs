@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// Encryption-related fields extracted from Config.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub struct EncryptionSettings {
     #[serde(default)]
     pub encryption_enabled: bool,
@@ -13,14 +14,6 @@ pub struct EncryptionSettings {
     pub encryption_password: Option<String>,
 }
 
-impl Default for EncryptionSettings {
-    fn default() -> Self {
-        Self {
-            encryption_enabled: false,
-            encryption_password: None,
-        }
-    }
-}
 
 impl EncryptionSettings {
     /// Derive a 32-byte encryption key from a password using PBKDF2 (via the `chacha20poly1305` crate's key derivation).

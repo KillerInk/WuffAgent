@@ -136,7 +136,7 @@ pub fn list_sessions(dir: &Path) -> Vec<Session> {
             }
         }
     }
-    sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sessions.sort_by_key(|a| std::cmp::Reverse(a.created_at));
     sessions
 }
 
@@ -308,7 +308,7 @@ mod tar_builder {
         }
 
         fn checksum(&self) -> u32 {
-            let mut raw = self.clone();
+            let mut raw = *self;
             raw.checksum = [0u8; 8];
             let bytes = unsafe {
                 std::slice::from_raw_parts(&raw as *const Self as *const u8, std::mem::size_of::<Self>())

@@ -301,18 +301,18 @@ fn parse_duckduckgo_results(html: &str, limit: usize) -> Vec<serde_json::Value> 
     for row in rows.iter().take(limit) {
         // Extract title from <a class="result__a">
         let title = extract_between(row, "class=\"result__a\"", ">")
-            .and_then(|s| extract_text(s))
+            .and_then(extract_text)
             .unwrap_or_default();
 
         // Extract URL from href attribute
         let url = extract_between(row, "href=\"", "\"")
             .or_else(|| extract_between(row, "href='", "'"))
-            .map(|s| clean_ddg_url(s))
+            .map(clean_ddg_url)
             .unwrap_or_default();
 
         // Extract snippet from <div class="result__snippet">
         let snippet = extract_between(row, "class=\"result__snippet\"", ">")
-            .and_then(|s| extract_text(s))
+            .and_then(extract_text)
             .unwrap_or_default();
 
         if !title.is_empty() {
@@ -368,7 +368,7 @@ fn clean_ddg_url(url: &str) -> String {
     if url.starts_with("/l/") && url.contains("uddg=") {
         if let Some(eq_pos) = url.find("uddg=") {
             let encoded = &url[eq_pos + 5..];
-            let encoded = encoded.trim_end_matches(|c: char| c == '"' || c == '\'');
+            let encoded = encoded.trim_end_matches(['"', '\'']);
             return match urlencoding::decode(encoded) {
                 Ok(decoded) => decoded.into(),
                 Err(_) => encoded.to_string(),

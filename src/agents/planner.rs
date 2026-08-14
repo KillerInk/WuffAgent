@@ -94,7 +94,7 @@ impl<C: ChatClientLike> PlannerAgent<C> {
         self.client
             .send_message(messages)
             .await
-            .map_err(|e| AgentError::LlmError(e))
+            .map_err(AgentError::LlmError)
     }
 
     fn parse_plan_response(&self, response: &str) -> Result<ExecutionPlan, AgentError> {
@@ -136,7 +136,7 @@ impl<C: ChatClientLike> PlannerAgent<C> {
             // Detect task items: numbered lists, bullet points, or "###" sections
             if trimmed.starts_with(|c: char| c.is_ascii_digit()) && trimmed.contains('.') {
                 // Numbered list item like "1. Do something" or "1) Do something"
-                if let Some(rest) = trimmed.split_once(|c| c == '.' || c == ')') {
+                if let Some(rest) = trimmed.split_once(['.', ')']) {
                     let desc = rest.1.trim().to_string();
                     if !desc.is_empty() {
                         if !current_task_desc.is_empty() {
@@ -166,7 +166,7 @@ impl<C: ChatClientLike> PlannerAgent<C> {
             if in_task && (trimmed.starts_with("  ") || trimmed.starts_with("\t")) && !trimmed.is_empty() {
                 let sub = trimmed.trim();
                 if !sub.is_empty() {
-                    current_task_desc.push_str(" ");
+                    current_task_desc.push(' ');
                     current_task_desc.push_str(sub);
                 }
                 continue;
@@ -184,7 +184,7 @@ impl<C: ChatClientLike> PlannerAgent<C> {
 
             // Regular text line — accumulate as task description
             if in_task && !trimmed.is_empty() {
-                current_task_desc.push_str(" ");
+                current_task_desc.push(' ');
                 current_task_desc.push_str(trimmed);
             }
         }
