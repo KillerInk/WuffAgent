@@ -152,6 +152,7 @@ impl ToolRegistry {
 mod tests {
     use super::*;
     use crate::tools::lib::{ToolLogger, TracingToolLogger};
+    use crate::tools::builtin::{CalculationTool, FileIOTool};
 
     fn mock_logger() -> Arc<dyn ToolLogger> {
         Arc::new(TracingToolLogger)

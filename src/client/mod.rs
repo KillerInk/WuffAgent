@@ -125,11 +125,13 @@ impl ChatClient {
         self.session_dir = session_dir;
     }
 
-    /// Clear the current session (set session_id to None).
-    /// Call this when a session is deleted to prevent it from being
-    /// recreated on the next save.
+    /// Clear the current session (set session_id to None) and wipe the
+    /// in-memory conversation. Call this when a session is deleted so that a
+    /// subsequent save cannot resurrect the deleted session file from a
+    /// stale in-memory conversation buffer.
     pub fn clear_session(&mut self) {
         self.session_id = None;
+        self.conversation.lock().unwrap().clear();
     }
 
     pub fn set_encryption_key(&mut self, key: Option<[u8; 32]>) {

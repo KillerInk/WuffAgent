@@ -54,6 +54,8 @@ pub fn apply_actions(
                     panel.show_notification(&format!("Session '{}' deleted", id), true);
                     // Clear the panel's session ID
                     panel.clear_session();
+                    // Reload the session list so the deleted session is removed from the UI
+                    panel.refresh();
                     // Also clear the config's session_id so the next session is loaded on restart
                     panel.config().lock().unwrap().session_id = None;
                     PanelActionResult { selected_id: None, clear_client_session: true }

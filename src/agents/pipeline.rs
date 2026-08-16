@@ -7,7 +7,7 @@ use tracing;
 use super::planner::PlannerAgent;
 use super::supervisor::SupervisorAgent;
 use super::traits::{AgentError, ChatClientLike, PlannerAgent as PlannerAgentTrait, SupervisorAgent as SupervisorAgentTrait, SupervisorDecision};
-use super::types::{AgentResult, Task, TaskStatus};
+use super::types::{AgentResult, ExecutionPlan, Task, TaskStatus};
 use super::types::build_context;
 use crate::types::AppEvent;
 
@@ -46,7 +46,6 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
             let planner = self.planner.lock().await;
             PlannerAgentTrait::generate_plan(&*planner, user_request, None).await?
         };
-
         let mut all_results = Vec::new();
         let mut iteration = 0u32;
         // Track how many times each task has been retried (to avoid infinite retry loops).
@@ -72,17 +71,36 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
 
             match decision {
                 SupervisorDecision::Complete { final_output } => {
-                    tracing::info!("Pipeline complete. Output: {}", final_output);
                     all_results.extend(new_results);
-                    let output_str = match final_output.as_str() {
-                        Some(s) if !s.is_empty() => s.to_string(),
-                        _ => format!("{}", final_output),
-                    };
-                    self.send_event(AppEvent::AgentPipelineComplete {
-                        result_count: all_results.len(),
-                        final_output: output_str,
+                    // Verify the objective is actually satisfied before completing
+                    let objective_satisfied = self.verify_objective(&plan, &all_results).await.unwrap_or(false);
+                    if objective_satisfied {
+                        tracing::info!("Pipeline complete. Objective verified. Output: {}", final_output);
+                        let output_str = match final_output.as_str() {
+                            Some(s) if !s.is_empty() => s.to_string(),
+                            _ => format!("{}", final_output),
+                        };
+                        self.send_event(AppEvent::AgentPipelineComplete {
+                            result_count: all_results.len(),
+                            final_output: output_str,
+                        });
+                        return Ok(all_results);
+                    }
+                    // Objective not satisfied — treat as refinement
+                    tracing::warn!(
+                        "Pipeline: objective not satisfied after iteration {}, triggering refinement",
+                        iteration
+                    );
+                    self.send_event(AppEvent::AgentFeedbackLoop {
+                        iteration: iteration + 1,
+                        action: "objective not satisfied, refining".to_string(),
                     });
-                    return Ok(all_results);
+                    iteration += 1;
+                    let refined_plan = {
+                        let planner = self.planner.lock().await;
+                        PlannerAgentTrait::refine_plan(&*planner, &plan, &[], &[], &build_context(&all_results)).await?
+                    };
+                    plan = refined_plan;
                 }
                 SupervisorDecision::Refine {
                     completed,
@@ -219,6 +237,16 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
     pub fn cancel(&self) {
         tracing::info!("Pipeline cancel requested");
         self.cancel_token.cancel();
+    }
+
+    /// Verify that the accumulated results satisfy the original user objective.
+    async fn verify_objective(
+        &self,
+        plan: &ExecutionPlan,
+        results: &[AgentResult],
+    ) -> Result<bool, AgentError> {
+        let planner = self.planner.lock().await;
+        PlannerAgentTrait::is_objective_satisfied(&*planner, plan, results).await
     }
 
     fn send_event(&self, event: AppEvent) {
@@ -574,6 +602,78 @@ mod tests {
         assert!(
             result.is_ok(),
             "pipeline should complete without error even when tool calls fail, got: {:?}",
+            result
+        );
+    }
+
+    /// Test that objective verification is called on Complete decision
+    /// A mock client that returns "true" for objective verification
+    struct VerifyTrueMockClient {
+        plan_response: String,
+    }
+
+    impl VerifyTrueMockClient {
+        fn new() -> Self {
+            let plan_json = serde_json::json!({
+                "plan_id": "plan-verify-001",
+                "user_request": "test request",
+                "created_at": "2024-01-15T10:30:00Z",
+                "tasks": [
+                    {
+                        "id": "task-verify-001",
+                        "description": "Do something",
+                        "agent_type": "general",
+                        "input": {},
+                        "depends_on": null,
+                        "max_retries": 3,
+                        "priority": 0
+                    }
+                ]
+            });
+            Self {
+                plan_response: plan_json.to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChatClientLike for VerifyTrueMockClient {
+        async fn send_message(&self, messages: &[Message]) -> Result<String, String> {
+            // Check if this is a verification call (contains "Is the objective satisfied")
+            let is_verification = messages.iter().any(|m| {
+                m.content.contains("Is the objective satisfied")
+                    || m.content.contains("Is the objective satisfied")
+            });
+            if is_verification {
+                Ok("true".to_string())
+            } else {
+                Ok(self.plan_response.clone())
+            }
+        }
+        async fn send_streaming(&self, messages: &[Message]) -> Result<String, String> {
+            self.send_message(messages).await
+        }
+    }
+
+    /// Test 7: Pipeline completes successfully when objective is verified
+    #[tokio::test]
+    async fn test_pipeline_objective_verification_passes() {
+        let mock_client = VerifyTrueMockClient::new();
+        let planner = PlannerAgent::new(mock_client);
+        let supervisor = make_supervisor();
+        let pipeline = AgentPipeline::new(planner, supervisor, None);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            pipeline.execute("Test objective verification"),
+        )
+        .await
+        .expect("execute should not timeout");
+
+        // Should complete successfully (objective verified)
+        assert!(
+            result.is_ok(),
+            "pipeline should complete when objective is verified, got: {:?}",
             result
         );
     }

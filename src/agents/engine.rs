@@ -10,6 +10,15 @@ use super::registry::AgentRegistry;
 use crate::tools::ToolManager;
 use crate::types::Message;
 
+/// System prompt for tool-output verification.
+static VERIFICATION_SYSTEM_PROMPT: &str =
+    "You are verifying whether tool outputs answer the user's request. \
+     Respond with exactly 'VERIFIED' if the outputs are correct and complete, \
+     or 'NEEDS_FIX' followed by a brief explanation if something is wrong.";
+
+/// Maximum verification attempts before giving up.
+const MAX_VERIFICATION_ATTEMPTS: u32 = 2;
+
 // Re-export AgentChainEntry from sessions model
 pub use crate::sessions::model::AgentChainEntry;
 
@@ -178,6 +187,8 @@ impl AgentEngine {
         _depth: u32,
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {
+        // Track verification attempts to avoid infinite loops
+        let mut verification_attempts = 0u32;
         let mut iteration_count = 0u32;
         let start = Instant::now();
 
@@ -262,14 +273,115 @@ impl AgentEngine {
                 continue;
             }
 
-            // No more tool calls, return the response
-            tracing::info!(
-                "[AGENT ENGINE] Agent '{}' completed in {} iterations",
-                agent_config.name,
-                iteration_count
-            );
-            return Ok(response);
+            // No more tool calls — verify the outputs answer the user's request
+            // Limit verification attempts to avoid infinite loops
+            if verification_attempts >= MAX_VERIFICATION_ATTEMPTS {
+                tracing::warn!(
+                    "[AGENT ENGINE] Agent '{}' verification limit ({}) reached, returning response",
+                    agent_config.name,
+                    MAX_VERIFICATION_ATTEMPTS
+                );
+                return Ok(response);
+            }
+            verification_attempts += 1;
+
+            let original_request = self.extract_original_request(messages);
+            let verification_result = self.verify_tool_outputs(messages, &original_request).await;
+            match verification_result {
+                Ok(true) => {
+                    tracing::info!(
+                        "[AGENT ENGINE] Agent '{}' completed in {} iterations (verified)",
+                        agent_config.name,
+                        iteration_count
+                    );
+                    return Ok(response);
+                }
+                Ok(false) => {
+                    tracing::warn!(
+                        "[AGENT ENGINE] Agent '{}' verification failed (attempt {}/{}), feeding feedback to LLM",
+                        agent_config.name,
+                        verification_attempts,
+                        MAX_VERIFICATION_ATTEMPTS
+                    );
+                    messages.push(Message {
+                        role: "system".to_string(),
+                        content: "The previous tool outputs did not fully satisfy the user's request. Please try again with corrected tool calls.".to_string(),
+                        timestamp: String::new(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[AGENT ENGINE] Agent '{}' verification error: {}, proceeding with response",
+                        agent_config.name,
+                        e
+                    );
+                    return Ok(response);
+                }
+            }
         }
+    }
+
+    /// Extract the original user request from the message history.
+    fn extract_original_request(&self, messages: &[Message]) -> String {
+        messages
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default()
+    }
+
+    /// Verify that the tool outputs in the message history satisfy the user's request.
+    async fn verify_tool_outputs(
+        &self,
+        messages: &[Message],
+        original_request: &str,
+    ) -> Result<bool, String> {
+        // Collect recent tool outputs for context
+        let tool_outputs: Vec<String> = messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| m.content.clone())
+            .collect();
+
+        let recent_tool_summary: String = if tool_outputs.is_empty() {
+            "No tool calls were made.".to_string()
+        } else {
+            tool_outputs
+                .iter()
+                .map(|o| o.chars().take(200).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let verification_messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: VERIFICATION_SYSTEM_PROMPT.to_string(),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: format!(
+                    "User request: {}\n\nRecent tool outputs:\n{}\n\nIs the request satisfied?",
+                    original_request, recent_tool_summary
+                ),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        let response = match self.llm_client.complete(&verification_messages).await {
+            Ok(r) => r,
+            Err(e) => return Err(format!("Verification LLM call failed: {}", e)),
+        };
+
+        Ok(response.to_uppercase().contains("VERIFIED") && !response.to_uppercase().contains("NEEDS_FIX"))
     }
 
     /// Parse tool calls from an LLM response.

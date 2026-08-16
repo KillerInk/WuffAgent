@@ -386,7 +386,7 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
         plan: &ExecutionPlan,
         results: &[AgentResult],
     ) -> Result<bool, AgentError> {
-        // Hybrid: mechanical check first
+        // Hybrid: mechanical check first, LLM as fallback
         let all_tasks = plan.tasks.len();
         let completed_count = results
             .iter()
@@ -398,10 +398,11 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
             .count();
 
         tracing::debug!(
-            "is_objective_satisfied: all={}, completed={}, failed={}",
+            "is_objective_satisfied: all={}, completed={}, failed={}, results_len={}",
             all_tasks,
             completed_count,
-            failed_count
+            failed_count,
+            results.len()
         );
 
         // Mechanical: all tasks completed
@@ -412,6 +413,22 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
         // Mechanical: no tasks at all (trivial plan)
         if all_tasks == 0 {
             return Ok(true);
+        }
+
+        // Edge case: results are empty (no tasks executed yet)
+        if results.is_empty() {
+            return Ok(false);
+        }
+
+        // Edge case: all results are empty / no meaningful output
+        let has_any_output = results.iter().any(|r| {
+            !r.output.is_null()
+                && !r.output.is_string()
+                || r.output.as_str().map(|s| !s.is_empty()).unwrap_or(false)
+        });
+        if !has_any_output && all_tasks > 0 {
+            tracing::debug!("is_objective_satisfied: no meaningful output from any result");
+            return Ok(false);
         }
 
         // If some failed and no more retries, escalate to LLM
@@ -445,9 +462,39 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
 
             let response = self.call_llm(&messages).await?;
             Ok(response.to_lowercase().contains("true"))
-        } else {
-            // Not all tasks done yet, not all failed — not satisfied
+        } else if completed_count + failed_count < all_tasks {
+            // Not all tasks done yet — not satisfied
+            tracing::debug!("is_objective_satisfied: not all tasks done yet");
             Ok(false)
+        } else {
+            // Fallback: some results exist but status is unclear — ask LLM
+            tracing::debug!("is_objective_satisfied: ambiguous status, escalating to LLM");
+            let summary: Vec<String> = results
+                .iter()
+                .map(|r| format!("{}: {} ({})", r.task_id, r.summary, r.status))
+                .collect();
+            let messages = vec![
+                Message {
+                    role: "system".to_string(),
+                    content: "You are evaluating whether execution results satisfy the user's objective. Answer with just 'true' or 'false'.".to_string(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: format!(
+                        "Request: {}\nResults: {}\n\nIs the objective satisfied?",
+                        plan.user_request,
+                        summary.join("; ")
+                    ),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ];
+            let response = self.call_llm(&messages).await?;
+            Ok(response.to_lowercase().contains("true"))
         }
     }
 }
@@ -513,6 +560,8 @@ fn extract_json_from_response(response: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::traits::PlannerAgent as PlannerAgentTrait;
+    use chrono::Utc;
 
     #[test]
     fn test_extract_json_pure_json() {
@@ -571,5 +620,81 @@ mod tests {
     fn test_extract_json_escaped_quotes() {
         let input = r#"{"msg": "she said \"hello {world}\"", "n": 2}"#;
         assert_eq!(extract_json_from_response(input), input);
+    }
+
+    /// Test is_objective_satisfied with empty results returns false
+    #[tokio::test]
+    async fn test_is_objective_satisfied_empty_results() {
+        struct DummyClient;
+        #[async_trait::async_trait]
+        impl ChatClientLike for DummyClient {
+            async fn send_message(&self, _messages: &[Message]) -> Result<String, String> {
+                Ok("false".to_string())
+            }
+            async fn send_streaming(&self, _messages: &[Message]) -> Result<String, String> {
+                Ok("false".to_string())
+            }
+        }
+        let planner = PlannerAgent::new(DummyClient);
+        let plan = ExecutionPlan::new("test request", vec![
+            Task::new("task1", AgentType::General, serde_json::json!({})),
+        ]);
+        let result = planner.is_objective_satisfied(&plan, &[]).await.unwrap();
+        assert!(!result, "empty results should not satisfy objective");
+    }
+
+    /// Test is_objective_satisfied with all tasks completed returns true
+    #[tokio::test]
+    async fn test_is_objective_satisfied_all_completed() {
+        struct DummyClient;
+        #[async_trait::async_trait]
+        impl ChatClientLike for DummyClient {
+            async fn send_message(&self, _messages: &[Message]) -> Result<String, String> {
+                Ok("false".to_string())
+            }
+            async fn send_streaming(&self, _messages: &[Message]) -> Result<String, String> {
+                Ok("false".to_string())
+            }
+        }
+        let planner = PlannerAgent::new(DummyClient);
+        let plan = ExecutionPlan::new("test request", vec![
+            Task::new("task1", AgentType::General, serde_json::json!({})),
+        ]);
+        let result = planner
+            .is_objective_satisfied(&plan, &[AgentResult {
+                task_id: plan.tasks[0].id.clone(),
+                agent_id: "test".to_string(),
+                agent_type: AgentType::General,
+                status: TaskStatus::Completed,
+                output: serde_json::json!({"result": "ok"}),
+                summary: "done".to_string(),
+                needs_refinement: false,
+                fixable: false,
+                suggested_followup: vec![],
+                duration_ms: 100,
+                completed_at: Some(Utc::now()),
+            }])
+            .await
+            .unwrap();
+        assert!(result, "all completed tasks should satisfy objective");
+    }
+
+    /// Test is_objective_satisfied with empty plan returns true
+    #[tokio::test]
+    async fn test_is_objective_satisfied_empty_plan() {
+        struct DummyClient;
+        #[async_trait::async_trait]
+        impl ChatClientLike for DummyClient {
+            async fn send_message(&self, _messages: &[Message]) -> Result<String, String> {
+                Ok("false".to_string())
+            }
+            async fn send_streaming(&self, _messages: &[Message]) -> Result<String, String> {
+                Ok("false".to_string())
+            }
+        }
+        let planner = PlannerAgent::new(DummyClient);
+        let plan = ExecutionPlan::new("test request", vec![]);
+        let result = planner.is_objective_satisfied(&plan, &[]).await.unwrap();
+        assert!(result, "empty plan should satisfy objective");
     }
 }

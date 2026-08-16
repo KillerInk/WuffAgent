@@ -395,8 +395,9 @@ impl SupervisorAgentTrait for SupervisorAgent {
             });
         }
 
-        // Check if all tasks are done
-        let all_done = completed.len() + failed.len() + retryable.len() >= plan.tasks.len();
+        // Check if all tasks are done — use == to avoid false positives from duplicates
+        let all_done = completed.len() + failed.len() + retryable.len() == plan.tasks.len()
+            && results.iter().map(|r| &r.task_id).collect::<std::collections::HashSet<_>>().len() == results.len();
         if all_done {
             // Check for fixable errors — these need the planner to regenerate with correct params
             let fixable_errors: Vec<AgentResult> = failed
@@ -460,6 +461,8 @@ mod tests {
     use super::super::worker::GenericWorker;
     use crate::tools::registry::ToolRegistry;
     use crate::tools::lib::TracingToolLogger;
+    use crate::tools::ToolManager;
+    use tokio::sync::Mutex;
 
     /// Helper: build a minimal SupervisorAgent with the given configs.
     fn make_supervisor(worker_configs: Vec<WorkerConfig>) -> SupervisorAgent {

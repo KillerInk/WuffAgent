@@ -32,65 +32,77 @@ impl ChatApp {
             });
         }
 
-        // Input row
-        let input_width = ui.available_width() - 80.0; // Account for button
-        ui.horizontal(|ui| {
-            // Styled text input
-            let text_edit = egui::TextEdit::singleline(&mut self.chat.input_text)
-                .hint_text("Type a message... (use /plan to trigger multi-agent pipeline)")
-                .vertical_align(egui::Align::Center);
-            let response = ui.add_sized([input_width, 32.0], text_edit);
-            if response.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
-                && !self.chat.is_generating && !self.chat.is_pipeline_running && !self.chat.input_text.trim().is_empty() {
+        // Input area: text field + button row below
+        let input_width = ui.available_width(); // Full width — button is on its own row
+        ui.vertical(|ui| {
+            // Text input — constrained width, multiline
+            ui.scope(|ui| {
+                ui.set_max_width(input_width);
+                let text_edit = egui::TextEdit::multiline(&mut self.chat.input_text)
+                    .hint_text("Type a message... (use /plan to trigger multi-agent pipeline)")
+                    .desired_width(f32::INFINITY);
+                let response = ui.add(text_edit);
+                // Send on Ctrl+Enter when focus is lost
+                let modifiers = ui.ctx().input(|i| i.modifiers);
+                if response.lost_focus()
+                    && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
+                    && modifiers.ctrl
+                    && !self.chat.is_generating
+                    && !self.chat.is_pipeline_running
+                    && !self.chat.input_text.trim().is_empty()
+                {
                     let input = self.chat.input_text.trim().to_string();
-                    if let Some(rest) = input.strip_prefix("/plan") {
-                        // Extract the request after "/plan" (skip "/plan " or "/plan" with no space)
-                        let request = rest.trim().to_string();
-                        if request.is_empty() {
-                            self.chat.status = AppStatus::Error("Please provide a request after /plan".to_string());
-                            self.chat.pending_error = Some("Please provide a request after /plan".to_string());
-                        } else {
-                            self.send_plan_request(&request);
-                        }
-                    } else {
-                        self.send_message();
-                    }
+                    self.handle_send_input(&input);
                 }
+            });
 
-            // Send or Stop button
-            if !self.chat.is_generating && !self.chat.is_pipeline_running {
-                let send_btn = egui::Button::new("Send")
-                    .fill(theme.primary)
-                    .rounding(6.0)
-                    .min_size(egui::vec2(60.0, 28.0));
-                if ui.add(send_btn).clicked() {
-                    let input = self.chat.input_text.trim().to_string();
-                    if let Some(rest) = input.strip_prefix("/plan") {
-                        // Extract the request after "/plan" (skip "/plan " or "/plan" with no space)
-                        let request = rest.trim().to_string();
-                        if request.is_empty() {
-                            self.chat.status = AppStatus::Error("Please provide a request after /plan".to_string());
-                            self.chat.pending_error = Some("Please provide a request after /plan".to_string());
-                        } else {
-                            self.send_plan_request(&request);
-                        }
-                    } else {
-                        self.send_message();
+            ui.add_space(6.0); // padding between text box and button
+
+            // Button row below the text area
+            ui.horizontal(|ui| {
+                if !self.chat.is_generating && !self.chat.is_pipeline_running {
+                    let send_btn = egui::Button::new("Send")
+                        .fill(theme.primary)
+                        .rounding(6.0)
+                        .min_size(egui::vec2(60.0, 28.0));
+                    if ui.add(send_btn).clicked() {
+                        let input = self.chat.input_text.trim().to_string();
+                        self.handle_send_input(&input);
+                    }
+                } else {
+                    let stop_btn = egui::Button::new("Stop")
+                        .fill(theme.error)
+                        .rounding(6.0)
+                        .min_size(egui::vec2(60.0, 28.0));
+                    if ui.add(stop_btn).clicked() {
+                        self.stop_generation();
                     }
                 }
-            } else {
-                let stop_btn = egui::Button::new("Stop")
-                    .fill(theme.error)
-                    .rounding(6.0)
-                    .min_size(egui::vec2(60.0, 28.0));
-                if ui.add(stop_btn).clicked() {
-                    self.stop_generation();
-                }
-            }
+            });
         });
 
         // Handle image drop - simplified
         let _drop_zone = ui.allocate_space(egui::Vec2::new(ui.available_width(), 10.0));
+    }
+
+    fn handle_send_input(&mut self, input: &str) {
+        if let Err(e) = self.validate_input(input) {
+            self.chat.status = AppStatus::Error(e.clone());
+            self.chat.pending_error = Some(e);
+            return;
+        }
+
+        if let Some(rest) = input.strip_prefix("/plan") {
+            let request = rest.trim().to_string();
+            if request.is_empty() {
+                self.chat.status = AppStatus::Error("Please provide a request after /plan".to_string());
+                self.chat.pending_error = Some("Please provide a request after /plan".to_string());
+            } else {
+                self.send_plan_request(&request);
+            }
+        } else {
+            self.send_message();
+        }
     }
 
     fn validate_input(&self, text: &str) -> Result<(), String> {

@@ -23,9 +23,11 @@ impl ChatApp {
             self.switch_session(&id);
         }
 
-        // Clear client session if a session was deleted (explicit flag from panel)
+        // Clear client session if a session was deleted (explicit flag from panel).
+        // Also clear the chat display so the deleted conversation isn't re-saved.
         if clear_client_session {
             self.client.lock().unwrap().clear_session();
+            self.chat.messages.clear();
         }
 
         egui::TopBottomPanel::top("menu_bar").resizable(false).show(ctx, |ui| {
