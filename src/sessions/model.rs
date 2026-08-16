@@ -2,6 +2,27 @@ use serde::{Deserialize, Serialize};
 use chrono::{Utc, DateTime};
 use crate::types::Message;
 
+/// Status of an agent chain entry.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub enum AgentChainEntryStatus {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl std::fmt::Display for AgentChainEntryStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentChainEntryStatus::Pending => write!(f, "pending"),
+            AgentChainEntryStatus::Running => write!(f, "running"),
+            AgentChainEntryStatus::Completed => write!(f, "completed"),
+            AgentChainEntryStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
 /// An entry in the agent execution chain, recording which agent handled a request.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentChainEntry {
@@ -13,6 +34,8 @@ pub struct AgentChainEntry {
     pub completed_at: DateTime<Utc>,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub status: AgentChainEntryStatus,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

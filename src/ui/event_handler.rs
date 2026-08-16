@@ -265,7 +265,8 @@ impl ChatApp {
                 | AppEvent::AgentChainError { .. }
                 | AppEvent::AgentChainCancelled { .. }
                 | AppEvent::AgentChainComplete { .. }
-                | AppEvent::AgentChainStopped => {
+                | AppEvent::AgentChainStopped
+                | AppEvent::NCtxUpdated { .. } => {
                     self.process_chain_event(&event);
                     if self.chat.at_bottom {
                         self.chat.scroll_to_bottom_requested = true;

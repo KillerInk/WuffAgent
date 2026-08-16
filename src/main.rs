@@ -1,24 +1,53 @@
+#[cfg(feature = "egui-ui")]
 pub mod types;
+#[cfg(feature = "egui-ui")]
 pub mod client;
+#[cfg(feature = "egui-ui")]
 pub mod config;
+#[cfg(feature = "egui-ui")]
 pub mod server;
+#[cfg(feature = "egui-ui")]
 pub mod ui;
+#[cfg(feature = "egui-ui")]
 pub mod tools;
+#[cfg(feature = "egui-ui")]
 pub mod sessions;
+#[cfg(feature = "egui-ui")]
 pub mod agents;
+
+#[cfg(feature = "iced-ui")]
+pub mod types;
+#[cfg(feature = "iced-ui")]
+pub mod client;
+#[cfg(feature = "iced-ui")]
+pub mod config;
+#[cfg(feature = "iced-ui")]
+pub mod server;
+#[cfg(feature = "iced-ui")]
+pub mod tools;
+#[cfg(feature = "iced-ui")]
+pub mod sessions;
+#[cfg(feature = "iced-ui")]
+pub mod agents;
+#[cfg(feature = "iced-ui")]
+pub mod app;
 
 use std::sync::{Arc, Mutex};
 
 use client::ChatClient;
 use config::Config;
-use eframe::egui;
 use server::ServerManager;
 use tools::{builtin, registry::ToolRegistry, ToolManager, TracingToolLogger};
-use ui::state::ChatApp;
 use agents::{AgentRegistry, AgentEngine};
 
-#[tokio::main]
-async fn main() -> eframe::Result {
+/// Bootstrap shared state and return a Backend (for iced) or the values needed for egui.
+fn bootstrap() -> (
+    Arc<Mutex<Config>>,
+    Arc<ServerManager>,
+    Arc<Mutex<ChatClient>>,
+    Arc<ToolManager>,
+    Arc<AgentEngine>,
+) {
     // Initialize tracing subscriber for debug logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -26,11 +55,6 @@ async fn main() -> eframe::Result {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug")),
         )
         .init();
-
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),
-        ..Default::default()
-    };
 
     // Load config
     let config_path = config::get_config_path();
@@ -54,7 +78,6 @@ async fn main() -> eframe::Result {
             let session = sessions::create_session(&sessions_dir, "Untitled");
             cfg.session_id = Some(session.id.clone());
         } else if !sessions::session_exists(&sessions_dir, cfg.session_id.as_ref().unwrap()) {
-            // Session configured but file missing — create a new one
             tracing::warn!(
                 "Session file missing for id={}, creating new session",
                 cfg.session_id.as_ref().unwrap()
@@ -151,26 +174,23 @@ async fn main() -> eframe::Result {
 
     let mut search_dirs = vec![config_agents_dir.clone()];
 
-    // Also scan legacy workers/ directory for migration
     let mut add_workers_dir = |path: std::path::PathBuf| {
         if path.exists() {
             search_dirs.push(path);
         }
     };
 
-    // 1. Relative to executable parent (works for installed binary)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             add_workers_dir(exe_dir.parent().map(|p| p.join("workers")).unwrap_or_default());
         }
     }
 
-    // 2. Relative to current working directory (works during development / cargo run)
     if let Ok(cwd) = std::env::current_dir() {
         add_workers_dir(cwd.join("workers"));
     }
 
-    // Create AgentRegistry (replaces AgentManager)
+    // Create AgentRegistry
     let agent_registry = match AgentRegistry::load(search_dirs.clone(), &registry) {
         Ok(reg) => {
             tracing::info!("Loaded {} agents from {:?}", reg.agent_count(), search_dirs);
@@ -192,18 +212,28 @@ async fn main() -> eframe::Result {
     );
     let agent_engine = Arc::new(agent_engine);
 
+    (config, server, client, tool_manager, agent_engine)
+}
+
+#[cfg(feature = "egui-ui")]
+async fn run_egui(
+    config: Arc<Mutex<Config>>,
+    server: Arc<ServerManager>,
+    client: Arc<Mutex<ChatClient>>,
+    tool_manager: Arc<ToolManager>,
+    agent_engine: Arc<AgentEngine>,
+) -> eframe::Result {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),
+        ..Default::default()
+    };
+
     eframe::run_native(
         "WuffAgent",
         options,
         Box::new(|cc| {
-            // Use egui's built-in default fonts which include:
-            // - Ubuntu-Light (primary proportional font)
-            // - NotoEmoji-Regular (emoji + special chars, scaled to 0.81)
-            // - emoji-icon-font (additional icon/emoji coverage, scaled to 0.90)
-            // - Hack (monospace)
-            // No customization needed - these already cover all special chars used in the UI
             cc.egui_ctx.set_fonts(egui::FontDefinitions::default());
-            Ok(Box::new(ChatApp::new(
+            Ok(Box::new(ui::state::ChatApp::new(
                 server,
                 client,
                 config,
@@ -212,4 +242,62 @@ async fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(feature = "iced-ui")]
+async fn run_iced(
+    config: Arc<Mutex<Config>>,
+    server: Arc<ServerManager>,
+    client: Arc<Mutex<ChatClient>>,
+    tool_manager: Arc<ToolManager>,
+    agent_engine: Arc<AgentEngine>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use app::backend::Backend;
+
+    let runtime = Arc::new(tokio::runtime::Handle::current());
+    let backend = Arc::new(Backend::new(
+        runtime,
+        client,
+        server,
+        config,
+        tool_manager,
+        agent_engine,
+    ));
+
+    // Set up the event sender for iced subscriptions
+    app::subscription::set_event_sender(backend.event_sender.clone());
+
+    let settings = iced::Settings {
+        default_text_size: 14.0.into(),
+        antialiasing: false,
+        ..iced::Settings::default()
+    };
+
+    iced::application(
+        move || app::boot(backend.clone()),
+        app::update,
+        app::view,
+    )
+    .subscription(|_state| app::subscription::event_subscription())
+    .settings(settings)
+    .run()?;
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (config, server, client, tool_manager, agent_engine) = bootstrap();
+
+    #[cfg(feature = "egui-ui")]
+    {
+        run_egui(config, server, client, tool_manager, agent_engine).await?;
+    }
+
+    #[cfg(feature = "iced-ui")]
+    {
+        run_iced(config, server, client, tool_manager, agent_engine).await?;
+    }
+
+    Ok(())
 }

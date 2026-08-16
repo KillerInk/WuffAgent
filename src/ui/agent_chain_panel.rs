@@ -104,6 +104,7 @@ impl ChatApp {
                     tool_calls: Vec::new(),
                     completed_at: chrono::Utc::now(),
                     error: None,
+                    status: crate::sessions::model::AgentChainEntryStatus::Completed,
                 };
                 self.agent_chain_state.entries.push(entry);
                 if self.agent_chain_state.current_agent.as_ref() == Some(agent_name) {
@@ -120,6 +121,7 @@ impl ChatApp {
                     tool_calls: Vec::new(),
                     completed_at: chrono::Utc::now(),
                     error: Some(error.clone()),
+                    status: crate::sessions::model::AgentChainEntryStatus::Failed,
                 };
                 self.agent_chain_state.entries.push(entry);
                 if self.agent_chain_state.current_agent.as_ref() == Some(agent_name) {

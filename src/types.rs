@@ -63,6 +63,7 @@ pub struct ChatMessage {
 }
 
 /// Events that flow from the client engine to the UI.
+#[derive(Clone, Debug)]
 pub enum AppEvent {
     MessageResult { content: String, usage: Option<Usage> },
     MessageError { error: String },
@@ -97,4 +98,6 @@ pub enum AppEvent {
     AgentChainCancelled { agent_name: String },
     AgentChainComplete { response: String, entries: Vec<crate::sessions::model::AgentChainEntry> },
     AgentChainStopped,
+    /// Remote server n_ctx was updated.
+    NCtxUpdated { n_ctx: u32 },
 }
