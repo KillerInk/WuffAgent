@@ -5,6 +5,16 @@
 - Rust toolchain (Rust 1.75+): https://www.rust-lang.org/tools/install
 - `cargo` must be on PATH
 
+## Project Structure
+
+This project is a Cargo workspace with three crates:
+
+| Crate | Purpose |
+|-------|---------|
+| `wuffagent-core` | Shared library: types, client, config, server, sessions, tools, agents |
+| `wuffagent-egui` | Egui-based frontend binary |
+| `wuffagent-iced` | Iced-based frontend binary |
+
 ## Quick Start
 
 ```bash
@@ -16,65 +26,58 @@ cd WuffAgent
 cargo check
 cargo test
 
-# Build for development
+# Build all crates
 cargo build
 
 # Build for release
 cargo build --release
-
-# Run the application
-cargo run
-# or, from the release build:
-target/release/wuffagent.exe
 ```
 
-## Build Commands
+## Running
 
-| Command | Description |
-|---------|-------------|
-| `cargo check` | Fast syntax and type check (no compilation) |
-| `cargo build` | Debug build with optimizations disabled |
-| `cargo build --release` | Release build with full optimizations |
-| `cargo test` | Run all unit and integration tests |
-| `cargo test --release` | Run tests in release mode |
-| `cargo doc --open` | Generate and open documentation |
-| `cargo clippy` | Run the Rust linter |
-| `cargo fmt` | Format all code according to Rust standards |
+```bash
+# Run the egui frontend (default)
+cargo run -p wuffagent-egui
 
-## Test Output
+# Run the iced frontend
+cargo run -p wuffagent-iced
 
-```
-running 25 tests
-test client::tests::test_build_request_no_system_prompt ... ok
-test client::tests::test_build_request_streaming ... ok
-test client::tests::test_build_request_with_system_prompt ... ok
-test client::tests::test_process_sse_line_done ... ok
-test client::tests::test_process_sse_line_empty ... ok
-test client::tests::test_process_sse_line_empty_content ... ok
-test client::tests::test_process_sse_line_non_data ... ok
-test client::tests::test_process_sse_line_multiple_chunks ... ok
-test client::tests::test_process_sse_line_valid_chunk ... ok
-test config::tests::test_config_default ... ok
-test config::tests::test_config_load_nonexistent ... ok
-test config::tests::test_config_save_and_load ... ok
-test config::tests::test_config_validate_empty_paths ... ok
-test config::tests::test_config_validate_invalid_gpu_layers ... ok
-test config::tests::test_config_validate_invalid_port ... ok
-test config::tests::test_config_validate_invalid_threads ... ok
-test config::tests::test_config_validate_nonexistent_paths ... ok
-test config::tests::test_config_validate_valid ... ok
-test server::tests::test_parse_progress ... ok
-test server::tests::test_server_manager_creation ... ok
-test test_chat_client_error_handling ... ok
-test test_chat_client_request ... ok
-test test_config_persistence ... ok
-test test_server_manager_state ... ok
-test test_sse_parsing_end_to_end ... ok
-
-test result: ok. 25 passed; 0 failed; 0 ignored
+# Or from release builds:
+target/release/wuffagent-egui.exe
+target/release/wuffagent-iced.exe
 ```
 
-## Output
+## Architecture
 
-- Debug binary: `target/debug/wuffagent.exe`
-- Release binary: `target/release/wuffagent.exe`
+```
+Cargo.toml (workspace)
+├── wuffagent-core/          # Shared backend logic
+│   ├── types.rs
+│   ├── client/
+│   ├── config/
+│   ├── server/
+│   ├── sessions/
+│   ├── tools/
+│   └── agents/
+├── wuffagent-egui/          # Egui frontend
+│   └── src/main.rs          # Bootstraps core + runs egui app
+└── wuffagent-iced/          # Iced frontend
+    ├── wuffagent-iced-app/  # Shared iced UI logic
+    └── src/main.rs          # Bootstraps core + runs iced app
+```
+
+Both frontends share the same `wuffagent-core` backend. The egui UI lives in
+`wuffagent-egui/src/ui/` and the iced UI lives in `wuffagent-iced-app/src/app/`.
+
+## Building a Single Crate
+
+```bash
+# Build only the core library
+cargo build -p wuffagent-core
+
+# Build only the egui binary
+cargo build -p wuffagent-egui
+
+# Build only the iced binary
+cargo build -p wuffagent-iced
+```

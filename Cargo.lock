@@ -6830,7 +6830,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
-name = "wuffagent"
+name = "wuffagent-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -6840,16 +6840,10 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "dirs",
- "eframe",
- "egui",
- "epaint_default_fonts",
  "futures",
- "futures-lite",
  "glob",
  "hex",
  "http",
- "iced",
- "iced_aw",
  "image",
  "jsonschema",
  "libloading 0.9.0",
@@ -6868,6 +6862,56 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+]
+
+[[package]]
+name = "wuffagent-egui"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "dirs",
+ "eframe",
+ "egui",
+ "epaint_default_fonts",
+ "reqwest",
+ "rfd",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "wuffagent-core",
+]
+
+[[package]]
+name = "wuffagent-iced"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "iced",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wuffagent-core",
+ "wuffagent-iced-app",
+]
+
+[[package]]
+name = "wuffagent-iced-app"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "chrono",
+ "futures",
+ "futures-lite",
+ "iced",
+ "iced_aw",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "wuffagent-core",
 ]
 
 [[package]]

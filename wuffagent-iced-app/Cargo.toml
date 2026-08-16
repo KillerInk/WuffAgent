@@ -1,0 +1,17 @@
+[package]
+name = "wuffagent-iced-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wuffagent-core = { path = "../wuffagent-core" }
+iced = "0.14"
+iced_aw = "0.14"
+futures-lite = "2"
+futures = "0.3"
+tokio = { version = "1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+async-stream = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
