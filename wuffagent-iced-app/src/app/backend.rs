@@ -6,7 +6,7 @@ use crate::client::ChatClient;
 use crate::config::Config;
 use crate::server::ServerManager;
 use crate::tools::ToolManager;
-use crate::agents::AgentEngine;
+use crate::agents::{AgentEngine, config::AgentManager};
 use crate::types::AppEvent;
 
 /// Shared backend state passed to the UI layer.
@@ -22,6 +22,7 @@ pub struct Backend {
     pub config: Arc<std::sync::Mutex<Config>>,
     pub tool_manager: Arc<ToolManager>,
     pub agent_engine: Arc<AgentEngine>,
+    pub agent_manager: Arc<std::sync::Mutex<AgentManager>>,
 }
 
 impl Backend {
@@ -41,6 +42,7 @@ impl Backend {
         config: Arc<std::sync::Mutex<Config>>,
         tool_manager: Arc<ToolManager>,
         agent_engine: Arc<AgentEngine>,
+        agent_manager: Arc<std::sync::Mutex<AgentManager>>,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(64);
         Backend {
@@ -51,6 +53,7 @@ impl Backend {
             config,
             tool_manager,
             agent_engine,
+            agent_manager,
         }
     }
 }

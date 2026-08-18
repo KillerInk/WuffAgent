@@ -1,7 +1,7 @@
 use iced::Task;
 
 use super::messages::Message;
-use super::state::AppState;
+use super::state::{AppState, Dialog};
 use super::backend::Backend;
 
 /// Update function for the iced application.
@@ -44,33 +44,46 @@ pub fn update(message: Message, state: &mut AppState, backend: &Backend) -> Task
         }
         Message::SettingsClicked => {
             let cfg = state.config.lock().unwrap().clone();
-            let presets = state.presets.clone();
-            state.dialog = Some(super::state::Dialog::Settings { config: cfg, preset_store: presets });
+            state.dialog = Some(Dialog::Settings);
+            state.settings_dialog = Some(super::widgets::dialogs::settings::SettingsDialog::new(&cfg));
             Task::none()
         }
         Message::SettingsSaved => {
+            if let Some(ref sd) = state.settings_dialog {
+                sd.save(&state.config);
+                if let Ok(path) = crate::config::get_presets_path().parent() {
+                    if let Err(e) = state.presets.save(&path.join("presets.json")) {
+                        tracing::warn!("Failed to save presets: {}", e);
+                    }
+                }
+            }
             state.dialog = None;
+            state.settings_dialog = None;
             Task::none()
         }
         Message::SettingsClosed => {
             state.dialog = None;
+            state.settings_dialog = None;
             Task::none()
         }
         Message::PresetsClicked => {
-            let presets = state.presets.clone();
-            state.dialog = Some(super::state::Dialog::Presets { store: presets });
+            state.dialog = Some(Dialog::Presets);
+            state.presets_dialog = Some(super::widgets::dialogs::presets::PresetsDialog::new(state.presets.clone()));
             Task::none()
         }
         Message::PresetsClosed => {
             state.dialog = None;
+            state.presets_dialog = None;
             Task::none()
         }
         Message::AgentConfigClicked => {
-            state.dialog = Some(super::state::Dialog::AgentConfig);
+            state.dialog = Some(Dialog::AgentConfig);
+            state.agent_config_dialog = Some(super::widgets::dialogs::agent_config::AgentConfigDialog::new(&backend.clone()));
             Task::none()
         }
         Message::AgentConfigClosed => {
             state.dialog = None;
+            state.agent_config_dialog = None;
             Task::none()
         }
         Message::SessionSelected(id) => {
@@ -121,6 +134,310 @@ pub fn update(message: Message, state: &mut AppState, backend: &Backend) -> Task
         }
         Message::ImageAttached(path) => {
             state.chat.pending_image = path;
+            Task::none()
+        }
+        // ─── Settings dialog ─────────────────────────────────────────────────────
+        Message::SettingsServerPath(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.server_path = v;
+            }
+            Task::none()
+        }
+        Message::SettingsModelPath(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.model_path = v;
+            }
+            Task::none()
+        }
+        Message::SettingsPort(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.port = v.parse().unwrap_or(sd.port);
+            }
+            Task::none()
+        }
+        Message::SettingsGpuLayers(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.n_gpu_layers = v.parse().unwrap_or(sd.n_gpu_layers);
+            }
+            Task::none()
+        }
+        Message::SettingsNCtx(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.n_ctx = v.parse().unwrap_or(sd.n_ctx);
+            }
+            Task::none()
+        }
+        Message::SettingsThreads(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.threads = v.parse().unwrap_or(sd.threads);
+            }
+            Task::none()
+        }
+        Message::SettingsSystemPrompt(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.system_prompt = v;
+            }
+            Task::none()
+        }
+        Message::SettingsStreaming(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.streaming = v;
+            }
+            Task::none()
+        }
+        Message::SettingsTheme(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.theme = v;
+                state.theme_name = v;
+            }
+            Task::none()
+        }
+        Message::SettingsConnectionType(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.connection_type = v;
+            }
+            Task::none()
+        }
+        Message::SettingsRemoteUrl(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.remote_url = v;
+            }
+            Task::none()
+        }
+        Message::SettingsRemoteApiKey(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.remote_api_key = v;
+            }
+            Task::none()
+        }
+        Message::SettingsEncryptionEnabled(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.encryption_enabled = v;
+            }
+            Task::none()
+        }
+        Message::SettingsEncryptionPassword(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.encryption_password = v;
+            }
+            Task::none()
+        }
+        Message::SettingsMaxMessages(v) => {
+            if let Some(ref mut sd) = state.settings_dialog {
+                sd.max_messages = v.parse().unwrap_or(sd.max_messages);
+            }
+            Task::none()
+        }
+        Message::SettingsShowPresets => {
+            state.dialog = Some(Dialog::Presets);
+            state.settings_dialog = None;
+            state.presets_dialog = Some(super::widgets::dialogs::presets::PresetsDialog::new(state.presets.clone()));
+            Task::none()
+        }
+        // ─── Presets dialog ──────────────────────────────────────────────────────
+        Message::PresetsSelect(i) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                if pd.store.presets.len() > i {
+                    pd.selected_index = if pd.selected_index == Some(i) { None } else { Some(i) };
+                }
+            }
+            Task::none()
+        }
+        Message::PresetsLoad(i) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.load(i, &state.config);
+            }
+            Task::none()
+        }
+        Message::PresetsDelete(i) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.delete(i);
+            }
+            Task::none()
+        }
+        Message::PresetsNew => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.show_add_form = true;
+                pd.selected_index = None;
+                pd.clear_new_form();
+            }
+            Task::none()
+        }
+        Message::PresetsNewName(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_name = v;
+            }
+            Task::none()
+        }
+        Message::PresetsNewType(t) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_type = t;
+            }
+            Task::none()
+        }
+        Message::PresetsNewServerPath(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_server_path = v;
+            }
+            Task::none()
+        }
+        Message::PresetsNewModelPath(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_model_path = v;
+            }
+            Task::none()
+        }
+        Message::PresetsNewPort(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_port = v.parse().unwrap_or(pd.new_port);
+            }
+            Task::none()
+        }
+        Message::PresetsNewGpuLayers(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_n_gpu_layers = v.parse().unwrap_or(pd.new_n_gpu_layers);
+            }
+            Task::none()
+        }
+        Message::PresetsNewNCtx(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_n_ctx = v.parse().unwrap_or(pd.new_n_ctx);
+            }
+            Task::none()
+        }
+        Message::PresetsNewThreads(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_threads = v.parse().unwrap_or(pd.new_threads);
+            }
+            Task::none()
+        }
+        Message::PresetsNewRemoteUrl(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_remote_url = v;
+            }
+            Task::none()
+        }
+        Message::PresetsNewRemoteApiKey(v) => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.new_remote_api_key = v;
+            }
+            Task::none()
+        }
+        Message::PresetsAdd => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.add();
+            }
+            Task::none()
+        }
+        Message::PresetsCancelAdd => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.show_add_form = false;
+            }
+            Task::none()
+        }
+        Message::PresetsSaveStore => {
+            if let Some(ref mut pd) = state.presets_dialog {
+                pd.save_store();
+                state.presets = pd.store.clone();
+            }
+            Task::none()
+        }
+        // ─── Agent config dialog ─────────────────────────────────────────────────
+        Message::AgentConfigSelect(i) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.select_agent(i);
+            }
+            Task::none()
+        }
+        Message::AgentConfigEdit(i) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.edit_agent(i);
+            }
+            Task::none()
+        }
+        Message::AgentConfigNew => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.new_agent();
+            }
+            Task::none()
+        }
+        Message::AgentConfigName(v) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.name = v;
+            }
+            Task::none()
+        }
+        Message::AgentConfigDescription(v) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.description = v;
+            }
+            Task::none()
+        }
+        Message::AgentConfigPriority(v) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.priority = v.parse().unwrap_or(ad.priority);
+            }
+            Task::none()
+        }
+        Message::AgentConfigMaxConcurrent(v) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.max_concurrent = v.parse().unwrap_or(ad.max_concurrent);
+            }
+            Task::none()
+        }
+        Message::AgentConfigEnabled(v) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.enabled = v;
+            }
+            Task::none()
+        }
+        Message::AgentConfigSystemPrompt(v) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.system_prompt = v;
+            }
+            Task::none()
+        }
+        Message::AgentConfigSelectAllTools => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                for cb in &mut ad.tool_checkboxes {
+                    *cb = true;
+                }
+                ad.sync_tools_from_checkboxes();
+            }
+            Task::none()
+        }
+        Message::AgentConfigClearTools => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                for cb in &mut ad.tool_checkboxes {
+                    *cb = false;
+                }
+                ad.sync_tools_from_checkboxes();
+            }
+            Task::none()
+        }
+        Message::AgentConfigToolToggle(i, v) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                if i < ad.tool_checkboxes.len() {
+                    ad.tool_checkboxes[i] = v;
+                }
+            }
+            Task::none()
+        }
+        Message::AgentConfigSave => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.save(backend);
+            }
+            Task::none()
+        }
+        Message::AgentConfigCancel => {
+            state.dialog = None;
+            state.agent_config_dialog = None;
+            Task::none()
+        }
+        Message::AgentConfigDelete => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                ad.delete_agent(backend);
+            }
             Task::none()
         }
     }

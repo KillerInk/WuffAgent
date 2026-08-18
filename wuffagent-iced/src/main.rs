@@ -14,6 +14,7 @@ fn bootstrap() -> (
     Arc<Mutex<ChatClient>>,
     Arc<ToolManager>,
     Arc<AgentEngine>,
+    Arc<Mutex<wuffagent_core::agents::config::AgentManager>>,
 ) {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -161,7 +162,11 @@ fn bootstrap() -> (
     );
     let agent_engine = Arc::new(agent_engine);
 
-    (config, server, client, tool_manager, agent_engine)
+    let agent_manager = Arc::new(Mutex::new(
+        wuffagent_core::agents::config::AgentManager::new(config_agents_dir.clone())
+    ));
+
+    (config, server, client, tool_manager, agent_engine, agent_manager)
 }
 
 #[tokio::main]
@@ -169,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use wuffagent_iced_app::app::backend::Backend;
     use wuffagent_iced_app::subscription;
 
-    let (config, server, client, tool_manager, agent_engine) = bootstrap();
+    let (config, server, client, tool_manager, agent_engine, agent_manager) = bootstrap();
 
     let runtime = Arc::new(tokio::runtime::Handle::current());
     let backend = Arc::new(Backend::new(
@@ -179,6 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config,
         tool_manager,
         agent_engine,
+        agent_manager,
     ));
 
     subscription::set_event_sender(backend.event_sender.clone());

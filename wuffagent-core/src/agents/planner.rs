@@ -405,8 +405,18 @@ impl<C: ChatClientLike + Send + Sync + 'static> super::traits::PlannerAgent for 
             results.len()
         );
 
-        // Mechanical: all tasks completed
-        if all_tasks > 0 && completed_count == all_tasks {
+        // H3: verify by task ID, not by count. Counting lets duplicate or
+        // partial results satisfy the check (e.g. one task completed twice
+        // while another never ran). Every plan task must have a corresponding
+        // completed result.
+        let completed_ids: std::collections::HashSet<&str> = results
+            .iter()
+            .filter(|r| r.status == TaskStatus::Completed)
+            .map(|r| r.task_id.as_str())
+            .collect();
+        let all_planned_completed = all_tasks > 0
+            && plan.tasks.iter().all(|t| completed_ids.contains(t.id.as_str()));
+        if all_planned_completed {
             return Ok(true);
         }
 
@@ -677,6 +687,50 @@ mod tests {
             .await
             .unwrap();
         assert!(result, "all completed tasks should satisfy objective");
+    }
+
+    /// H3: objective satisfaction is by task ID, not by count. A plan with two
+    /// tasks where only one ran (but its result appears twice) must NOT be
+    /// satisfied. The old count-based check (`completed_count == all_tasks`)
+    /// would have passed this spuriously.
+    #[tokio::test]
+    async fn test_is_objective_satisfied_duplicate_results_rejected() {
+        struct DummyClient;
+        #[async_trait::async_trait]
+        impl ChatClientLike for DummyClient {
+            async fn send_message(&self, _messages: &[Message]) -> Result<String, String> {
+                Ok("false".to_string())
+            }
+            async fn send_streaming(&self, _messages: &[Message]) -> Result<String, String> {
+                Ok("false".to_string())
+            }
+        }
+        let planner = PlannerAgent::new(DummyClient);
+        let plan = ExecutionPlan::new("test request", vec![
+            Task::new("task1", AgentType::General, serde_json::json!({})),
+            Task::new("task2", AgentType::General, serde_json::json!({})),
+        ]);
+        // Only task1 completed, but its result is duplicated so that the raw
+        // completed count (2) equals all_tasks (2). task2 never ran.
+        let t1 = plan.tasks[0].id.clone();
+        let mk = || AgentResult {
+            task_id: t1.clone(),
+            agent_id: "test".to_string(),
+            agent_type: AgentType::General,
+            status: TaskStatus::Completed,
+            output: serde_json::json!({"result": "ok"}),
+            summary: "done".to_string(),
+            needs_refinement: false,
+            fixable: false,
+            suggested_followup: vec![],
+            duration_ms: 100,
+            completed_at: Some(Utc::now()),
+        };
+        let result = planner.is_objective_satisfied(&plan, &[mk(), mk()]).await.unwrap();
+        assert!(
+            !result,
+            "duplicated results for a subset of tasks must not satisfy the objective"
+        );
     }
 
     /// Test is_objective_satisfied with empty plan returns true

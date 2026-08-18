@@ -155,41 +155,80 @@ impl ExecutionPlan {
     }
 
     /// Returns tasks in dependency-respecting, priority-ordered sequence.
+    ///
+    /// Every task is emitted only after all of its (transitive) dependencies.
+    /// A dependency that references a missing task id is ignored (treated as
+    /// already satisfied). A dependency *cycle* is broken deterministically:
+    /// the first task encountered in the cycle is emitted before its
+    /// dependencies so the pipeline can proceed rather than deadlock.
     pub fn ordered_tasks(&self) -> Vec<&Task> {
         let mut sorted = Vec::new();
-        let mut visited = std::collections::HashSet::new();
+        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut in_stack: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
         fn visit<'a>(
             task: &'a Task,
             all_tasks: &'a [Task],
             visited: &mut std::collections::HashSet<&'a str>,
+            in_stack: &mut std::collections::HashSet<&'a str>,
             sorted: &mut Vec<&'a Task>,
         ) {
-            if !visited.insert(&task.id) {
+            let id: &'a str = &task.id;
+            if visited.contains(id) {
                 return;
             }
-            if let Some(dep_id) = &task.depends_on {
-                if let Some(dep) = all_tasks.iter().find(|t| &t.id == dep_id) {
-                    visit(dep, all_tasks, visited, sorted);
-                }
+            // Cycle detected: this task is already on the current recursion
+            // path. Break the cycle by emitting it now. Mark it `visited`
+            // FIRST so the outer recursion frame (which is about to resume and
+            // push the same task) sees it as already emitted and skips it —
+            // otherwise the task would be emitted twice.
+            if in_stack.contains(id) {
+                tracing::warn!(
+                    "ordered_tasks: dependency cycle detected at task '{}'; breaking it",
+                    task.id
+                );
+                visited.insert(id);
+                in_stack.remove(id);
+                sorted.push(task);
+                return;
             }
+
+            in_stack.insert(id);
+            if let Some(dep_id) = &task.depends_on {
+                if let Some(dep) = all_tasks.iter().find(|t| t.id == *dep_id) {
+                    visit(dep, all_tasks, visited, in_stack, sorted);
+                }
+                // A dependency on a missing task id is ignored.
+            }
+            in_stack.remove(id);
+            // Re-check: a dependency cycle may have caused this exact task to
+            // be emitted already while resolving a deeper frame. If so, do not
+            // emit it a second time.
+            if visited.contains(id) {
+                return;
+            }
+            visited.insert(id);
             sorted.push(task);
         }
 
+        // Seed from roots (no dependencies), highest priority first.
         let mut roots: Vec<&Task> = self
             .tasks
             .iter()
             .filter(|t| t.depends_on.is_none())
             .collect();
         roots.sort_by_key(|t| t.priority);
-
         for root in roots {
-            visit(root, &self.tasks, &mut visited, &mut sorted);
+            visit(root, &self.tasks, &mut visited, &mut in_stack, &mut sorted);
         }
 
+        // Sweep any remaining tasks (e.g., members of a cycle that was never
+        // seeded from a root). Recurse so their dependencies are ordered too,
+        // instead of appending them in raw plan order (C2).
         for task in &self.tasks {
-            if visited.insert(&task.id) {
-                sorted.push(task);
+            let id: &str = &task.id;
+            if !visited.contains(id) {
+                visit(task, &self.tasks, &mut visited, &mut in_stack, &mut sorted);
             }
         }
 
@@ -323,10 +362,15 @@ pub enum FeedbackMessage {
 }
 
 /// Builds a context value from completed task results, keyed by task_id.
+///
+/// M3: only `Completed` results are included. Including `Failed` results would
+/// leak error payloads into the parent context that downstream tasks consume.
 pub fn build_context(completed: &[AgentResult]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for result in completed {
-        map.insert(result.task_id.clone(), result.output.clone());
+        if result.status == TaskStatus::Completed {
+            map.insert(result.task_id.clone(), result.output.clone());
+        }
     }
     serde_json::Value::Object(map)
 }
@@ -401,6 +445,59 @@ mod tests {
         let t1_idx = ordered.iter().position(|t| t.id == t1_id).unwrap();
         let t3_idx = ordered.iter().position(|t| t.id == t3_id).unwrap();
         assert!(t1_idx < t3_idx, "dependency t1 should come before t3");
+    }
+
+    /// C2: a dependency chain that is never seeded from a root must still be
+    /// emitted in dependency order (the old code appended such tasks in raw
+    /// plan order, violating their dependencies).
+    #[test]
+    fn test_ordered_tasks_isolated_chain() {
+        // d1 <- d2 <- d3, none of them a root in raw order, d3 listed first.
+        let d1 = Task::new("d1", AgentType::General, serde_json::json!({}));
+        let d2 = Task::new("d2", AgentType::General, serde_json::json!({}));
+        let d3 = Task::new("d3", AgentType::General, serde_json::json!({}));
+        let d1_id = d1.id.clone();
+        let d2_id = d2.id.clone();
+        let d3_id = d3.id.clone();
+        let mut plan = ExecutionPlan::new("chain", vec![d3, d2, d1]);
+        if let Some(t) = plan.tasks.iter_mut().find(|t| t.id == d2_id) {
+            t.depends_on = Some(d1_id.clone());
+        }
+        if let Some(t) = plan.tasks.iter_mut().find(|t| t.id == d3_id) {
+            t.depends_on = Some(d2_id.clone());
+        }
+        let ordered = plan.ordered_tasks();
+        let idx = |id: &str| ordered.iter().position(|t| t.id == id).unwrap();
+        assert!(
+            idx(&d1_id) < idx(&d2_id) && idx(&d2_id) < idx(&d3_id),
+            "chain must be emitted dependency-first, got order: {:?}",
+            ordered.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// C2: a dependency cycle must be broken deterministically (no deadlock,
+    /// all tasks emitted exactly once).
+    #[test]
+    fn test_ordered_tasks_cycle_broken() {
+        let a = Task::new("a", AgentType::General, serde_json::json!({}));
+        let b = Task::new("b", AgentType::General, serde_json::json!({}));
+        let a_id = a.id.clone();
+        let b_id = b.id.clone();
+        let mut plan = ExecutionPlan::new("cycle", vec![a, b]);
+        if let Some(t) = plan.tasks.iter_mut().find(|t| t.id == a_id) {
+            t.depends_on = Some(b_id.clone());
+        }
+        if let Some(t) = plan.tasks.iter_mut().find(|t| t.id == b_id) {
+            t.depends_on = Some(a_id.clone());
+        }
+        let ordered = plan.ordered_tasks();
+        assert_eq!(ordered.len(), 2, "both cycle members must be emitted");
+        let ids: Vec<&str> = ordered.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids.iter().filter(|id| **id == a_id.as_str()).count(),
+            1,
+            "each task emitted exactly once"
+        );
     }
 
     #[test]

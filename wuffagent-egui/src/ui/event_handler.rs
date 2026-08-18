@@ -244,7 +244,7 @@ impl ChatApp {
                     if !response.is_empty() {
                         self.add_message("assistant", &response);
                     }
-                    self.chat.is_pipeline_running = false;
+                    self.stop_streaming();
                     if self.chat.at_bottom {
                         self.chat.scroll_to_bottom_requested = true;
                     }
@@ -253,11 +253,12 @@ impl ChatApp {
                     tracing::error!(error = %error, "Agent engine error");
                     self.add_message("system", &format!("❌ **Agent error**: {}", error));
                     self.chat.status = AppStatus::Error(error);
-                    self.chat.is_pipeline_running = false;
+                    self.stop_streaming();
                 }
                 AppEvent::AgentEngineStopped => {
                     tracing::info!("Agent engine stopped");
-                    self.chat.is_pipeline_running = false;
+                    self.stop_streaming();
+                    // Don't reset chain cancelled state here — it was set by stop_generation
                 }
                 // Agent chain events — delegate to chain panel processor
                 AppEvent::AgentChainStarted { .. }

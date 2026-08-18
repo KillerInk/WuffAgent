@@ -71,7 +71,9 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
 
             match decision {
                 SupervisorDecision::Complete { final_output } => {
-                    all_results.extend(new_results);
+                    // Phase 5: carry the new results into the accumulation so the
+                    // objective check and any refinement see the full picture.
+                    all_results.extend(new_results.clone());
                     // Verify the objective is actually satisfied before completing
                     let objective_satisfied = self.verify_objective(&plan, &all_results).await.unwrap_or(false);
                     if objective_satisfied {
@@ -86,11 +88,25 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                         });
                         return Ok(all_results);
                     }
-                    // Objective not satisfied — treat as refinement
+                    // Objective not satisfied — treat as refinement. Phase 5: pass the
+                    // REAL completed/failed results (carrying their
+                    // needs_refinement / suggested_followup feedback) so the
+                    // planner can refine with meaningful context instead of empty
+                    // slices.
                     tracing::warn!(
                         "Pipeline: objective not satisfied after iteration {}, triggering refinement",
                         iteration
                     );
+                    let completed: Vec<AgentResult> = all_results
+                        .iter()
+                        .filter(|r| r.status == TaskStatus::Completed)
+                        .cloned()
+                        .collect();
+                    let failed: Vec<AgentResult> = all_results
+                        .iter()
+                        .filter(|r| r.status == TaskStatus::Failed)
+                        .cloned()
+                        .collect();
                     self.send_event(AppEvent::AgentFeedbackLoop {
                         iteration: iteration + 1,
                         action: "objective not satisfied, refining".to_string(),
@@ -98,7 +114,7 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                     iteration += 1;
                     let refined_plan = {
                         let planner = self.planner.lock().await;
-                        PlannerAgentTrait::refine_plan(&*planner, &plan, &[], &[], &build_context(&all_results)).await?
+                        PlannerAgentTrait::refine_plan(&*planner, &plan, &completed, &failed, &build_context(&all_results)).await?
                     };
                     plan = refined_plan;
                 }
@@ -129,6 +145,18 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                         let planner = self.planner.lock().await;
                         PlannerAgentTrait::refine_plan(&*planner, &plan, &completed, &failed, &context).await?
                     };
+                    // H2: a refine produces a NEW plan. Tasks that are no longer
+                    // present were dropped or replanned; carry their accumulated
+                    // retry counts into the new plan and they would silently
+                    // exhaust max_retries. Reset counts for tasks not in the new
+                    // plan so replanned work gets a fresh retry budget.
+                    let retained: std::collections::HashSet<&str> = refined_plan
+                        .tasks
+                        .iter()
+                        .map(|t| t.id.as_str())
+                        .collect();
+                    task_retry_counts
+                        .retain(|id, _| retained.contains(id.as_str()));
                     plan = refined_plan;
                     all_results.extend(completed);
                 }
@@ -154,20 +182,20 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                         return Ok(all_results);
                     }
                     let already_failed = tasks.len() - retryable.len();
-                    tracing::info!("Retrying {} failed tasks ({} already exhausted retries)", retryable.len(), already_failed);
-                    // Pre-increment retry counts for all retryable tasks so they are properly tracked.
+                    tracing::info!(
+                        "Retrying {} failed tasks ({} already exhausted retries)",
+                        retryable.len(),
+                        already_failed
+                    );
+                    // H1: increment retry counts ONCE here (pre-increment).
+                    // The old code also incremented again for tasks that failed
+                    // this round, double-counting each retry and exhausting
+                    // max_retries after ~half the intended attempts.
                     for task in &retryable {
                         let count = task_retry_counts.entry(task.id.clone()).or_insert(0);
                         *count += 1;
                     }
                     let retry_results = self.supervisor.retry_tasks(&retryable, &all_results).await?;
-                    // Increment retry counts for tasks that failed this round (they already have the pre-increment).
-                    for result in &retry_results {
-                        if result.status == TaskStatus::Failed {
-                            let count = task_retry_counts.entry(result.task_id.clone()).or_insert(0);
-                            *count += 1;
-                        }
-                    }
                     all_results.extend(retry_results);
                 }
                 SupervisorDecision::NeedsFix {
@@ -221,6 +249,15 @@ impl<C: ChatClientLike + 'static> AgentPipeline<C> {
                         let planner = self.planner.lock().await;
                         PlannerAgentTrait::refine_plan(&*planner, &plan, &completed, &failed, &context).await?
                     };
+                    // H2: same as the Refine arm — reset retry counts for tasks
+                    // that the fixed plan no longer contains.
+                    let retained: std::collections::HashSet<&str> = refined_plan
+                        .tasks
+                        .iter()
+                        .map(|t| t.id.as_str())
+                        .collect();
+                    task_retry_counts
+                        .retain(|id, _| retained.contains(id.as_str()));
                     plan = refined_plan;
                     all_results.extend(completed);
                 }

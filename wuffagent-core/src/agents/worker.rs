@@ -4,7 +4,7 @@ use tokio::sync::Mutex;
 
 use super::traits::{Agent, AgentError};
 use super::types::AgentId;
-use super::types::{AgentResult, AgentType, Task, TaskStatus};
+use super::types::{AgentResult, AgentType, Task, TaskStatus, merge_context_into_input};
 use crate::tools::{ToolManager, ToolOutput};
 
 /// Base trait that all workers implement.
@@ -87,31 +87,38 @@ impl super::traits::WorkerAgent for GenericWorker {
         // Determine which tool to call based on task input
         let tool_name = self.determine_tool(task);
 
-        // Check authorization
+        // Check authorization — fail closed. Silently swapping tools would
+        // change task semantics (C1). If the task requests a tool this worker
+        // is not configured for, reject the task rather than bypass.
         if !self.allowed_tools.contains(&tool_name) {
+            let allowed = self
+                .allowed_tools
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let err = AgentError::TaskFailure(format!(
+                "Worker '{}' not authorized for tool '{}' (allowed: [{}])",
+                self.name, tool_name, allowed
+            ));
             tracing::warn!(
-                "Worker '{}' not authorized for tool '{}', using fallback",
+                "Worker '{}' rejected task '{}': {}",
                 self.name,
-                tool_name
+                task.description,
+                err
             );
-            // Fall back to first allowed tool
-            let _tool_name = self.allowed_tools.first()
-                .ok_or_else(|| AgentError::TaskFailure(
-                    format!("Worker '{}' has no allowed tools", self.name)
-                ))?
-                .clone();
+            return Err(err);
         }
 
-        // Build tool parameters from task input
+        // Build tool parameters from task input. M4: merge the parent task's
+        // output from the dependency context into the input via the shared
+        // helper (previously dead code) instead of an ad-hoc `parent_<id>` key,
+        // so the keying is consistent across the codebase.
+        let input = merge_context_into_input(&task.input, context, &task.depends_on);
         let mut params = crate::tools::ToolParams::new();
-        if let serde_json::Value::Object(obj) = &task.input {
+        if let serde_json::Value::Object(obj) = &input {
             for (k, v) in obj {
                 params.values.insert(k.clone(), v.clone());
-            }
-        }
-        if let Some(dep_id) = &task.depends_on {
-            if let Some(parent_output) = context.get(dep_id) {
-                params.values.insert(format!("parent_{}", dep_id), parent_output.clone());
             }
         }
 
@@ -200,4 +207,72 @@ impl Agent for GenericWorker {
         super::traits::AgentRole::CustomWorker(self.name.clone())
     }
     fn instructions(&self) -> &str { &self.system_prompt }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::registry::ToolRegistry;
+    use crate::tools::lib::TracingToolLogger;
+
+    fn make_worker(allowed_tools: Vec<String>) -> GenericWorker {
+        let registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
+        let tool_manager = Arc::new(Mutex::new(ToolManager::new(registry)));
+        GenericWorker::new(
+            "test-worker",
+            "test worker",
+            allowed_tools,
+            "You are a test worker.",
+            tool_manager,
+        )
+    }
+
+    /// C1: a task that requests a tool the worker is not authorized for must be
+    /// REJECTED (fail closed), not silently executed under a different tool.
+    #[tokio::test]
+    async fn test_c1_unauthorized_tool_rejected() {
+        // Worker is only allowed "file_io" but the task asks for "web_search".
+        let mut worker = make_worker(vec!["file_io".to_string()]);
+        let task = Task::new(
+            "search the web",
+            AgentType::General,
+            serde_json::json!({ "tool": "web_search", "query": "rust" }),
+        );
+        let result = worker.execute_task(&task, &serde_json::json!({})).await;
+        assert!(
+            result.is_err(),
+            "unauthorized tool must be rejected, got: {:?}",
+            result
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not authorized"),
+            "error should mention authorization, got: {}",
+            err
+        );
+    }
+
+    /// C1: a task explicitly requesting an authorized tool proceeds (not
+    /// rejected for authorization). It may still fail at the tool-execution
+    /// level (tool not registered in this empty registry), but the rejection
+    /// must NOT be an authorization error.
+    #[tokio::test]
+    async fn test_c1_authorized_tool_proceeds() {
+        let mut worker = make_worker(vec!["file_io".to_string()]);
+        let task = Task::new(
+            "read a file",
+            AgentType::General,
+            serde_json::json!({ "tool": "file_io", "action": "file_info", "path": "." }),
+        );
+        let result = worker.execute_task(&task, &serde_json::json!({})).await;
+        let is_auth_rejection = matches!(
+            &result,
+            Err(e) if e.to_string().contains("not authorized")
+        );
+        assert!(
+            !is_auth_rejection,
+            "authorized tool must not be rejected for authorization, got: {:?}",
+            result
+        );
+    }
 }

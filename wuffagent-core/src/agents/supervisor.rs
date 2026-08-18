@@ -118,17 +118,12 @@ impl SupervisorAgentTrait for SupervisorAgent {
         let mut iteration = 0u32;
 
         while !pending.is_empty() {
-            // Check cancellation
+            // Check cancellation. M6: report cancellation as an error rather
+            // than masking it as a successful (partial) completion, so the
+            // pipeline can distinguish a cancel from a real result.
             if self.cancel_token.is_cancelled() {
-                self.send_event(AppEvent::AgentPipelineError {
-                    error: "Pipeline cancelled".to_string(),
-                });
-                return Ok((
-                    SupervisorDecision::Complete {
-                        final_output: serde_json::json!({ "error": "cancelled" }),
-                    },
-                    results,
-                ));
+                self.send_event(AppEvent::AgentPipelineCancelled);
+                return Err(AgentError::Cancelled);
             }
 
             // Build context from completed tasks
@@ -339,11 +334,17 @@ impl SupervisorAgentTrait for SupervisorAgent {
             };
 
             tracing::info!("Retrying task '{}' with worker '{}'", task.id, worker_name);
-            match worker.execute_task(task, &context).await {
-                Ok(result) => {
+            // M5: apply the same timeout to the retry path as to the main
+            // execution path, so a hung worker cannot stall the retry loop.
+            let retry_timeout = tokio::time::timeout(
+                std::time::Duration::from_millis(60_000),
+                worker.execute_task(task, &context),
+            ).await;
+            match retry_timeout {
+                Ok(Ok(result)) => {
                     results.push(result);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!("Retry task '{}' failed with worker '{}': {}", task.id, worker_name, e);
                     let failed_result = AgentResult {
                         task_id: task.id.clone(),
@@ -356,6 +357,23 @@ impl SupervisorAgentTrait for SupervisorAgent {
                         fixable: e.to_string().contains("is required") || e.to_string().contains("required"),
                         suggested_followup: vec![],
                         duration_ms: 0,
+                        completed_at: Some(chrono::Utc::now()),
+                    };
+                    results.push(failed_result);
+                }
+                Err(_) => {
+                    tracing::warn!("Retry task '{}' timed out with worker '{}'", task.id, worker_name);
+                    let failed_result = AgentResult {
+                        task_id: task.id.clone(),
+                        agent_id: worker_name,
+                        agent_type: AgentType::General,
+                        status: TaskStatus::Failed,
+                        output: serde_json::json!({ "error": "retry timed out" }),
+                        summary: format!("Retry task '{}' timed out", task.id),
+                        needs_refinement: false,
+                        fixable: false,
+                        suggested_followup: vec![],
+                        duration_ms: 60_000,
                         completed_at: Some(chrono::Utc::now()),
                     };
                     results.push(failed_result);
@@ -447,9 +465,19 @@ impl SupervisorAgentTrait for SupervisorAgent {
             });
         }
 
-        // Not all tasks done yet
-        Ok(SupervisorDecision::Complete {
-            final_output: build_context(results),
+        // Not all tasks done yet. Do NOT report Complete with partial results
+        // (C3): that would silently drop the remaining tasks and let
+        // verify_objective pass spuriously. Ask the planner to refine so the
+        // outstanding tasks get a chance to run.
+        tracing::warn!(
+            "Supervisor: only {}/{} tasks accounted for; refining instead of completing",
+            results.len(),
+            plan.tasks.len()
+        );
+        Ok(SupervisorDecision::Refine {
+            completed: completed.iter().cloned().cloned().collect(),
+            failed: failed.iter().cloned().cloned().collect(),
+            context: build_context(results),
         })
     }
 }
@@ -524,15 +552,14 @@ mod tests {
         sup.cancel_token.cancel();
         let task = Task::new("should be cancelled", AgentType::General, serde_json::json!({}));
         let plan = make_plan("cancel-test", vec![task]);
-        let (decision, results) = sup.execute_plan(&plan).await.unwrap();
-        // Should return early with cancelled signal, not error
-        match decision {
-            SupervisorDecision::Complete { final_output } => {
-                assert_eq!(final_output["error"], "cancelled");
-            }
-            _ => panic!("expected Complete with cancelled error"),
-        }
-        assert!(results.is_empty(), "no tasks should have run");
+        // M6: cancellation is reported as an error, not masked as a
+        // successful (partial) completion.
+        let result = sup.execute_plan(&plan).await;
+        assert!(
+            matches!(result, Err(AgentError::Cancelled)),
+            "cancellation should surface as Err(Cancelled), got: {:?}",
+            result.as_ref().map(|(d, _)| d)
+        );
     }
 
     #[tokio::test]

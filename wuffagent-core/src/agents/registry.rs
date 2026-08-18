@@ -132,6 +132,13 @@ impl AgentRegistry {
         self.agents.len()
     }
 
+    /// Insert an agent (test helper).
+    #[cfg(test)]
+    pub fn add_agent_for_test(&mut self, config: AgentConfig) {
+        self.agents.insert(config.name.clone(), config);
+        self.prompt_dirty = true;
+    }
+
     /// Returns all agents in the registry (for internal use).
     pub(crate) fn get_all_agents(&self) -> Vec<&AgentConfig> {
         self.agents.values().collect()
@@ -140,6 +147,47 @@ impl AgentRegistry {
     /// Returns the cached routing prompt (read-only access).
     pub(crate) fn routing_prompt(&self) -> &str {
         &self.routing_prompt
+    }
+
+    /// Get a list of all available agent names as a comma-separated string.
+    pub(crate) fn available_agent_names(&self) -> String {
+        self.agents.keys()
+            .filter(|k| self.agents.get(*k).map(|a| a.enabled).unwrap_or(false))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Find a fallback agent when the LLM uses a wrong name.
+    /// Tries exact match first, then substring match, then falls back to "generalist" or first enabled agent.
+    pub(crate) fn find_fallback_agent(&self, requested: &str) -> String {
+        // Try exact match
+        if self.agents.contains_key(requested) {
+            return requested.to_string();
+        }
+        // Try case-insensitive match
+        let lower = requested.to_lowercase();
+        for name in self.agents.keys() {
+            if name.to_lowercase() == lower {
+                return name.clone();
+            }
+        }
+        // Try substring match (e.g., "SRE_BugHunt" might match "bug_hunter")
+        for name in self.agents.keys() {
+            let name_lower = name.to_lowercase();
+            if name_lower.contains(&lower) || lower.contains(&name_lower) {
+                return name.clone();
+            }
+        }
+        // Fall back to generalist or first enabled agent
+        if self.agents.contains_key("generalist") {
+            return "generalist".to_string();
+        }
+        self.agents.keys()
+            .filter(|k| self.agents.get(*k).map(|a| a.enabled).unwrap_or(false))
+            .next()
+            .map(|k| k.clone())
+            .unwrap_or_else(|| "general".to_string())
     }
 
     /// Build the routing prompt that describes all agents for LLM selection.
@@ -160,7 +208,7 @@ impl AgentRegistry {
     /// Internal build — constructs the routing prompt from all enabled agents.
     fn build_routing_prompt_internal(&mut self) -> String {
         let mut prompt = String::from("You are a multi-agent system router. Choose the best agent for each task.\n\n");
-        prompt.push_str("Available agents:\n");
+        prompt.push_str("Available agents (you MUST use only these names):\n");
 
         let mut agents: Vec<_> = self.agents.values().filter(|a| a.enabled).collect();
         agents.sort_by_key(|a| a.name.clone());
@@ -177,7 +225,9 @@ impl AgentRegistry {
             ));
         }
 
-        prompt.push_str("\nRespond with a JSON array of objects with keys: agent, task.\n");
+        prompt.push_str("\nIf the task requires a specific agent, respond with a single JSON object: {\"agent\": \"<agent_name>\", \"task\": \"<delegated_task>\"}\n");
+        prompt.push_str("If the task can be answered directly, respond with plain text.\n");
+        prompt.push_str("IMPORTANT: Use ONLY the exact agent names listed above. Do NOT invent new agent names like 'BugHunter', 'CodeReviewer', etc. These will be rejected.\n");
         prompt
     }
 

@@ -76,15 +76,11 @@ pub enum PipelineTaskStatus {
     Failed,
 }
 
-/// Dialog type enum.
+/// Dialog type enum - which dialog is currently open.
+#[derive(Clone, Debug)]
 pub enum Dialog {
-    Settings {
-        config: Config,
-        preset_store: PresetStore,
-    },
-    Presets {
-        store: PresetStore,
-    },
+    Settings,
+    Presets,
     AgentConfig,
 }
 
@@ -101,6 +97,11 @@ pub struct AppState {
     pub presets: PresetStore,
     pub backend: Arc<Backend>,
     pub error_toast: Option<String>,
+
+    // Dialog-specific state (mutable across update calls)
+    pub settings_dialog: Option<super::widgets::dialogs::settings::SettingsDialog>,
+    pub presets_dialog: Option<super::widgets::dialogs::presets::PresetsDialog>,
+    pub agent_config_dialog: Option<super::widgets::dialogs::agent_config::AgentConfigDialog>,
 }
 
 impl AppState {
@@ -126,6 +127,9 @@ impl AppState {
             presets,
             backend,
             error_toast: None,
+            settings_dialog: None,
+            presets_dialog: None,
+            agent_config_dialog: None,
         }
     }
 }

@@ -69,6 +69,20 @@ Cargo.toml (workspace)
 Both frontends share the same `wuffagent-core` backend. The egui UI lives in
 `wuffagent-egui/src/ui/` and the iced UI lives in `wuffagent-iced-app/src/app/`.
 
+## Agent Execution Model
+
+`wuffagent-core` has a single agent execution core with two modes:
+
+- **Simple routing path** — `AgentEngine::execute` routes the request to the
+  best-matching agent and runs its LLM tool loop.
+- **Plan path** — `AgentEngine::execute_plan_mode` runs the planner →
+  supervisor → workers pipeline. Each planned task is executed *through* the
+  `AgentEngine` via the `EngineWorker` bridge (a `WorkerAgent` that delegates to
+  the engine), so both modes share one execution core.
+
+The egui `/plan <request>` command uses the plan path. The `LlmClientAdapter`
+bridges the engine's `LlmClient` to the `ChatClientLike` trait the planner needs.
+
 ## Building a Single Crate
 
 ```bash

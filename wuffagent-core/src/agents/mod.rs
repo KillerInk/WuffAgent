@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod feedback;
 pub mod registry;
 pub mod engine;
+pub mod engine_worker;
 
 pub use types::*;
 pub use traits::*;
@@ -26,3 +27,4 @@ pub use pipeline::AgentPipeline;
 pub use feedback::FeedbackLoop;
 pub use registry::AgentRegistry;
 pub use engine::AgentEngine;
+pub use engine_worker::{EngineWorker, engine_worker_for};

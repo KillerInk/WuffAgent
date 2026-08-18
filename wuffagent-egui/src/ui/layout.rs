@@ -99,15 +99,13 @@ impl ChatApp {
             self.draw_chat_area(ui);
         });
 
-        // Agent chain side panel — shown when chain is active or has entries
-        if self.agent_chain_panel_shown() {
-            egui::SidePanel::right("agent_chain_panel")
-                .default_width(280.0)
-                .resizable(true)
-                .show(ctx, |ui| {
-                    self.draw_agent_chain_panel(ui);
-                });
-        }
+        // Agent chain side panel — always shown so the user can see agent activity
+        egui::SidePanel::right("agent_chain_panel")
+            .default_width(280.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                self.draw_agent_chain_panel(ui);
+            });
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {

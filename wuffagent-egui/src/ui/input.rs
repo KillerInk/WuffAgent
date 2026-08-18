@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use eframe::egui;
 
 use super::state::ChatApp;
@@ -185,18 +187,27 @@ impl ChatApp {
         self.chat.is_pipeline_running = true;
         
         // Clone dependencies
-        let engine = self.agent_engine.clone();
         let cancel_token = self.agent_cancel_token.clone();
         let event_tx = self.pending_tx.clone();
         let request = request.to_string();
+        
+        // Wire the event tx so the engine can emit chain events
+        let engine = if let Some(ref tx) = event_tx {
+            // Take the inner engine out of the Arc, set the tx, and wrap it back
+            let inner = (*self.agent_engine).clone();
+            Arc::new(inner.with_event_tx(Arc::new(Mutex::new(tx.clone()))))
+        } else {
+            self.agent_engine.clone()
+        };
         
         // Spawn async task
         tokio::spawn(async move {
             tracing::info!("[AGENT ENGINE] Running agent engine for: {}", request);
             
             // Execute with cancellation support
+            // Phase 8: /plan uses the planner-supervisor-workers pipeline.
             let result = tokio::select! {
-                result = engine.execute(&request, &cancel_token) => result,
+                result = engine.execute_plan_mode(&request, &cancel_token) => result,
                 _ = cancel_token.cancelled() => {
                     Ok(String::from("[CANCELLED]"))
                 }
@@ -243,6 +254,9 @@ impl ChatApp {
         
         // Cancel agent engine
         self.agent_cancel_token.cancel();
+        
+        // Mark the chain as cancelled so the UI reflects it immediately
+        self.agent_chain_state.cancelled = true;
         
         self.stop_streaming();
         self.chat.status = AppStatus::Ready;

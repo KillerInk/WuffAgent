@@ -23,6 +23,8 @@ pub struct Response {
 #[derive(Deserialize, Debug)]
 pub struct Choice {
     pub message: Message,
+    #[serde(default)]
+    pub finish_reason: Option<String>,
 }
 
 /// Build a ChatRequest from the given client state.
@@ -115,9 +117,11 @@ pub async fn send_message(
 
     let content = response.choices[0].message.content.clone();
     let usage = response.usage.clone();
+    let finish_reason = response.choices[0].finish_reason.clone();
     tracing::debug!(
-        "send_message (non-stream) assistant content (len={}): {:?}",
+        "send_message (non-stream) assistant content (len={}) finish_reason={:?}: {:?}",
         content.len(),
+        finish_reason,
         content.chars().take(200).collect::<String>()
     );
 
