@@ -55,15 +55,33 @@ impl ChatApp {
     }
 
     pub fn show_agent_config_dialog(&mut self, ctx: &egui::Context) {
+        let agents_dir = self.config.file_path.parent()
+            .map(|p| p.join("agents"))
+            .unwrap_or_else(|| PathBuf::from("agents"));
         if self.show_agent_config && self.agent_config_dialog.is_none() {
-            let agents_dir = PathBuf::from("agents");
-            let agent_manager = crate::agents::config::AgentManager::new(agents_dir);
+            let mut agent_manager = crate::agents::config::AgentManager::new(agents_dir.clone());
+            // Scan project-level workers dirs for discovery (same as get_agent_names)
+            if let Ok(cwd) = std::env::current_dir() {
+                agent_manager.add_search_dir(cwd.join("workers"));
+            }
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(exe_dir) = exe.parent() {
+                    agent_manager.add_search_dir(exe_dir.join("workers"));
+                }
+            }
             self.agent_config_dialog =
                 Some(super::agent_config::AgentConfigDialog::new(Arc::new(Mutex::new(agent_manager)), &self.tool_manager));
         }
         if let Some(dialog) = self.agent_config_dialog.as_mut() {
-            let agents_dir = PathBuf::from("agents");
-            let agent_manager = crate::agents::config::AgentManager::new(agents_dir);
+            let mut agent_manager = crate::agents::config::AgentManager::new(agents_dir.clone());
+            if let Ok(cwd) = std::env::current_dir() {
+                agent_manager.add_search_dir(cwd.join("workers"));
+            }
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(exe_dir) = exe.parent() {
+                    agent_manager.add_search_dir(exe_dir.join("workers"));
+                }
+            }
             let closed = dialog.show(ctx, &Arc::new(Mutex::new(agent_manager)));
             if closed {
                 self.show_agent_config = false;

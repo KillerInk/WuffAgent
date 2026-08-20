@@ -16,6 +16,7 @@ impl ChatApp {
                 self.chat.is_generating = false;
                 self.chat.is_streaming = false;
                 self.status = AppStatus::Ready;
+                self.chat.status = AppStatus::Ready;
                 if let Some(usage) = usage {
                     self.chat.token_count = usage.total_tokens as usize;
                     let n_ctx = self.get_effective_n_ctx();
@@ -39,7 +40,8 @@ impl ChatApp {
             AppEvent::StreamError { error } => {
                 self.chat.stream_chunk(&format!("\n\nStream error: {}", error));
                 self.chat.commit_stream();
-                self.status = AppStatus::Error(error);
+                self.status = AppStatus::Error(error.clone());
+                self.chat.status = AppStatus::Error(error);
             }
             AppEvent::ToolCallWarning { tool_name, message } => {
                 tracing::warn!(tool_name, message, "Tool call warning");
@@ -123,6 +125,7 @@ impl ChatApp {
                 self.chat.streaming = false;
                 self.chat.is_pipeline_running = false;
                 self.status = AppStatus::Ready;
+                self.chat.status = AppStatus::Ready;
             }
             AppEvent::NCtxUpdated { n_ctx } => {
                 tracing::info!(n_ctx, "n_ctx updated");

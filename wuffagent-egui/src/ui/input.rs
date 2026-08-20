@@ -156,6 +156,8 @@ impl ChatApp {
         self.chat.is_generating = true;
         self.chat.is_streaming = true;
         self.chat.streaming = true;
+        self.status = AppStatus::Generating;
+        self.chat.status = AppStatus::Generating;
 
         // Add user message to chat display
         let image = self.chat.pending_image.take();
@@ -296,6 +298,8 @@ impl ChatApp {
         self.chat.is_generating = true;
         self.chat.is_streaming = true;
         self.chat.streaming = true;
+        self.status = AppStatus::Generating;
+        self.chat.status = AppStatus::Generating;
         self.chat.messages.push(crate::types::ChatMessage {
             role: "user".to_string(),
             content: format!("/plan {}", request),
