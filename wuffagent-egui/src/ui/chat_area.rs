@@ -367,7 +367,7 @@ impl ChatApp {
                                     theme.text_primary
                                 };
                                 if is_tool {
-                                    self.draw_tool_message(ui, message, theme);
+                                    self.draw_tool_message(ui, message, theme, index);
                                 } else if message.content.starts_with("💭 ") {
                                     // Thinking message — render dim and italic
                                     let thinking_text = &message.content["💭 ".len()..];
@@ -458,7 +458,7 @@ impl ChatApp {
 
     /// Parse a tool message and render it with smart formatting.
     /// Tool messages have the format: "header||call_id||result_json"
-    fn draw_tool_message(&mut self, ui: &mut egui::Ui, message: &ChatMessage, theme: &Theme) {
+    fn draw_tool_message(&mut self, ui: &mut egui::Ui, message: &ChatMessage, theme: &Theme, msg_index: usize) {
         // First check if this is a legacy format (starts with { or 🔧)
         let is_legacy = message.content.starts_with('{') || message.content.starts_with('🔧');
         
@@ -475,7 +475,7 @@ impl ChatApp {
                 message.content.clone()
             };
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw_result) {
-                self.draw_tool_json_result(ui, &json, &raw_result, theme);
+                self.draw_tool_json_result(ui, &json, &raw_result, theme, msg_index);
             } else {
                 self.draw_tool_plain_result(ui, &raw_result, theme);
             }
@@ -506,14 +506,14 @@ impl ChatApp {
 
         // Render result with smart formatting
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_result) {
-            self.draw_tool_json_result(ui, &json, raw_result, theme);
+            self.draw_tool_json_result(ui, &json, raw_result, theme, msg_index);
         } else {
             self.draw_tool_plain_result(ui, raw_result, theme);
         }
     }
 
     /// Render a tool result that is valid JSON with smart field extraction.
-    fn draw_tool_json_result(&mut self, ui: &mut egui::Ui, json: &serde_json::Value, raw: &str, theme: &Theme) {
+    fn draw_tool_json_result(&mut self, ui: &mut egui::Ui, json: &serde_json::Value, raw: &str, theme: &Theme, msg_index: usize) {
         // Check for common structured patterns
         if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
             // Has a path field — likely a file operation result
@@ -548,15 +548,26 @@ impl ChatApp {
                         });
                 }
             } else if is_file_read {
-                // File read: show path badge ONLY, hide content behind button
+                // File read: show path badge + show/hide content button
                 self.draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
                 if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
                     let char_count = content.len();
-                    // Always show a "Show content" button, hide the content by default
-                    let btn = egui::Button::new(format!("Show content ({} chars)", char_count))
-                        .rounding(4.0);
+                    let is_expanded = self.chat.expanded_messages.contains(&msg_index);
+                    let btn_text = if is_expanded {
+                        format!("Hide content ({} chars)", char_count)
+                    } else {
+                        format!("Show content ({} chars)", char_count)
+                    };
+                    let btn = egui::Button::new(btn_text).rounding(4.0);
                     if ui.add(btn).clicked() {
+                        if is_expanded {
+                            self.chat.expanded_messages.retain(|&i| i != msg_index);
+                        } else {
+                            self.chat.expanded_messages.push(msg_index);
+                        }
+                    }
+                    if is_expanded {
                         egui::Frame::none()
                             .fill(egui::Color32::from_rgb(10, 10, 10))
                             .rounding(4.0)

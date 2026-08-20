@@ -77,21 +77,6 @@ pub async fn process_sse_line(
             );
             callback(thinking.to_string(), true)?;
         }
-    } else {
-        // Debug: log when delta has other fields but not thinking/reasoning
-        let delta = chunk
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("delta"));
-        if let Some(delta) = delta {
-            let has_content = delta.get("content").is_some();
-            let has_thinking = delta.get("thinking").is_some();
-            let has_reasoning = delta.get("reasoning").is_some();
-            let has_reasoning_content = delta.get("reasoning_content").is_some();
-            tracing::debug!(
-                "SSE: delta fields - content={has_content}, thinking={has_thinking}, reasoning={has_reasoning}, reasoning_content={has_reasoning_content}"
-            );
-        }
     }
 
     // Handle tool_calls in streaming delta chunks
@@ -229,14 +214,14 @@ pub fn add_streaming_messages(conversation: &Arc<Mutex<Vec<Message>>>, prompt: &
     conv.push(Message {
         role: "user".to_string(),
         content: prompt.to_string(),
-        timestamp: String::new(),
+        timestamp: crate::types::format_timestamp(),
         tool_calls: None,
         tool_call_id: None,
     });
     conv.push(Message {
         role: "assistant".to_string(),
         content: String::new(),
-        timestamp: String::new(),
+        timestamp: crate::types::format_timestamp(),
         tool_calls: None,
         tool_call_id: None,
     });

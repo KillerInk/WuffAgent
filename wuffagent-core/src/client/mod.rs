@@ -231,14 +231,14 @@ impl ChatClient {
         conv.push(Message {
             role: "user".to_string(),
             content: prompt.to_string(),
-            timestamp: String::new(),
+            timestamp: crate::types::format_timestamp(),
             tool_calls: None,
             tool_call_id: None,
         });
         conv.push(Message {
             role: "assistant".to_string(),
             content: content.clone(),
-            timestamp: String::new(),
+            timestamp: crate::types::format_timestamp(),
             tool_calls: None,
             tool_call_id: None,
         });
