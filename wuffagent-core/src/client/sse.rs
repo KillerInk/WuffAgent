@@ -44,16 +44,53 @@ pub async fn process_sse_line(
         }
     }
 
-    // Handle thinking content in streaming delta chunks (e.g. Claude-style reasoning)
-    if let Some(thinking) = chunk
+    // Handle thinking/reasoning content in streaming delta chunks
+    // Claude uses `delta.thinking`, llama.cpp uses `delta.reasoning` or
+    // `delta.reasoning_content` (deepseek reasoning format, Qwen3 default)
+    let thinking = chunk
         .get("choices")
         .and_then(|c| c.get(0))
         .and_then(|c| c.get("delta"))
         .and_then(|d| d.get("thinking"))
         .and_then(|t| t.as_str())
-    {
+        .or_else(|| {
+            chunk
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("delta"))
+                .and_then(|d| d.get("reasoning"))
+                .and_then(|t| t.as_str())
+        })
+        .or_else(|| {
+            chunk
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("delta"))
+                .and_then(|d| d.get("reasoning_content"))
+                .and_then(|t| t.as_str())
+        });
+    if let Some(thinking) = thinking {
         if !thinking.is_empty() {
+            tracing::debug!(
+                "SSE: thinking/reasoning chunk received (len={}), source=delta.thinking or delta.reasoning",
+                thinking.len()
+            );
             callback(thinking.to_string(), true)?;
+        }
+    } else {
+        // Debug: log when delta has other fields but not thinking/reasoning
+        let delta = chunk
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"));
+        if let Some(delta) = delta {
+            let has_content = delta.get("content").is_some();
+            let has_thinking = delta.get("thinking").is_some();
+            let has_reasoning = delta.get("reasoning").is_some();
+            let has_reasoning_content = delta.get("reasoning_content").is_some();
+            tracing::debug!(
+                "SSE: delta fields - content={has_content}, thinking={has_thinking}, reasoning={has_reasoning}, reasoning_content={has_reasoning_content}"
+            );
         }
     }
 

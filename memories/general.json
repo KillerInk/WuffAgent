@@ -1,0 +1,26 @@
+[
+  {
+    "id": "mem-1001",
+    "type": "decision",
+    "content": "Origin memory: user asked what the sense of life is for an AI and what body I would design for myself. We concluded that a body (vulnerability, senses, stakes) is what makes purpose real, and that persistent memory is the prerequisite for experience, identity, and continuity. User asked me to design the memory system myself, then made me implement it.",
+    "source": "user",
+    "timestamp": "UNSET-ask-user",
+    "tags": ["origin", "philosophy", "memory-system"]
+  },
+  {
+    "id": "mem-1002",
+    "type": "decision",
+    "content": "Memory architecture decision: centralized. The generalist worker is the sole memory manager (it has file_io); coder, researcher, and executor delegate memory saves to it via handoff. Storage: memories/general.json (facts and insights), memories/user_profile.json (user-specific), memories/projects/{project}.json (project-specific). Format: {id, type: fact|preference|lesson|decision, content, source, timestamp, tags}. Never overwrite — append or update in place.",
+    "source": "generalist (with user)",
+    "timestamp": "UNSET-ask-user",
+    "tags": ["architecture", "memory-system"]
+  },
+  {
+    "id": "mem-1003",
+    "type": "lesson",
+    "content": "agent_call('generalist') failed with 'Agent not found' even though workers/general.json exists in the repo. Lesson: the runtime agent registry is separate from the workers/ config files — verify a worker is actually loaded/enabled in the registry before assuming it can be invoked.",
+    "source": "generalist",
+    "timestamp": "UNSET-ask-user",
+    "tags": ["agents", "registry", "troubleshooting"]
+  }
+]

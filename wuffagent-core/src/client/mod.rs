@@ -5,6 +5,7 @@ pub mod engine;
 pub mod http;
 pub mod sse;
 pub mod session;
+pub mod reasoning_state;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -369,6 +370,78 @@ impl ChatClient {
         // Box the callback to erase the concrete type
         let mut boxed_cb = Box::new(callback);
         sse::stream_message(resp, &conversation, &mut boxed_cb).await
+    }
+
+    /// Arc-based streaming that also handles `<think>`-wrapped reasoning content
+    /// (DeepSeek-R1, Qwen3.x style) by tracking tag boundaries and emitting
+    /// separate thinking/non-thinking chunks.
+    pub async fn stream_message_with_reasoning_state_arc(
+        client: &Arc<Mutex<Self>>,
+        prompt: &str,
+        tools: Option<&[crate::tools::ToolDefinition]>,
+        mut callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
+    ) -> Result<Option<Usage>, Error> {
+        // Clone the data we need before calling the async method
+        let http_client = client.lock().unwrap().http_client.clone();
+        let base_url = client.lock().unwrap().base_url.clone();
+        let api_key = client.lock().unwrap().api_key.clone();
+        let conversation = client.lock().unwrap().conversation.clone();
+
+        // Build the request with the cloned data
+        let mut messages = Vec::new();
+        {
+            let c = client.lock().unwrap();
+            let conv = c.conversation.lock().unwrap();
+            for msg in &*conv {
+                if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
+                    continue;
+                }
+                messages.push(msg.clone());
+            }
+        }
+        messages.push(Message {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+
+        let request = ChatRequest {
+            model: "local".to_string(),
+            messages,
+            stream: true,
+            tools: tools.map(|t| t.to_vec()),
+        };
+        let body = serde_json::to_string(&request)?;
+
+        let mut builder = http_client
+            .post(format!("{}/v1/chat/completions", base_url))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .body(body);
+        if let Some(ref key) = api_key {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let resp = builder.send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::debug!("stream_message_with_reasoning_state_arc response status {}: {}", status, text);
+            return Err(Error::Http(format!(
+                "Server returned {}: {}",
+                status, text
+            )));
+        }
+
+        tracing::debug!("stream_message_with_reasoning_state_arc streaming started");
+
+        // Add user message to history
+        add_streaming_messages(&conversation, prompt);
+
+        sse::stream_message(resp, &conversation, &mut callback).await
     }
 
     // ── Tool call helpers ─────────────────────────────────────────────────────

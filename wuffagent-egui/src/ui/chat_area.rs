@@ -242,6 +242,13 @@ impl ChatApp {
         current_offset >= max_offset - Self::SCROLL_BOTTOM_THRESHOLD
     }
 
+    /// Strip <think>...</think> wrapper from thinking content for display.
+    fn strip_thinking_tags(content: &str) -> String {
+        let t = content.trim();
+        let t = t.strip_prefix("<think>").unwrap_or(t);
+        t.strip_suffix("</think>").unwrap_or(t).trim().to_string()
+    }
+
     pub(super) fn draw_message(
         &mut self,
         ui: &mut egui::Ui,
@@ -251,6 +258,8 @@ impl ChatApp {
     ) {
         let is_user = message.role == "user";
         let is_editing = self.chat.editing_message_index == Some(index);
+        // Detect thinking messages (no wrapper tags but role=assistant with dim rendering path)
+        // We rely on the UI having stored content without tags; the live-render path below handles it.
         
         // Constrain content width (leaves room for avatar + margins)
         let avatar_size = 28.0;
@@ -359,9 +368,25 @@ impl ChatApp {
                                 };
                                 if is_tool {
                                     self.draw_tool_message(ui, message, theme);
-                                } else {
+                                } else if message.content.starts_with("💭 ") {
+                                    // Thinking message — render dim and italic
+                                    let thinking_text = &message.content["💭 ".len()..];
                                     let content_label = egui::Label::new(
-                                        egui::RichText::new(message.content.clone())
+                                        egui::RichText::new(thinking_text)
+                                            .color(theme.text_dim)
+                                            .italics()
+                                            .size(12.0)
+                                    ).wrap();
+                                    ui.add(content_label);
+                                } else {
+                                    // Normal message — strip any legacy <think> tags
+                                    let display_content = if message.content.contains("<think>") || message.content.contains("</think>") {
+                                        Self::strip_thinking_tags(&message.content)
+                                    } else {
+                                        message.content.clone()
+                                    };
+                                    let content_label = egui::Label::new(
+                                        egui::RichText::new(display_content)
                                             .color(text_color)
                                     ).wrap();
                                     ui.add(content_label);

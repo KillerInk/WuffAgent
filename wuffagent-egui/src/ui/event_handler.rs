@@ -8,6 +8,7 @@ impl ChatApp {
         match event {
             AppEvent::StreamChunk { content } => {
                 self.chat.stream_chunk(&content);
+                self.chat.current_response.push_str(&content);
             }
             AppEvent::StreamComplete { content, usage } => {
                 // Only commit the buffered stream — the chunks were already
@@ -49,21 +50,42 @@ impl ChatApp {
             AppEvent::ToolCallStart { tool_name, call_id } => {
                 tracing::debug!(tool_name, call_id, "Tool call started");
             }
-            AppEvent::ToolCallComplete { tool_name, call_id: _, result } => {
+            AppEvent::ToolCallComplete { tool_name, call_id, result } => {
                 tracing::debug!(tool_name, result, "Tool call complete");
-                self.chat.append_message("tool", &format!("Tool '{}' completed", tool_name));
-                self.chat.append_message("system", &result);
+                let header = Self::tool_call_header(&tool_name, &result);
+                self.chat.messages.push(crate::types::ChatMessage {
+                    role: "tool".to_string(),
+                    content: format!("{}||{}||{}", header, call_id, result),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    image: None,
+                });
             }
-            AppEvent::ToolCallError { tool_name, call_id: _, error } => {
+            AppEvent::ToolCallError { tool_name, call_id, error } => {
                 tracing::warn!(tool_name, error, "Tool call error");
-                self.chat.append_message("tool", &format!("Tool '{}' error: {}", tool_name, error));
+                let header = format!("Tool '{}' error: {}", tool_name, error);
+                self.chat.messages.push(crate::types::ChatMessage {
+                    role: "tool".to_string(),
+                    content: format!("{}||{}||", header, call_id),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    image: None,
+                });
             }
             AppEvent::StreamThinkingChunk { content } => {
-                self.chat.stream_chunk(&format!("\n> {}", content));
+                tracing::debug!("UI: StreamThinkingChunk received, content_len={}", content.len());
+                // Accumulate for live display; don't add to stream_buffer
+                // (the live display handles formatting via current_thinking)
+                self.chat.current_thinking.push_str(&content);
             }
             AppEvent::StreamThinkingComplete { content: _ } => {
-                self.chat.stream_chunk(&format!("\n\n[Thinking complete]"));
+                tracing::debug!("UI: StreamThinkingComplete received, current_thinking_len={}", self.chat.current_thinking.len());
+                // Commit the thinking as a message, then clear live state
+                let thinking_text = self.chat.current_thinking.clone();
+                if !thinking_text.is_empty() {
+                    // Mark thinking messages with a prefix so draw_message can render them specially
+                    self.chat.append_message("assistant", &format!("💭 {}", thinking_text));
+                }
                 self.chat.commit_stream();
+                self.chat.current_thinking.clear();
             }
             AppEvent::AgentChainStarted { agent_name, depth } => {
                 tracing::info!(agent_name, depth, "Agent chain started");

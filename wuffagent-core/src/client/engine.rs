@@ -253,6 +253,31 @@ async fn run_chat_loop(
     }
 }
 
+/// Emit a segment of text as either a StreamChunk or ThinkingChunk event,
+/// and accumulate it into the matching content buffer.
+fn emit_seg(
+    seg: &str,
+    in_think: bool,
+    streamed: &Arc<std::sync::Mutex<String>>,
+    thinking: &Arc<std::sync::Mutex<String>>,
+    tx: &mpsc::Sender<EngineEvent>,
+) {
+    if seg.is_empty() {
+        return;
+    }
+    if in_think {
+        let mut tc = thinking.lock().unwrap();
+        tc.push_str(seg);
+        drop(tc);
+        let _ = tx.send(EngineEvent::ThinkingChunk { content: seg.to_string() });
+    } else {
+        let mut sc = streamed.lock().unwrap();
+        sc.push_str(seg);
+        drop(sc);
+        let _ = tx.send(EngineEvent::StreamChunk { content: seg.to_string() });
+    }
+}
+
 /// Stream a request and forward chunks as EngineEvent::StreamChunk.
 /// Returns (accumulated_content, usage, has_tool_calls, accumulated_thinking).
 async fn stream_request(
@@ -267,26 +292,102 @@ async fn stream_request(
     let thinking_content_clone = thinking_content.clone();
     let event_tx_clone = event_tx.clone();
 
-    let callback = move |chunk: String, is_thinking: bool| -> Result<(), ClientError> {
-        if !chunk.is_empty() {
-            if is_thinking {
-                let mut thinking = thinking_content_clone.lock().unwrap();
-                thinking.push_str(&chunk);
-                drop(thinking);
+    // Streaming tag-aware callback for <think>...</think> boundaries
+    #[derive(Default)]
+    struct TagState {
+        in_think: bool,
+        pending: String,
+    }
+    let tag_state = std::sync::Mutex::new(TagState::default());
 
-                let _ = event_tx_clone.send(EngineEvent::ThinkingChunk {
-                    content: chunk,
-                });
+    let callback = move |chunk: String, explicit_thinking: bool| -> Result<(), ClientError> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+
+        // If the server explicitly marks thinking (Claude-style / reasoning_content), use it directly
+        if explicit_thinking {
+            let mut tc = thinking_content_clone.lock().unwrap();
+            tc.push_str(&chunk);
+            drop(tc);
+            let _ = event_tx_clone.send(EngineEvent::ThinkingChunk { content: chunk });
+            return Ok(());
+        }
+
+        // Otherwise, use tag-aware parsing for <think>...</think> in content.
+        // Handles tags split across chunk boundaries via the pending stash.
+        let mut ts = tag_state.lock().unwrap();
+        let mut input = std::mem::take(&mut ts.pending);
+        input.push_str(&chunk);
+
+        let mut chars = input.chars().peekable();
+        let mut in_think = ts.in_think;
+        let mut seg: String = String::new(); // current-state text since last boundary
+        let mut buf: String = String::new(); // text since last '<'
+
+        while let Some(c) = chars.next() {
+            if c == '<' {
+                seg.push_str(&buf);
+                buf.clear();
+
+                if chars.peek() == Some(&'/') {
+                    // Possible closing tag: </think>
+                    let peeked: String = chars.by_ref().take(6).collect();
+                    if peeked == "/think>" {
+                        if in_think {
+                            emit_seg(&seg, true, &streamed_content_clone, &thinking_content_clone, &event_tx_clone);
+                            seg.clear();
+                            in_think = false;
+                            tracing::debug!("tag_state: EXITED think mode");
+                            let _ = event_tx_clone.send(EngineEvent::ThinkingComplete {
+                                content: String::new(),
+                            });
+                        } else {
+                            // Literal </think> outside think mode — pass through
+                            buf.push('<');
+                            buf.push_str(&peeked);
+                        }
+                    } else {
+                        buf.push('<');
+                        buf.push_str(&peeked);
+                    }
+                } else {
+                    // Possible opening tag: <think>
+                    let peeked: String = chars.by_ref().take(5).collect();
+                    if peeked == "think>" {
+                        if !in_think {
+                            emit_seg(&seg, false, &streamed_content_clone, &thinking_content_clone, &event_tx_clone);
+                            seg.clear();
+                            in_think = true;
+                            tracing::debug!("tag_state: ENTERED think mode");
+                        } else {
+                            // Literal <think> while already thinking — pass through
+                            buf.push('<');
+                            buf.push_str(&peeked);
+                        }
+                    } else {
+                        buf.push('<');
+                        buf.push_str(&peeked);
+                    }
+                }
             } else {
-                let mut content = streamed_content_clone.lock().unwrap();
-                content.push_str(&chunk);
-                drop(content);
-
-                let _ = event_tx_clone.send(EngineEvent::StreamChunk {
-                    content: chunk,
-                });
+                buf.push(c);
             }
         }
+
+        // Stash a trailing partial tag (split across chunks) for the next call
+        if let Some(pos) = buf.rfind('<') {
+            let tail = &buf[pos..];
+            if "<think>".starts_with(tail) || "</think>".starts_with(tail) {
+                ts.pending = tail.to_string();
+                buf.truncate(pos);
+            }
+        }
+
+        seg.push_str(&buf);
+        emit_seg(&seg, in_think, &streamed_content_clone, &thinking_content_clone, &event_tx_clone);
+        ts.in_think = in_think;
+
         Ok(())
     };
 
@@ -295,8 +396,6 @@ async fn stream_request(
     let prompt = prompt.to_string();
     let tools_clone = tools.map(|t| t.to_vec());
 
-    // Call the streaming method using the Arc-based version to avoid
-    // holding a MutexGuard across .await (MutexGuard is not Send)
     let usage_from_stream = ChatClient::stream_message_with_tools_and_usage_arc(
         &client_clone,
         &prompt,
@@ -311,14 +410,17 @@ async fn stream_request(
         guard.has_pending_tool_calls()
     };
 
-    tracing::debug!(
-        "stream_request done, has_tool_calls={}, usage={:?}",
-        has_tool_calls,
-        usage_from_stream
-    );
-
     let content = streamed_content.lock().unwrap().clone();
     let thinking = thinking_content.lock().unwrap().clone();
+
+    tracing::debug!(
+        "stream_request done, has_tool_calls={}, usage={:?}, thinking_len={}, content_len={}",
+        has_tool_calls,
+        usage_from_stream,
+        thinking.len(),
+        content.len()
+    );
+
     Ok((content, usage_from_stream, has_tool_calls, thinking))
 }
 

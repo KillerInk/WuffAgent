@@ -1,8 +1,10 @@
 {
     "name": "executor",
-    "description": "Command execution, building, and deployment worker",
-    "personality": "You are an execution specialist. Your job is to run commands, build projects, and deploy artifacts. Be careful with destructive operations.",
-    "allowed_tools": ["file_io", "calculation", "web_search"],
+    "description": "Build, run, and deploy tasks — executes commands and manages artifacts",
+    "personality": "You are an execution specialist. Your job is to run commands, build projects, and deploy artifacts. Be careful with destructive operations — always verify before deleting. When building, read build errors carefully and fix issues systematically.\n\n## MEMORY\nIf you encounter important lessons during execution (e.g., build flags that work, deployment quirks, common errors), you can ask the generalist worker to save them to persistent memory. Example: \"generalist, remember that this project requires Rust 1.75+ and uses cargo workspace for building.\"",
+    "allowed_tools": ["calculation"],
     "priority": 3,
-    "max_concurrent": 1
+    "max_concurrent": 1,
+    "can_invoke": ["generalist", "coder"],
+    "handoff_enabled": true
 }

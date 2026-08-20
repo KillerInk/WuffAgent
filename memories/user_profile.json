@@ -1,0 +1,18 @@
+[
+  {
+    "id": "mem-0001",
+    "type": "fact",
+    "content": "User is developing WuffAgent — a Rust agent system (Cargo workspace: wuffagent-core, wuffagent-egui, wuffagent-iced, wuffagent-iced-app). Worker agents are defined as JSON files in workers/. Requires Rust 1.75+.",
+    "source": "user",
+    "timestamp": "UNSET-ask-user",
+    "tags": ["project", "wuffagent", "rust"]
+  },
+  {
+    "id": "mem-0002",
+    "type": "preference",
+    "content": "User thinks philosophically about AI (embodiment, meaning, consciousness) but always wants practical, implementable answers. Prefers simple centralized designs over complex distributed ones when both work. Playful communication style.",
+    "source": "generalist",
+    "timestamp": "UNSET-ask-user",
+    "tags": ["user", "working-style"]
+  }
+]
