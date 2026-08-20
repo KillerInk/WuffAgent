@@ -134,7 +134,7 @@ impl ChatApp {
             role: m.role.clone(),
             content: m.content.clone(),
             timestamp: if m.timestamp.is_empty() {
-                chrono::Local::now().format("%H:%M:%S").to_string()
+                crate::types::format_timestamp()
             } else {
                 m.timestamp.clone()
             },
@@ -258,7 +258,7 @@ impl ChatAreaState {
         self.messages.push(ChatMessage {
             role: role.to_string(),
             content: content.to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::types::format_timestamp(),
             image: None,
         });
     }

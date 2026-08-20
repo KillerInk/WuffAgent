@@ -2,11 +2,13 @@ pub mod calculation;
 pub mod file_io;
 pub mod web_search;
 pub mod agent_call;
+pub mod time;
 
 pub use calculation::CalculationTool;
 pub use file_io::FileIOTool;
 pub use web_search::WebSearchTool;
 pub use agent_call::AgentCallTool;
+pub use time::TimeTool;
 
 use crate::tools::types::{ToolMetadata};
 use crate::tools::registry::ToolEntry;
@@ -55,6 +57,17 @@ pub fn register_builtins(
             name: "agent_call".to_string(),
             version: "1.0.0".to_string(),
             description: "Invoke another agent to execute a sub-task".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+    })?;
+
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(TimeTool::new()),
+        metadata: ToolMetadata {
+            name: "time".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Get the current date and time".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

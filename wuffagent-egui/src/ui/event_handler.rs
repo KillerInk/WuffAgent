@@ -56,7 +56,7 @@ impl ChatApp {
                 self.chat.messages.push(crate::types::ChatMessage {
                     role: "tool".to_string(),
                     content: format!("{}||{}||{}", header, call_id, result),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    timestamp: crate::types::format_timestamp(),
                     image: None,
                 });
             }
@@ -66,7 +66,7 @@ impl ChatApp {
                 self.chat.messages.push(crate::types::ChatMessage {
                     role: "tool".to_string(),
                     content: format!("{}||{}||", header, call_id),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    timestamp: crate::types::format_timestamp(),
                     image: None,
                 });
             }

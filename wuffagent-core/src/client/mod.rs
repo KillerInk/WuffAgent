@@ -636,8 +636,18 @@ impl ChatClient {
                 }
             }
 
-            // Add result message to conversation
+            // Add result message to conversation in formatted format for UI display
             {
+                let result_str = result.as_ref().map_or_else(
+                    |e| e.to_string(),
+                    |r| match r {
+                        crate::tools::types::ToolOutput::Success(v) => v.to_string(),
+                        crate::tools::types::ToolOutput::Error(e) => e.clone(),
+                    },
+                );
+                let header = crate::types::tool_call_header(&tc.function.name, &result_str);
+                let content = format!("{}||{}||{}", header, tc.id, result_str);
+
                 let client = client.lock().unwrap();
                 let mut conv = client.conversation.lock().unwrap();
                 if let Some(last) = conv.last_mut() {
@@ -650,14 +660,8 @@ impl ChatClient {
                 }
                 conv.push(Message {
                     role: "tool".to_string(),
-                    content: result.map_or_else(
-                        |e| e.to_string(),
-                        |r| match r {
-                            crate::tools::types::ToolOutput::Success(v) => v.to_string(),
-                            crate::tools::types::ToolOutput::Error(e) => e,
-                        }
-                    ),
-                    timestamp: String::new(),
+                    content,
+                    timestamp: crate::types::format_timestamp(),
                     tool_calls: None,
                     tool_call_id: Some(tc.id.clone()),
                 });

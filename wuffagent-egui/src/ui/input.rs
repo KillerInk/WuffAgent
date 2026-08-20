@@ -164,7 +164,7 @@ impl ChatApp {
         self.chat.messages.push(crate::types::ChatMessage {
             role: "user".to_string(),
             content: input.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::types::format_timestamp(),
             image: image.map(|_| String::new()),
         });
 
@@ -303,7 +303,7 @@ impl ChatApp {
         self.chat.messages.push(crate::types::ChatMessage {
             role: "user".to_string(),
             content: format!("/plan {}", request),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::types::format_timestamp(),
             image: None,
         });
 
