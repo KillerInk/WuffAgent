@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::tools::lib::{Tool, ToolOutput, ToolParams, ToolSchema};
+use crate::tools::types::{Tool, ToolOutput, ToolParams, ToolSchema};
 
 /// A tool that evaluates mathematical expressions.
 pub struct CalculationTool;
@@ -30,13 +30,13 @@ impl Tool for CalculationTool {
         ToolSchema {
             name: "calculation".to_string(),
             description: "Evaluate a mathematical expression".to_string(),
-            input_type: Some(crate::tools::lib::JsonSchema {
+            input_type: Some(crate::tools::types::JsonSchema {
                 type_name: "object".to_string(),
                 properties: Some({
                     let mut map = HashMap::new();
                     map.insert(
                         "expression".to_string(),
-                        crate::tools::lib::FieldSchema {
+                        crate::tools::types::FieldSchema {
                             type_name: "string".to_string(),
                             description: "Mathematical expression to evaluate".to_string(),
                             nullable: false,
@@ -49,17 +49,17 @@ impl Tool for CalculationTool {
         }
     }
 
-    fn execute(&self, params: ToolParams) -> crate::tools::lib::ToolResult<ToolOutput> {
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
         let expression: String = params
             .get("expression")
             .ok_or_else(|| {
-                crate::tools::lib::ToolError::InvalidParams("expression is required".to_string())
+                crate::tools::types::ToolError::InvalidParams("expression is required".to_string())
             })?;
 
         // Use the `evalu8` crate for safe expression evaluation.
         // For now we use a simple parser; replace with a proper library in production.
         let result = evaluate_expression(&expression).map_err(|e| {
-            crate::tools::lib::ToolError::Execution(format!("Evaluation error: {}", e))
+            crate::tools::types::ToolError::Execution(format!("Evaluation error: {}", e))
         })?;
 
         Ok(ToolOutput::Success(serde_json::json!({

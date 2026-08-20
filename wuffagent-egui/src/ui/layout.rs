@@ -26,7 +26,7 @@ impl ChatApp {
         // Clear client session if a session was deleted (explicit flag from panel).
         // Also clear the chat display so the deleted conversation isn't re-saved.
         if clear_client_session {
-            self.client.lock().unwrap().clear_session();
+            self.client.clone().clear_session();
             self.chat.messages.clear();
         }
 
@@ -34,7 +34,7 @@ impl ChatApp {
             ui.set_min_height(32.0);
             ui.set_max_height(36.0);
 
-            let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+            let theme = Theme::from_name(&self.config.clone().theme.clone());
             ui.visuals_mut().panel_fill = theme.background;
 
             ui.horizontal(|ui| {
@@ -74,7 +74,7 @@ impl ChatApp {
 
         // Bottom panels stack upward, so bottom_bar must be declared first to be at the bottom
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
-            let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+            let theme = Theme::from_name(&self.config.clone().theme.clone());
             ui.visuals_mut().panel_fill = theme.surface;
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
             self.draw_status_bar(ui);
@@ -87,29 +87,21 @@ impl ChatApp {
             .default_height(50.0)
             .resizable(false)
             .show(ctx, |ui| {
-                let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+                let theme = Theme::from_name(&self.config.clone().theme.clone());
                 ui.visuals_mut().panel_fill = theme.surface;
                 self.draw_input_area(ui);
             });
 
         // Chat area fills all remaining space between top bar and input panel
         egui::CentralPanel::default().show(ctx, |ui| {
-            let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+            let theme = Theme::from_name(&self.config.clone().theme.clone());
             ui.visuals_mut().panel_fill = theme.background;
             self.draw_chat_area(ui);
         });
-
-        // Agent chain side panel — always shown so the user can see agent activity
-        egui::SidePanel::right("agent_chain_panel")
-            .default_width(280.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                self.draw_agent_chain_panel(ui);
-            });
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {
-        let cfg = self.config.lock().unwrap();
+        let cfg = self.config.clone();
         let current_theme = cfg.theme.clone();
         drop(cfg);
 
@@ -119,8 +111,8 @@ impl ChatApp {
             "dark".to_string()
         };
 
-        self.config.lock().unwrap().theme = new_theme.clone();
-        if let Err(e) = self.config.lock().unwrap().save() {
+        self.config.theme = new_theme.clone();
+        if let Err(e) = self.save_config() {
             eprintln!("Failed to save theme: {}", e);
         }
 

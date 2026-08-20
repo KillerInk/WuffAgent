@@ -65,8 +65,6 @@ pub struct ChatMessage {
 /// Events that flow from the client engine to the UI.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
-    MessageResult { content: String, usage: Option<Usage> },
-    MessageError { error: String },
     StreamChunk { content: String },
     StreamComplete { content: String, usage: Option<Usage> },
     StreamError { error: String },
@@ -77,16 +75,6 @@ pub enum AppEvent {
     // Thinking output events (e.g. Claude-style reasoning)
     StreamThinkingChunk { content: String },
     StreamThinkingComplete { content: String },
-    // Agent pipeline events
-    AgentPlanGenerated { plan_id: String, task_count: usize, user_request: String, task_descriptions: Vec<String> },
-    AgentTaskStarted { task_id: String, task_description: String, agent_type: String },
-    AgentTaskCompleted { task_id: String, status: String, duration_ms: u64 },
-    AgentFeedbackLoop { iteration: u32, action: String },
-    AgentPipelineComplete { result_count: usize, final_output: String },
-    AgentPipelineError { error: String },
-    AgentPipelineCancelled,
-    /// A tool error occurred during a task execution — send to planner for plan refinement.
-    AgentToolError { tool_name: String, task_id: String, error: String },
     // Agent engine events
     AgentEngineComplete { response: String },
     AgentEngineError { error: String },
@@ -100,4 +88,20 @@ pub enum AppEvent {
     AgentChainStopped,
     /// Remote server n_ctx was updated.
     NCtxUpdated { n_ctx: u32 },
+}
+
+/// Convert engine events (from the chat engine) to app events (UI-facing).
+impl From<crate::client::engine::EngineEvent> for AppEvent {
+    fn from(event: crate::client::engine::EngineEvent) -> Self {
+        match event {
+            crate::client::engine::EngineEvent::StreamChunk { content } => Self::StreamChunk { content },
+            crate::client::engine::EngineEvent::StreamComplete { content, usage } => Self::StreamComplete { content, usage },
+            crate::client::engine::EngineEvent::StreamError { error } => Self::StreamError { error },
+            crate::client::engine::EngineEvent::ToolCallStart { tool_name, call_id } => Self::ToolCallStart { tool_name, call_id },
+            crate::client::engine::EngineEvent::ToolCallComplete { tool_name, call_id, result } => Self::ToolCallComplete { tool_name, call_id, result },
+            crate::client::engine::EngineEvent::ToolCallError { tool_name, call_id, error } => Self::ToolCallError { tool_name, call_id, error },
+            crate::client::engine::EngineEvent::ThinkingChunk { content } => Self::StreamThinkingChunk { content },
+            crate::client::engine::EngineEvent::ThinkingComplete { content } => Self::StreamThinkingComplete { content },
+        }
+    }
 }

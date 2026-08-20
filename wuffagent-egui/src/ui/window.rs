@@ -1,25 +1,18 @@
 use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 
-use crate::config::{ChatMessage as ConfigChatMessage, Config, get_presets_path, PresetStore};
-use crate::tools::ToolManager;
+use crate::config::{get_presets_path, PresetStore};
 pub use crate::ui::state::ChatApp;
 
 impl ChatApp {
-    pub fn show_settings_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        _server: &Arc<crate::server::ServerManager>,
-        _client: &Arc<Mutex<crate::client::ChatClient>>,
-        config: &Arc<Mutex<Config>>,
-    ) {
+    pub fn show_settings_dialog(&mut self, ctx: &egui::Context) {
         if self.show_settings && self.settings_dialog.is_none() {
-            // Pass a shared flag so settings can signal us to open presets
             let show_presets = Arc::new(Mutex::new(false));
             self.settings_dialog =
-                Some(super::settings::SettingsDialog::new_with_presets_flag(config, show_presets));
+                Some(super::settings::SettingsDialog::new_with_presets_flag(&Arc::new(Mutex::new(self.config.clone())), show_presets));
         }
         if let Some(dialog) = self.settings_dialog.as_mut() {
-            let closed = dialog.show(ctx, config);
+            let closed = dialog.show(ctx, &Arc::new(Mutex::new(self.config.clone())));
             if closed {
                 self.show_settings = false;
                 self.settings_dialog = None;
@@ -27,12 +20,7 @@ impl ChatApp {
         }
     }
 
-    pub fn show_presets_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        config: &Arc<Mutex<Config>>,
-    ) {
-        // Check if settings dialog signaled us to open presets via shared flag
+    pub fn show_presets_dialog(&mut self, ctx: &egui::Context) {
         if let Some(ref sd) = self.settings_dialog {
             if let Ok(flag) = sd.show_presets.lock() {
                 if *flag {
@@ -51,9 +39,8 @@ impl ChatApp {
         }
 
         if let Some(dialog) = self.presets_dialog.as_mut() {
-            let closed = dialog.show(ctx, config);
+            let closed = dialog.show(ctx, &Arc::new(Mutex::new(self.config.clone())));
             if closed {
-                // Persist store to disk before closing
                 if let Ok(path) = std::env::current_exe() {
                     if let Some(dir) = path.parent() {
                         let presets_path = dir.join("presets.json");
@@ -67,22 +54,78 @@ impl ChatApp {
         }
     }
 
-    pub fn show_agent_config_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        agent_manager: &Arc<Mutex<crate::agents::config::AgentManager>>,
-        tool_manager: &Arc<ToolManager>,
-    ) {
+    pub fn show_agent_config_dialog(&mut self, ctx: &egui::Context) {
         if self.show_agent_config && self.agent_config_dialog.is_none() {
+            let agents_dir = PathBuf::from("agents");
+            let agent_manager = crate::agents::config::AgentManager::new(agents_dir);
             self.agent_config_dialog =
-                Some(super::agent_config::AgentConfigDialog::new(agent_manager.clone(), tool_manager));
+                Some(super::agent_config::AgentConfigDialog::new(Arc::new(Mutex::new(agent_manager)), &self.tool_manager));
         }
         if let Some(dialog) = self.agent_config_dialog.as_mut() {
-            let closed = dialog.show(ctx, agent_manager);
+            let agents_dir = PathBuf::from("agents");
+            let agent_manager = crate::agents::config::AgentManager::new(agents_dir);
+            let closed = dialog.show(ctx, &Arc::new(Mutex::new(agent_manager)));
             if closed {
                 self.show_agent_config = false;
                 self.agent_config_dialog = None;
             }
+        }
+    }
+
+    pub fn process_pending_events(&mut self) {
+        // Drain all buffered events from the channel and handle them.
+        // Events are produced by:
+        //  - the merge task (engine_rx → AppEvent + tool_rx → AppEvent)
+        //  - any direct AppEvent sends from the client (tool calls)
+        // Take the receiver out of the Option to avoid borrowing self mutably
+        // while also calling self.handle_event().
+        if let Some(rx) = self.pending_rx.take() {
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+            // Put the receiver back
+            self.pending_rx = Some(rx);
+            for event in events {
+                self.handle_event(event);
+            }
+        }
+    }
+
+    pub fn update_save_failure_notification(&mut self) {
+        // Update save failure notification state
+        if self.client.has_save_failure() {
+            // Could show a toast/notification here
+        }
+    }
+
+    pub fn switch_session(&mut self, id: &str) {
+        // Save the current session before switching
+        if let Err(e) = self.save_session() {
+            eprintln!("Failed to save session before switch: {}", e);
+        }
+        // Switch to a different session
+        self.client.clone().clear_session();
+        self.chat.messages.clear();
+        // Update the panel's selected_id so the UI reflects the switch immediately
+        if let Some(ref mut panel) = self.sessions.sessions_panel {
+            panel.select_session(id);
+        }
+        // Reload the selected session
+        let session_dir = self.config.sessions_dir.clone();
+        if let Some(session) = crate::sessions::load_session(&session_dir, id) {
+            let mut conv = self.client.conversation().lock().unwrap();
+            *conv = session.messages.clone();
+            drop(conv);
+            self.client.set_session(Some(id.to_string()), session_dir);
+            self.client.load_session();
+            // Populate the UI display with the loaded session messages
+            self.chat.messages = session.messages.iter().map(|m| crate::types::ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                timestamp: m.timestamp.clone(),
+                image: None,
+            }).collect();
         }
     }
 }
@@ -103,10 +146,7 @@ impl eframe::App for ChatApp {
                 let handle = tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        let url = {
-                            let cfg = config.lock().unwrap();
-                            cfg.remote_url.clone()
-                        };
+                        let url = config.remote_url.clone();
                         if url.is_empty() {
                             continue;
                         }
@@ -142,42 +182,27 @@ impl eframe::App for ChatApp {
 
         // Process any pending async results first
         self.process_pending_events();
+        // Retry any pending session saves
+        self.client.clone().retry_pending_saves();
         // Update save-failure notification state
         self.update_save_failure_notification();
         // Show settings dialog
-        let server = self.server.clone();
-        let client = self.client.clone();
-        let config = self.config.clone();
-        self.show_settings_dialog(ctx, &server, &client, &config);
+        self.show_settings_dialog(ctx);
         // Show presets dialog (may be triggered from settings)
-        self.show_presets_dialog(ctx, &config);
+        self.show_presets_dialog(ctx);
         // Show agent config dialog
-        let agent_manager = self.agent_manager.clone();
-        let tool_manager = self.tool_manager.clone();
-        self.show_agent_config_dialog(ctx, &agent_manager, &tool_manager);
+        self.show_agent_config_dialog(ctx);
         // Draw main UI
         self.setup_ui(ctx);
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        // Save config (existing)
-        let mut cfg = self.config.lock().unwrap();
-        cfg.streaming = self.chat.streaming;
-        cfg.chat_history = self.chat.messages.iter().map(|m| ConfigChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            timestamp: if m.timestamp.is_empty() {
-                chrono::Local::now().format("%H:%M:%S").to_string()
-            } else {
-                m.timestamp.clone()
-            },
-        }).collect();
-        // Note: images are not persisted in config chat_history (they're in session)
-        if let Err(e) = cfg.save() {
+        // Save config via centralized method
+        if let Err(e) = self.save_config() {
             eprintln!("Failed to save config: {}", e);
         }
-        // Save current session
-        if let Err(e) = self.client.lock().unwrap().save_session() {
+        // Save current session via centralized method
+        if let Err(e) = self.save_session() {
             eprintln!("Failed to save session: {}", e);
         }
     }

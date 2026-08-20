@@ -9,11 +9,12 @@ use super::sessions_actions::PanelAction;
 use super::sessions_utils::{relative_time, truncate};
 use super::sessions_actions::apply_actions;
 
+#[derive(Clone, Debug)]
 pub struct SessionsPanel {
     sessions: Vec<crate::sessions::Session>,
     selected_id: Option<String>,
     sessions_dir: PathBuf,
-    config: Arc<Mutex<Config>>,
+    config: Config,
     renaming: Option<String>,
     rename_input: String,
     creating: bool,
@@ -34,14 +35,15 @@ impl SessionsPanel {
     pub fn new(config: &Arc<Mutex<Config>>) -> Self {
         let cfg = config.lock().unwrap();
         let dir = cfg.sessions_dir().clone();
-        drop(cfg);
         let sessions = sessions::list_sessions(&dir);
         let selected_id = sessions.first().map(|s| s.id.clone());
+        let config_clone = cfg.clone();
+        drop(cfg);
         Self {
             sessions,
             selected_id,
             sessions_dir: dir,
-            config: config.clone(),
+            config: config_clone,
             renaming: None,
             rename_input: String::new(),
             creating: false,
@@ -63,6 +65,11 @@ impl SessionsPanel {
         self.selected_id = None;
     }
 
+    /// Select a session by id without clearing it first.
+    pub fn select_session(&mut self, id: &str) {
+        self.selected_id = Some(id.to_string());
+    }
+
     pub(super) fn sessions_dir(&self) -> &PathBuf {
         &self.sessions_dir
     }
@@ -75,7 +82,7 @@ impl SessionsPanel {
         &mut self.selected_id
     }
 
-    pub(super) fn config(&self) -> &Mutex<Config> {
+    pub(super) fn config(&self) -> &Config {
         &self.config
     }
 
@@ -193,7 +200,7 @@ impl SessionsPanel {
             .min_width(150.0)
             .max_width(320.0)
             .show(ctx, |ui| {
-                let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+                let theme = Theme::from_name(&self.config.theme);
                 ui.visuals_mut().panel_fill = theme.panel_bg;
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);
                 // Session heading with accent color
@@ -313,12 +320,9 @@ impl SessionsPanel {
                         selected_id = Some(session.id.clone());
                         self.selected_id = Some(session.id.clone());
                         // Update config so the selected session is loaded on next app start
-                        {
-                            let mut cfg = self.config.lock().unwrap();
-                            cfg.session_id = Some(session.id.clone());
-                            if let Err(e) = cfg.save() {
-                                eprintln!("Failed to save config after selecting session: {}", e);
-                            }
+                        self.config.session_id = Some(session.id.clone());
+                        if let Err(e) = self.config.save() {
+                            eprintln!("Failed to save config after selecting session: {}", e);
                         }
                     }
                     if response.double_clicked() {

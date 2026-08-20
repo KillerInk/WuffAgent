@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use libloading::{Library, Symbol};
 
-use crate::tools::lib::{PluginTool, Tool, ToolError, ToolLogger, ToolMetadata, ToolResult};
+use crate::tools::types::{PluginTool, Tool, ToolError, ToolLogger, ToolMetadata, ToolResult};
 
 /// A handle to a dynamically loaded plugin.
 pub struct PluginHandle {

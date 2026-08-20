@@ -13,18 +13,7 @@ use crate::types::{AppEvent, AppStatus, ChatMessage};
 // Re-export EngineEvent for use in other modules
 pub use crate::client::engine::EngineEvent;
 
-// Re-export agent types for use in other modules
-pub use crate::agents::AgentPipeline;
-
 /// A single task progress entry in the pipeline panel.
-#[derive(Clone, Debug)]
-pub struct PipelineTaskEntry {
-    pub id: String,
-    pub description: String,
-    pub status: PipelineTaskStatus,
-    pub agent_type: String,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum PipelineTaskStatus {
     #[default]
@@ -34,212 +23,286 @@ pub enum PipelineTaskStatus {
     Failed,
 }
 
-impl std::fmt::Display for PipelineTaskStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PipelineTaskStatus::Pending => write!(f, "pending"),
-            PipelineTaskStatus::Running => write!(f, "running"),
-            PipelineTaskStatus::Completed => write!(f, "completed"),
-            PipelineTaskStatus::Failed => write!(f, "failed"),
-        }
-    }
+#[derive(Clone, Debug)]
+pub struct PipelineTaskEntry {
+    pub id: String,
+    pub description: String,
+    pub status: PipelineTaskStatus,
+    pub agent_type: String,
 }
 
-/// State of the agent pipeline panel.
+/// State for the agent chain panel.
 #[derive(Clone, Debug, Default)]
-pub struct PipelineState {
-    pub(super) active: bool,
-    pub(super) plan_id: String,
-    pub(super) iteration: u32,
-    pub(super) tasks: Vec<PipelineTaskEntry>,
-    pub(super) feedback_state: String,
-    pub(super) cancelled: bool,
-}
-
-/// Chat-related state extracted from ChatApp
-#[derive(Default)]
-pub struct ChatState {
-    pub(super) messages: Vec<ChatMessage>,
-    pub(super) input_text: String,
-    pub(super) is_generating: bool,
-    pub(super) is_pipeline_running: bool,
-    pub(super) status: AppStatus,
-    pub(super) streaming: bool,
-    pub(super) current_response: String,
-    pub(super) current_thinking: String,
-    pub(super) token_count: u32,
-    pub(super) context_used: f32,
-    /// Whether to scroll to bottom on the next frame (set when new message arrives while at bottom)
-    pub(super) scroll_to_bottom_requested: bool,
-    /// Whether the scroll-to-bottom button should be visible
-    pub(super) button_visible: bool,
-    /// Fade animation for the button (0.0 to 1.0)
-    pub(super) button_opacity: f32,
-    /// Whether user is currently at the bottom of the chat
-    pub(super) at_bottom: bool,
-    /// Current scroll offset Y position (tracked across frames)
-    pub(super) scroll_offset_y: f32,
-    /// Previous frame's scroll offset Y position
-    pub(super) prev_scroll_offset_y: f32,
-    /// Previous frame's content height (for computing was_at_bottom)
-    pub(super) prev_content_height: f32,
-    pub(super) pending_image: Option<String>,
-    pub(super) editing_message_index: Option<usize>,
-    pub(super) editing_message_content: String,
-    pub(super) pending_error: Option<String>,
-    pub(super) streaming_task: Option<JoinHandle<()>>,
-    pub(super) engine: Option<crate::client::engine::ChatEngine>,
-    /// Agent pipeline panel state
-    pub(super) pipeline: PipelineState,
-}
-
-/// Session-related state extracted from ChatApp
-pub struct SessionState {
-    pub(super) sessions_panel: Option<super::sessions_panel::SessionsPanel>,
-    pub(super) save_failure_message: Option<String>,
-    pub(super) max_display_messages: usize,
-}
-
-/// State for the agent chain UI panel.
-#[derive(Default)]
 pub struct AgentChainState {
-    pub(super) active: bool,
-    pub(super) entries: Vec<crate::sessions::model::AgentChainEntry>,
-    pub(super) current_agent: Option<String>,
-    pub(super) cancelled: bool,
+    pub active: bool,
+    pub entries: Vec<crate::sessions::model::AgentChainEntry>,
+    pub current_agent: Option<String>,
+    pub cancelled: bool,
 }
 
-/// Main app state with extracted sub-structs
+/// State for the presets dialog.
+#[derive(Clone, Debug)]
+pub struct PresetsDialogState {
+    pub show_presets: Arc<Mutex<bool>>,
+}
+
+/// Main application state for the egui UI.
 pub struct ChatApp {
-    // Core dependencies
-    pub(super) server: Arc<ServerManager>,
-    pub(super) client: Arc<Mutex<ChatClient>>,
-    pub(super) config: Arc<Mutex<Config>>,
-    pub(super) tool_manager: Arc<ToolManager>,
-    pub(super) pending_tx: Option<mpsc::Sender<AppEvent>>,
-    pub(super) pending_rx: Mutex<mpsc::Receiver<AppEvent>>,
-
-    // Extracted state structs
-    pub(super) chat: ChatState,
-    pub(super) sessions: SessionState,
-    // UI flags
-    pub(super) show_settings: bool,
-    pub(super) settings_dialog: Option<super::settings::SettingsDialog>,
-    pub(super) presets_dialog: Option<super::presets_dialog::PresetsDialog>,
-    pub(super) show_agent_config: bool,
-    pub(super) agent_config_dialog: Option<super::agent_config::AgentConfigDialog>,
-    /// Agent manager for add/edit/remove/list of worker configurations.
-    pub(super) agent_manager: Arc<Mutex<crate::agents::config::AgentManager>>,
-
-    // Agent engine (replaces agent_pipeline)
-    pub(super) agent_engine: Arc<crate::agents::AgentEngine>,
-    pub(super) agent_cancel_token: Arc<CancellationToken>,
-    pub(super) agent_chain_state: AgentChainState,
-    /// Which chain entries are expanded for result preview.
-    pub(super) agent_chain_expanded: Vec<usize>,
-
-    // Remote server state
-    pub(super) remote_n_ctx: u32,
-    pub(super) remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
-    pub(super) remote_n_ctx_handle: Option<JoinHandle<()>>,
-
-    // UI progress
-    pub(super) progress: f32,
+    pub config: Config,
+    pub client: ChatClient,
+    pub server: ServerManager,
+    pub tool_manager: Arc<ToolManager>,
+    pub agent_engine: Arc<crate::agents::AgentEngine>,
+    pub cancellation_token: CancellationToken,
+    pub chat: ChatAreaState,
+    pub sessions: SessionsPanelState,
+    pub status: AppStatus,
+    pub show_settings: bool,
+    pub settings_dialog: Option<super::settings::SettingsDialog>,
+    pub presets_dialog: Option<super::presets_dialog::PresetsDialog>,
+    pub show_agent_config: bool,
+    pub agent_config_dialog: Option<super::agent_config::AgentConfigDialog>,
+    pub agent_chain_state: AgentChainState,
+    pub agent_chain_expanded: Vec<usize>,
+    /// Channel sender for relaying core events (EngineEvent, AppEvent) to the UI thread.
+    /// The corresponding receiver is stored separately so `process_pending_events` can poll it.
+    pub pending_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
+    pub pending_rx: Option<mpsc::Receiver<AppEvent>>,
+    pub agent_cancel_token: CancellationToken,
+    /// Persistent chat engine — created once in `new()` and reused across sends.
+    pub chat_engine: Option<crate::client::engine::ChatEngine>,
+    /// Index of the currently selected agent for chat (None = auto-select).
+    pub selected_agent_index: Option<usize>,
+    /// Remote n_ctx value (for remote mode).
+    pub remote_n_ctx: u32,
+    /// Handle for the remote n_ctx update task.
+    pub remote_n_ctx_handle: Option<JoinHandle<()>>,
+    /// Arc for the remote n_ctx atomic value.
+    pub remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
 }
 
 impl ChatApp {
     pub fn new(
-        server: Arc<ServerManager>,
-        client: Arc<Mutex<ChatClient>>,
-        config: Arc<Mutex<Config>>,
+        config: Config,
+        client: ChatClient,
+        server: ServerManager,
         tool_manager: Arc<ToolManager>,
         agent_engine: Arc<crate::agents::AgentEngine>,
     ) -> Self {
-        let cfg = config.lock().unwrap();
-        let streaming = cfg.streaming;
-        let max_messages = cfg.max_messages;
-        drop(cfg);
-        let (tx, rx) = mpsc::channel();
-
-        // Connect the UI event channel to the client's tool event sender
-        // so that ToolCallStart/ToolCallComplete events reach the UI
-        client.lock().unwrap().set_tool_event_sender(tx.clone());
-
-        // Initialize sessions panel and load the current session
-        let sessions_panel = super::sessions_panel::SessionsPanel::new(&config.clone());
-        let mut messages: Vec<ChatMessage> = Vec::new();
-        {
-            let mut cl = client.lock().unwrap();
-            if let Some(session) = cl.load_session() {
-                let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-                messages = session.messages.iter().map(|m| ChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                    timestamp: if m.timestamp.is_empty() { ts.clone() } else { m.timestamp.clone() },
-                    image: None,
-                }).collect();
-            }
-        }
-
+        // Create the event channel pair: UI polls the receiver each frame,
+        // the merge task (started in send_message) writes into the sender.
+        let (tx, rx) = mpsc::channel::<AppEvent>();
+        // Initialize the sessions panel with a clone of the config.
+        let sessions_panel =
+            super::sessions_panel::SessionsPanel::new(&Arc::new(Mutex::new(config.clone())));
         Self {
-            server,
+            config,
             client,
-            config: config.clone(),
+            server,
             tool_manager,
-            pending_tx: Some(tx),
-            pending_rx: Mutex::new(rx),
-            chat: ChatState {
-                messages,
-                input_text: String::new(),
-                is_generating: false,
-                is_pipeline_running: false,
-                status: AppStatus::Stopped,
-                streaming,
-                current_response: String::new(),
-                current_thinking: String::new(),
-                token_count: 0,
-                context_used: 0.0,
-                scroll_to_bottom_requested: false,
-                button_visible: false,
-                button_opacity: 0.0,
-                at_bottom: true,
-                scroll_offset_y: 0.0,
-                prev_scroll_offset_y: 0.0,
-                prev_content_height: 0.0,
-                pending_image: None,
-                editing_message_index: None,
-                editing_message_content: String::new(),
-                pending_error: None,
-                streaming_task: None,
-                engine: None,
-                pipeline: PipelineState::default(),
-            },
-            sessions: SessionState {
+            agent_engine,
+            cancellation_token: CancellationToken::new(),
+            chat: ChatAreaState::new(),
+            sessions: SessionsPanelState {
+                sessions: Vec::new(),
+                selected_session: None,
                 sessions_panel: Some(sessions_panel),
-                save_failure_message: None,
-                max_display_messages: max_messages,
             },
+            status: AppStatus::Stopped,
             show_settings: false,
             settings_dialog: None,
             presets_dialog: None,
             show_agent_config: false,
             agent_config_dialog: None,
-            agent_manager: Arc::new(Mutex::new(crate::agents::config::AgentManager::new(
-                config_path_parent(&config).join("workers"),
-            ))),
-            remote_n_ctx: 0,
-            remote_n_ctx_arc: None,
-            remote_n_ctx_handle: None,
-            progress: 0.0,
-            agent_engine,
-            agent_cancel_token: Arc::new(CancellationToken::new()),
             agent_chain_state: AgentChainState::default(),
             agent_chain_expanded: Vec::new(),
+            pending_tx: Some(Arc::new(Mutex::new(tx))),
+            pending_rx: Some(rx),
+            agent_cancel_token: CancellationToken::new(),
+            chat_engine: None,
+            selected_agent_index: None,
+            remote_n_ctx: 0,
+            remote_n_ctx_handle: None,
+            remote_n_ctx_arc: None,
+        }
+    }
+
+    /// Centralized config save — all callers should use this.
+    pub fn save_config(&mut self) -> Result<(), crate::config::Error> {
+        self.config.streaming = self.chat.streaming;
+        self.config.chat_history = self.chat.messages.iter().map(|m| crate::config::ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+            timestamp: if m.timestamp.is_empty() {
+                chrono::Local::now().format("%H:%M:%S").to_string()
+            } else {
+                m.timestamp.clone()
+            },
+        }).collect();
+        self.config.save()
+    }
+
+    /// Centralized session save — delegates to client.
+    pub fn save_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.client.clone().save_session().map_err(|e| e.into())
+    }
+
+}
+
+/// State for the chat area.
+pub struct ChatAreaState {
+    pub messages: Vec<ChatMessage>,
+    pub input_text: String,
+    pub is_streaming: bool,
+    pub stream_buffer: String,
+    pub is_pipeline_running: bool,
+    pub pending_error: Option<String>,
+    pub is_generating: bool,
+    pub streaming: bool,
+    pub prev_scroll_offset_y: f32,
+    pub prev_content_height: f32,
+    pub scroll_to_bottom_requested: bool,
+    pub current_thinking: String,
+    pub current_response: String,
+    pub at_bottom: bool,
+    pub scroll_offset_y: f32,
+    pub button_opacity: f32,
+    pub button_visible: bool,
+    pub editing_message_index: Option<usize>,
+    pub editing_message_content: String,
+    pub context_used: f32,
+    pub pipeline: Option<PipelineState>,
+    pub pending_image: Option<egui::ImageSource<'static>>,
+    pub status: crate::types::AppStatus,
+    pub token_count: usize,
+    pub engine: Option<Arc<crate::agents::AgentEngine>>,
+    pub streaming_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+// Implement Clone manually for ChatAreaState since JoinHandle doesn't implement Clone
+impl Clone for ChatAreaState {
+    fn clone(&self) -> Self {
+        Self {
+            messages: self.messages.clone(),
+            input_text: self.input_text.clone(),
+            is_streaming: self.is_streaming,
+            stream_buffer: self.stream_buffer.clone(),
+            is_pipeline_running: self.is_pipeline_running,
+            pending_error: self.pending_error.clone(),
+            is_generating: self.is_generating,
+            streaming: self.streaming,
+            prev_scroll_offset_y: self.prev_scroll_offset_y,
+            prev_content_height: self.prev_content_height,
+            scroll_to_bottom_requested: self.scroll_to_bottom_requested,
+            current_thinking: self.current_thinking.clone(),
+            current_response: self.current_response.clone(),
+            at_bottom: self.at_bottom,
+            scroll_offset_y: self.scroll_offset_y,
+            button_opacity: self.button_opacity,
+            button_visible: self.button_visible,
+            editing_message_index: self.editing_message_index,
+            editing_message_content: self.editing_message_content.clone(),
+            context_used: self.context_used,
+            pipeline: self.pipeline.clone(),
+            pending_image: self.pending_image.clone(),
+            status: self.status.clone(),
+            token_count: self.token_count,
+            engine: self.engine.clone(),
+            streaming_task: None,
         }
     }
 }
 
-fn config_path_parent(config: &Arc<Mutex<Config>>) -> std::path::PathBuf {
-    let cfg = config.lock().unwrap();
-    cfg.file_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
+#[derive(Clone, Debug)]
+pub struct PipelineState {
+    pub plan_id: String,
+    pub iteration: usize,
+    pub cancelled: bool,
+    pub tasks: Vec<PipelineTaskEntry>,
+    pub feedback_state: Option<String>,
+}
+
+impl ChatAreaState {
+    pub fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            input_text: String::new(),
+            is_streaming: false,
+            stream_buffer: String::new(),
+            is_pipeline_running: false,
+            pending_error: None,
+            is_generating: false,
+            streaming: false,
+            prev_scroll_offset_y: 0.0,
+            prev_content_height: 0.0,
+            scroll_to_bottom_requested: false,
+            current_thinking: String::new(),
+            current_response: String::new(),
+            at_bottom: true,
+            scroll_offset_y: 0.0,
+            button_opacity: 1.0,
+            button_visible: true,
+            editing_message_index: None,
+            editing_message_content: String::new(),
+            context_used: 0.0,
+            pipeline: None,
+            pending_image: None,
+            status: crate::types::AppStatus::Stopped,
+            token_count: 0,
+            engine: None,
+            streaming_task: None,
+        }
+    }
+
+    pub fn append_message(&mut self, role: &str, content: &str) {
+        self.messages.push(ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            image: None,
+        });
+    }
+
+    pub fn stream_chunk(&mut self, chunk: &str) {
+        self.stream_buffer.push_str(chunk);
+    }
+
+    pub fn commit_stream(&mut self) {
+        let buffer = self.stream_buffer.clone();
+        if !buffer.is_empty() {
+            self.append_message("assistant", &buffer);
+            self.stream_buffer.clear();
+        }
+        self.is_streaming = false;
+    }
+}
+
+impl Default for ChatAreaState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// State for the sessions panel.
+#[derive(Clone, Debug)]
+pub struct SessionsPanelState {
+    pub sessions: Vec<crate::sessions::model::Session>,
+    pub selected_session: Option<String>,
+    pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
+}
+
+impl SessionsPanelState {
+    pub fn new() -> Self {
+        Self {
+            sessions: Vec::new(),
+            selected_session: None,
+            sessions_panel: None,
+        }
+    }
+}
+
+impl Default for SessionsPanelState {
+    fn default() -> Self {
+        Self::new()
+    }
 }

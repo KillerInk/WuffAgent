@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::tools::lib::{ToolError, ToolLogger, ToolOutput, ToolParams, ToolResult, TracingToolLogger};
+use crate::tools::types::{ToolError, ToolLogger, ToolOutput, ToolParams, ToolResult, TracingToolLogger};
 use crate::tools::registry::ToolRegistry;
 
 /// High-level orchestrator that exposes tool execution to the rest of the application.
@@ -23,6 +23,16 @@ impl Clone for ToolManager {
 
 impl ToolManager {
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
+        Self {
+            registry,
+            logger: Arc::new(TracingToolLogger),
+            allowlist: None,
+        }
+    }
+
+    /// Create a ToolManager with an empty registry (no tools).
+    pub fn new_empty() -> Self {
+        let registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
         Self {
             registry,
             logger: Arc::new(TracingToolLogger),
@@ -86,7 +96,7 @@ impl ToolManager {
 
     /// Get all tool definitions in OpenAI-compatible format for function calling.
     /// Filters by allowlist when present.
-    pub fn get_tool_definitions(&self) -> Vec<crate::tools::lib::ToolDefinition> {
+    pub fn get_tool_definitions(&self) -> Vec<crate::tools::types::ToolDefinition> {
         let mut defs = self.registry.to_tool_definitions();
         if let Some(ref allowlist) = self.allowlist {
             defs.retain(|d| allowlist.contains(&d.function.name));

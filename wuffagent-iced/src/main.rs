@@ -154,11 +154,11 @@ fn bootstrap() -> (
     };
     let agent_registry = Arc::new(agent_registry);
 
+    let tool_manager_for_engine = Arc::new(Mutex::new((*tool_manager).clone()));
     let agent_engine = AgentEngine::new(
         agent_registry.clone(),
         llm_client,
-        tool_manager.clone(),
-        5,
+        tool_manager_for_engine,
     );
     let agent_engine = Arc::new(agent_engine);
 

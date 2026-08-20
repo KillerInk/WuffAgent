@@ -8,10 +8,6 @@ use super::backend::Backend;
 /// Update function for the iced application.
 pub fn update(message: Message, state: &mut AppState, backend: &Backend) -> Task<Message> {
     match message {
-        Message::FakeEvent => {
-            tracing::debug!("Fake event received (spike test)");
-            Task::none()
-        }
         Message::AppEvent(event) => {
             tracing::debug!("App event: {:?}", event);
             handle_app_event(event, state, backend)
@@ -471,18 +467,6 @@ fn handle_app_event(event: crate::types::AppEvent, state: &mut AppState, _backen
             state.chat.status = crate::types::AppStatus::Error(error.clone());
             Task::none()
         }
-        crate::types::AppEvent::MessageResult { content: _, usage } => {
-            state.chat.is_generating = false;
-            if let Some(u) = usage {
-                state.chat.token_count = u.total_tokens;
-            }
-            Task::none()
-        }
-        crate::types::AppEvent::MessageError { error } => {
-            state.chat.is_generating = false;
-            state.chat.status = crate::types::AppStatus::Error(error.clone());
-            Task::none()
-        }
         crate::types::AppEvent::StreamThinkingChunk { content } => {
             state.chat.current_thinking.push_str(&content);
             Task::none()
@@ -530,46 +514,16 @@ fn handle_app_event(event: crate::types::AppEvent, state: &mut AppState, _backen
             state.remote_n_ctx = n_ctx;
             Task::none()
         }
-        crate::types::AppEvent::AgentTaskStarted { task_id, task_description, agent_type } => {
-            state.panels.pipeline_active = true;
-            state.panels.pipeline_tasks.push(
-                crate::app::state::PipelineTaskEntry {
-                    id: task_id,
-                    description: task_description,
-                    status: crate::app::state::PipelineTaskStatus::Running,
-                    agent_type,
-                }
-            );
-            Task::none()
-        }
-        crate::types::AppEvent::AgentTaskCompleted { task_id, status, duration_ms: _ } => {
-            if let Some(task) = state.panels.pipeline_tasks.iter_mut().find(|t| t.id == task_id) {
-                task.status = match status.as_str() {
-                    "completed" => crate::app::state::PipelineTaskStatus::Completed,
-                    "failed" => crate::app::state::PipelineTaskStatus::Failed,
-                    _ => crate::app::state::PipelineTaskStatus::Pending,
-                };
-            }
-            Task::none()
-        }
-        crate::types::AppEvent::AgentPipelineComplete { result_count: _, final_output: _ } => {
-            state.panels.pipeline_active = false;
-            for task in &mut state.panels.pipeline_tasks {
-                if task.status == crate::app::state::PipelineTaskStatus::Running {
-                    task.status = crate::app::state::PipelineTaskStatus::Completed;
-                }
-            }
-            Task::none()
-        }
-        crate::types::AppEvent::AgentPipelineError { error: _ } => {
+        crate::types::AppEvent::AgentEngineComplete { .. } => {
             state.panels.pipeline_active = false;
             Task::none()
         }
-        crate::types::AppEvent::AgentPipelineCancelled => {
+        crate::types::AppEvent::AgentEngineError { .. } => {
             state.panels.pipeline_active = false;
-            for task in &mut state.panels.pipeline_tasks {
-                task.status = crate::app::state::PipelineTaskStatus::Failed;
-            }
+            Task::none()
+        }
+        crate::types::AppEvent::AgentChainCancelled { .. } => {
+            state.panels.pipeline_active = false;
             Task::none()
         }
         _ => Task::none(),

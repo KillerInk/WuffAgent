@@ -8,7 +8,6 @@ use tokio::task::JoinHandle;
 use super::{ChatClient, Error as ClientError};
 use crate::tools::manager::ToolManager;
 use crate::types::Usage;
-use crate::types::AppEvent;
 
 /// Errors that can occur during chat engine operations
 #[derive(Debug, thiserror::Error)]
@@ -136,6 +135,9 @@ impl ChatEngine {
                 let _ = event_tx.send(EngineEvent::StreamError {
                     error: e.to_string(),
                 });
+            } else {
+                // Notify the UI that the chat loop finished
+                let _ = event_tx.send(EngineEvent::StreamComplete { content: String::new(), usage: None });
             }
         });
 
@@ -320,38 +322,3 @@ async fn stream_request(
     Ok((content, usage_from_stream, has_tool_calls, thinking))
 }
 
-/// Convert EngineEvent to AppEvent for UI
-impl From<EngineEvent> for AppEvent {
-    fn from(event: EngineEvent) -> Self {
-        match event {
-            EngineEvent::StreamChunk { content } => AppEvent::StreamChunk { content },
-            EngineEvent::StreamComplete { content, usage } => {
-                AppEvent::StreamComplete { content, usage }
-            }
-            EngineEvent::StreamError { error } => AppEvent::StreamError { error },
-            EngineEvent::ToolCallStart { tool_name, call_id } => {
-                AppEvent::ToolCallStart { tool_name, call_id }
-            }
-            EngineEvent::ToolCallComplete {
-                tool_name,
-                call_id,
-                result,
-            } => AppEvent::ToolCallComplete {
-                tool_name,
-                call_id,
-                result,
-            },
-            EngineEvent::ToolCallError {
-                tool_name,
-                call_id,
-                error,
-            } => AppEvent::ToolCallError {
-                tool_name,
-                call_id,
-                error,
-            },
-            EngineEvent::ThinkingChunk { content } => AppEvent::StreamThinkingChunk { content },
-            EngineEvent::ThinkingComplete { content } => AppEvent::StreamThinkingComplete { content },
-        }
-    }
-}

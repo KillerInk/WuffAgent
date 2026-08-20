@@ -129,12 +129,6 @@ pub struct ToolMetadata {
     pub dependencies: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
-pub enum ToolSource {
-    BuiltIn,
-    Dynamic(std::path::PathBuf),
-}
-
 // ─── Core Tool Trait ────────────────────────────────────────────────────────
 
 pub trait Tool: Send + Sync {

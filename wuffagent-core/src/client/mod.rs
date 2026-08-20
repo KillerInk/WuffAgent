@@ -14,15 +14,13 @@ use crate::types::{Message, Usage};
 
 // Re-export key types so the public API surface is unchanged
 pub use http::{build_request, send_message, build_stream_request, ChatRequest, Response, Choice};
-pub use sse::{process_sse_line, stream_message, stream_message_arc, add_streaming_messages};
+pub use sse::{process_sse_line, stream_message, add_streaming_messages};
 pub use session::{
     save_session, load_session,
     enqueue_save_failure, retry_pending_saves, has_save_failure,
     clear_save_failure,
     trim_conversation, clear_history, clear_session_messages,
 };
-
-use crate::agents::traits::ChatClientLike;
 
 #[derive(Clone)]
 pub struct ChatClient {
@@ -370,7 +368,7 @@ impl ChatClient {
 
         // Box the callback to erase the concrete type
         let mut boxed_cb = Box::new(callback);
-        sse::stream_message_arc(resp, &conversation, &mut boxed_cb).await
+        sse::stream_message(resp, &conversation, &mut boxed_cb).await
     }
 
     // ── Tool call helpers ─────────────────────────────────────────────────────
@@ -544,8 +542,8 @@ impl ChatClient {
                 Ok(output) => {
                     if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
                         let result_str = match output {
-                            crate::tools::lib::ToolOutput::Success(v) => v.to_string(),
-                            crate::tools::lib::ToolOutput::Error(e) => e.clone(),
+                            crate::tools::types::ToolOutput::Success(v) => v.to_string(),
+                            crate::tools::types::ToolOutput::Error(e) => e.clone(),
                         };
                         let _ = tx.send(crate::types::AppEvent::ToolCallComplete {
                             tool_name: tc.function.name.clone(),
@@ -582,8 +580,8 @@ impl ChatClient {
                     content: result.map_or_else(
                         |e| e.to_string(),
                         |r| match r {
-                            crate::tools::lib::ToolOutput::Success(v) => v.to_string(),
-                            crate::tools::lib::ToolOutput::Error(e) => e,
+                            crate::tools::types::ToolOutput::Success(v) => v.to_string(),
+                            crate::tools::types::ToolOutput::Error(e) => e,
                         }
                     ),
                     timestamp: String::new(),
@@ -957,40 +955,5 @@ mod tests {
 
         let warnings = client.check_tool_call_warnings();
         assert!(warnings.is_empty());
-    }
-}
-
-#[async_trait::async_trait]
-impl ChatClientLike for ChatClient {
-    async fn send_message(&self, _messages: &[Message]) -> Result<String, String> {
-        let prompt = _messages.iter()
-            .filter(|m| m.role == "system" || m.role == "user" || m.role == "assistant")
-            .map(|m| m.content.as_str())
-            .collect::<Vec<&str>>()
-            .join("\n");
-        match self.send_message(&prompt).await {
-            Ok((response, _)) => Ok(response),
-            Err(e) => Err(e.to_string()),
-        }
-    }
-    async fn send_streaming(&self, _messages: &[Message]) -> Result<String, String> {
-        let prompt = _messages.iter()
-            .filter(|m| m.role == "system" || m.role == "user" || m.role == "assistant")
-            .map(|m| m.content.as_str())
-            .collect::<Vec<&str>>()
-            .join("\n");
-        // Call the internal HTTP streaming method directly (not the trait method)
-        let request = build_request(&self.system_prompt, &self.conversation, &prompt, true, None);
-        let builder = build_stream_request(&self.http_client, &self.base_url, self.api_key.as_deref(), &request);
-        let resp = builder.send().await.map_err(|e| e.to_string())?;
-        let mut callback = |_chunk: String, _is_thinking: bool| -> Result<(), Error> { Ok(()) };
-        let _usage = stream_message_arc(resp, &self.conversation, &mut callback).await.map_err(|e| e.to_string())?;
-        // Extract the accumulated response from conversation (lock after await to avoid Send issue)
-        let conv = self.conversation.lock().unwrap();
-        let last_msg = conv.iter().rev().find(|m| m.role == "assistant" && !m.content.is_empty());
-        match last_msg {
-            Some(m) => Ok(m.content.clone()),
-            None => Err("No response from streaming".to_string()),
-        }
     }
 }

@@ -39,7 +39,7 @@ pub fn apply_actions(
             *panel.selected_id_mut() = Some(session.id.clone());
             // Update config so the new session is loaded on next app start
             {
-                let mut cfg = panel.config().lock().unwrap();
+                let mut cfg = panel.config().clone();
                 cfg.session_id = Some(session.id.clone());
                 if let Err(e) = cfg.save() {
                     eprintln!("Failed to save config after creating session: {}", e);
@@ -57,7 +57,12 @@ pub fn apply_actions(
                     // Reload the session list so the deleted session is removed from the UI
                     panel.refresh();
                     // Also clear the config's session_id so the next session is loaded on restart
-                    panel.config().lock().unwrap().session_id = None;
+                    let mut cfg = panel.config().clone();
+                    cfg.session_id = None;
+                    if let Err(e) = cfg.save() {
+                        eprintln!("Failed to save config after deleting session: {}", e);
+                    }
+                    panel.show_notification("Session deleted", true);
                     PanelActionResult { selected_id: None, clear_client_session: true }
                 }
                 Err(e) => {

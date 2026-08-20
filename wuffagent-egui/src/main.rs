@@ -20,9 +20,9 @@ pub use wuffagent_core::agents;
 mod ui;
 
 fn bootstrap() -> (
-    Arc<Mutex<Config>>,
-    Arc<ServerManager>,
-    Arc<Mutex<ChatClient>>,
+    Config,
+    ServerManager,
+    ChatClient,
     Arc<ToolManager>,
     Arc<AgentEngine>,
 ) {
@@ -34,52 +34,46 @@ fn bootstrap() -> (
         .init();
 
     let config_path = wuffagent_core::config::get_config_path();
-    let config = match Config::load(&config_path) {
+    let mut config = match Config::load(&config_path) {
         Ok(mut cfg) => {
             cfg.file_path = config_path.clone();
-            Arc::new(Mutex::new(cfg))
+            cfg
         }
         Err(e) => {
             eprintln!("Failed to load config: {}, using defaults", e);
-            Arc::new(Mutex::new(Config { file_path: config_path.clone(), ..Default::default() }))
+            Config { file_path: config_path.clone(), ..Default::default() }
         }
     };
 
     let sessions_dir = wuffagent_core::sessions::sessions_dir(&config_path);
     {
-        let mut cfg = config.lock().unwrap();
-        cfg.sessions_dir = sessions_dir.clone();
-        if cfg.session_id.is_none() {
+        config.sessions_dir = sessions_dir.clone();
+        if config.session_id.is_none() {
             let session = wuffagent_core::sessions::create_session(&sessions_dir, "Untitled");
-            cfg.session_id = Some(session.id.clone());
-        } else if !wuffagent_core::sessions::session_exists(&sessions_dir, cfg.session_id.as_ref().unwrap()) {
+            config.session_id = Some(session.id.clone());
+        } else if !wuffagent_core::sessions::session_exists(&sessions_dir, config.session_id.as_ref().unwrap()) {
             tracing::warn!(
                 "Session file missing for id={}, creating new session",
-                cfg.session_id.as_ref().unwrap()
+                config.session_id.as_ref().unwrap()
             );
             let session = wuffagent_core::sessions::create_session(&sessions_dir, "Untitled");
-            cfg.session_id = Some(session.id.clone());
+            config.session_id = Some(session.id.clone());
         }
     }
 
-    let is_remote;
-    {
-        let cfg = config.lock().unwrap();
-        is_remote = cfg.is_remote();
-    }
+    let is_remote = config.is_remote();
 
-    let server = if is_remote {
-        Arc::new(ServerManager::noop())
+    let _server = if is_remote {
+        ServerManager::noop()
     } else {
-        let cfg = config.lock().unwrap();
-        Arc::new(ServerManager::new(
-            &cfg.server_path,
-            &cfg.model_path,
-            cfg.port,
-            cfg.n_gpu_layers,
-            cfg.n_ctx,
-            cfg.threads,
-        ))
+        ServerManager::new(
+            &config.server_path,
+            &config.model_path,
+            config.port,
+            config.n_gpu_layers,
+            config.n_ctx,
+            config.threads,
+        )
     };
 
     let logger = Arc::new(TracingToolLogger);
@@ -97,33 +91,19 @@ fn bootstrap() -> (
         eprintln!("Warning: failed to discover plugins: {}", e);
     }
 
-    let tool_manager = Arc::new(ToolManager::new(registry.clone()));
+    let tool_manager: Arc<ToolManager> = Arc::new(ToolManager::new(registry.clone()));
 
-    let base_url;
-    let api_key;
-    {
-        let cfg = config.lock().unwrap();
-        base_url = cfg.base_url();
-        api_key = cfg.remote_api_key.clone();
-    }
-    let client = Arc::new(Mutex::new(ChatClient::new(&base_url)));
-
-    {
-        let mut cl = client.lock().unwrap();
-        cl.set_api_key(api_key.as_deref());
-        let cfg = config.lock().unwrap();
-        cl.set_session(cfg.session_id.clone(), cfg.sessions_dir.clone());
-        if cfg.encryption_enabled {
-            if let Some(key) = cfg.encryption_key() {
-                cl.set_encryption_key(Some(key));
-            }
+    let base_url = config.base_url();
+    let api_key = config.remote_api_key.clone();
+    let mut client = ChatClient::new(&base_url);
+    client.set_api_key(api_key.as_deref());
+    client.set_session(config.session_id.clone(), config.sessions_dir.clone());
+    if config.encryption_enabled {
+        if let Some(key) = config.encryption_key() {
+            client.set_encryption_key(Some(key));
         }
     }
-
-    {
-        let mut cl = client.lock().unwrap();
-        let _ = cl.load_session();
-    }
+    let _ = client.load_session();
 
     let base_url_clone = base_url.clone();
     let llm_client = Arc::new(wuffagent_core::agents::llm_client::ChatClientAdapter::new(
@@ -164,11 +144,19 @@ fn bootstrap() -> (
     };
     let agent_registry = Arc::new(agent_registry);
 
+    let server = ServerManager::new(
+        &config.server_path,
+        &config.model_path,
+        config.port,
+        config.n_gpu_layers,
+        config.n_ctx,
+        config.threads,
+    );
+    let tool_manager_for_engine: Arc<Mutex<ToolManager>> = Arc::new(Mutex::new((*tool_manager).clone()));
     let agent_engine = AgentEngine::new(
         agent_registry.clone(),
         llm_client,
-        tool_manager.clone(),
-        5,
+        tool_manager_for_engine,
     );
     let agent_engine = Arc::new(agent_engine);
 
@@ -188,7 +176,7 @@ async fn main() -> eframe::Result {
         Box::new(|cc| {
             cc.egui_ctx.set_fonts(egui::FontDefinitions::default());
             Ok(Box::new(ui::state::ChatApp::new(
-                server, client, config, tool_manager, agent_engine,
+                config, client, server, tool_manager, agent_engine,
             )))
         }),
     )

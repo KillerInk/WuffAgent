@@ -3,7 +3,7 @@ pub use loader::PluginHandle;
 
 use std::sync::Arc;
 
-pub use super::lib::{ToolLogger, ToolResult};
+pub use super::types::{ToolLogger, ToolResult};
 
 /// A loader that can be shared across the registry.
 pub struct PluginLoader {

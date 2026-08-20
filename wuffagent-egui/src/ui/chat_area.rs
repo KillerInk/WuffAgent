@@ -9,7 +9,7 @@ impl ChatApp {
     const SCROLL_BOTTOM_THRESHOLD: f32 = 10.0;
 
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+        let theme = Theme::from_name(&self.config.clone().theme.clone());
         
         // Show pending error as inline warning
         let pending_error = self.chat.pending_error.take();
@@ -487,7 +487,7 @@ impl ChatApp {
         }
         // Update session
         {
-            let cl = self.client.lock().unwrap();
+            let cl = self.client.clone();
             let mut conv = cl.conversation().lock().unwrap();
             if index < conv.len() {
                 conv[index].content = new_content;
@@ -786,14 +786,13 @@ impl ChatApp {
     #[allow(dead_code)]
     pub(super) fn draw_pipeline_panel(&mut self, ui: &mut egui::Ui, theme: &Theme) {
         // Snapshot pipeline state before the closure
-        let plan_id = self.chat.pipeline.plan_id.clone();
-        let iteration = self.chat.pipeline.iteration;
-        let cancelled = self.chat.pipeline.cancelled;
-        let tasks: Vec<_> = self.chat.pipeline.tasks.iter().collect();
-        let feedback_state = self.chat.pipeline.feedback_state.clone();
+        let (plan_id, iteration, cancelled, tasks, feedback_state) = match &self.chat.pipeline {
+            Some(p) => (p.plan_id.clone(), p.iteration, p.cancelled, p.tasks.iter().cloned().collect::<Vec<_>>(), p.feedback_state.clone()),
+            None => (String::new(), 0usize, false, Vec::new(), None),
+        };
         // Shorten plan ID for display (first 8 chars)
         let plan_short = plan_id.chars().take(8).collect::<String>();
-        
+
         // Panel header with cancel button
         egui::Frame::none()
             .fill(theme.surface_light)
@@ -812,7 +811,7 @@ impl ChatApp {
                         .color(theme.text_primary)
                         .size(12.0)
                         .strong());
-                    
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Cancel button
                         if !cancelled {
@@ -830,9 +829,9 @@ impl ChatApp {
                         }
                     });
                 });
-                
+
                 ui.add_space(6.0);
-                
+
                 // Task progress list
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
@@ -851,17 +850,17 @@ impl ChatApp {
                         }
                     }
                 });
-                
+
                 ui.add_space(4.0);
-                
+
                 // Feedback loop status
-                if !feedback_state.is_empty() || iteration > 0 {
+                if feedback_state.as_ref().map_or(false, |s| !s.is_empty()) || iteration > 0 {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
                         ui.label(egui::RichText::new("🔄 Feedback:")
                             .color(theme.text_secondary)
                             .size(10.0));
-                        ui.label(egui::RichText::new(&feedback_state)
+                        ui.label(egui::RichText::new(feedback_state.as_deref().unwrap_or(""))
                             .color(theme.accent)
                             .size(10.0));
                     });
@@ -872,7 +871,10 @@ impl ChatApp {
     /// Draw a compact pipeline progress bar below the chat.
     #[allow(dead_code)]
     pub(super) fn draw_pipeline_progress(&self, ui: &mut egui::Ui, theme: &Theme) {
-        let pipeline = &self.chat.pipeline;
+        let pipeline = match &self.chat.pipeline {
+            Some(p) => p,
+            None => return,
+        };
         if pipeline.tasks.is_empty() {
             return;
         }
@@ -918,7 +920,7 @@ impl ChatApp {
         }
         // Remove from session
         {
-            let cl = self.client.lock().unwrap();
+            let cl = self.client.clone();
             let mut conv = cl.conversation().lock().unwrap();
             if index < conv.len() {
                 conv.remove(index);

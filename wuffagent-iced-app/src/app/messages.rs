@@ -4,8 +4,6 @@ use super::widgets::dialogs::presets::PresetType;
 /// Application message type for the iced update loop.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Dummy event for spike testing
-    FakeEvent,
     /// Scroll event from the chat list
     Scrolled(f32),
     /// Received an event from the background channel

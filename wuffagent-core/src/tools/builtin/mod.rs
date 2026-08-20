@@ -8,14 +8,14 @@ pub use file_io::FileIOTool;
 pub use web_search::WebSearchTool;
 pub use agent_call::AgentCallTool;
 
-use crate::tools::lib::{ToolMetadata};
+use crate::tools::types::{ToolMetadata};
 use crate::tools::registry::ToolEntry;
 
 /// Register all built-in tools into the registry.
 pub fn register_builtins(
     registry: &crate::tools::registry::ToolRegistry,
     invocation_registry: &crate::agents::invocation_registry::AgentInvocationRegistry,
-) -> crate::tools::lib::ToolResult<()> {
+) -> crate::tools::types::ToolResult<()> {
     registry.register(ToolEntry {
         tool: std::sync::Arc::new(WebSearchTool::new()),
         metadata: ToolMetadata {

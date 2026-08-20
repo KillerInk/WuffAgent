@@ -186,38 +186,6 @@ pub async fn stream_message(
     Ok(last_usage)
 }
 
-/// Stream a message using an Arc-based approach (for use from async contexts
-/// where the ChatClient is wrapped in Arc<Mutex<>>).
-/// `conversation` is the cloned Arc to the conversation lock.
-pub async fn stream_message_arc(
-    resp: reqwest::Response,
-    conversation: &Arc<Mutex<Vec<Message>>>,
-    callback: &mut (impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static),
-) -> Result<Option<Usage>, Error> {
-    let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
-    let mut last_usage: Option<Usage> = None;
-    let mut cb = callback;
-
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
-
-            if let Some(usage) = process_sse_line(&line, &mut cb, conversation).await? {
-                last_usage = Some(usage);
-            }
-        }
-    }
-
-    tracing::debug!("stream_message (arc) streaming completed, usage={:?}", last_usage);
-    Ok(last_usage)
-}
-
 /// Add user and empty assistant messages to the conversation.
 pub fn add_streaming_messages(conversation: &Arc<Mutex<Vec<Message>>>, prompt: &str) {
     let mut conv = conversation.lock().unwrap();

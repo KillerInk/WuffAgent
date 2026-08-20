@@ -1,9 +1,0 @@
-{
-    "name": "general",
-    "description": "General purpose agent",
-    "system_prompt": "",
-    "allowed_tools": [],
-    "enabled": true,
-    "max_depth": 5,
-    "recovery_policy": "FailFast"
-}

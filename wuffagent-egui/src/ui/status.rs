@@ -6,7 +6,7 @@ use super::theme::Theme;
 
 impl ChatApp {
     pub(super) fn draw_status_bar(&self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+        let theme = Theme::from_name(&self.config.clone().theme.clone());
         
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -34,11 +34,6 @@ impl ChatApp {
             
             ui.separator();
             ui.label(egui::RichText::new(format!("Messages: {}", self.chat.messages.len())).color(theme.text_secondary).size(11.0));
-
-            if let Some(ref msg) = self.sessions.save_failure_message {
-                ui.separator();
-                ui.label(egui::RichText::new(msg).color(theme.warning).size(11.0));
-            }
         });
     }
 
@@ -53,7 +48,7 @@ impl ChatApp {
 
     /// Returns true when in remote connection mode.
     pub(super) fn is_remote_mode(&self) -> bool {
-        let cfg = self.config.lock().unwrap();
+        let cfg = self.config.clone();
         let is_remote = cfg.connection_type == crate::config::ConnectionType::Remote;
         drop(cfg);
         is_remote
@@ -71,7 +66,7 @@ impl ChatApp {
     }
 
     pub(super) fn draw_bottom_bar(&self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+        let theme = Theme::from_name(&self.config.clone().theme.clone());
         let n_ctx = self.get_effective_n_ctx();
         let n_gpu_layers = self.server.get_n_gpu_layers();
         let threads = self.server.get_threads();

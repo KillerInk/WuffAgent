@@ -237,6 +237,7 @@ impl SettingsDialog {
         } else {
             cfg.encryption_password = None;
         }
+        // Save via the shared config reference
         if let Err(e) = cfg.save() {
             eprintln!("Failed to save config: {}", e);
         }

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use crate::tools::lib::{Tool, ToolError, ToolLogger, ToolMetadata, ToolSchema};
+use crate::tools::types::{Tool, ToolError, ToolLogger, ToolMetadata, ToolSchema};
 
 /// Internal entry wrapping a loaded tool.
 pub struct ToolEntry {
@@ -81,19 +81,19 @@ impl ToolRegistry {
     }
 
     /// Return tool definitions in OpenAI-compatible format.
-    pub fn to_tool_definitions(&self) -> Vec<crate::tools::lib::ToolDefinition> {
+    pub fn to_tool_definitions(&self) -> Vec<crate::tools::types::ToolDefinition> {
         self.tools
             .read()
             .unwrap()
             .values()
             .map(|e| {
                 let schema = e.tool.parameters_schema();
-                crate::tools::lib::ToolDefinition {
+                crate::tools::types::ToolDefinition {
                     type_name: "function".to_string(),
-                    function: crate::tools::lib::ToolFunctionSpec {
+                    function: crate::tools::types::ToolFunctionSpec {
                         name: e.tool.name().to_string(),
                         description: e.tool.description().to_string(),
-                        parameters: schema.input_type.unwrap_or(crate::tools::lib::JsonSchema {
+                        parameters: schema.input_type.unwrap_or(crate::tools::types::JsonSchema {
                             type_name: "object".to_string(),
                             properties: None,
                             required: vec![],
@@ -151,7 +151,7 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::lib::{ToolLogger, TracingToolLogger};
+    use crate::tools::types::{ToolLogger, TracingToolLogger};
     use crate::tools::builtin::{CalculationTool, FileIOTool};
 
     fn mock_logger() -> Arc<dyn ToolLogger> {

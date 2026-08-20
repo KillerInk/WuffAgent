@@ -17,8 +17,6 @@ pub struct AgentConfigDialog {
     name: String,
     description: String,
     system_prompt: String,
-    priority: u32,
-    max_concurrent: usize,
     enabled: bool,
     /// Checked status per tool index.
     tool_checkboxes: Vec<bool>,
@@ -50,8 +48,6 @@ impl AgentConfigDialog {
             name: String::new(),
             description: String::new(),
             system_prompt: String::new(),
-            priority: 0,
-            max_concurrent: 1,
             enabled: true,
             tool_checkboxes,
             available_tools,
@@ -108,40 +104,60 @@ impl AgentConfigDialog {
 
                                     ui.separator();
 
-                                    // Collect click actions to avoid borrowing self twice
-                                    let mut action = None;
-                                    for (i, agent) in self.agents.iter().enumerate() {
-                                        let selected = i as isize == self.selected_index;
-                                        let label = format!(
-                                            "{} {}",
-                                            if agent.enabled { "✓" } else { "○" },
-                                            agent.name
-                                        );
-                                        let response = ui
-                                            .add(egui::Button::new(label).fill(if selected {
-                                                theme.selected_bg
-                                            } else {
-                                                ui.style().visuals.widgets.noninteractive.fg_stroke.color
-                                            }))
-                                            .on_hover_text(if agent.enabled {
-                                                &agent.description
-                                            } else {
-                                                "Disabled"
-                                            });
-                                        if response.clicked() {
-                                            action = Some((i, false));
-                                            break;
+                                    if self.agents.is_empty() {
+                                        ui.label("No agents configured.");
+                                    } else {
+                                        // Pre-collect agent data to avoid borrowing self mutably inside the loop
+                                        struct AgentButtonData {
+                                            label: String,
+                                            bg: egui::Color32,
+                                            idx: usize,
+                                            name: String,
+                                            desc: String,
+                                            prompt: String,
+                                            enabled: bool,
+                                            allowed: Vec<String>,
                                         }
-                                        if response.double_clicked() {
-                                            action = Some((i, true));
-                                            break;
+                                        let button_data: Vec<AgentButtonData> = self.agents.iter().enumerate().map(|(i, agent)| {
+                                            let selected = i as isize == self.selected_index;
+                                            AgentButtonData {
+                                                label: format!("{} {}", if agent.enabled { "✓" } else { "○" }, agent.name),
+                                                bg: if selected { egui::Color32::from_rgb(0x33, 0x66, 0xCC) } else { egui::Color32::from_rgb(0x33, 0x33, 0x33) },
+                                                idx: i,
+                                                name: agent.name.clone(),
+                                                desc: agent.description.clone(),
+                                                prompt: agent.system_prompt.clone(),
+                                                enabled: agent.enabled,
+                                                allowed: agent.allowed_tools.clone(),
+                                            }
+                                        }).collect();
+                                        for bd in &button_data {
+                                            if ui.add(egui::Button::new(&bd.label).fill(bd.bg)).clicked() {
+                                                self.selected_index = bd.idx as isize;
+                                                self.is_new = false;
+                                                self.name = bd.name.clone();
+                                                self.description = bd.desc.clone();
+                                                self.system_prompt = bd.prompt.clone();
+                                                self.enabled = bd.enabled;
+                                                self.sync_tools_from_agent(&bd.allowed);
+                                                self.message = None;
+                                            }
                                         }
                                     }
-                                    if let Some((i, double_clicked)) = action {
-                                        if double_clicked {
-                                            self.start_edit(self.agents[i].clone());
-                                        } else {
-                                            self.select_agent(i);
+
+                                    if !self.agents.is_empty()
+                                        && self.selected_index >= 0
+                                    {
+                                        ui.separator();
+                                        if ui
+                                            .add_enabled(
+                                                true,
+                                                egui::Button::new("Delete")
+                                                    .fill(egui::Color32::from_rgb(0xCC, 0x33, 0x33)),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.delete_agent(agent_manager);
                                         }
                                     }
                                 },
@@ -154,137 +170,68 @@ impl AgentConfigDialog {
                                 egui::Vec2::new(ui.available_width(), ui.available_height()),
                                 egui::Layout::top_down(egui::Align::LEFT),
                                 |ui| {
-                                    self.draw_editor(ui, agent_manager, &mut closed);
+                                    ui.heading("Agent Editor");
+                                    ui.separator();
+
+                                    if self.selected_index >= 0 {
+                                        // Agent fields
+                                        ui.vertical(|ui| {
+                                            ui.label("Name:");
+                                            ui.text_edit_singleline(&mut self.name);
+
+                                            ui.label("Description:");
+                                            ui.text_edit_singleline(&mut self.description);
+
+                                            ui.label("System Prompt:");
+                                            ui.text_edit_multiline(&mut self.system_prompt);
+
+                                            ui.horizontal(|ui| {
+                                                ui.checkbox(&mut self.enabled, "Enabled");
+                                            });
+
+                                            ui.separator();
+                                            ui.label("Allowed Tools:");
+
+                                            // Tool checkboxes
+                                            for (i, tool) in self.available_tools.iter().enumerate() {
+                                                ui.checkbox(&mut self.tool_checkboxes[i], tool);
+                                            }
+
+                                            ui.separator();
+                                            ui.horizontal(|ui| {
+                                                if ui.add(
+                                                    egui::Button::new("Save")
+                                                        .fill(theme.success),
+                                                )
+                                                .clicked()
+                                                {
+                                                    if self.save(agent_manager) {
+                                                        self.clear_form();
+                                                    }
+                                                }
+                                            });
+
+                                            if let Some(msg) = &self.message {
+                                                if msg.contains("Error") {
+                                                    ui.label(egui::RichText::new(msg).color(egui::Color32::from_rgb(0xCC, 0x33, 0x33)));
+                                                } else {
+                                                    ui.label(egui::RichText::new(msg).color(theme.success));
+                                                }
+                                                self.message = None;
+                                            }
+                                        });
+                                    } else {
+                                        // No agent selected — show info
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(egui::RichText::new("Select an agent from the list, or click \"+ Add Agent\" to create one.").strong());
+                                        });
+                                    }
                                 },
                             );
                         });
                     });
             });
         closed
-    }
-
-    fn draw_editor(
-        &mut self,
-        ui: &mut egui::Ui,
-        agent_manager: &Arc<Mutex<AgentManager>>,
-        closed: &mut bool,
-    ) {
-        let theme = Theme::from_name("dark");
-
-        if self.is_new || self.selected_index >= 0 {
-            // Form header
-            ui.heading(if self.is_new { "New Agent" } else { "Edit Agent" });
-            ui.separator();
-
-            // Basic info
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Name:").size(12.0));
-                    ui.text_edit_singleline(&mut self.name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Description:").size(12.0));
-                    ui.text_edit_singleline(&mut self.description);
-                });
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Priority:").size(12.0));
-                    ui.add(egui::Slider::new(&mut self.priority, 0..=100).text("Priority"));
-                    ui.label(egui::RichText::new("(lower = selected first)").size(10.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Max Concurrent:").size(12.0));
-                    ui.add(egui::Slider::new(&mut self.max_concurrent, 1..=16).text("Max concurrent"));
-                });
-                ui.checkbox(&mut self.enabled, "Enabled");
-            });
-
-            ui.separator();
-
-            // System prompt
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("System Prompt:").size(12.0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Clear").clicked() {
-                            self.system_prompt.clear();
-                        }
-                    });
-                });
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.system_prompt)
-                        .hint_text("Enter the system prompt / personality for this agent...")
-                        .min_size(egui::Vec2::new(ui.available_width(), 120.0)),
-                );
-            });
-
-            ui.separator();
-
-            // Allowed tools
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Allowed Tools:").size(12.0).strong());
-                    if ui.button("Select All").clicked() {
-                        for cb in &mut self.tool_checkboxes {
-                            *cb = true;
-                        }
-                    }
-                    if ui.button("Clear All").clicked() {
-                        for cb in &mut self.tool_checkboxes {
-                            *cb = false;
-                        }
-                    }
-                });
-                for (i, tool) in self.available_tools.iter().enumerate() {
-                    ui.checkbox(&mut self.tool_checkboxes[i], tool);
-                }
-            });
-
-            ui.separator();
-
-            // Message
-            if let Some(ref msg) = self.message {
-                let color = if msg.to_lowercase().contains("error") || msg.to_lowercase().contains("failed") {
-                    theme.error
-                } else {
-                    theme.success
-                };
-                ui.label(egui::RichText::new(msg).color(color).size(11.0));
-            }
-
-            ui.separator();
-
-            // Action buttons
-            ui.horizontal(|ui| {
-                if ui
-                    .add(egui::Button::new("Save").fill(theme.primary).rounding(6.0))
-                    .clicked()
-                    && self.save(agent_manager) {
-                        *closed = true;
-                    }
-                if ui
-                    .add(egui::Button::new("Cancel")
-                        .fill(theme.surface_light)
-                        .rounding(6.0))
-                    .clicked()
-                {
-                    *closed = true;
-                }
-                if !self.is_new && self.selected_index >= 0
-                    && ui
-                        .add(egui::Button::new("Delete")
-                            .fill(theme.error)
-                            .rounding(6.0))
-                        .clicked()
-                    {
-                        self.delete_agent(agent_manager);
-                    }
-            });
-        } else {
-            // No agent selected — show info
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Select an agent from the list, or click \"+ Add Agent\" to create one.").strong());
-            });
-        }
     }
 
     fn save(&mut self, agent_manager: &Arc<Mutex<AgentManager>>) -> bool {
@@ -299,17 +246,17 @@ impl AgentConfigDialog {
             description: self.description.trim().to_string(),
             system_prompt: self.system_prompt.clone(),
             allowed_tools: self.allowed_tools.clone(),
-            priority: self.priority,
-            max_concurrent: self.max_concurrent,
+            priority: 0,
+            max_concurrent: 1,
             enabled: self.enabled,
             can_invoke: vec![],
             handoff_enabled: false,
         };
 
-        // Ensure the workers directory exists before saving
+        // Ensure the directory exists before saving
         if let Ok(m) = agent_manager.lock() {
             if let Err(e) = std::fs::create_dir_all(m.workers_dir()) {
-                self.message = Some(format!("Failed to create workers directory: {}", e));
+                self.message = Some(format!("Failed to create directory: {}", e));
                 return false;
             }
         }
@@ -367,16 +314,12 @@ impl AgentConfigDialog {
         let agent_name = self.agents[idx].name.clone();
         let agent_desc = self.agents[idx].description.clone();
         let agent_prompt = self.agents[idx].system_prompt.clone();
-        let agent_priority = self.agents[idx].priority;
-        let agent_max_concurrent = self.agents[idx].max_concurrent;
         let agent_enabled = self.agents[idx].enabled;
         let agent_allowed = self.agents[idx].allowed_tools.clone();
 
         self.name = agent_name;
         self.description = agent_desc;
         self.system_prompt = agent_prompt;
-        self.priority = agent_priority;
-        self.max_concurrent = agent_max_concurrent;
         self.enabled = agent_enabled;
 
         self.sync_tools_from_agent(&agent_allowed);
@@ -402,8 +345,6 @@ impl AgentConfigDialog {
         self.name.clear();
         self.description.clear();
         self.system_prompt.clear();
-        self.priority = 0;
-        self.max_concurrent = 1;
         self.enabled = true;
         self.allowed_tools.clear();
         for cb in &mut self.tool_checkboxes {

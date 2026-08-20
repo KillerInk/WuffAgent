@@ -9,7 +9,7 @@ use crate::ui::state::EngineEvent;
 
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.lock().unwrap().theme.clone());
+        let theme = Theme::from_name(&self.config.clone().theme.clone());
         ui.style_mut().spacing.item_spacing.y = 0.0;
 
         // Validate input length
@@ -62,6 +62,30 @@ impl ChatApp {
 
             // Button row below the text area
             ui.horizontal(|ui| {
+                // Agent selector dropdown
+                let agent_names = self.get_agent_names();
+                let selected = self.selected_agent_index;
+                let selected_label = selected
+                    .map(|i| agent_names.get(i).cloned().unwrap_or_default())
+                    .unwrap_or_else(|| "Auto".to_string());
+                let mut next_idx = selected;
+                egui::ComboBox::from_id_salt("agent_selector")
+                    .width(120.0)
+                    .selected_text(selected_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut next_idx, None, "Auto");
+                        for (i, name) in agent_names.iter().enumerate() {
+                            ui.selectable_value(&mut next_idx, Some(i), name);
+                        }
+                        if agent_names.is_empty() {
+                            ui.label(egui::RichText::new("No agents found").size(10.0).color(theme.text_secondary));
+                        }
+                    });
+                if next_idx != selected {
+                    self.selected_agent_index = next_idx;
+                }
+                ui.add_space(6.0);
+
                 if !self.chat.is_generating && !self.chat.is_pipeline_running {
                     let send_btn = egui::Button::new("Send")
                         .fill(theme.primary)
@@ -119,7 +143,6 @@ impl ChatApp {
     }
 
     pub(super) fn send_message(&mut self) {
-        self.chat.is_pipeline_running = false;
         let input = self.chat.input_text.trim().to_string();
         if let Err(e) = self.validate_input(&input) {
             self.chat.status = AppStatus::Error(e.clone());
@@ -130,135 +153,227 @@ impl ChatApp {
         tracing::info!("[CHAT PATH] send_message called with: {}", input);
 
         self.chat.input_text.clear();
-        self.start_streaming();
+        self.chat.is_generating = true;
+        self.chat.is_streaming = true;
+        self.chat.streaming = true;
 
-        // Add user message to chat display and session
+        // Add user message to chat display
         let image = self.chat.pending_image.take();
-        self.add_message_with_image("user", &input, image);
+        self.chat.messages.push(crate::types::ChatMessage {
+            role: "user".to_string(),
+            content: input.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            image: image.map(|_| String::new()),
+        });
 
         // Get tool definitions
-        let tool_defs = self.get_tool_definitions();
+        let tool_defs = self.tool_manager.get_tool_definitions();
 
-        // Clone dependencies
-        let client = self.client.clone();
-        let tool_manager = self.tool_manager.clone();
-        let event_tx = self.pending_tx.clone();
+        // Abort any existing streaming task
+        if let Some(handle) = self.chat.streaming_task.take() {
+            handle.abort();
+        }
 
-        // Create a channel for engine events
+        // Create a channel for engine events (engine → relay task)
         let (engine_tx, engine_rx) = std::sync::mpsc::channel::<EngineEvent>();
 
-        // Spawn a task to handle engine events
-        if let Some(tx) = event_tx.clone() {
+        // Create a dedicated channel for client tool events (client → UI).
+        // We need a separate channel because the relay task also writes to pending_tx,
+        // and the UI must read from a single receiver.
+        let (tool_tx, tool_rx) = std::sync::mpsc::channel::<AppEvent>();
+
+        // Spawn a task that merges both streams into pending_tx
+        if let Some(pending_tx) = self.pending_tx.clone() {
             let handle = tokio::spawn(async move {
-                // Relay engine events to UI
-                for event in engine_rx.iter() {
-                    let app_event: AppEvent = event.into();
-                    let _ = tx.send(app_event);
+                // We need to select from both receivers. Use a simple polling loop.
+                let engine_rx = std::sync::Mutex::new(engine_rx);
+                let tool_rx = std::sync::Mutex::new(tool_rx);
+                let pending_tx = pending_tx.clone();
+
+                loop {
+                    let mut ready = false;
+                    // Try engine_rx
+                    if let Ok(rx) = engine_rx.lock() {
+                        if let Ok(event) = rx.try_recv() {
+                            let app_event: AppEvent = event.into();
+                            let _ = pending_tx.lock().unwrap().send(app_event);
+                            ready = true;
+                        }
+                    }
+                    // Try tool_rx
+                    if let Ok(rx) = tool_rx.lock() {
+                        if let Ok(event) = rx.try_recv() {
+                            let _ = pending_tx.lock().unwrap().send(event);
+                            ready = true;
+                        }
+                    }
+                    if !ready {
+                        // Both channels empty, wait a bit before polling again
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                 }
             });
             self.chat.streaming_task = Some(handle);
         }
 
+        // Wire the tool event sender into the client so tool execution events
+        // (ToolCallStart/Complete/Error) reach the UI.
+        self.client.set_tool_event_sender(tool_tx);
+
         // Create and start the chat engine
+        let client = Arc::new(Mutex::new(self.client.clone()));
+        let tool_manager = (*self.tool_manager).clone();
         let engine = crate::client::engine::ChatEngine::new(
             client,
-            (*tool_manager).clone(),
+            tool_manager,
             engine_tx,
         );
-        
-        // Store engine for potential cancellation
-        self.chat.engine = Some(engine.clone());
+        // Store the engine for potential cancellation
+        self.chat_engine = Some(engine);
 
         // Start the chat
-        engine.start_chat(input, tool_defs);
+        self.chat_engine.as_ref().unwrap().start_chat(input, tool_defs);
+    }
+
+    /// Return the list of agent names from all known workers directories.
+    fn get_agent_names(&self) -> Vec<String> {
+        let config_path = &self.config.file_path;
+        let mut names: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Scan project-level workers/ directory (relative to cwd or exe)
+        if let Ok(cwd) = std::env::current_dir() {
+            let workers_dir = cwd.join("workers");
+            if workers_dir.exists() {
+                if let Ok(workers) = crate::agents::WorkerConfig::load_all_from_dir(&workers_dir) {
+                    for w in workers {
+                        if seen.insert(w.name.clone()) {
+                            names.push(w.name);
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let workers_dir = exe_dir.join("workers");
+                if workers_dir.exists() {
+                    if let Ok(workers) = crate::agents::WorkerConfig::load_all_from_dir(&workers_dir) {
+                        for w in workers {
+                            if seen.insert(w.name.clone()) {
+                                names.push(w.name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also scan the config-directory workers subdirectory
+        let agents_dir = config_path
+            .parent()
+            .map(|p| p.join("agents"))
+            .unwrap_or_else(|| config_path.clone());
+        let config_workers = agents_dir.join("workers");
+        if config_workers.exists() {
+            if let Ok(workers) = crate::agents::WorkerConfig::load_all_from_dir(&config_workers) {
+                for w in workers {
+                    if seen.insert(w.name.clone()) {
+                        names.push(w.name);
+                    }
+                }
+            }
+        }
+
+        names
     }
 
     /// Send a /plan request to the agent engine.
     pub(super) fn send_plan_request(&mut self, request: &str) {
         tracing::info!("[AGENT ENGINE] send_plan_request called with: {}", request);
-        
+
         self.chat.input_text.clear();
-        self.start_streaming();
-        self.add_message("user", &format!("/plan {}", request));
-        
+        self.chat.is_generating = true;
+        self.chat.is_streaming = true;
+        self.chat.streaming = true;
+        self.chat.messages.push(crate::types::ChatMessage {
+            role: "user".to_string(),
+            content: format!("/plan {}", request),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            image: None,
+        });
+
         // Reset agent chain state
         self.agent_chain_state = super::state::AgentChainState::default();
         self.agent_chain_state.active = true;
         self.chat.is_pipeline_running = true;
-        
+
         // Clone dependencies
         let cancel_token = self.agent_cancel_token.clone();
         let event_tx = self.pending_tx.clone();
         let request = request.to_string();
-        
+
         // Wire the event tx so the engine can emit chain events
-        let engine = if let Some(ref tx) = event_tx {
-            // Take the inner engine out of the Arc, set the tx, and wrap it back
+        let engine = if let Some(ref tx) = self.pending_tx {
+            let inner_tx = tx.lock().unwrap().clone();
             let inner = (*self.agent_engine).clone();
-            Arc::new(inner.with_event_tx(Arc::new(Mutex::new(tx.clone()))))
+            Arc::new(inner.with_event_tx(Arc::new(Mutex::new(inner_tx))))
         } else {
             self.agent_engine.clone()
         };
-        
+
+        // Clone event_tx for the async block
+        let event_tx_for_spawn = event_tx.clone();
+
         // Spawn async task
         tokio::spawn(async move {
             tracing::info!("[AGENT ENGINE] Running agent engine for: {}", request);
-            
-            // Execute with cancellation support
-            // Phase 8: /plan uses the planner-supervisor-workers pipeline.
+
             let result = tokio::select! {
-                result = engine.execute_plan_mode(&request, &cancel_token) => result,
+                result = engine.execute(&request, &cancel_token) => result,
                 _ = cancel_token.cancelled() => {
                     Ok(String::from("[CANCELLED]"))
                 }
             };
-            
-            match result {
-                Ok(response) => {
-                    tracing::info!("[AGENT ENGINE] Completed with {} chars", response.len());
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(AppEvent::AgentEngineComplete {
-                            response,
+
+            if let Some(ref tx) = event_tx_for_spawn {
+                match &result {
+                    Ok(response) => {
+                        tracing::info!("[AGENT ENGINE] Completed with {} chars", response.len());
+                        let _ = tx.lock().unwrap().send(AppEvent::AgentEngineComplete {
+                            response: response.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("[AGENT ENGINE] Failed: {}", e);
+                        let _ = tx.lock().unwrap().send(AppEvent::AgentEngineError {
+                            error: e.clone(),
                         });
                     }
                 }
-                Err(e) => {
-                    tracing::error!("[AGENT ENGINE] Failed: {}", e);
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(AppEvent::AgentEngineError {
-                            error: e.to_string(),
-                        });
-                    }
-                }
-            }
-            
-            // Reset pipeline running state
-            if let Some(ref tx) = event_tx {
-                let _ = tx.send(AppEvent::AgentEngineStopped);
+                let _ = tx.lock().unwrap().send(AppEvent::AgentEngineStopped);
             }
         });
     }
 
     pub(super) fn stop_generation(&mut self) {
-        // Cancel the engine task
-        if let Some(engine) = self.chat.engine.take() {
-            engine.cancel();
-        }
-        
         // Also cancel the streaming task
         if let Some(handle) = self.chat.streaming_task.take() {
             handle.abort();
         }
-        
+
         tracing::info!("[CANCEL] Stopping all generation");
-        
+
         // Cancel agent engine
         self.agent_cancel_token.cancel();
-        
+
         // Mark the chain as cancelled so the UI reflects it immediately
         self.agent_chain_state.cancelled = true;
-        
-        self.stop_streaming();
+
+        // Stop streaming state
+        self.chat.is_generating = false;
+        self.chat.is_streaming = false;
+        self.chat.streaming = false;
         self.chat.status = AppStatus::Ready;
         self.chat.pending_error = None;
     }

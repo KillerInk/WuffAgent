@@ -4,12 +4,12 @@ use std::sync::{Arc, RwLock};
 use tracing;
 
 use super::traits::{AgentError, AgentInvocation};
-use super::types::{AgentMetadata, AgentType, AgentResult, Task};
+use super::types::{AgentResult, AgentType};
 
 /// Registry of agents that can be invoked by other agents.
 ///
-/// This enables inter-agent communication where one worker can invoke
-/// another agent as a sub-task, similar to calling a tool.
+/// This enables inter-agent communication where one agent can invoke
+/// another agent as a sub-task.
 pub struct AgentInvocationRegistry {
     agents: RwLock<HashMap<String, Arc<dyn AgentInvocation>>>,
 }
@@ -69,13 +69,13 @@ impl AgentInvocationRegistry {
     pub async fn invoke(
         &self,
         target: &str,
-        task: &Task,
+        request: &str,
         context: &serde_json::Value,
     ) -> Result<AgentResult, AgentError> {
         let agent = self
             .get(target)
             .ok_or_else(|| AgentError::AgentNotFound(format!("Agent '{}' not found", target)))?;
-        agent.invoke(task, context).await
+        agent.invoke(request, context).await
     }
 }
 
@@ -85,53 +85,11 @@ impl Default for AgentInvocationRegistry {
     }
 }
 
-/// Wrapper that adapts a WorkerAgent factory into an AgentInvocation.
-///
-/// This allows workers registered in WorkerRegistry to also be invokable
-/// by other workers through the agent_call tool.
-pub struct InvokableWorker {
-    name: String,
-    factory: Arc<dyn Fn() -> Box<dyn super::worker::WorkerAgent> + Send + Sync>,
-}
-
-impl InvokableWorker {
-    pub fn new(
-        name: &str,
-        factory: Arc<dyn Fn() -> Box<dyn super::worker::WorkerAgent> + Send + Sync>,
-    ) -> Self {
-        Self {
-            name: name.to_string(),
-            factory,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl AgentInvocation for InvokableWorker {
-    async fn invoke(
-        &self,
-        task: &Task,
-        context: &serde_json::Value,
-    ) -> Result<AgentResult, AgentError> {
-        let mut worker = (self.factory)();
-        worker.execute_task(task, context).await
-    }
-
-    fn metadata(&self) -> AgentMetadata {
-        // Default metadata — specific metadata would need to be provided at registration time
-        AgentMetadata {
-            name: self.name.clone(),
-            description: format!("Worker: {}", self.name),
-            agent_type: AgentType::General,
-            allowed_tools: Vec::new(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::types::AgentType;
+    use super::super::traits::{AgentError, AgentInvocation};
+    use super::super::types::{AgentMetadata, AgentResult, AgentType, TaskStatus};
 
     #[tokio::test]
     async fn test_register_and_get() {
@@ -163,8 +121,7 @@ mod tests {
         let registry = AgentInvocationRegistry::new();
         let mock = Arc::new(MockAgent::new("test-agent"));
         registry.register("test-agent", mock);
-        let task = Task::new("test task", AgentType::General, serde_json::json!({}));
-        let result = registry.invoke("test-agent", &task, &serde_json::json!({})).await;
+        let result = registry.invoke("test-agent", "test request", &serde_json::json!({})).await;
         assert!(result.is_ok());
     }
 
@@ -192,19 +149,16 @@ mod tests {
     impl AgentInvocation for MockAgent {
         async fn invoke(
             &self,
-            _task: &Task,
+            _request: &str,
             _context: &serde_json::Value,
         ) -> Result<AgentResult, AgentError> {
             Ok(AgentResult {
                 task_id: "test".to_string(),
                 agent_id: self.name.clone(),
                 agent_type: self.agent_type.clone(),
-                status: super::super::types::TaskStatus::Completed,
+                status: TaskStatus::Completed,
                 output: serde_json::json!({ "result": "mock" }),
                 summary: "mock result".to_string(),
-                needs_refinement: false,
-                fixable: false,
-                suggested_followup: vec![],
                 duration_ms: 0,
                 completed_at: None,
             })
