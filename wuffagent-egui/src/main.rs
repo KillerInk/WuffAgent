@@ -19,6 +19,39 @@ pub use wuffagent_core::agents;
 
 mod ui;
 
+fn emoji_fonts() -> egui::FontDefinitions {
+    let mut font_data = egui::FontDefinitions::default();
+    // Load system emoji font for Windows
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(data) = std::fs::read("C:\\Windows\\Fonts\\seguiemj.ttf") {
+            font_data
+                .font_data
+                .insert("emoji".to_string(), Arc::new(egui::FontData::from_owned(data)));
+            font_data
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
+                .insert(0, "emoji".to_string());
+        }
+    }
+    // Load system emoji font for macOS
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(data) = std::fs::read("/System/Library/Fonts/Apple Color Emoji.ttc") {
+            font_data
+                .font_data
+                .insert("emoji".to_string(), Arc::new(egui::FontData::from_owned(data)));
+            font_data
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .unwrap()
+                .insert(0, "emoji".to_string());
+        }
+    }
+    font_data
+}
+
 fn bootstrap() -> (
     Config,
     ServerManager,
@@ -174,7 +207,7 @@ async fn main() -> eframe::Result {
         "WuffAgent (egui)",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_fonts(egui::FontDefinitions::default());
+            cc.egui_ctx.set_fonts(emoji_fonts());
             Ok(Box::new(ui::state::ChatApp::new(
                 config, client, server, tool_manager, agent_engine,
             )))
