@@ -9,13 +9,28 @@ impl ChatApp {
             AppEvent::StreamChunk { content } => {
                 self.chat.stream_chunk(&content);
             }
-            AppEvent::StreamComplete { content: _, usage: _ } => {
+            AppEvent::StreamComplete { content, usage } => {
                 // Only commit the buffered stream — the chunks were already
                 // delivered via StreamChunk events. Don't re-add the full content.
                 self.chat.commit_stream();
                 self.chat.is_generating = false;
                 self.chat.is_streaming = false;
                 self.status = AppStatus::Ready;
+                if let Some(usage) = usage {
+                    self.chat.token_count = usage.total_tokens as usize;
+                    let n_ctx = self.get_effective_n_ctx();
+                    if n_ctx > 0 {
+                        self.chat.context_used = usage.total_tokens as f32 / n_ctx as f32 * 100.0;
+                    }
+                } else {
+                    // Server doesn't send usage stats (common with some llama.cpp setups).
+                    // Estimate from content length: ~4 chars per token.
+                    self.chat.token_count = Self::estimate_token_count(&content) as usize;
+                    let n_ctx = self.get_effective_n_ctx();
+                    if n_ctx > 0 {
+                        self.chat.context_used = self.chat.token_count as f32 / n_ctx as f32 * 100.0;
+                    }
+                }
                 // Persist the session after each complete response
                 if let Err(e) = self.save_session() {
                     eprintln!("Failed to save session: {}", e);
@@ -103,6 +118,11 @@ impl ChatApp {
             }
             AppEvent::AgentEngineStopped => {
                 tracing::info!("Agent engine stopped");
+                self.chat.is_generating = false;
+                self.chat.is_streaming = false;
+                self.chat.streaming = false;
+                self.chat.is_pipeline_running = false;
+                self.status = AppStatus::Ready;
             }
             AppEvent::NCtxUpdated { n_ctx } => {
                 tracing::info!(n_ctx, "n_ctx updated");

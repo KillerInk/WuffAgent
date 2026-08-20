@@ -126,6 +126,13 @@ impl ChatApp {
                 timestamp: m.timestamp.clone(),
                 image: None,
             }).collect();
+            // Estimate token count from loaded session messages
+            let total_chars: usize = session.messages.iter().map(|m| m.content.len()).sum();
+            self.chat.token_count = (total_chars as f32 / 4.0).ceil() as usize;
+            let n_ctx = self.get_effective_n_ctx();
+            if n_ctx > 0 {
+                self.chat.context_used = self.chat.token_count as f32 / n_ctx as f32 * 100.0;
+            }
         }
     }
 }
