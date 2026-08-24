@@ -26,7 +26,10 @@ impl ChatApp {
         // Clear client session if a session was deleted (explicit flag from panel).
         // Also clear the chat display so the deleted conversation isn't re-saved.
         if clear_client_session {
-            self.client.clone().clear_session();
+            // Must call on the real client: `clear_session` sets `session_id`
+            // on the struct itself (not the shared Arc), so calling it on a
+            // clone would leave the stale id and resurrect the session on save.
+            self.client.clear_session();
             self.chat.messages.clear();
         }
 

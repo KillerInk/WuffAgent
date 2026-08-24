@@ -122,8 +122,11 @@ impl ChatApp {
         if let Err(e) = self.save_session() {
             eprintln!("Failed to save session before switch: {}", e);
         }
-        // Switch to a different session
-        self.client.clone().clear_session();
+        // Switch to a different session. Must call on the real client:
+        // `clear_session` sets `session_id` on the struct itself (not the
+        // shared Arc), so calling it on a clone would leave the stale id
+        // and resurrect the previous session on the next save.
+        self.client.clear_session();
         self.chat.messages.clear();
         // Update the panel's selected_id so the UI reflects the switch immediately
         if let Some(ref mut panel) = self.sessions.sessions_panel {

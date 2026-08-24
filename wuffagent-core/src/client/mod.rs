@@ -900,7 +900,7 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         assert!(!json.contains("reasoning_effort"));
 
-        // High: serialized as "high"
+        // High: serialized as "xhigh" (Qwen3 template wire value)
         client.set_reasoning_effort(crate::types::ReasoningEffort::High);
         let request = build_request(
             &client.system_prompt,
@@ -910,9 +910,9 @@ mod tests {
             None,
             client.reasoning_effort(),
         );
-        assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(request.reasoning_effort.as_deref(), Some("xhigh"));
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains(r#""reasoning_effort":"high""#));
+        assert!(json.contains(r#""reasoning_effort":"xhigh""#));
     }
 
     #[test]

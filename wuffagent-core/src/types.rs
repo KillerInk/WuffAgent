@@ -48,7 +48,7 @@ impl ReasoningEffort {
             ReasoningEffort::Off => None,
             ReasoningEffort::Low => Some("low"),
             ReasoningEffort::Medium => Some("medium"),
-            ReasoningEffort::High => Some("high"),
+            ReasoningEffort::High => Some("xhigh"),
         }
     }
 
