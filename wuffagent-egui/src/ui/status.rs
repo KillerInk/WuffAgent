@@ -6,7 +6,7 @@ use super::theme::Theme;
 
 impl ChatApp {
     pub(super) fn draw_status_bar(&self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.clone().theme.clone());
+        let theme = Theme::from_name(&self.config.theme);
         
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -28,7 +28,7 @@ impl ChatApp {
             };
             ui.label(egui::RichText::new(status_text).color(status_color).size(11.0));
 
-            if self.chat.streaming {
+            if self.chat.is_generating {
                 ui.label(egui::RichText::new("Streaming").color(theme.accent).size(11.0));
             }
             
@@ -48,10 +48,7 @@ impl ChatApp {
 
     /// Returns true when in remote connection mode.
     pub(super) fn is_remote_mode(&self) -> bool {
-        let cfg = self.config.clone();
-        let is_remote = cfg.connection_type == crate::config::ConnectionType::Remote;
-        drop(cfg);
-        is_remote
+        self.config.connection_type == crate::config::ConnectionType::Remote
     }
 
     /// Returns the effective n_ctx for display and percentage calculations.
@@ -66,7 +63,7 @@ impl ChatApp {
     }
 
     pub(super) fn draw_bottom_bar(&self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.clone().theme.clone());
+        let theme = Theme::from_name(&self.config.theme);
         let n_ctx = self.get_effective_n_ctx();
         let n_gpu_layers = self.server.get_n_gpu_layers();
         let threads = self.server.get_threads();

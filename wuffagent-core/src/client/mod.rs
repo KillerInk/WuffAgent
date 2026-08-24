@@ -399,9 +399,20 @@ impl ChatClient {
         let base_url = client.lock().unwrap().base_url.clone();
         let api_key = client.lock().unwrap().api_key.clone();
         let conversation = client.lock().unwrap().conversation.clone();
+        let system_prompt = client.lock().unwrap().system_prompt.clone();
 
         // Build the request with the cloned data
         let mut messages = Vec::new();
+        if !system_prompt.is_empty() {
+            messages.push(Message {
+                role: "system".to_string(),
+                content: system_prompt,
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
         {
             let c = client.lock().unwrap();
             let conv = c.conversation.lock().unwrap();
@@ -475,9 +486,20 @@ impl ChatClient {
         let base_url = client.lock().unwrap().base_url.clone();
         let api_key = client.lock().unwrap().api_key.clone();
         let conversation = client.lock().unwrap().conversation.clone();
+        let system_prompt = client.lock().unwrap().system_prompt.clone();
 
         // Build the request with the cloned data
         let mut messages = Vec::new();
+        if !system_prompt.is_empty() {
+            messages.push(Message {
+                role: "system".to_string(),
+                content: system_prompt,
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
         {
             let c = client.lock().unwrap();
             let conv = c.conversation.lock().unwrap();

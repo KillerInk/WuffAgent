@@ -8,10 +8,7 @@ use crate::config::Config;
 use crate::server::ServerManager;
 use crate::tools::ToolManager;
 
-use crate::types::{AppEvent, AppStatus, ChatMessage};
-
-// Re-export EngineEvent for use in other modules
-pub use crate::client::engine::EngineEvent;
+use crate::types::{AppEvent, AppStatus, ChatMessage, MessageKind};
 
 /// A single task progress entry in the pipeline panel.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -133,7 +130,6 @@ impl ChatApp {
 
     /// Centralized config save — all callers should use this.
     pub fn save_config(&mut self) -> Result<(), crate::config::Error> {
-        self.config.streaming = self.chat.streaming;
         self.config.reasoning_effort = self.reasoning_effort;
         self.client.set_reasoning_effort(self.reasoning_effort);
         self.config.chat_history = self.chat.messages.iter().map(|m| crate::config::ChatMessage {
@@ -156,22 +152,17 @@ impl ChatApp {
 }
 
 /// State for the chat area.
+#[derive(Clone)]
 pub struct ChatAreaState {
     pub messages: Vec<ChatMessage>,
     pub input_text: String,
-    pub is_streaming: bool,
     pub stream_buffer: String,
     pub is_pipeline_running: bool,
     pub pending_error: Option<String>,
     pub is_generating: bool,
-    pub streaming: bool,
-    pub prev_scroll_offset_y: f32,
-    pub prev_content_height: f32,
     pub scroll_to_bottom_requested: bool,
     pub current_thinking: String,
-    pub current_response: String,
     pub at_bottom: bool,
-    pub scroll_offset_y: f32,
     pub button_opacity: f32,
     pub button_visible: bool,
     pub editing_message_index: Option<usize>,
@@ -183,42 +174,6 @@ pub struct ChatAreaState {
     pub status: crate::types::AppStatus,
     pub token_count: usize,
     pub engine: Option<Arc<crate::agents::AgentEngine>>,
-    pub streaming_task: Option<tokio::task::JoinHandle<()>>,
-}
-
-// Implement Clone manually for ChatAreaState since JoinHandle doesn't implement Clone
-impl Clone for ChatAreaState {
-    fn clone(&self) -> Self {
-        Self {
-            messages: self.messages.clone(),
-            input_text: self.input_text.clone(),
-            is_streaming: self.is_streaming,
-            stream_buffer: self.stream_buffer.clone(),
-            is_pipeline_running: self.is_pipeline_running,
-            pending_error: self.pending_error.clone(),
-            is_generating: self.is_generating,
-            streaming: self.streaming,
-            prev_scroll_offset_y: self.prev_scroll_offset_y,
-            prev_content_height: self.prev_content_height,
-            scroll_to_bottom_requested: self.scroll_to_bottom_requested,
-            current_thinking: self.current_thinking.clone(),
-            current_response: self.current_response.clone(),
-            at_bottom: self.at_bottom,
-            scroll_offset_y: self.scroll_offset_y,
-            button_opacity: self.button_opacity,
-            button_visible: self.button_visible,
-            editing_message_index: self.editing_message_index,
-            editing_message_content: self.editing_message_content.clone(),
-            expanded_messages: self.expanded_messages.clone(),
-            context_used: self.context_used,
-            pipeline: self.pipeline.clone(),
-            pending_image: self.pending_image.clone(),
-            status: self.status.clone(),
-            token_count: self.token_count,
-            engine: self.engine.clone(),
-            streaming_task: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -235,19 +190,13 @@ impl ChatAreaState {
         Self {
             messages: Vec::new(),
             input_text: String::new(),
-            is_streaming: false,
             stream_buffer: String::new(),
             is_pipeline_running: false,
             pending_error: None,
             is_generating: false,
-            streaming: false,
-            prev_scroll_offset_y: 0.0,
-            prev_content_height: 0.0,
             scroll_to_bottom_requested: false,
             current_thinking: String::new(),
-            current_response: String::new(),
             at_bottom: true,
-            scroll_offset_y: 0.0,
             button_opacity: 1.0,
             button_visible: true,
             editing_message_index: None,
@@ -259,12 +208,12 @@ impl ChatAreaState {
             status: crate::types::AppStatus::Stopped,
             token_count: 0,
             engine: None,
-            streaming_task: None,
         }
     }
 
-    pub fn append_message(&mut self, role: &str, content: &str) {
+    pub fn push_message(&mut self, kind: MessageKind, role: &str, content: &str) {
         self.messages.push(ChatMessage {
+            kind,
             role: role.to_string(),
             content: content.to_string(),
             timestamp: crate::types::format_timestamp(),
@@ -272,17 +221,19 @@ impl ChatAreaState {
         });
     }
 
+    pub fn append_message(&mut self, role: &str, content: &str) {
+        self.push_message(MessageKind::Normal, role, content);
+    }
+
     pub fn stream_chunk(&mut self, chunk: &str) {
         self.stream_buffer.push_str(chunk);
     }
 
     pub fn commit_stream(&mut self) {
-        let buffer = self.stream_buffer.clone();
+        let buffer = std::mem::take(&mut self.stream_buffer);
         if !buffer.is_empty() {
             self.append_message("assistant", &buffer);
-            self.stream_buffer.clear();
         }
-        self.is_streaming = false;
     }
 }
 

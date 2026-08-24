@@ -10,7 +10,6 @@ fn test_config_default() {
     assert_eq!(cfg.n_ctx, 4096);
     assert_eq!(cfg.threads, 8);
     assert_eq!(cfg.theme, "dark");
-    assert!(cfg.streaming);
     assert_eq!(cfg.connection_type, ConnectionType::Local);
     assert!(cfg.server_path.is_empty());
     assert!(cfg.model_path.is_empty());
@@ -42,7 +41,6 @@ fn test_config_save_and_load() {
     cfg.n_gpu_layers = 33;
     cfg.n_ctx = 2048;
     cfg.system_prompt = "You are a helpful assistant.".to_string();
-    cfg.streaming = false;
     cfg.theme = "light".to_string();
     cfg.chat_history = vec![
         ChatMessage { role: "user".to_string(), content: "Hello".to_string(), timestamp: String::new() },
@@ -62,7 +60,6 @@ fn test_config_save_and_load() {
     assert_eq!(loaded.n_gpu_layers, 33);
     assert_eq!(loaded.n_ctx, 2048);
     assert_eq!(loaded.system_prompt, "You are a helpful assistant.");
-    assert!(!loaded.streaming);
     assert_eq!(loaded.theme, "light");
     assert_eq!(loaded.chat_history.len(), 2);
     assert_eq!(loaded.chat_history[0].role, "user");
@@ -440,7 +437,6 @@ fn test_config_serialize_deserialize_all_fields() {
     cfg.n_gpu_layers = 33;
     cfg.n_ctx = 2048;
     cfg.system_prompt = "You are a helpful agent.".to_string();
-    cfg.streaming = false;
     cfg.theme = "light".to_string();
     cfg.chat_history = vec![
         ChatMessage { role: "user".to_string(), content: "Hello".to_string(), timestamp: String::new() },
@@ -460,7 +456,6 @@ fn test_config_serialize_deserialize_all_fields() {
     assert_eq!(loaded.n_gpu_layers, 33);
     assert_eq!(loaded.n_ctx, 2048);
     assert_eq!(loaded.system_prompt, "You are a helpful agent.");
-    assert!(!loaded.streaming);
     assert_eq!(loaded.theme, "light");
     assert_eq!(loaded.chat_history.len(), 2);
     assert_eq!(loaded.max_messages, 50);

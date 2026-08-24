@@ -116,12 +116,29 @@ pub struct ChatMessage {
     pub timestamp: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Display kind — replaces legacy string-prefix conventions (💭 prefix, "||" tool format).
+    #[serde(default)]
+    pub kind: MessageKind,
+}
+
+/// How a UI chat message should be rendered.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    #[default]
+    Normal,
+    /// Model reasoning/thinking (rendered dim + italic).
+    Thinking,
+    /// Tool call result; content is "header||call_id||result_json" or a bare result.
+    Tool,
 }
 
 /// Events that flow from the client engine to the UI.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     StreamChunk { content: String },
+    /// An intermediate tool round finished (text committed, generation continues).
+    StreamRoundComplete { content: String, usage: Option<Usage> },
     StreamComplete { content: String, usage: Option<Usage> },
     StreamError { error: String },
     ToolCallWarning { tool_name: String, message: String },
@@ -146,21 +163,6 @@ pub enum AppEvent {
     NCtxUpdated { n_ctx: u32 },
 }
 
-/// Convert engine events (from the chat engine) to app events (UI-facing).
-impl From<crate::client::engine::EngineEvent> for AppEvent {
-    fn from(event: crate::client::engine::EngineEvent) -> Self {
-        match event {
-            crate::client::engine::EngineEvent::StreamChunk { content } => Self::StreamChunk { content },
-            crate::client::engine::EngineEvent::StreamComplete { content, usage } => Self::StreamComplete { content, usage },
-            crate::client::engine::EngineEvent::StreamError { error } => Self::StreamError { error },
-            crate::client::engine::EngineEvent::ToolCallStart { tool_name, call_id } => Self::ToolCallStart { tool_name, call_id },
-            crate::client::engine::EngineEvent::ToolCallComplete { tool_name, call_id, result } => Self::ToolCallComplete { tool_name, call_id, result },
-            crate::client::engine::EngineEvent::ToolCallError { tool_name, call_id, error } => Self::ToolCallError { tool_name, call_id, error },
-            crate::client::engine::EngineEvent::ThinkingChunk { content } => Self::StreamThinkingChunk { content },
-            crate::client::engine::EngineEvent::ThinkingComplete { content } => Self::StreamThinkingComplete { content },
-        }
-    }
-}
 
 /// Produce a human-readable label for a tool call from its result.
 /// Returns e.g. "read: Read `path/to/file`" or "write: Write `path/to/file`"

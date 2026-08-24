@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use super::state::ChatApp;
-use crate::types::ChatMessage;
+use crate::types::{ChatMessage, MessageKind};
 use super::theme::Theme;
 
 impl ChatApp {
@@ -9,158 +9,42 @@ impl ChatApp {
     const SCROLL_BOTTOM_THRESHOLD: f32 = 10.0;
 
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.clone().theme.clone());
-        
+        let theme = Theme::from_name(&self.config.theme);
+
         // Show pending error as inline warning
-        let pending_error = self.chat.pending_error.take();
-        if let Some(ref err) = pending_error {
+        if let Some(err) = self.chat.pending_error.take() {
             ui.horizontal(|ui| {
                 ui.colored_label(theme.error, format!("⚠ Error: {}", err));
             });
-            if ui.button("Dismiss").clicked() {
-                // already taken above
-            }
             ui.separator();
         }
 
-        // Clone messages to avoid borrow checker issues
-        let messages: Vec<ChatMessage> = self.chat.messages.clone();
+        // Move messages out so the scroll closure borrows only the local,
+        // not `self.chat` (avoids the per-frame deep clone of every message).
+        let messages = std::mem::take(&mut self.chat.messages);
 
-        // Load egui's persisted scroll state BEFORE rendering to know where the user was
-        let scroll_id = ui.id().with("chat_scroll");
-        let prev_egui_state = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id);
-        
-        // Determine if user was at bottom BEFORE this frame rendered new content
-        // We compare the persisted state's offset against the previous frame's content height
-        let was_at_bottom = self.compute_was_at_bottom(
-            prev_egui_state.as_ref(),
-            self.chat.prev_scroll_offset_y,
-            self.chat.prev_content_height,
-        );
-
-        // Determine whether to auto-scroll this frame
-        // Button click always scrolls to bottom; new messages only scroll if user was at bottom
-        let auto_scroll = self.chat.scroll_to_bottom_requested || was_at_bottom;
-
-        // Use egui's built-in scroll area with id_salt
-        // When button clicked, pre-set offset to max so stick_to_bottom works even without new content
-        let scroll_area = egui::ScrollArea::vertical()
+        // Stick to bottom when the user is already there or forced the button.
+        let scroll_output = egui::ScrollArea::vertical()
             .id_salt("chat_scroll")
             .auto_shrink([false, true])
-            .stick_to_bottom(auto_scroll);
-        let scroll_output = if self.chat.scroll_to_bottom_requested {
-            // Force scroll to bottom by setting offset to max content offset
-            scroll_area
-                .vertical_scroll_offset(self.chat.prev_content_height)
-                .show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                        for (i, msg) in messages.iter().enumerate() {
-                            self.draw_message(ui, msg, i, &theme);
-                        }
-                        let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
-                        if self.chat.is_generating && !self.chat.current_thinking.is_empty() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.label(egui::RichText::new(&streaming_ts)
-                                    .color(theme.text_dim)
-                                    .size(11.0));
-                                ui.colored_label(theme.text_dim, "Thinking:");
-                                ui.add(egui::Label::new(
-                                    egui::RichText::new(&self.chat.current_thinking)
-                                        .color(theme.text_dim)
-                                        .italics()
-                                        .size(12.0)
-                                ));
-                                ui.spinner();
-                            });
-                        }
-                        if self.chat.is_generating && !self.chat.current_response.is_empty() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.label(egui::RichText::new(&streaming_ts)
-                                    .color(theme.text_dim)
-                                    .size(11.0));
-                                ui.colored_label(theme.primary, "AI:");
-                                ui.add(egui::Label::new(
-                                    egui::RichText::new(&self.chat.current_response)
-                                        .color(theme.text_primary)
-                                ));
-                                ui.spinner();
-                            });
-                        } else if self.chat.is_generating && self.chat.current_response.is_empty() && self.chat.current_thinking.is_empty() {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.label(egui::RichText::new(&streaming_ts)
-                                    .color(theme.text_dim)
-                                    .size(11.0));
-                                ui.colored_label(theme.primary, "AI:");
-                                ui.spinner();
-                            });
-                        }
-                    });
-                })
-        } else {
-            scroll_area.show(ui, |ui| {
+            .stick_to_bottom(self.chat.scroll_to_bottom_requested || self.chat.at_bottom)
+            .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     for (i, msg) in messages.iter().enumerate() {
                         self.draw_message(ui, msg, i, &theme);
                     }
-                    let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
-                    if self.chat.is_generating && !self.chat.current_thinking.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(egui::RichText::new(&streaming_ts)
-                                .color(theme.text_dim)
-                                .size(11.0));
-                            ui.colored_label(theme.text_dim, "Thinking:");
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(&self.chat.current_thinking)
-                                    .color(theme.text_dim)
-                                    .italics()
-                                    .size(12.0)
-                            ));
-                            ui.spinner();
-                        });
-                    }
-                    if self.chat.is_generating && !self.chat.current_response.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(egui::RichText::new(&streaming_ts)
-                                .color(theme.text_dim)
-                                .size(11.0));
-                            ui.colored_label(theme.primary, "AI:");
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(&self.chat.current_response)
-                                    .color(theme.text_primary)
-                            ));
-                            ui.spinner();
-                        });
-                    } else if self.chat.is_generating && self.chat.current_response.is_empty() && self.chat.current_thinking.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(egui::RichText::new(&streaming_ts)
-                                .color(theme.text_dim)
-                                .size(11.0));
-                            ui.colored_label(theme.primary, "AI:");
-                            ui.spinner();
-                        });
-                    }
+                    self.draw_streaming_line(ui, &theme);
                 });
-            })
-        };
+            });
+
+        self.chat.messages = messages;
 
         // Reset the scroll-to-bottom flag after this frame
         self.chat.scroll_to_bottom_requested = false;
 
         // Update at_bottom from the output - use content_size vs offset from the rendered output
         self.chat.at_bottom = self.is_at_bottom_from_output(&scroll_output);
-        
-        // Save our tracking state so next frame has fresh data
-        self.chat.prev_scroll_offset_y = scroll_output.state.offset.y;
-        self.chat.scroll_offset_y = scroll_output.state.offset.y;
-        self.chat.prev_content_height = scroll_output.content_size.y;
 
         // Update button visibility and opacity
         if self.chat.at_bottom {
@@ -206,25 +90,53 @@ impl ChatApp {
         });
     }
 
-    /// Compute whether user was at bottom using the persisted egui state before render.
-    /// Compares the persisted scroll offset against the previous frame's content height.
-    fn compute_was_at_bottom(
-        &self,
-        prev_state: Option<&egui::containers::scroll_area::State>,
-        _prev_offset_y: f32,
-        prev_content_height: f32,
-    ) -> bool {
-        // If we have no prior state (first render), assume at bottom
-        if prev_state.is_none() {
-            return true;
+    /// Live streaming line shown while a response is in flight.
+    /// Text renders as it arrives via StreamChunk events (no extra buffering).
+    fn draw_streaming_line(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        if !self.chat.is_generating {
+            return;
         }
-        // If we have no prior content height (first render), assume at bottom
-        if prev_content_height == 0.0 {
-            return true;
+        let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        ui.add_space(10.0);
+        if !self.chat.current_thinking.is_empty() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(egui::RichText::new(&streaming_ts)
+                    .color(theme.text_dim)
+                    .size(11.0));
+                ui.colored_label(theme.text_dim, "Thinking:");
+                ui.add(egui::Label::new(
+                    egui::RichText::new(&self.chat.current_thinking)
+                        .color(theme.text_dim)
+                        .italics()
+                        .size(12.0)
+                ));
+                ui.spinner();
+            });
         }
-        // Use the at_bottom flag from last frame - it was computed correctly
-        // from the ScrollAreaOutput after the previous render
-        self.chat.at_bottom
+        if !self.chat.stream_buffer.is_empty() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(egui::RichText::new(&streaming_ts)
+                    .color(theme.text_dim)
+                    .size(11.0));
+                ui.colored_label(theme.primary, "AI:");
+                ui.add(egui::Label::new(
+                    egui::RichText::new(&self.chat.stream_buffer)
+                        .color(theme.text_primary)
+                ));
+                ui.spinner();
+            });
+        } else if self.chat.current_thinking.is_empty() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(egui::RichText::new(&streaming_ts)
+                    .color(theme.text_dim)
+                    .size(11.0));
+                ui.colored_label(theme.primary, "AI:");
+                ui.spinner();
+            });
+        }
     }
 
     /// Check if the scroll area is at the bottom using ScrollAreaOutput after render.
@@ -258,18 +170,18 @@ impl ChatApp {
     ) {
         let is_user = message.role == "user";
         let is_editing = self.chat.editing_message_index == Some(index);
-        // Detect thinking messages (no wrapper tags but role=assistant with dim rendering path)
-        // We rely on the UI having stored content without tags; the live-render path below handles it.
-        
+
         // Constrain content width (leaves room for avatar + margins)
         let avatar_size = 28.0;
         let avatar_margin = 16.0; // space from edges + gap to content
         let max_content_width = (ui.available_width() - avatar_size - avatar_margin * 2.0).max(120.0);
-        
+
         // Message bubble backgrounds with good contrast
         let user_bubble_bg = egui::Color32::from_rgb(37, 99, 235); // dark blue for white text
         let bubble_bg = if is_user {
             user_bubble_bg
+        } else if message.kind == MessageKind::Tool {
+            theme.tool_bg
         } else {
             theme.surface_light
         };
@@ -349,35 +261,22 @@ impl ChatApp {
                                         ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
                                     }
                                 }
-                                // Message content with wrapping
-                                // Tool messages: green/yellow tinted bubble
-                                // User messages: white text on dark blue bubble for contrast
-                                // AI messages: dark text on light bubble for contrast
-                                let is_tool = message.role == "tool";
-                                let _bubble_bg = if is_tool {
-                                    theme.tool_bg
-                                } else if is_user {
-                                    theme.user_bg
-                                } else {
-                                    theme.ai_bg
-                                };
+                                // Branch on message kind — no string-prefix sniffing
                                 let text_color = if is_user {
                                     egui::Color32::WHITE
                                 } else {
                                     theme.text_primary
                                 };
-                                if is_tool {
+                                if message.kind == MessageKind::Tool {
                                     self.draw_tool_message(ui, message, theme, index);
-                                } else if message.content.starts_with("💭 ") {
+                                } else if message.kind == MessageKind::Thinking {
                                     // Thinking message — render dim and italic
-                                    let thinking_text = &message.content["💭 ".len()..];
-                                    let content_label = egui::Label::new(
-                                        egui::RichText::new(thinking_text)
+                                    ui.add(egui::Label::new(
+                                        egui::RichText::new(&message.content)
                                             .color(theme.text_dim)
                                             .italics()
                                             .size(12.0)
-                                    ).wrap();
-                                    ui.add(content_label);
+                                    ).wrap());
                                 } else {
                                     // Normal message — strip any legacy <think> tags
                                     let display_content = if message.content.contains("<think>") || message.content.contains("</think>") {
@@ -428,10 +327,6 @@ impl ChatApp {
         }
     }
 
-    /// Delegate to the core tool_call_header function.
-    pub(super) fn tool_call_header(tool_name: &str, result: &str) -> String {
-        crate::types::tool_call_header(tool_name, result)
-    }
 
     pub(super) fn commit_message_edit(&mut self, index: usize) {
         let new_content = self.chat.editing_message_content.clone();
@@ -457,52 +352,23 @@ impl ChatApp {
     }
 
     /// Parse a tool message and render it with smart formatting.
-    /// Tool messages have the format: "header||call_id||result_json"
+    /// Content is "header||call_id||result" — or a bare result for messages
+    /// loaded from older sessions (rendered without a header).
     fn draw_tool_message(&mut self, ui: &mut egui::Ui, message: &ChatMessage, theme: &Theme, msg_index: usize) {
-        // First check if this is a legacy format (starts with { or 🔧)
-        let is_legacy = message.content.starts_with('{') || message.content.starts_with('🔧');
-        
-        if is_legacy {
-            // Legacy format - parse as before
-            let lines: Vec<&str> = message.content.lines().collect();
-            if lines.is_empty() { return; }
-            ui.label(egui::RichText::new(lines[0])
-                .color(theme.text_primary).size(11.0));
-            ui.add_space(3.0);
-            let raw_result = if lines.len() >= 3 && lines[1].starts_with("```") && lines.last().is_some_and(|l| l.starts_with("```")) {
-                lines[2..lines.len()-1].join("\n")
-            } else {
-                message.content.clone()
-            };
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw_result) {
-                self.draw_tool_json_result(ui, &json, &raw_result, theme, msg_index);
-            } else {
-                self.draw_tool_plain_result(ui, &raw_result, theme);
-            }
-            return;
-        }
-
         let parts: Vec<&str> = message.content.splitn(3, "||").collect();
-        if parts.is_empty() {
-            return;
-        }
-
-        let header = parts[0];
-        let _call_id = if parts.len() > 1 { Some(parts[1]) } else { None };
-        let raw_result = if parts.len() > 2 { parts[2] } else { message.content.as_str() };
-
-        // Render beautiful header
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(header)
-                .color(theme.text_primary)
-                .size(11.0));
-            if let Some(cid) = _call_id {
-                ui.label(egui::RichText::new(cid)
+        if parts.len() >= 2 {
+            // Render header + call id
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(parts[0])
+                    .color(theme.text_primary)
+                    .size(11.0));
+                ui.label(egui::RichText::new(parts[1])
                     .color(theme.text_dim)
                     .size(9.0));
-            }
-        });
-        ui.add_space(3.0);
+            });
+            ui.add_space(3.0);
+        }
+        let raw_result = if parts.len() > 2 { parts[2] } else { message.content.as_str() };
 
         // Render result with smart formatting
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_result) {

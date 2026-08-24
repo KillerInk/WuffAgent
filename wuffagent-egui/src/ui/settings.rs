@@ -13,7 +13,6 @@ pub struct SettingsDialog {
     pub n_ctx: u32,
     pub threads: u32,
     pub system_prompt: String,
-    pub streaming: bool,
     pub theme: String,
     pub connection_type: String,
     pub remote_url: String,
@@ -43,7 +42,6 @@ impl SettingsDialog {
             n_ctx: cfg.n_ctx,
             threads: cfg.threads,
             system_prompt: cfg.system_prompt.clone(),
-            streaming: cfg.streaming,
             theme: cfg.theme.clone(),
             connection_type: match &cfg.connection_type {
                 ConnectionType::Local => "local".to_string(),
@@ -111,7 +109,6 @@ impl SettingsDialog {
                     ui.separator();
                     ui.label(egui::RichText::new("System prompt:").size(12.0).color(theme.text_secondary));
                     ui.text_edit_multiline(&mut self.system_prompt);
-                    ui.add(egui::Checkbox::new(&mut self.streaming, "Stream responses"));
                     ui.add(egui::Slider::new(&mut self.max_messages, 10..=500).text("Max messages to keep"));
                 });
 
@@ -218,7 +215,6 @@ impl SettingsDialog {
         cfg.n_ctx = self.n_ctx;
         cfg.threads = self.threads;
         cfg.system_prompt.clone_from(&self.system_prompt);
-        cfg.streaming = self.streaming;
         cfg.theme.clone_from(&self.theme);
         cfg.max_messages = self.max_messages;
         cfg.connection_type = match self.connection_type.as_str() {

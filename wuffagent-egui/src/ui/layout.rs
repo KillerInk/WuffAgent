@@ -34,7 +34,7 @@ impl ChatApp {
             ui.set_min_height(32.0);
             ui.set_max_height(36.0);
 
-            let theme = Theme::from_name(&self.config.clone().theme.clone());
+            let theme = Theme::from_name(&self.config.theme);
             ui.visuals_mut().panel_fill = theme.background;
 
             ui.horizontal(|ui| {
@@ -74,7 +74,7 @@ impl ChatApp {
 
         // Bottom panels stack upward, so bottom_bar must be declared first to be at the bottom
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
-            let theme = Theme::from_name(&self.config.clone().theme.clone());
+            let theme = Theme::from_name(&self.config.theme);
             ui.visuals_mut().panel_fill = theme.surface;
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
             self.draw_status_bar(ui);
@@ -87,37 +87,27 @@ impl ChatApp {
             .default_height(50.0)
             .resizable(false)
             .show(ctx, |ui| {
-                let theme = Theme::from_name(&self.config.clone().theme.clone());
+                let theme = Theme::from_name(&self.config.theme);
                 ui.visuals_mut().panel_fill = theme.surface;
                 self.draw_input_area(ui);
             });
 
         // Chat area fills all remaining space between top bar and input panel
         egui::CentralPanel::default().show(ctx, |ui| {
-            let theme = Theme::from_name(&self.config.clone().theme.clone());
+            let theme = Theme::from_name(&self.config.theme);
             ui.visuals_mut().panel_fill = theme.background;
             self.draw_chat_area(ui);
         });
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {
-        let cfg = self.config.clone();
-        let current_theme = cfg.theme.clone();
-        drop(cfg);
-
-        let new_theme = if current_theme == "dark" {
-            "light".to_string()
-        } else {
-            "dark".to_string()
-        };
-
-        self.config.theme = new_theme.clone();
+        let new_theme: &str = if self.config.theme == "dark" { "light" } else { "dark" };
+        self.config.theme = new_theme.to_string();
         if let Err(e) = self.save_config() {
             eprintln!("Failed to save theme: {}", e);
         }
 
         // Apply custom theme colors
-        let theme = Theme::from_name(&new_theme);
-        theme.apply(ctx);
+        Theme::from_name(new_theme).apply(ctx);
     }
 }

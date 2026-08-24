@@ -52,7 +52,6 @@ pub struct Config {
 
     // Chat settings
     pub system_prompt: String,
-    pub streaming: bool,
     pub theme: String,
     pub chat_history: Vec<ChatMessage>,
     /// Reasoning effort for reasoning models (Off = omitted from requests).
@@ -148,7 +147,6 @@ impl Default for Config {
             remote_url: String::new(),
             remote_api_key: None,
             system_prompt: String::new(),
-            streaming: true,
             theme: "dark".to_string(),
             chat_history: Vec::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),

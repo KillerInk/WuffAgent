@@ -137,12 +137,23 @@ impl ChatApp {
             drop(conv);
             self.client.set_session(Some(id.to_string()), session_dir);
             self.client.load_session();
-            // Populate the UI display with the loaded session messages
-            self.chat.messages = session.messages.iter().map(|m| crate::types::ChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                timestamp: m.timestamp.clone(),
-                image: None,
+            // Populate the UI display with the loaded session messages.
+            // Derive message kind from legacy conventions (tool role, 💭 prefix).
+            self.chat.messages = session.messages.iter().map(|m| {
+                let (content, kind) = if m.role == "tool" {
+                    (m.content.clone(), crate::types::MessageKind::Tool)
+                } else if let Some(t) = m.content.strip_prefix("💭 ") {
+                    (t.to_string(), crate::types::MessageKind::Thinking)
+                } else {
+                    (m.content.clone(), crate::types::MessageKind::Normal)
+                };
+                crate::types::ChatMessage {
+                    kind,
+                    role: m.role.clone(),
+                    content,
+                    timestamp: m.timestamp.clone(),
+                    image: None,
+                }
             }).collect();
             // Estimate token count from loaded session messages
             let total_chars: usize = session.messages.iter().map(|m| m.content.len()).sum();

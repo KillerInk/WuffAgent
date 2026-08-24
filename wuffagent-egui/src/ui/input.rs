@@ -3,13 +3,12 @@ use std::sync::{Arc, Mutex};
 use eframe::egui;
 
 use super::state::ChatApp;
-use crate::types::{AppEvent, AppStatus};
+use crate::types::{AppEvent, AppStatus, MessageKind};
 use super::theme::Theme;
-use crate::ui::state::EngineEvent;
 
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.clone().theme.clone());
+        let theme = Theme::from_name(&self.config.theme);
         ui.style_mut().spacing.item_spacing.y = 0.0;
 
         // Validate input length
@@ -174,14 +173,13 @@ impl ChatApp {
 
         self.chat.input_text.clear();
         self.chat.is_generating = true;
-        self.chat.is_streaming = true;
-        self.chat.streaming = true;
         self.status = AppStatus::Generating;
         self.chat.status = AppStatus::Generating;
 
         // Add user message to chat display
         let image = self.chat.pending_image.take();
         self.chat.messages.push(crate::types::ChatMessage {
+            kind: MessageKind::Normal,
             role: "user".to_string(),
             content: input.clone(),
             timestamp: crate::types::format_timestamp(),
@@ -191,70 +189,86 @@ impl ChatApp {
         // Get tool definitions
         let tool_defs = self.tool_manager.get_tool_definitions();
 
-        // Abort any existing streaming task
-        if let Some(handle) = self.chat.streaming_task.take() {
-            handle.abort();
+        // Apply the selected agent profile's system prompt for this request
+        // (None = "Auto" → the general profile).
+        let agent_prompt = match self.selected_agent_index {
+            Some(i) => {
+                let name = self.get_agent_names().get(i).cloned().unwrap_or_default();
+                self.load_agent_system_prompt(&[name.as_str()])
+            }
+            None => {
+                self.load_agent_system_prompt(&["general", "generalist"])
+            }
+        };
+        if !agent_prompt.is_empty() {
+            self.client.set_system_prompt(&agent_prompt);
+            tracing::info!("Applied agent system prompt ({} chars)", agent_prompt.len());
+        } else {
+            tracing::warn!("No agent system prompt found — chat will run without one");
         }
 
-        // Create a channel for engine events (engine → relay task)
-        let (engine_tx, engine_rx) = std::sync::mpsc::channel::<EngineEvent>();
-
-        // Create a dedicated channel for client tool events (client → UI).
-        // We need a separate channel because the relay task also writes to pending_tx,
-        // and the UI must read from a single receiver.
-        let (tool_tx, tool_rx) = std::sync::mpsc::channel::<AppEvent>();
-
-        // Spawn a task that merges both streams into pending_tx
-        if let Some(pending_tx) = self.pending_tx.clone() {
-            let handle = tokio::spawn(async move {
-                // We need to select from both receivers. Use a simple polling loop.
-                let engine_rx = std::sync::Mutex::new(engine_rx);
-                let tool_rx = std::sync::Mutex::new(tool_rx);
-                let pending_tx = pending_tx.clone();
-
-                loop {
-                    let mut ready = false;
-                    // Try engine_rx
-                    if let Ok(rx) = engine_rx.lock() {
-                        if let Ok(event) = rx.try_recv() {
-                            let app_event: AppEvent = event.into();
-                            let _ = pending_tx.lock().unwrap().send(app_event);
-                            ready = true;
-                        }
-                    }
-                    // Try tool_rx
-                    if let Ok(rx) = tool_rx.lock() {
-                        if let Ok(event) = rx.try_recv() {
-                            let _ = pending_tx.lock().unwrap().send(event);
-                            ready = true;
-                        }
-                    }
-                    if !ready {
-                        // Both channels empty, wait a bit before polling again
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                }
-            });
-            self.chat.streaming_task = Some(handle);
+        // Cancel any in-flight engine (previous send)
+        if let Some(ref engine) = self.chat_engine {
+            engine.cancel();
         }
 
-        // Wire the tool event sender into the client so tool execution events
-        // (ToolCallStart/Complete/Error) reach the UI.
-        self.client.set_tool_event_sender(tool_tx);
+        // Engine and client tool events both flow straight into the single
+        // pending_tx the UI polls each frame — no relay task needed.
+        let pending_tx = match self.pending_tx.clone() {
+            Some(tx) => tx.lock().unwrap().clone(),
+            None => return,
+        };
+        self.client.set_tool_event_sender(pending_tx.clone());
 
         // Create and start the chat engine
         let client = Arc::new(Mutex::new(self.client.clone()));
         let tool_manager = (*self.tool_manager).clone();
-        let engine = crate::client::engine::ChatEngine::new(
-            client,
-            tool_manager,
-            engine_tx,
-        );
+        let engine = crate::client::engine::ChatEngine::new(client, tool_manager, pending_tx);
         // Store the engine for potential cancellation
         self.chat_engine = Some(engine);
 
         // Start the chat
         self.chat_engine.as_ref().unwrap().start_chat(input, tool_defs);
+    }
+
+    /// Load the system prompt of the first matching worker profile.
+    /// Searches the same workers directories as `get_agent_names` and
+    /// matches the profile's `name` field (not the file name).
+    /// Returns an empty string when no candidate profile exists.
+    fn load_agent_system_prompt(&self, names: &[&str]) -> String {
+        let mut dirs = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            dirs.push(cwd.join("workers"));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                dirs.push(exe_dir.join("workers"));
+            }
+        }
+        let agents_dir = self.config.file_path
+            .parent()
+            .map(|p| p.join("agents"))
+            .unwrap_or_else(|| self.config.file_path.clone());
+        dirs.push(agents_dir.join("workers"));
+
+        for dir in dirs {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                        continue;
+                    }
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(cfg) = serde_json::from_str::<crate::agents::WorkerConfig>(&content) {
+                            if names.iter().any(|n| cfg.name == *n) {
+                                return cfg.system_prompt;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        String::new()
     }
 
     /// Return the list of agent names from all known workers directories.
@@ -316,11 +330,10 @@ impl ChatApp {
 
         self.chat.input_text.clear();
         self.chat.is_generating = true;
-        self.chat.is_streaming = true;
-        self.chat.streaming = true;
         self.status = AppStatus::Generating;
         self.chat.status = AppStatus::Generating;
         self.chat.messages.push(crate::types::ChatMessage {
+            kind: MessageKind::Normal,
             role: "user".to_string(),
             content: format!("/plan {}", request),
             timestamp: crate::types::format_timestamp(),
@@ -386,23 +399,19 @@ impl ChatApp {
     }
 
     pub(super) fn stop_generation(&mut self) {
-        // Also cancel the streaming task
-        if let Some(handle) = self.chat.streaming_task.take() {
-            handle.abort();
-        }
-
         tracing::info!("[CANCEL] Stopping all generation");
 
-        // Cancel agent engine
+        // Cancel the chat engine and agent engine
+        if let Some(ref engine) = self.chat_engine {
+            engine.cancel();
+        }
         self.agent_cancel_token.cancel();
 
         // Mark the chain as cancelled so the UI reflects it immediately
         self.agent_chain_state.cancelled = true;
 
-        // Stop streaming state
+        // Stop generating state
         self.chat.is_generating = false;
-        self.chat.is_streaming = false;
-        self.chat.streaming = false;
         self.chat.status = AppStatus::Ready;
         self.chat.pending_error = None;
     }

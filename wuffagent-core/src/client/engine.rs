@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use super::{ChatClient, Error as ClientError};
 use crate::tools::manager::ToolManager;
-use crate::types::Usage;
+use crate::types::{AppEvent, Usage};
 
 /// Errors that can occur during chat engine operations
 #[derive(Debug, thiserror::Error)]
@@ -19,30 +19,9 @@ pub enum EngineError {
     #[error("Max tool rounds ({0}) reached")]
     MaxRounds(usize),
     #[error("Send error: {0}")]
-    Send(#[from] mpsc::SendError<EngineEvent>),
+    Send(#[from] mpsc::SendError<AppEvent>),
     #[error("Client error: {0}")]
     Client(#[from] ClientError),
-}
-
-/// Events that the ChatEngine can produce
-#[derive(Debug)]
-pub enum EngineEvent {
-    /// A new stream chunk arrived
-    StreamChunk { content: String },
-    /// Streaming is complete
-    StreamComplete { content: String, usage: Option<Usage> },
-    /// An error occurred
-    StreamError { error: String },
-    /// A tool call started
-    ToolCallStart { tool_name: String, call_id: String },
-    /// A tool call completed
-    ToolCallComplete { tool_name: String, call_id: String, result: String },
-    /// A tool call errored
-    ToolCallError { tool_name: String, call_id: String, error: String },
-    /// A chunk of model thinking/reasoning content (e.g. Claude-style)
-    ThinkingChunk { content: String },
-    /// Thinking/reasoning phase is complete
-    ThinkingComplete { content: String },
 }
 
 /// Configuration for the chat engine
@@ -72,7 +51,7 @@ pub struct ChatEngine {
     client: Arc<Mutex<ChatClient>>,
     tool_manager: ToolManager,
     config: EngineConfig,
-    event_tx: mpsc::Sender<EngineEvent>,
+    event_tx: mpsc::Sender<AppEvent>,
     /// Handle to the running task (for cancellation)
     task_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
@@ -93,7 +72,7 @@ impl ChatEngine {
     pub fn new(
         client: Arc<Mutex<ChatClient>>,
         tool_manager: ToolManager,
-        event_tx: mpsc::Sender<EngineEvent>,
+        event_tx: mpsc::Sender<AppEvent>,
     ) -> Self {
         Self {
             client,
@@ -131,13 +110,12 @@ impl ChatEngine {
             )
             .await;
 
+            // StreamComplete was already emitted by run_chat_loop on success;
+            // only surface an error here (the UI clears is_generating on it).
             if let Err(e) = result {
-                let _ = event_tx.send(EngineEvent::StreamError {
+                let _ = event_tx.send(AppEvent::StreamError {
                     error: e.to_string(),
                 });
-            } else {
-                // Notify the UI that the chat loop finished
-                let _ = event_tx.send(EngineEvent::StreamComplete { content: String::new(), usage: None });
             }
         });
 
@@ -156,7 +134,7 @@ impl ChatEngine {
 async fn run_chat_loop(
     client: &Arc<Mutex<ChatClient>>,
     tool_manager: &ToolManager,
-    event_tx: &mpsc::Sender<EngineEvent>,
+    event_tx: &mpsc::Sender<AppEvent>,
     prompt: &str,
     initial_tools: Option<&[crate::tools::ToolDefinition]>,
     config: EngineConfig,
@@ -179,7 +157,7 @@ async fn run_chat_loop(
                 round,
                 thinking_content.len()
             );
-            event_tx.send(EngineEvent::ThinkingComplete { content: thinking_content })?;
+            event_tx.send(AppEvent::StreamThinkingComplete { content: thinking_content })?;
         }
 
         // 2. Check for tool calls in the response
@@ -189,13 +167,14 @@ async fn run_chat_loop(
                 round,
                 content.len()
             );
-            event_tx.send(EngineEvent::StreamComplete { content, usage })?;
+            event_tx.send(AppEvent::StreamComplete { content, usage })?;
             return Ok(());
         }
 
-        // 2.5. Emit StreamComplete for the current content/response so far, before tool execution
-        // This allows the UI to show the full content up to this point.
-        event_tx.send(EngineEvent::StreamComplete { content: content.clone(), usage: usage.clone() })?;
+        // 2.5. Emit StreamRoundComplete for the current content before tool execution.
+        // The UI commits the round's text but keeps is_generating=true so the
+        // next round's chunks keep rendering live.
+        event_tx.send(AppEvent::StreamRoundComplete { content: content.clone(), usage: usage.clone() })?;
 
         // 3. Validate tool calls before executing
         {
@@ -211,7 +190,7 @@ async fn run_chat_loop(
                 );
             }
             for (name, msg) in warnings {
-                event_tx.send(EngineEvent::ToolCallError {
+                event_tx.send(AppEvent::ToolCallError {
                     tool_name: name,
                     call_id: String::new(),
                     error: msg,
@@ -243,7 +222,7 @@ async fn run_chat_loop(
                 round
             );
             // Send the last content as complete instead of error
-            event_tx.send(EngineEvent::StreamComplete { content, usage })?;
+            event_tx.send(AppEvent::StreamComplete { content, usage })?;
             return Ok(());
         }
 
@@ -253,14 +232,14 @@ async fn run_chat_loop(
     }
 }
 
-/// Emit a segment of text as either a StreamChunk or ThinkingChunk event,
+/// Emit a segment of text as either a StreamChunk or StreamThinkingChunk event,
 /// and accumulate it into the matching content buffer.
 fn emit_seg(
     seg: &str,
     in_think: bool,
     streamed: &Arc<std::sync::Mutex<String>>,
     thinking: &Arc<std::sync::Mutex<String>>,
-    tx: &mpsc::Sender<EngineEvent>,
+    tx: &mpsc::Sender<AppEvent>,
 ) {
     if seg.is_empty() {
         return;
@@ -269,22 +248,22 @@ fn emit_seg(
         let mut tc = thinking.lock().unwrap();
         tc.push_str(seg);
         drop(tc);
-        let _ = tx.send(EngineEvent::ThinkingChunk { content: seg.to_string() });
+        let _ = tx.send(AppEvent::StreamThinkingChunk { content: seg.to_string() });
     } else {
         let mut sc = streamed.lock().unwrap();
         sc.push_str(seg);
         drop(sc);
-        let _ = tx.send(EngineEvent::StreamChunk { content: seg.to_string() });
+        let _ = tx.send(AppEvent::StreamChunk { content: seg.to_string() });
     }
 }
 
-/// Stream a request and forward chunks as EngineEvent::StreamChunk.
+/// Stream a request and forward chunks as AppEvent::StreamChunk.
 /// Returns (accumulated_content, usage, has_tool_calls, accumulated_thinking).
 async fn stream_request(
     client: &Arc<Mutex<ChatClient>>,
     prompt: &str,
     tools: Option<&[crate::tools::ToolDefinition]>,
-    event_tx: &mpsc::Sender<EngineEvent>,
+    event_tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(String, Option<Usage>, bool, String), EngineError> {
     let streamed_content = Arc::new(Mutex::new(String::new()));
     let streamed_content_clone = streamed_content.clone();
@@ -310,7 +289,7 @@ async fn stream_request(
             let mut tc = thinking_content_clone.lock().unwrap();
             tc.push_str(&chunk);
             drop(tc);
-            let _ = event_tx_clone.send(EngineEvent::ThinkingChunk { content: chunk });
+            let _ = event_tx_clone.send(AppEvent::StreamThinkingChunk { content: chunk });
             return Ok(());
         }
 
@@ -339,7 +318,7 @@ async fn stream_request(
                             seg.clear();
                             in_think = false;
                             tracing::debug!("tag_state: EXITED think mode");
-                            let _ = event_tx_clone.send(EngineEvent::ThinkingComplete {
+                            let _ = event_tx_clone.send(AppEvent::StreamThinkingComplete {
                                 content: String::new(),
                             });
                         } else {
