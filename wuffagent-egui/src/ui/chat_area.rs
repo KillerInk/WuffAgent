@@ -99,33 +99,62 @@ impl ChatApp {
         let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
         ui.add_space(10.0);
         if !self.chat.current_thinking.is_empty() {
+            // Header row; the thinking text wraps on its own line below.
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.label(egui::RichText::new(&streaming_ts)
                     .color(theme.text_dim)
                     .size(11.0));
                 ui.colored_label(theme.text_dim, "Thinking:");
-                ui.add(egui::Label::new(
-                    egui::RichText::new(&self.chat.current_thinking)
-                        .color(theme.text_dim)
-                        .italics()
-                        .size(12.0)
-                ));
                 ui.spinner();
             });
+            ui.add(egui::Label::new(
+                egui::RichText::new(&self.chat.current_thinking)
+                    .color(theme.text_dim)
+                    .italics()
+                    .size(12.0)
+            ).wrap());
         }
         if !self.chat.stream_buffer.is_empty() {
+            // Render the streamed text exactly like a completed AI message
+            // (width-constrained bubble + wrapping label), so line breaks
+            // match what the message looks like once it is committed.
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.label(egui::RichText::new(&streaming_ts)
                     .color(theme.text_dim)
                     .size(11.0));
                 ui.colored_label(theme.primary, "AI:");
-                ui.add(egui::Label::new(
-                    egui::RichText::new(&self.chat.stream_buffer)
-                        .color(theme.text_primary)
-                ));
                 ui.spinner();
+            });
+            // Bubble row: reserve the avatar column exactly like `draw_message`
+            // so the bubble's width and right edge match the committed messages.
+            // (Without the reserved column the bubble is ~44px wider and
+            // overflows the right edge of the window.)
+            let avatar_size = 28.0;
+            let avatar_margin = 16.0;
+            let max_content_width = (ui.available_width() - avatar_size - avatar_margin * 2.0).max(120.0);
+            ui.horizontal(|ui| {
+                ui.add_space(avatar_size);
+                ui.add_space(8.0); // gap between avatar and bubble
+                // The wrapping label must live in a VERTICAL layout (a
+                // horizontal one has infinite available width, so `Label::wrap`
+                // never breaks the line).
+                ui.scope(|ui| {
+                    ui.set_max_width(max_content_width);
+                    ui.vertical(|ui| {
+                        let bubble_frame = egui::Frame::none()
+                            .fill(theme.surface_light)
+                            .rounding(egui::Rounding::same(8.0))
+                            .inner_margin(egui::Margin::same(6.0));
+                        bubble_frame.show(ui, |ui| {
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(&self.chat.stream_buffer)
+                                    .color(theme.text_primary)
+                            ).wrap());
+                        });
+                    });
+                });
             });
         } else if self.chat.current_thinking.is_empty() {
             ui.horizontal(|ui| {
@@ -401,9 +430,9 @@ impl ChatApp {
                         .show(ui, |ui| {
                             for entry in display_entries {
                                 if let Some(s) = entry.as_str() {
-                                    ui.label(egui::RichText::new(s)
+                                    ui.add(egui::Label::new(egui::RichText::new(s)
                                         .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .monospace());
+                                        .monospace()).wrap());
                                 }
                             }
                             if entries.len() > max_entries {
@@ -442,10 +471,10 @@ impl ChatApp {
                                 egui::ScrollArea::vertical()
                                     .max_height(300.0)
                                     .show(ui, |ui| {
-                                        ui.label(egui::RichText::new(content)
-                                            .color(egui::Color32::from_rgb(200, 200, 200))
-                                            .monospace());
-                                    });
+                                    ui.add(egui::Label::new(egui::RichText::new(content)
+                                        .color(egui::Color32::from_rgb(200, 200, 200))
+                                        .monospace()).wrap());
+                                });
                             });
                     }
                 }
@@ -513,31 +542,31 @@ impl ChatApp {
                     serde_json::Value::Object(map) => {
                         for (key, value) in map {
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("{}:", key))
+                                ui.add(egui::Label::new(egui::RichText::new(format!("{}:", key))
                                     .color(theme.text_secondary)
                                     .monospace()
-                                    .size(11.0));
+                                    .size(11.0)).wrap());
                                 let val_str = Self::json_value_to_string(value);
-                                ui.label(egui::RichText::new(val_str)
+                                ui.add(egui::Label::new(egui::RichText::new(val_str)
                                     .color(egui::Color32::from_rgb(200, 200, 200))
                                     .monospace()
-                                    .size(11.0));
+                                    .size(11.0)).wrap());
                             });
                         }
                     }
                     serde_json::Value::Array(arr) => {
                         for item in arr {
-                            ui.label(egui::RichText::new(Self::json_value_to_string(item))
+                            ui.add(egui::Label::new(egui::RichText::new(Self::json_value_to_string(item))
                                 .color(egui::Color32::from_rgb(200, 200, 200))
                                 .monospace()
-                                .size(11.0));
+                                .size(11.0)).wrap());
                         }
                     }
                     other => {
-                        ui.label(egui::RichText::new(Self::json_value_to_string(other))
+                        ui.add(egui::Label::new(egui::RichText::new(Self::json_value_to_string(other))
                             .color(egui::Color32::from_rgb(200, 200, 200))
                             .monospace()
-                            .size(11.0));
+                            .size(11.0)).wrap());
                     }
                 }
             });
@@ -600,7 +629,22 @@ impl ChatApp {
             .rounding(4.0)
             .inner_margin(egui::Margin::same(6.0))
             .show(ui, |ui| {
-                ui.label(egui::RichText::new(text)
+                let mut wrapped_text = text.to_string();
+                // Pre-wrap long lines to avoid horizontal overflow
+                let max_width = ui.available_width();
+                if max_width > 0.0 {
+                    let approx_chars_per_line = (max_width / 8.0).max(20.0) as usize; // monospace ~8px/char
+                    if wrapped_text.len() > approx_chars_per_line {
+                        let mut result = String::new();
+                        let chars: Vec<char> = wrapped_text.chars().collect();
+                        for chunk in chars.chunks(approx_chars_per_line) {
+                            result.push_str(&chunk.iter().collect::<String>());
+                            result.push('\n');
+                        }
+                        wrapped_text = result.trim_end().to_string();
+                    }
+                }
+                ui.label(egui::RichText::new(wrapped_text)
                     .color(egui::Color32::from_rgb(200, 200, 200))
                     .monospace());
             });
