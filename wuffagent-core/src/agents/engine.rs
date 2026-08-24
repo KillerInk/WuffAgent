@@ -216,14 +216,31 @@ impl AgentEngine {
             return Err("Cancelled".to_string());
         }
 
+        // Include a system prompt so the fallback call still has context.
+        let system_prompt = self
+            .registry
+            .get_agent("general")
+            .map(|a| a.system_prompt.clone())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| {
+                "You are a helpful assistant.".to_string()
+            });
         let messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: system_prompt,
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+             reasoning_content: None,
+            },
             Message {
                 role: "user".to_string(),
                 content: request.to_string(),
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
-            reasoning_content: None,
+             reasoning_content: None,
             },
         ];
 

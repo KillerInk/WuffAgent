@@ -37,15 +37,9 @@ impl ChatClientAdapter {
 #[async_trait]
 impl LlmClient for ChatClientAdapter {
     async fn complete(&self, messages: &[Message]) -> Result<String, String> {
-        let prompt = messages
-            .iter()
-            .filter(|m| m.role == "user" || m.role == "assistant")
-            .map(|m| m.content.as_str())
-            .collect::<Vec<&str>>()
-            .join("\n");
         // Clone the handle to avoid holding any lock across the await
         let client = self.client.clone();
-        match client.send_message(&prompt).await {
+        match client.complete_messages(messages, None).await {
             Ok((response, _)) => Ok(response),
             Err(e) => Err(e.to_string()),
         }
@@ -56,28 +50,24 @@ impl LlmClient for ChatClientAdapter {
         messages: &[Message],
         mut chunk_handler: Box<dyn FnMut(String) + Send + Sync + 'static>,
     ) -> Result<String, String> {
-        let prompt = messages
-            .iter()
-            .filter(|m| m.role == "user" || m.role == "assistant")
-            .map(|m| m.content.as_str())
-            .collect::<Vec<&str>>()
-            .join("\n");
-        // Clone the handle to avoid holding any lock across the await
         let client = self.client.clone();
-        match client
-            .stream_message_with_usage(&prompt, move |chunk| {
-                chunk_handler(chunk.clone());
+        let arc = std::sync::Arc::new(client);
+        match ChatClient::stream_with_messages_arc(
+            &arc,
+            messages,
+            None,
+            move |chunk: String, _is_thinking: bool| {
+                chunk_handler(chunk);
                 Ok(())
-            })
-            .await
+            },
+        )
+        .await
         {
-            Ok(_) => {
-                let conv = self.client.conversation();
-                let lock = conv.lock().unwrap();
-                let last_msg = lock.iter().rev().find(|m| m.role == "assistant" && !m.content.is_empty());
-                match last_msg {
-                    Some(m) => Ok(m.content.clone()),
-                    None => Err("No response from streaming".to_string()),
+            Ok((msg, _)) => {
+                if msg.content.is_empty() {
+                    Err("No response from streaming".to_string())
+                } else {
+                    Ok(msg.content)
                 }
             }
             Err(e) => Err(e.to_string()),
@@ -103,15 +93,9 @@ impl ToolLlmClient {
 #[async_trait]
 impl LlmClient for ToolLlmClient {
     async fn complete(&self, messages: &[Message]) -> Result<String, String> {
-        let prompt = messages
-            .iter()
-            .filter(|m| m.role == "user" || m.role == "assistant")
-            .map(|m| m.content.as_str())
-            .collect::<Vec<&str>>()
-            .join("\n");
         let client = self.client.clone();
         let tools = self.tool_defs.clone();
-        match client.send_message_with_tools(&prompt, Some(&tools)).await {
+        match client.complete_messages(messages, Some(&tools)).await {
             Ok((response, _)) => Ok(response),
             Err(e) => Err(e.to_string()),
         }
@@ -122,28 +106,25 @@ impl LlmClient for ToolLlmClient {
         messages: &[Message],
         mut chunk_handler: Box<dyn FnMut(String) + Send + Sync + 'static>,
     ) -> Result<String, String> {
-        let prompt = messages
-            .iter()
-            .filter(|m| m.role == "user" || m.role == "assistant")
-            .map(|m| m.content.as_str())
-            .collect::<Vec<&str>>()
-            .join("\n");
         let client = self.client.clone();
         let tools = self.tool_defs.clone();
-        match client
-            .stream_message_with_tools_and_usage(&prompt, Some(&tools), move |chunk| {
-                chunk_handler(chunk.clone());
+        let arc = std::sync::Arc::new(client);
+        match ChatClient::stream_with_messages_arc(
+            &arc,
+            messages,
+            Some(&tools),
+            move |chunk: String, _is_thinking: bool| {
+                chunk_handler(chunk);
                 Ok(())
-            })
-            .await
+            },
+        )
+        .await
         {
-            Ok(_) => {
-                let conv = client.conversation();
-                let lock = conv.lock().unwrap();
-                let last_msg = lock.iter().rev().find(|m| m.role == "assistant" && !m.content.is_empty());
-                match last_msg {
-                    Some(m) => Ok(m.content.clone()),
-                    None => Err("No response from streaming".to_string()),
+            Ok((msg, _)) => {
+                if msg.content.is_empty() {
+                    Err("No response from streaming".to_string())
+                } else {
+                    Ok(msg.content)
                 }
             }
             Err(e) => Err(e.to_string()),

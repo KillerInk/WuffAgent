@@ -262,6 +262,33 @@ impl ChatClient {
         self.send_message_with_tools(prompt, None).await
     }
 
+    /// Send a non-streaming request built from an explicit message list.
+    ///
+    /// Unlike `send_message` (which prepends `self.system_prompt` and appends
+    /// the prompt to `self.conversation`), this uses the given messages
+    /// verbatim — the caller is responsible for including the system prompt,
+    /// history, and user turn in the right order.
+    pub async fn complete_messages(
+        &self,
+        messages: &[Message],
+        tools: Option<&[crate::tools::ToolDefinition]>,
+    ) -> Result<(String, Option<Usage>), Error> {
+        let request = ChatRequest {
+            model: "local".to_string(),
+            messages: messages.to_vec(),
+            stream: false,
+            tools: tools.map(|t| t.to_vec()),
+            reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
+        };
+        send_message(
+            &self.http_client,
+            &self.base_url,
+            self.api_key.as_deref(),
+            &request,
+        )
+        .await
+    }
+
     pub async fn send_message_with_tools(
         &self,
         prompt: &str,

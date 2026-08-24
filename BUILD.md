@@ -7,13 +7,12 @@
 
 ## Project Structure
 
-This project is a Cargo workspace with three crates:
+This project is a Cargo workspace with two crates:
 
 | Crate | Purpose |
 |-------|---------|
 | `wuffagent-core` | Shared library: types, client, config, server, sessions, tools, agents |
 | `wuffagent-egui` | Egui-based frontend binary |
-| `wuffagent-iced` | Iced-based frontend binary |
 
 ## Quick Start
 
@@ -39,12 +38,8 @@ cargo build --release
 # Run the egui frontend (default)
 cargo run -p wuffagent-egui
 
-# Run the iced frontend
-cargo run -p wuffagent-iced
-
 # Or from release builds:
 target/release/wuffagent-egui.exe
-target/release/wuffagent-iced.exe
 ```
 
 ## Architecture
@@ -59,15 +54,12 @@ Cargo.toml (workspace)
 │   ├── sessions/
 │   ├── tools/
 │   └── agents/
-├── wuffagent-egui/          # Egui frontend
-│   └── src/main.rs          # Bootstraps core + runs egui app
-└── wuffagent-iced/          # Iced frontend
-    ├── wuffagent-iced-app/  # Shared iced UI logic
-    └── src/main.rs          # Bootstraps core + runs iced app
+└── wuffagent-egui/          # Egui frontend
+    └── src/main.rs          # Bootstraps core + runs egui app
 ```
 
-Both frontends share the same `wuffagent-core` backend. The egui UI lives in
-`wuffagent-egui/src/ui/` and the iced UI lives in `wuffagent-iced-app/src/app/`.
+The egui frontend shares the `wuffagent-core` backend. The UI lives in
+`wuffagent-egui/src/ui/`.
 
 ## Agent Execution Model
 
@@ -91,7 +83,4 @@ cargo build -p wuffagent-core
 
 # Build only the egui binary
 cargo build -p wuffagent-egui
-
-# Build only the iced binary
-cargo build -p wuffagent-iced
 ```

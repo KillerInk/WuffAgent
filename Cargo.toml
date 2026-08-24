@@ -2,7 +2,5 @@
 members = [
     "wuffagent-core",
     "wuffagent-egui",
-    "wuffagent-iced",
-    "wuffagent-iced-app",
 ]
 resolver = "2"
