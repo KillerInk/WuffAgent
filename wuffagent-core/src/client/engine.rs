@@ -331,8 +331,8 @@ async fn stream_request(
                 buf.clear();
 
                 if chars.peek() == Some(&'/') {
-                    // Possible closing tag: </think>
-                    let peeked: String = chars.by_ref().take(6).collect();
+                    // Possible closing tag: </think> (7 chars after '<')
+                    let peeked: String = chars.by_ref().take(7).collect();
                     if peeked == "/think>" {
                         if in_think {
                             emit_seg(&seg, true, &streamed_content_clone, &thinking_content_clone, &event_tx_clone);
@@ -352,8 +352,8 @@ async fn stream_request(
                         buf.push_str(&peeked);
                     }
                 } else {
-                    // Possible opening tag: <think>
-                    let peeked: String = chars.by_ref().take(5).collect();
+                    // Possible opening tag: <think> (6 chars after '<')
+                    let peeked: String = chars.by_ref().take(6).collect();
                     if peeked == "think>" {
                         if !in_think {
                             emit_seg(&seg, false, &streamed_content_clone, &thinking_content_clone, &event_tx_clone);

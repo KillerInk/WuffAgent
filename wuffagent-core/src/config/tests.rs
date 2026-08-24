@@ -48,6 +48,7 @@ fn test_config_save_and_load() {
         ChatMessage { role: "user".to_string(), content: "Hello".to_string(), timestamp: String::new() },
         ChatMessage { role: "assistant".to_string(), content: "Hi there!".to_string(), timestamp: String::new() },
     ];
+    cfg.reasoning_effort = crate::types::ReasoningEffort::High;
     cfg.file_path = path.clone();
 
     cfg.save().unwrap();
@@ -68,6 +69,21 @@ fn test_config_save_and_load() {
     assert_eq!(loaded.chat_history[0].content, "Hello");
     assert_eq!(loaded.chat_history[1].role, "assistant");
     assert_eq!(loaded.chat_history[1].content, "Hi there!");
+    assert_eq!(loaded.reasoning_effort, crate::types::ReasoningEffort::High);
+}
+
+#[test]
+fn test_config_reasoning_effort_defaults_to_off_when_missing() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    // Valid config JSON without a reasoning_effort key (pre-existing file).
+    std::fs::write(
+        &path,
+        r#"{"server_path":"s","model_path":"m","port":8080,"n_gpu_layers":99,"n_ctx":4096,"threads":8,"remote_url":"","system_prompt":"","streaming":true,"theme":"dark","chat_history":[]}"#,
+    )
+    .unwrap();
+    let cfg = Config::load(&path).unwrap();
+    assert_eq!(cfg.reasoning_effort, crate::types::ReasoningEffort::Off);
 }
 
 #[test]

@@ -8,6 +8,7 @@ use tracing;
 use super::config::AgentConfig;
 use super::invocation_registry::AgentInvocationRegistry;
 use super::llm_client::LlmClient;
+use crate::client::ChatClient;
 use super::types::AgentId;
 use crate::tools::ToolManager;
 use crate::types::Message;
@@ -36,6 +37,8 @@ pub struct Agent {
     tool_manager: Arc<Mutex<ToolManager>>,
     invocation_registry: Arc<AgentInvocationRegistry>,
     event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
+    /// Chat client used for streaming (native tool-call) requests.
+    client: Arc<ChatClient>,
 }
 
 impl Agent {
@@ -46,7 +49,18 @@ impl Agent {
         tool_manager: Arc<Mutex<ToolManager>>,
         invocation_registry: Arc<AgentInvocationRegistry>,
         event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
+        client: Arc<ChatClient>,
     ) -> Self {
+        // Apply the agent's per-agent reasoning effort: give it its own
+        // client clone with the effort set. Off = inherit the global
+        // client setting (no override).
+        let client = if config.reasoning_effort != crate::types::ReasoningEffort::Off {
+            let mut c = (*client).clone();
+            c.set_reasoning_effort(config.reasoning_effort);
+            Arc::new(c)
+        } else {
+            client
+        };
         Self {
             id: AgentId::generate(),
             config,
@@ -54,7 +68,30 @@ impl Agent {
             tool_manager,
             invocation_registry,
             event_tx,
+            client,
         }
+    }
+
+    /// Build the initial message list for a task (system prompt + user task).
+    pub fn build_initial_messages(&self, task: &str) -> Vec<Message> {
+        vec![
+            Message {
+                role: "system".to_string(),
+                content: self.build_system_prompt(),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: task.to_string(),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ]
     }
 
     /// Create an agent from config with an empty tool manager.
@@ -62,6 +99,7 @@ impl Agent {
         config: AgentConfig,
         llm_client: Arc<dyn LlmClient>,
         invocation_registry: Arc<AgentInvocationRegistry>,
+        client: Arc<ChatClient>,
     ) -> Self {
         let tool_registry = Arc::new(crate::tools::registry::ToolRegistry::new(
             vec![],
@@ -74,6 +112,7 @@ impl Agent {
             tool_manager,
             invocation_registry,
             None,
+            client,
         )
     }
 
@@ -95,25 +134,7 @@ impl Agent {
             return Err("Cancelled".to_string());
         }
 
-        // Build system prompt
-        let system_prompt = self.build_system_prompt();
-
-        let mut messages = vec![
-            Message {
-                role: "system".to_string(),
-                content: system_prompt,
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-            Message {
-                role: "user".to_string(),
-                content: request.to_string(),
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-            },
-        ];
+        let mut messages = self.build_initial_messages(request);
 
         self.send_event(crate::types::AppEvent::AgentChainStarted {
             agent_name: self.config.name.clone(),
@@ -160,7 +181,15 @@ impl Agent {
         prompt
     }
 
-    /// Run the LLM loop: call LLM, execute tool calls if present, repeat.
+    /// Run the LLM loop with NATIVE tool calling via the chat client (SSE).
+    ///
+    /// - Streams content/thinking to the UI through the agent event channel.
+    /// - Sends the agent's tool definitions (filtered by `allowed_tools`) so
+    ///   the model can emit structured tool calls, executed in-process.
+    /// - Round-trips the model's `reasoning_content` in history so reasoning
+    ///   models (Qwen3/DeepSeek style) stay coherent across tool-call rounds.
+    /// - Falls back to text-embedded tool-call parsing (bash blocks / JSON
+    ///   arrays) for models that don't honor native function calling.
     async fn run_llm_loop(
         &self,
         messages: &mut Vec<Message>,
@@ -169,6 +198,18 @@ impl Agent {
         let mut verification_attempts = 0u32;
         let mut iteration_count = 0u32;
         let start = Instant::now();
+
+        // Tool definitions for native function calling, filtered per-agent.
+        let tool_defs: Option<Vec<crate::tools::ToolDefinition>> = {
+            let manager = self.tool_manager.lock().unwrap();
+            let mgr = if self.config.allowed_tools.is_empty() {
+                manager.clone()
+            } else {
+                manager.with_allowlist(&self.config.allowed_tools)
+            };
+            let defs = mgr.get_tool_definitions();
+            if defs.is_empty() { None } else { Some(defs) }
+        };
 
         loop {
             if cancel_token.is_cancelled() {
@@ -200,152 +241,204 @@ impl Agent {
                 ));
             }
 
-            // Call LLM
-            let response = match self.llm_client.complete(messages).await {
-                Ok(r) => r,
+            // ── LLM call (streaming with native tools) ──────────────────
+            // The callback must be 'static, so it captures cloned Arcs rather
+            // than `self`.
+            let tx = self.event_tx.clone();
+            let round_thinking = Arc::new(Mutex::new(String::new()));
+            let rt = round_thinking.clone();
+
+            let (assistant_msg, _usage) = match ChatClient::stream_with_messages_arc(
+                &self.client,
+                messages,
+                tool_defs.as_deref(),
+                move |chunk: String, is_thinking: bool| {
+                    if is_thinking {
+                        rt.lock().unwrap().push_str(&chunk);
+                    }
+                    if let Some(ref tx) = tx {
+                        if let Ok(g) = tx.lock() {
+                            let _ = g.send(if is_thinking {
+                                crate::types::AppEvent::StreamThinkingChunk { content: chunk }
+                            } else {
+                                crate::types::AppEvent::StreamChunk { content: chunk }
+                            });
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .await
+            {
+                Ok((msg, usage)) => (msg, usage),
                 Err(e) => return Err(format!("LLM call failed: {}", e)),
             };
 
-            // Check if response is a routing JSON object (agent delegation)
-            if let Some((sub_agent, task)) = self.parse_routing_object(&response) {
-                let is_truncated = !response.trim().ends_with('}') && response.contains("\"agent\"");
-                if is_truncated {
-                    tracing::warn!(
-                        "[AGENT] LLM response appears truncated (incomplete JSON): len={}",
-                        response.len()
-                    );
-                }
-                // Check depth limit
-                if messages.iter().filter(|m| m.role == "assistant").count() as u32 >= self.config.max_depth {
-                    tracing::warn!(
-                        "[AGENT] Max delegation depth ({}) reached, returning response directly",
-                        self.config.max_depth
-                    );
-                    return Ok(response);
-                }
-                // Only allow delegation to agents that exist in the registry
-                if self.invocation_registry.has(&sub_agent) {
-                    tracing::info!(
-                        "[AGENT] Delegated to sub-agent '{}' with task: {}",
-                        sub_agent, task
-                    );
-                    let context = serde_json::Value::Object(serde_json::Map::new());
-                    let sub_result = match self.invocation_registry.invoke(&sub_agent, &task, &context).await {
-                        Ok(result) => result.output.to_string(),
-                        Err(e) => format!("Error invoking {}: {}", sub_agent, e),
-                    };
-                    messages.push(Message {
-                        role: "assistant".to_string(),
-                        content: sub_result.clone(),
-                        timestamp: String::new(),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
+            // Commit this round's thinking block to the UI.
+            // (Read via `round_thinking` — `rt` was moved into the closure.)
+            let round_thinking_str = round_thinking.lock().unwrap().clone();
+            if !round_thinking_str.is_empty() {
+                self.send_event(crate::types::AppEvent::StreamThinkingComplete {
+                    content: round_thinking_str,
+                });
+            }
+
+            let content = assistant_msg.content.clone();
+            let tool_calls = assistant_msg.tool_calls.clone();
+            let reasoning = assistant_msg.reasoning_content.clone();
+
+            // Record the assistant turn (content + native calls + reasoning)
+            messages.push(Message {
+                role: "assistant".to_string(),
+                content: content.clone(),
+                timestamp: crate::types::format_timestamp(),
+                tool_calls: tool_calls.clone(),
+                tool_call_id: None,
+                reasoning_content: reasoning.clone(),
+            });
+
+            // Display-friendly content (think tags stripped if embedded)
+            let display_content = crate::client::strip_think_tags(&content);
+
+            // ── Native tool calls ───────────────────────────────────────
+            if let Some(calls) = &tool_calls {
+                if !calls.is_empty() {
+                    for call in calls {
+                        if cancel_token.is_cancelled() {
+                            return Err("Cancelled".to_string());
+                        }
+                        self.send_event(crate::types::AppEvent::ToolCallStart {
+                            tool_name: call.function.name.clone(),
+                            call_id: call.id.clone(),
+                        });
+                        let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!("[AGENT] Bad args for '{}': {}", call.function.name, e);
+                                self.send_event(crate::types::AppEvent::ToolCallError {
+                                    tool_name: call.function.name.clone(),
+                                    call_id: call.id.clone(),
+                                    error: e.clone(),
+                                });
+                                messages.push(Message {
+                                    role: "tool".to_string(),
+                                    content: format!("Error: {}", e),
+                                    timestamp: crate::types::format_timestamp(),
+                                    tool_calls: None,
+                                    tool_call_id: Some(call.id.clone()),
+                                    reasoning_content: None,
+                                });
+                                continue;
+                            }
+                        };
+                        let manager = self.tool_manager.lock().unwrap().clone();
+                        let tool_result = manager.execute(&call.function.name, params).await;
+                        let result_str = match tool_result {
+                            Ok(output) => format!("{}", output),
+                            Err(e) => {
+                                tracing::warn!("[AGENT] Tool '{}' failed: {}", call.function.name, e);
+                                format!("Error: {}", e)
+                            }
+                        };
+                        self.send_event(crate::types::AppEvent::ToolCallComplete {
+                            tool_name: call.function.name.clone(),
+                            call_id: call.id.clone(),
+                            result: result_str.clone(),
+                        });
+                        messages.push(Message {
+                            role: "tool".to_string(),
+                            content: result_str,
+                            timestamp: crate::types::format_timestamp(),
+                            tool_calls: None,
+                            tool_call_id: Some(call.id.clone()),
+                            reasoning_content: None,
+                        });
+                    }
                     continue;
                 }
-                // Agent not found — reject delegation
-                tracing::warn!(
-                    "[AGENT] LLM requested non-existent agent '{}', rejecting delegation",
-                    sub_agent
-                );
-                messages.push(Message {
-                    role: "system".to_string(),
-                    content: format!(
-                        "You requested to delegate to agent '{}', but that agent does not exist. Handle the task yourself.",
-                        sub_agent
-                    ),
-                    timestamp: String::new(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-                continue;
             }
 
-            // Check if response contains bash/code blocks that should be converted to tool calls
-            if let Some(tool_calls) = self.extract_bash_as_tool_calls(&response) {
-                for tool_call in tool_calls {
-                    if cancel_token.is_cancelled() {
-                        return Err("Cancelled".to_string());
-                    }
-                    let tool_name = tool_call.function.name.clone();
-                    let tool_args = serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
-                    let tool_manager = self.tool_manager.lock().unwrap().clone();
-                    let tool_result = tool_manager.execute(&tool_name, tool_args).await;
-                    let result_str = match tool_result {
-                        Ok(output) => format!("{}", output),
-                        Err(e) => {
-                            tracing::warn!("[AGENT] Tool '{}' failed: {}", tool_name, e);
-                            format!("Error: {}", e)
-                        }
-                    };
-                    messages.push(Message {
-                        role: "assistant".to_string(),
-                        content: format!("Tool call: {}({})", tool_name, tool_call.function.arguments),
-                        timestamp: String::new(),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
-                    messages.push(Message {
-                        role: "tool".to_string(),
-                        content: result_str,
-                        timestamp: String::new(),
-                        tool_calls: None,
-                        tool_call_id: Some(tool_call.id.clone()),
-                    });
+            // ── Fallback: text-embedded tool calls (non-native models) ──
+            if tool_defs.as_ref().map(|d| d.is_empty()).unwrap_or(false) {
+                // No tools offered — skip text parsing entirely.
+            } else {
+                let mut embedded = Vec::new();
+                if let Some(bash_calls) = self.extract_bash_as_tool_calls(&display_content) {
+                    embedded.extend(bash_calls);
                 }
-                continue;
-            }
-
-            // Check if response contains tool calls
-            if let Some(tool_calls) = self.parse_tool_calls(&response) {
-                for tool_call in tool_calls {
-                    if cancel_token.is_cancelled() {
-                        return Err("Cancelled".to_string());
+                if embedded.is_empty() {
+                    if let Some(json_calls) = self.parse_tool_calls(&display_content) {
+                        embedded.extend(json_calls);
                     }
-
-                    let tool_name = tool_call.function.name.clone();
-                    let tool_args = serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
-                    let tool_manager = self.tool_manager.lock().unwrap().clone();
-                    let tool_result = tool_manager.execute(&tool_name, tool_args).await;
-
-                    let result_str = match tool_result {
-                        Ok(output) => format!("{}", output),
-                        Err(e) => {
-                            tracing::warn!(
-                                "[AGENT] Tool '{}' failed: {}",
-                                tool_name,
-                                e
-                            );
-                            format!("Error: {}", e)
-                        }
-                    };
-
-                    messages.push(Message {
-                        role: "assistant".to_string(),
-                        content: format!("Tool call: {}({})", tool_call.function.name, tool_call.function.arguments),
-                        timestamp: String::new(),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
-                    messages.push(Message {
-                        role: "tool".to_string(),
-                        content: result_str,
-                        timestamp: String::new(),
-                        tool_calls: None,
-                        tool_call_id: Some(tool_call.id.clone()),
-                    });
                 }
-                continue;
+                if !embedded.is_empty() {
+                    for call in &embedded {
+                        if cancel_token.is_cancelled() {
+                            return Err("Cancelled".to_string());
+                        }
+                        self.send_event(crate::types::AppEvent::ToolCallStart {
+                            tool_name: call.function.name.clone(),
+                            call_id: call.id.clone(),
+                        });
+                        let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                self.send_event(crate::types::AppEvent::ToolCallError {
+                                    tool_name: call.function.name.clone(),
+                                    call_id: call.id.clone(),
+                                    error: e.clone(),
+                                });
+                                continue;
+                            }
+                        };
+                        let manager = self.tool_manager.lock().unwrap().clone();
+                        let tool_result = manager.execute(&call.function.name, params).await;
+                        let result_str = match tool_result {
+                            Ok(output) => format!("{}", output),
+                            Err(e) => format!("Error: {}", e),
+                        };
+                        self.send_event(crate::types::AppEvent::ToolCallComplete {
+                            tool_name: call.function.name.clone(),
+                            call_id: call.id.clone(),
+                            result: result_str.clone(),
+                        });
+                        // History entry in API-native shape (id links the result).
+                        messages.push(Message {
+                            role: "assistant".to_string(),
+                            content: String::new(),
+                            timestamp: crate::types::format_timestamp(),
+                            tool_calls: Some(vec![crate::types::ToolCall {
+                                id: call.id.clone(),
+                                call_type: call._call_type.clone(),
+                                function: crate::types::ToolFunction {
+                                    name: call.function.name.clone(),
+                                    arguments: call.function.arguments.clone(),
+                                },
+                            }]),
+                            tool_call_id: None,
+                            reasoning_content: None,
+                        });
+                        messages.push(Message {
+                            role: "tool".to_string(),
+                            content: result_str,
+                            timestamp: crate::types::format_timestamp(),
+                            tool_calls: None,
+                            tool_call_id: Some(call.id.clone()),
+                            reasoning_content: None,
+                        });
+                    }
+                    continue;
+                }
             }
 
-            // No more tool calls — verify the outputs answer the user's request
+            // ── No more tool calls ──────────────────────────────────────
             if verification_attempts >= MAX_VERIFICATION_ATTEMPTS {
                 tracing::info!(
                     "[AGENT] Agent '{}' completed in {} iterations",
                     self.config.name,
                     iteration_count
                 );
-                return Ok(response);
+                return Ok(display_content);
             }
             verification_attempts += 1;
 
@@ -358,7 +451,7 @@ impl Agent {
                         self.config.name,
                         iteration_count
                     );
-                    return Ok(response);
+                    return Ok(display_content);
                 }
                 Ok(false) => {
                     tracing::warn!(
@@ -373,6 +466,7 @@ impl Agent {
                         timestamp: String::new(),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                     continue;
                 }
@@ -382,7 +476,7 @@ impl Agent {
                         self.config.name,
                         e
                     );
-                    return Ok(response);
+                    return Ok(display_content);
                 }
             }
         }
@@ -426,6 +520,7 @@ impl Agent {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
+            reasoning_content: None,
             },
             Message {
                 role: "user".to_string(),
@@ -436,6 +531,7 @@ impl Agent {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
+            reasoning_content: None,
             },
         ];
 
@@ -727,7 +823,8 @@ mod tests {
         let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
         let invocation_registry = Arc::new(AgentInvocationRegistry::new());
-        Agent::new(config, llm_client, tool_manager, invocation_registry, None)
+        let client = Arc::new(ChatClient::new("http://localhost:1"));
+        Agent::new(config, llm_client, tool_manager, invocation_registry, None, client)
     }
 
     struct NoopLlm;
@@ -750,6 +847,50 @@ mod tests {
         let agent = make_agent("test");
         assert_eq!(agent.config.name, "test");
         assert!(!agent.id.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_agent_per_agent_reasoning_effort() {
+        let llm_client = Arc::new(NoopLlm);
+        let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
+        let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+        let invocation_registry = Arc::new(AgentInvocationRegistry::new());
+        // Global client set to Medium.
+        let global_client = Arc::new({
+            let mut c = ChatClient::new("http://localhost:1");
+            c.set_reasoning_effort(crate::types::ReasoningEffort::Medium);
+            c
+        });
+
+        // Agent with High: gets its own client clone with High.
+        let mut config = AgentConfig::default();
+        config.name = "researcher".to_string();
+        config.reasoning_effort = crate::types::ReasoningEffort::High;
+        let agent = Agent::new(
+            config,
+            llm_client.clone(),
+            tool_manager.clone(),
+            invocation_registry.clone(),
+            None,
+            global_client.clone(),
+        );
+        assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::High);
+        assert!(!Arc::ptr_eq(&agent.client, &global_client));
+
+        // Agent with Off: shares the global client (inherits Medium).
+        let mut config = AgentConfig::default();
+        config.name = "coder".to_string();
+        config.reasoning_effort = crate::types::ReasoningEffort::Off;
+        let agent = Agent::new(
+            config,
+            llm_client,
+            tool_manager,
+            invocation_registry,
+            None,
+            global_client.clone(),
+        );
+        assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::Medium);
+        assert!(Arc::ptr_eq(&agent.client, &global_client));
     }
 
     #[test]

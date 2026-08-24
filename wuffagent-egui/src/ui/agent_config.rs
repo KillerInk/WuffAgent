@@ -18,6 +18,8 @@ pub struct AgentConfigDialog {
     description: String,
     system_prompt: String,
     enabled: bool,
+    /// Reasoning effort for this agent (Off = inherit the global toggle).
+    reasoning_effort: crate::types::ReasoningEffort,
     /// Checked status per tool index.
     tool_checkboxes: Vec<bool>,
     /// Available tool names from the tool registry.
@@ -49,6 +51,7 @@ impl AgentConfigDialog {
             description: String::new(),
             system_prompt: String::new(),
             enabled: true,
+            reasoning_effort: crate::types::ReasoningEffort::default(),
             tool_checkboxes,
             available_tools,
             allowed_tools: Vec::new(),
@@ -117,6 +120,7 @@ impl AgentConfigDialog {
                                             prompt: String,
                                             enabled: bool,
                                             allowed: Vec<String>,
+                                            effort: crate::types::ReasoningEffort,
                                         }
                                         let button_data: Vec<AgentButtonData> = self.agents.iter().enumerate().map(|(i, agent)| {
                                             let selected = i as isize == self.selected_index;
@@ -129,6 +133,7 @@ impl AgentConfigDialog {
                                                 prompt: agent.system_prompt.clone(),
                                                 enabled: agent.enabled,
                                                 allowed: agent.allowed_tools.clone(),
+                                                effort: agent.reasoning_effort,
                                             }
                                         }).collect();
                                         for bd in &button_data {
@@ -139,6 +144,7 @@ impl AgentConfigDialog {
                                                 self.description = bd.desc.clone();
                                                 self.system_prompt = bd.prompt.clone();
                                                 self.enabled = bd.enabled;
+                                                self.reasoning_effort = bd.effort;
                                                 self.sync_tools_from_agent(&bd.allowed);
                                                 self.message = None;
                                             }
@@ -187,6 +193,11 @@ impl AgentConfigDialog {
 
                                             ui.horizontal(|ui| {
                                                 ui.checkbox(&mut self.enabled, "Enabled");
+                                                ui.separator();
+                                                ui.label("Reasoning effort:");
+                                                for variant in crate::types::ReasoningEffort::VARIANTS {
+                                                    ui.selectable_value(&mut self.reasoning_effort, variant, variant.name());
+                                                }
                                             });
 
                                             ui.separator();
@@ -251,7 +262,9 @@ impl AgentConfigDialog {
             enabled: self.enabled,
             can_invoke: vec![],
             handoff_enabled: false,
-        };
+            shell_config: wuffagent_core::agents::config::ShellConfig::default(),
+            reasoning_effort: self.reasoning_effort,
+       };
 
         // Ensure the directory exists before saving
         if let Ok(m) = agent_manager.lock() {
@@ -316,11 +329,13 @@ impl AgentConfigDialog {
         let agent_prompt = self.agents[idx].system_prompt.clone();
         let agent_enabled = self.agents[idx].enabled;
         let agent_allowed = self.agents[idx].allowed_tools.clone();
+        let agent_effort = self.agents[idx].reasoning_effort;
 
         self.name = agent_name;
         self.description = agent_desc;
         self.system_prompt = agent_prompt;
         self.enabled = agent_enabled;
+        self.reasoning_effort = agent_effort;
 
         self.sync_tools_from_agent(&agent_allowed);
         self.message = None;
@@ -346,6 +361,7 @@ impl AgentConfigDialog {
         self.description.clear();
         self.system_prompt.clear();
         self.enabled = true;
+        self.reasoning_effort = crate::types::ReasoningEffort::default();
         self.allowed_tools.clear();
         for cb in &mut self.tool_checkboxes {
             *cb = false;

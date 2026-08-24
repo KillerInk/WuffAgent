@@ -3,6 +3,42 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing;
 
+/// Shell configuration for a worker.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShellConfig {
+    /// Allowed command patterns (regex). Empty means allow all (except dangerous).
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    /// Shell type: "powershell", "cmd", or "bash".
+    #[serde(default = "default_shell_type")]
+    pub shell_type: String,
+    /// Default timeout in milliseconds.
+    #[serde(default = "default_shell_timeout")]
+    pub shell_timeout_ms: u64,
+    /// Whether shell commands are enabled.
+    #[serde(default = "default_shell_enabled")]
+    pub shell_enabled: bool,
+    /// Working directory restriction (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            allowed_commands: Vec::new(),
+            shell_type: "powershell".to_string(),
+            shell_timeout_ms: 300_000,
+            shell_enabled: false,
+            working_dir: None,
+        }
+    }
+}
+
+fn default_shell_type() -> String { "powershell".to_string() }
+fn default_shell_timeout() -> u64 { 300_000 }
+fn default_shell_enabled() -> bool { false }
+
 /// Configuration for a single worker, loaded from a JSON file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerConfig {
@@ -32,6 +68,12 @@ pub struct WorkerConfig {
     /// Whether runtime handoffs are allowed.
     #[serde(default = "default_handoff_enabled")]
     pub handoff_enabled: bool,
+    /// Shell configuration for this worker.
+    #[serde(default)]
+    pub shell_config: ShellConfig,
+    /// Reasoning effort for this agent (Off = inherit the global toggle).
+    #[serde(default)]
+    pub reasoning_effort: crate::types::ReasoningEffort,
 }
 
 impl Default for WorkerConfig {
@@ -46,6 +88,8 @@ impl Default for WorkerConfig {
             enabled: true,
             can_invoke: Vec::new(),
             handoff_enabled: false,
+            shell_config: ShellConfig::default(),
+            reasoning_effort: crate::types::ReasoningEffort::default(),
         }
     }
 }
@@ -136,6 +180,15 @@ impl WorkerConfig {
             return crate::agents::types::AgentType::Implementation;
         }
         crate::agents::types::AgentType::General
+    }
+
+    /// Get the shell configuration, returning a default if not explicitly set.
+    pub fn get_shell_config(&self) -> ShellConfig {
+        if self.shell_config.shell_enabled || !self.shell_config.allowed_commands.is_empty() {
+            self.shell_config.clone()
+        } else {
+            ShellConfig::default()
+        }
     }
 }
 
@@ -292,8 +345,7 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Research);
     }
@@ -308,8 +360,7 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Coding);
     }
@@ -324,8 +375,7 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Implementation);
     }
@@ -340,8 +390,7 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         // web_search maps to Research, so we use a tool that doesn't match any category
         assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Research);
@@ -353,6 +402,27 @@ mod tests {
         let config: WorkerConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.system_prompt, "You are a test worker.");
         assert_eq!(config.name, "test");
+        assert!(!config.shell_config.shell_enabled);
+    }
+
+    #[test]
+    fn test_worker_config_shell_config() {
+        let json = r#"{
+            "name":"executor",
+            "description":"Build and run",
+            "allowed_tools":["shell"],
+            "shell_config": {
+                "shell_enabled": true,
+                "allowed_commands": ["cargo build.*", "git.*"],
+                "shell_type": "powershell",
+                "shell_timeout_ms": 60000
+            }
+        }"#;
+        let config: WorkerConfig = serde_json::from_str(json).unwrap();
+        assert!(config.shell_config.shell_enabled);
+        assert_eq!(config.shell_config.allowed_commands, vec!["cargo build.*".to_string(), "git.*".to_string()]);
+        assert_eq!(config.shell_config.shell_type, "powershell");
+        assert_eq!(config.shell_config.shell_timeout_ms, 60000);
     }
 
     #[test]
@@ -369,8 +439,7 @@ mod tests {
             priority: 5,
             max_concurrent: 2,
             enabled: false,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
 
         let path = dir.join("test_agent.json");
@@ -404,8 +473,7 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         mgr.add_agent(&config).unwrap();
         assert!(mgr.get_agent("mgr_test").is_some());
@@ -446,8 +514,7 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         mgr.add_agent(&config).unwrap();
         let loaded = mgr.reload().unwrap();
@@ -475,8 +542,7 @@ mod tests {
             priority: 5,
             max_concurrent: 1,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         search_agent.save_to_file(&search_dir.join("search_agent.json")).unwrap();
 
@@ -489,8 +555,7 @@ mod tests {
             priority: 3,
             max_concurrent: 2,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         primary_agent.save_to_file(&primary_dir.join("primary_agent.json")).unwrap();
 
@@ -511,8 +576,7 @@ mod tests {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
-            can_invoke: vec![],
-            handoff_enabled: false,
+            ..Default::default()
         };
         mgr.add_agent(&new_agent).unwrap();
         assert!(primary_dir.join("new_agent.json").exists());
@@ -577,6 +641,9 @@ pub struct AgentConfig {
     /// Custom system prompts per agent type.
     #[serde(default)]
     pub custom_prompts: HashMap<String, String>,
+    /// Reasoning effort for this agent (Off = inherit the global toggle).
+    #[serde(default)]
+    pub reasoning_effort: crate::types::ReasoningEffort,
 }
 
 fn default_enabled_agent() -> bool { true }
@@ -608,6 +675,7 @@ impl Default for AgentConfig {
             auto_refine: true,
             workers_dir: default_workers_dir(),
             custom_prompts: HashMap::new(),
+            reasoning_effort: crate::types::ReasoningEffort::default(),
         }
     }
 }
@@ -688,4 +756,3 @@ impl AgentConfig {
         Ok(workers)
     }
 }
-

@@ -103,6 +103,7 @@ fn bootstrap() -> (
         cl.set_api_key(api_key.as_deref());
         let cfg = config.lock().unwrap();
         cl.set_session(cfg.session_id.clone(), cfg.sessions_dir.clone());
+        cl.set_reasoning_effort(cfg.reasoning_effort);
         if cfg.encryption_enabled {
             if let Some(key) = cfg.encryption_key() {
                 cl.set_encryption_key(Some(key));
@@ -155,10 +156,12 @@ fn bootstrap() -> (
     let agent_registry = Arc::new(agent_registry);
 
     let tool_manager_for_engine = Arc::new(Mutex::new((*tool_manager).clone()));
+    let client_for_engine = Arc::new(client.lock().unwrap().clone());
     let agent_engine = AgentEngine::new(
         agent_registry.clone(),
         llm_client,
         tool_manager_for_engine,
+        client_for_engine,
     );
     let agent_engine = Arc::new(agent_engine);
 

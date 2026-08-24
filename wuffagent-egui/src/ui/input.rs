@@ -86,6 +86,26 @@ impl ChatApp {
                 }
                 ui.add_space(6.0);
 
+                // Reasoning effort dropdown (applied immediately on change)
+                egui::ComboBox::from_id_salt("reasoning_effort")
+                    .width(130.0)
+                    .selected_text(self.reasoning_effort.label())
+                    .show_ui(ui, |ui| {
+                        for variant in crate::types::ReasoningEffort::VARIANTS {
+                            if ui
+                                .selectable_value(&mut self.reasoning_effort, variant, variant.label())
+                                .changed()
+                            {
+                                self.client.set_reasoning_effort(self.reasoning_effort);
+                                tracing::info!(
+                                    "Reasoning effort changed to {:?}",
+                                    self.reasoning_effort
+                                );
+                            }
+                        }
+                    });
+                ui.add_space(6.0);
+
                 if !self.chat.is_generating && !self.chat.is_pipeline_running {
                     let send_btn = egui::Button::new("Send")
                         .fill(theme.primary)
@@ -317,13 +337,18 @@ impl ChatApp {
         let event_tx = self.pending_tx.clone();
         let request = request.to_string();
 
-        // Wire the event tx so the engine can emit chain events
+        // Wire the event tx so the engine can emit chain events, and apply
+        // the current reasoning effort to the engine's LLM client.
         let engine = if let Some(ref tx) = self.pending_tx {
             let inner_tx = tx.lock().unwrap().clone();
             let inner = (*self.agent_engine).clone();
-            Arc::new(inner.with_event_tx(Arc::new(Mutex::new(inner_tx))))
+            Arc::new(
+                inner
+                    .with_event_tx(Arc::new(Mutex::new(inner_tx)))
+                    .with_reasoning_effort(self.reasoning_effort),
+            )
         } else {
-            self.agent_engine.clone()
+            Arc::new((*self.agent_engine).clone().with_reasoning_effort(self.reasoning_effort))
         };
 
         // Clone event_tx for the async block

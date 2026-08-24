@@ -18,6 +18,8 @@ pub struct AgentConfigDialog {
     pub priority: u32,
     pub max_concurrent: usize,
     pub enabled: bool,
+    /// Reasoning effort for this agent (Off = inherit the global toggle).
+    pub reasoning_effort: wuffagent_core::types::ReasoningEffort,
     pub tool_checkboxes: Vec<bool>,
     pub available_tools: Vec<String>,
     pub allowed_tools: Vec<String>,
@@ -47,6 +49,7 @@ impl AgentConfigDialog {
             priority: 0,
             max_concurrent: 1,
             enabled: true,
+            reasoning_effort: wuffagent_core::types::ReasoningEffort::default(),
             tool_checkboxes,
             available_tools,
             allowed_tools: Vec::new(),
@@ -94,6 +97,24 @@ impl AgentConfigDialog {
                         .on_press(Message::AgentConfigEnabled(!self.enabled)).padding([4, 8]))
                     .align_y(Alignment::Center)
             );
+
+            col = col.push(text("Reasoning Effort (Off = inherit global)").size(11).color(pal.text));
+            {
+                let mut eff_row = row!().spacing(4);
+                for (i, variant) in wuffagent_core::types::ReasoningEffort::VARIANTS.iter().enumerate() {
+                    let selected = *variant == self.reasoning_effort;
+                    eff_row = eff_row.push(
+                        button(
+                            text(format!("[{}] {}", if selected { "v" } else { " " }, variant.name()))
+                                .size(11)
+                                .color(if selected { iced::Color::WHITE } else { pal.text })
+                        )
+                        .on_press(Message::AgentConfigReasoningEffort(i as u8))
+                        .padding([2, 8])
+                    );
+                }
+                col = col.push(eff_row);
+            }
 
             col = col.push(text("System Prompt").size(11).color(pal.text));
             col = col.push(text_input("", &self.system_prompt).on_input(|v| Message::AgentConfigSystemPrompt(v)).padding([4, 8]));
@@ -190,6 +211,7 @@ impl AgentConfigDialog {
         self.priority = agent.priority;
         self.max_concurrent = agent.max_concurrent;
         self.enabled = agent.enabled;
+        self.reasoning_effort = agent.reasoning_effort;
         self.sync_tools_from_agent(&agent.allowed_tools);
         self.message = None;
     }
@@ -213,6 +235,7 @@ impl AgentConfigDialog {
         self.priority = 0;
         self.max_concurrent = 1;
         self.enabled = true;
+        self.reasoning_effort = wuffagent_core::types::ReasoningEffort::default();
         self.allowed_tools.clear();
         for cb in &mut self.tool_checkboxes {
             *cb = false;
@@ -236,6 +259,8 @@ impl AgentConfigDialog {
             enabled: self.enabled,
             can_invoke: vec![],
             handoff_enabled: false,
+            shell_config: wuffagent_core::agents::config::ShellConfig::default(),
+            reasoning_effort: self.reasoning_effort,
         };
         let agent_manager = backend.agent_manager.lock().unwrap();
         let result = if self.is_new {

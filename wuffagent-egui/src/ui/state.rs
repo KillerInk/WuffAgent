@@ -73,6 +73,8 @@ pub struct ChatApp {
     pub chat_engine: Option<crate::client::engine::ChatEngine>,
     /// Index of the currently selected agent for chat (None = auto-select).
     pub selected_agent_index: Option<usize>,
+    /// Reasoning effort for reasoning models (Off = omitted from requests).
+    pub reasoning_effort: crate::types::ReasoningEffort,
     /// Remote n_ctx value (for remote mode).
     pub remote_n_ctx: u32,
     /// Handle for the remote n_ctx update task.
@@ -95,6 +97,7 @@ impl ChatApp {
         // Initialize the sessions panel with a clone of the config.
         let sessions_panel =
             super::sessions_panel::SessionsPanel::new(&Arc::new(Mutex::new(config.clone())));
+        let reasoning_effort = config.reasoning_effort;
         Self {
             config,
             client,
@@ -103,6 +106,7 @@ impl ChatApp {
             agent_engine,
             cancellation_token: CancellationToken::new(),
             chat: ChatAreaState::new(),
+            reasoning_effort,
             sessions: SessionsPanelState {
                 sessions: Vec::new(),
                 selected_session: None,
@@ -130,6 +134,8 @@ impl ChatApp {
     /// Centralized config save — all callers should use this.
     pub fn save_config(&mut self) -> Result<(), crate::config::Error> {
         self.config.streaming = self.chat.streaming;
+        self.config.reasoning_effort = self.reasoning_effort;
+        self.client.set_reasoning_effort(self.reasoning_effort);
         self.config.chat_history = self.chat.messages.iter().map(|m| crate::config::ChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),

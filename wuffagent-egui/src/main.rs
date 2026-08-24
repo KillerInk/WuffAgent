@@ -131,6 +131,7 @@ fn bootstrap() -> (
     let mut client = ChatClient::new(&base_url);
     client.set_api_key(api_key.as_deref());
     client.set_session(config.session_id.clone(), config.sessions_dir.clone());
+    client.set_reasoning_effort(config.reasoning_effort);
     if config.encryption_enabled {
         if let Some(key) = config.encryption_key() {
             client.set_encryption_key(Some(key));
@@ -186,10 +187,12 @@ fn bootstrap() -> (
         config.threads,
     );
     let tool_manager_for_engine: Arc<Mutex<ToolManager>> = Arc::new(Mutex::new((*tool_manager).clone()));
+    let client_for_engine = Arc::new(client.clone());
     let agent_engine = AgentEngine::new(
         agent_registry.clone(),
         llm_client,
         tool_manager_for_engine,
+        client_for_engine,
     );
     let agent_engine = Arc::new(agent_engine);
 

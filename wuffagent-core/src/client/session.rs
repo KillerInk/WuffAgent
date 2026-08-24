@@ -212,6 +212,7 @@ mod tests {
             timestamp: "2024-01-01T00:00:00Z".to_string(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         }
     }
 

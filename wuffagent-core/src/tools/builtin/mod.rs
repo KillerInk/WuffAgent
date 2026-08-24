@@ -3,27 +3,31 @@ pub mod file_io;
 pub mod web_search;
 pub mod agent_call;
 pub mod time;
+pub mod shell;
 
 pub use calculation::CalculationTool;
 pub use file_io::FileIOTool;
 pub use web_search::WebSearchTool;
 pub use agent_call::AgentCallTool;
 pub use time::TimeTool;
+pub use shell::{ShellTool, ShellConfig};
 
 use crate::tools::types::{ToolMetadata};
 use crate::tools::registry::ToolEntry;
+use crate::config::SearchConfig;
 
 /// Register all built-in tools into the registry.
 pub fn register_builtins(
     registry: &crate::tools::registry::ToolRegistry,
     invocation_registry: &crate::agents::invocation_registry::AgentInvocationRegistry,
 ) -> crate::tools::types::ToolResult<()> {
+    // Create web search tool
     registry.register(ToolEntry {
         tool: std::sync::Arc::new(WebSearchTool::new()),
         metadata: ToolMetadata {
             name: "web_search".to_string(),
             version: "1.0.0".to_string(),
-            description: "Search the web for information".to_string(),
+            description: "Search the web for information using a search engine".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

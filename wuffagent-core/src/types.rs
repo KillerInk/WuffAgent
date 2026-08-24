@@ -14,6 +14,10 @@ pub struct Message {
     /// Reference to the tool call this result belongs to (for tool role messages).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Model reasoning/thinking content (llama.cpp `reasoning_content`, DeepSeek/Qwen style).
+    /// Round-tripped so the model can see its own prior reasoning across tool-call rounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// A single tool call requested by the AI.
@@ -23,6 +27,58 @@ pub struct ToolCall {
     #[serde(rename = "type")]
     pub call_type: String,
     pub function: ToolFunction,
+}
+
+/// Reasoning effort level sent to the model server (Qwen3/llama.cpp style).
+/// Serialized as a lowercase string; `Off` is omitted from requests entirely.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    /// JSON string value for the request body, or `None` for Off.
+    pub fn as_wire_value(self) -> Option<&'static str> {
+        match self {
+            ReasoningEffort::Off => None,
+            ReasoningEffort::Low => Some("low"),
+            ReasoningEffort::Medium => Some("medium"),
+            ReasoningEffort::High => Some("high"),
+        }
+    }
+
+    /// Short name for dropdown items.
+    pub fn name(self) -> &'static str {
+        match self {
+            ReasoningEffort::Off => "Off",
+            ReasoningEffort::Low => "Low",
+            ReasoningEffort::Medium => "Medium",
+            ReasoningEffort::High => "High",
+        }
+    }
+
+    /// Human-readable label for UI display.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReasoningEffort::Off => "Reasoning: Off",
+            ReasoningEffort::Low => "Reasoning: Low",
+            ReasoningEffort::Medium => "Reasoning: Medium",
+            ReasoningEffort::High => "Reasoning: High",
+        }
+    }
+
+    /// All selectable variants, in UI order.
+    pub const VARIANTS: [ReasoningEffort; 4] = [
+        ReasoningEffort::Off,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+    ];
 }
 
 /// The function specification within a tool call.

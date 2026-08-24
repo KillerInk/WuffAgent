@@ -76,6 +76,17 @@ pub async fn process_sse_line(
                 thinking.len()
             );
             callback(thinking.to_string(), true)?;
+
+            // Accumulate into the conversation so the model's reasoning
+            // round-trips on the next request (improves tool-call reliability
+            // with reasoning models such as Qwen3/DeepSeek).
+            let mut conv = conversation.lock().unwrap();
+            if let Some(last) = conv.last_mut() {
+                match last.reasoning_content.as_mut() {
+                    Some(r) => r.push_str(thinking),
+                    None => last.reasoning_content = Some(thinking.to_string()),
+                }
+            }
         }
     }
 
@@ -217,6 +228,7 @@ pub fn add_streaming_messages(conversation: &Arc<Mutex<Vec<Message>>>, prompt: &
         timestamp: crate::types::format_timestamp(),
         tool_calls: None,
         tool_call_id: None,
+    reasoning_content: None,
     });
     conv.push(Message {
         role: "assistant".to_string(),
@@ -224,5 +236,6 @@ pub fn add_streaming_messages(conversation: &Arc<Mutex<Vec<Message>>>, prompt: &
         timestamp: crate::types::format_timestamp(),
         tool_calls: None,
         tool_call_id: None,
+    reasoning_content: None,
     });
 }

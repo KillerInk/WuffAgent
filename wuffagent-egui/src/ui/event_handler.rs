@@ -134,7 +134,15 @@ impl ChatApp {
             }
             AppEvent::AgentEngineComplete { response } => {
                 tracing::info!("Agent engine complete");
-                self.chat.append_message("assistant", &response);
+                // The agent streams content via StreamChunk during execution;
+                // commit the accumulated buffer if present. Only fall back to
+                // the final response when nothing was streamed (e.g. the
+                // non-streaming direct-LLM fallback), to avoid duplicates.
+                if !self.chat.stream_buffer.is_empty() {
+                    self.chat.commit_stream();
+                } else if !response.is_empty() {
+                    self.chat.append_message("assistant", &response);
+                }
             }
             AppEvent::AgentEngineError { error } => {
                 tracing::error!(error, "Agent engine error");

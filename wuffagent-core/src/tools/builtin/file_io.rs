@@ -32,9 +32,11 @@ fn validate_path(path: &str) -> Result<(), crate::tools::types::ToolError> {
 
     // Reject absolute paths to sensitive system directories
     let canonical_str = canonical_path.to_string_lossy().to_lowercase();
-    // Strip Windows \\?\ prefix from canonicalized paths
-    let canonical_normalized = canonical_str.trim_start_matches("\\?\\");
-    let canonical_normalized = canonical_normalized.replace('\\', "/");
+    // Strip the Windows `\\?\` verbatim prefix from canonicalized paths
+    // (exact 4-char prefix; trim_start_matches with a wrong pattern would
+    // silently fail to strip it).
+    let canonical_stripped = canonical_str.strip_prefix(r"\\?\").unwrap_or(&canonical_str);
+    let canonical_normalized = canonical_stripped.replace('\\', "/");
     if canonical_normalized == "/etc" || canonical_normalized.starts_with("/etc/") || canonical_normalized == "/root" || canonical_normalized.starts_with("/root/") {
         return Err(crate::tools::types::ToolError::Execution("Path not allowed".to_string()));
     }

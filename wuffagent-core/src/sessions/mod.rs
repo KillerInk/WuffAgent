@@ -433,6 +433,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         session.add_message(Message {
             role: "assistant".to_string(),
@@ -440,6 +441,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         save_session(&dir, &session).unwrap();
 
@@ -535,6 +537,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         save_session(&dir, &session).unwrap();
 
@@ -552,6 +555,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         save_session(&dir, &new_session).unwrap();
 
@@ -579,6 +583,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         let key = gen_key();
         save_session_encrypted(&dir, &session, &key).unwrap();
@@ -619,6 +624,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         session.add_message(Message {
             role: "assistant".to_string(),
@@ -626,6 +632,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         let key = gen_key();
         save_session_encrypted(&dir, &session, &key).unwrap();
@@ -649,6 +656,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         let key = gen_key();
         let wrong_key = gen_key();
@@ -671,6 +679,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         let key = gen_key();
         save_session_encrypted(&dir, &session, &key).unwrap();
@@ -725,6 +734,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         session.add_message(Message {
             role: "assistant".to_string(),
@@ -732,6 +742,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         session.add_message(Message {
             role: "user".to_string(),
@@ -739,6 +750,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         let key = gen_key();
         save_session_encrypted(&dir, &session, &key).unwrap();

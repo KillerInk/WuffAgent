@@ -389,6 +389,14 @@ pub fn update(message: Message, state: &mut AppState, backend: &Backend) -> Task
             }
             Task::none()
         }
+        Message::AgentConfigReasoningEffort(v) => {
+            if let Some(ref mut ad) = state.agent_config_dialog {
+                if let Some(e) = wuffagent_core::types::ReasoningEffort::VARIANTS.get(v as usize) {
+                    ad.reasoning_effort = *e;
+                }
+            }
+            Task::none()
+        }
         Message::AgentConfigSystemPrompt(v) => {
             if let Some(ref mut ad) = state.agent_config_dialog {
                 ad.system_prompt = v;

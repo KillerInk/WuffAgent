@@ -121,6 +121,7 @@ impl AgentRegistry {
             auto_refine: true,
             workers_dir: PathBuf::from(""),
             custom_prompts: HashMap::new(),
+            reasoning_effort: legacy.reasoning_effort,
         };
 
         Self::validate_config(global_registry, &config)?;
@@ -255,6 +256,7 @@ impl AgentRegistry {
         name: &str,
         llm_client: Arc<dyn LlmClient>,
         event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
+        client: Arc<crate::client::ChatClient>,
     ) -> Option<Agent> {
         let config = self.agents.get(name)?.clone();
         let tool_manager = Arc::new(Mutex::new(crate::tools::ToolManager::new_empty()));
@@ -265,6 +267,7 @@ impl AgentRegistry {
             tool_manager,
             invocation_registry,
             event_tx,
+            client,
         ))
     }
 
@@ -379,7 +382,7 @@ mod tests {
             task_timeout_ms: 30_000,
             auto_refine: false,
             workers_dir: dir.clone(),
-            custom_prompts: HashMap::new(),
+            ..Default::default()
         };
         let path = dir.join("test_agent.json");
         let content = serde_json::to_string_pretty(&config).unwrap();

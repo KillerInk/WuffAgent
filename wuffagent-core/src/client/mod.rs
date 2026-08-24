@@ -27,6 +27,8 @@ pub use session::{
 pub struct ChatClient {
     base_url: String,
     system_prompt: String,
+    /// Reasoning effort level for reasoning models (Off = omitted from requests).
+    reasoning_effort: crate::types::ReasoningEffort,
     conversation: Arc<Mutex<Vec<Message>>>,
     http_client: reqwest::Client,
     api_key: Option<String>,
@@ -43,11 +45,57 @@ pub struct ChatClient {
     tool_event_tx: Arc<Mutex<Option<mpsc::Sender<crate::types::AppEvent>>>>,
 }
 
+/// Strip think tags and their contents from model output (for display).
+/// The content between the tags is kept, prefixed with a thinking marker.
+/// Tag literals are assembled via `concat!` so the raw sequence is not
+/// spelled out in source.
+pub fn strip_think_tags(text: &str) -> String {
+    const OPEN: &str = concat!("<", "think>");
+    const CLOSE: &str = concat!("<", "/think>");
+    let mut out = String::new();
+    let mut rest = text;
+    loop {
+        match rest.find(OPEN) {
+            Some(o) => {
+                out.push_str(&rest[..o]);
+                let after_open = &rest[o + OPEN.len()..];
+                match after_open.find(CLOSE) {
+                    Some(c) => {
+                        let inner = &after_open[..c];
+                        rest = &after_open[c + CLOSE.len()..];
+                        let trimmed = inner.trim();
+                        if !trimmed.is_empty() {
+                            if !out.is_empty() {
+                                out.push('\n');
+                            }
+                            out.push_str("💭 ");
+                            out.push_str(trimmed);
+                            out.push('\n');
+                        }
+                    }
+                    None => {
+                        // Unclosed tag: keep the remainder as-is
+                        out.push_str(&rest[o..]);
+                        rest = "";
+                        break;
+                    }
+                }
+            }
+            None => {
+                out.push_str(rest);
+                break;
+            }
+        }
+    }
+    out
+}
+
 impl ChatClient {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.to_string(),
             system_prompt: String::new(),
+            reasoning_effort: crate::types::ReasoningEffort::default(),
             conversation: Arc::new(Mutex::new(Vec::new())),
             http_client: reqwest::Client::new(),
             api_key: None,
@@ -91,6 +139,14 @@ impl ChatClient {
 
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: crate::types::ReasoningEffort) {
+        self.reasoning_effort = effort;
+    }
+
+    pub fn reasoning_effort(&self) -> crate::types::ReasoningEffort {
+        self.reasoning_effort
     }
 
     pub fn conversation(&self) -> &Arc<Mutex<Vec<Message>>> {
@@ -217,6 +273,7 @@ impl ChatClient {
             prompt,
             false,
             tools,
+            self.reasoning_effort,
         );
         let (content, usage) = send_message(
             &self.http_client,
@@ -234,6 +291,7 @@ impl ChatClient {
             timestamp: crate::types::format_timestamp(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         conv.push(Message {
             role: "assistant".to_string(),
@@ -241,6 +299,7 @@ impl ChatClient {
             timestamp: crate::types::format_timestamp(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         drop(conv);
 
@@ -270,6 +329,7 @@ impl ChatClient {
             prompt,
             true,
             tools,
+            self.reasoning_effort,
         );
         let builder = build_stream_request(
             &self.http_client,
@@ -331,6 +391,7 @@ impl ChatClient {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
 
         let request = ChatRequest {
@@ -338,6 +399,7 @@ impl ChatClient {
             messages,
             stream: true,
             tools: tools.map(|t| t.to_vec()),
+            reasoning_effort: client.lock().unwrap().reasoning_effort.as_wire_value().map(|s| s.to_string()),
         };
         let body = serde_json::to_string(&request)?;
 
@@ -405,6 +467,7 @@ impl ChatClient {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
 
         let request = ChatRequest {
@@ -412,6 +475,7 @@ impl ChatClient {
             messages,
             stream: true,
             tools: tools.map(|t| t.to_vec()),
+            reasoning_effort: client.lock().unwrap().reasoning_effort.as_wire_value().map(|s| s.to_string()),
         };
         let body = serde_json::to_string(&request)?;
 
@@ -442,6 +506,80 @@ impl ChatClient {
         add_streaming_messages(&conversation, prompt);
 
         sse::stream_message(resp, &conversation, &mut callback).await
+    }
+
+    /// Stream a request built from an EXPLICIT message list, without touching
+    /// the client's own conversation. The agent engine keeps its own message
+    /// history and uses this to retain full control (system prompt, assistant
+    /// tool-call messages, tool results, reasoning round-trip).
+    ///
+    /// Thinking/reasoning chunks are delivered via `callback` with
+    /// `is_thinking == true`; content chunks with `false`.
+    ///
+    /// Returns the accumulated assistant message (content, reasoning_content,
+    /// tool_calls) plus the usage reported by the server.
+    pub async fn stream_with_messages_arc(
+        client: &Arc<Self>,
+        messages: &[Message],
+        tools: Option<&[crate::tools::ToolDefinition]>,
+        callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
+    ) -> Result<(Message, Option<Usage>), Error> {
+        let http_client = client.http_client.clone();
+        let base_url = client.base_url.clone();
+        let api_key = client.api_key.clone();
+
+        let request = ChatRequest {
+            model: "local".to_string(),
+            messages: messages.to_vec(),
+            stream: true,
+            tools: tools.map(|t| t.to_vec()),
+            reasoning_effort: client.reasoning_effort.as_wire_value().map(|s| s.to_string()),
+        };
+        let body = serde_json::to_string(&request)?;
+
+        let mut builder = http_client
+            .post(format!("{}/v1/chat/completions", base_url))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .body(body);
+        if let Some(ref key) = api_key {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let resp = builder.send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Error::Http(format!(
+                "Server returned {}: {}",
+                status, text
+            )));
+        }
+
+        // Throwaway conversation seeded with one empty assistant message; the
+        // SSE layer accumulates content / reasoning_content / tool_calls into it.
+        let local_conv: Arc<Mutex<Vec<Message>>> = Arc::new(Mutex::new(vec![Message {
+            role: "assistant".to_string(),
+            content: String::new(),
+            timestamp: crate::types::format_timestamp(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }]));
+
+        let mut boxed_cb = Box::new(callback);
+        let usage = sse::stream_message(resp, &local_conv, &mut boxed_cb).await?;
+
+        let msg = local_conv.lock().unwrap().pop().unwrap_or_else(|| Message {
+            role: "assistant".to_string(),
+            content: String::new(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+
+        Ok((msg, usage))
     }
 
     // ── Tool call helpers ─────────────────────────────────────────────────────
@@ -664,6 +802,7 @@ impl ChatClient {
                     timestamp: crate::types::format_timestamp(),
                     tool_calls: None,
                     tool_call_id: Some(tc.id.clone()),
+                reasoning_content: None,
                 });
             }
         }
@@ -695,6 +834,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_build_request_reasoning_effort() {
+        let mut client = ChatClient::new("http://localhost:8080");
+
+        // Off: field omitted from JSON entirely
+        client.set_reasoning_effort(crate::types::ReasoningEffort::Off);
+        let request = build_request(
+            &client.system_prompt,
+            &client.conversation,
+            "Hello",
+            false,
+            None,
+            client.reasoning_effort(),
+        );
+        assert!(request.reasoning_effort.is_none());
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("reasoning_effort"));
+
+        // High: serialized as "high"
+        client.set_reasoning_effort(crate::types::ReasoningEffort::High);
+        let request = build_request(
+            &client.system_prompt,
+            &client.conversation,
+            "Hello",
+            false,
+            None,
+            client.reasoning_effort(),
+        );
+        assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""reasoning_effort":"high""#));
+    }
+
+    #[test]
     fn test_build_request_no_system_prompt() {
         let client = ChatClient::new("http://localhost:8080");
         let request = build_request(
@@ -703,6 +875,7 @@ mod tests {
             "Hello",
             false,
             None,
+            crate::types::ReasoningEffort::default(),
         );
         assert_eq!(request.model, "local");
         assert!(!request.stream);
@@ -721,6 +894,7 @@ mod tests {
             "Hello",
             false,
             None,
+            crate::types::ReasoningEffort::default(),
         );
         assert_eq!(request.model, "local");
         assert_eq!(request.messages.len(), 2);
@@ -739,6 +913,7 @@ mod tests {
             "Hello",
             true,
             None,
+            crate::types::ReasoningEffort::default(),
         );
         assert!(request.stream);
         assert_eq!(request.messages.len(), 1);
@@ -767,6 +942,7 @@ mod tests {
             "Hello",
             false,
             Some(&tools),
+            crate::types::ReasoningEffort::default(),
         );
         assert!(request.tools.is_some());
         assert_eq!(request.tools.as_ref().unwrap().len(), 1);
@@ -777,8 +953,8 @@ mod tests {
         let client = ChatClient::new("http://localhost:8080");
         {
             let mut conv = client.conversation.lock().unwrap();
-            conv.push(Message { role: "user".into(), content: "Hi there".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None });
-                        conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None });
+            conv.push(Message { role: "user".into(), content: "Hi there".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None });
+                        conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None });
         }
         let request = build_request(
             &client.system_prompt,
@@ -786,6 +962,7 @@ mod tests {
             "What's the weather?",
             false,
             None,
+            crate::types::ReasoningEffort::default(),
         );
         assert_eq!(request.messages.len(), 3);
         assert_eq!(request.messages[0].role, "user");
@@ -801,8 +978,8 @@ mod tests {
         let client = ChatClient::new("http://localhost:8080");
         {
             let mut conv = client.conversation.lock().unwrap();
-            conv.push(Message { role: "user".into(), content: "Hi".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None });
-                        conv.push(Message { role: "assistant".into(), content: String::new(), timestamp: String::new(), tool_calls: None, tool_call_id: None });
+            conv.push(Message { role: "user".into(), content: "Hi".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None });
+                        conv.push(Message { role: "assistant".into(), content: String::new(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None });
         }
         let request = build_request(
             &client.system_prompt,
@@ -810,6 +987,7 @@ mod tests {
             "Follow up",
             false,
             None,
+            crate::types::ReasoningEffort::default(),
         );
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].role, "user");
@@ -881,6 +1059,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         drop(conv);
 
@@ -909,6 +1088,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         drop(conv);
 
@@ -944,6 +1124,7 @@ mod tests {
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
+        reasoning_content: None,
         });
         drop(conv);
 
@@ -975,6 +1156,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+        reasoning_content: None,
         });
         drop(conv);
 
@@ -1001,6 +1183,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+        reasoning_content: None,
         });
         drop(conv);
 
@@ -1027,6 +1210,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+        reasoning_content: None,
         });
         drop(conv);
 

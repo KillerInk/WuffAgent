@@ -4,6 +4,30 @@ use std::sync::Arc;
 use crate::tools::types::{ToolError, ToolLogger, ToolOutput, ToolParams, ToolResult, TracingToolLogger};
 use crate::tools::registry::ToolRegistry;
 
+/// Parse raw tool-call argument JSON into `ToolParams`.
+///
+/// Tries the direct `ToolParams` shape first, then wraps a plain JSON object's
+/// fields into `values` (some models emit direct arguments like
+/// `{"path": "..."}`).
+pub fn parse_tool_args(arguments: &str) -> Result<ToolParams, String> {
+    if let Ok(p) = serde_json::from_str::<ToolParams>(arguments) {
+        return Ok(p);
+    }
+    if let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) {
+        let mut values = std::collections::HashMap::new();
+        if let Some(obj) = args.as_object() {
+            for (k, v) in obj {
+                values.insert(k.clone(), v.clone());
+            }
+        }
+        return Ok(ToolParams { values });
+    }
+    Err(format!(
+        "Failed to parse arguments: {}",
+        &arguments[..arguments.len().min(100)]
+    ))
+}
+
 /// High-level orchestrator that exposes tool execution to the rest of the application.
 pub struct ToolManager {
     registry: Arc<ToolRegistry>,

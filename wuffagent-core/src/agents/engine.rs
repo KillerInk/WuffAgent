@@ -25,6 +25,7 @@ pub struct AgentEngine {
     pub(super) llm_client: Arc<dyn LlmClient>,
     pub(super) tool_manager: Arc<Mutex<ToolManager>>,
     pub(super) event_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
+    pub(super) client: Arc<crate::client::ChatClient>,
 }
 
 impl AgentEngine {
@@ -33,18 +34,29 @@ impl AgentEngine {
         registry: Arc<AgentRegistry>,
         llm_client: Arc<dyn LlmClient>,
         tool_manager: Arc<Mutex<ToolManager>>,
+        client: Arc<crate::client::ChatClient>,
     ) -> Self {
         Self {
             registry,
             llm_client,
             tool_manager,
             event_tx: None,
+            client,
         }
     }
 
     /// Set the event transmitter for agent chain events.
     pub fn with_event_tx(mut self, tx: Arc<Mutex<mpsc::Sender<AppEvent>>>) -> Self {
         self.event_tx = Some(tx);
+        self
+    }
+
+    /// Return a clone of the engine with the LLM client's reasoning effort
+    /// updated (used so the agent tool loop honors the current UI setting).
+    pub fn with_reasoning_effort(mut self, effort: crate::types::ReasoningEffort) -> Self {
+        let mut client = (*self.client).clone();
+        client.set_reasoning_effort(effort);
+        self.client = Arc::new(client);
         self
     }
 
@@ -95,6 +107,7 @@ impl AgentEngine {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
+            reasoning_content: None,
             },
             Message {
                 role: "user".to_string(),
@@ -102,6 +115,7 @@ impl AgentEngine {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
+            reasoning_content: None,
             },
         ];
 
@@ -156,6 +170,7 @@ impl AgentEngine {
             self.tool_manager.clone(),
             self.registry.build_invocation_registry(),
             self.event_tx.clone(),
+            self.client.clone(),
         );
 
         agent.execute(request, cancel_token).await
@@ -208,6 +223,7 @@ impl AgentEngine {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
+            reasoning_content: None,
             },
         ];
 
@@ -251,7 +267,12 @@ mod tests {
             });
         }
         let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
-        AgentEngine::new(Arc::new(registry), Arc::new(NoopLlm), Arc::new(Mutex::new(crate::tools::ToolManager::new(tool_registry))))
+        AgentEngine::new(
+            Arc::new(registry),
+            Arc::new(NoopLlm),
+            Arc::new(Mutex::new(crate::tools::ToolManager::new(tool_registry))),
+            Arc::new(crate::client::ChatClient::new("http://localhost:1")),
+        )
     }
 
     /// A no-op LLM client (never actually called by the parsing tests).

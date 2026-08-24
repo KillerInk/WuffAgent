@@ -6,5 +6,6 @@
     "priority": 1,
     "max_concurrent": 2,
     "can_invoke": ["generalist"],
-    "handoff_enabled": true
+    "handoff_enabled": true,
+    "reasoning_effort": "high"
 }

@@ -7,6 +7,7 @@ pub use self::local::LocalConfig;
 pub use self::remote::RemoteConfig;
 pub use self::encryption::EncryptionSettings;
 pub use self::presets::{get_presets_path, LocalPreset, Preset, PresetError, PresetStore, RemotePreset};
+pub use self::search::{SearchConfig, SearchBackend, SearchRegion, TimeRange};
 pub use paths::get_config_path;
 
 mod chat;
@@ -15,6 +16,7 @@ mod remote;
 mod encryption;
 mod paths;
 mod presets;
+mod search;
 #[cfg(test)]
 mod tests;
 
@@ -53,10 +55,17 @@ pub struct Config {
     pub streaming: bool,
     pub theme: String,
     pub chat_history: Vec<ChatMessage>,
+    /// Reasoning effort for reasoning models (Off = omitted from requests).
+    #[serde(default)]
+    pub reasoning_effort: crate::types::ReasoningEffort,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default = "default_max_messages")]
     pub max_messages: usize,
+
+    // Search settings
+    #[serde(default)]
+    pub search_config: SearchConfig,
 
     // Internal paths (not serialized)
     #[serde(skip)]
@@ -142,8 +151,10 @@ impl Default for Config {
             streaming: true,
             theme: "dark".to_string(),
             chat_history: Vec::new(),
+            reasoning_effort: crate::types::ReasoningEffort::default(),
             session_id: None,
             max_messages: 100,
+            search_config: SearchConfig::default(),
             sessions_dir: PathBuf::new(),
             file_path: PathBuf::new(),
             encryption_enabled: false,

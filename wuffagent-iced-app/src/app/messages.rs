@@ -104,6 +104,8 @@ pub enum Message {
     AgentConfigPriority(String),
     AgentConfigMaxConcurrent(String),
     AgentConfigEnabled(bool),
+    /// Reasoning effort selector (index into ReasoningEffort::VARIANTS)
+    AgentConfigReasoningEffort(u8),
     AgentConfigSystemPrompt(String),
     AgentConfigSelectAllTools,
     AgentConfigClearTools,
