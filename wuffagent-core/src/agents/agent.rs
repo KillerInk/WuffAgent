@@ -39,6 +39,8 @@ pub struct Agent {
     event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
     /// Chat client used for streaming (native tool-call) requests.
     client: Arc<ChatClient>,
+    /// Memory manager for persistent context.
+    memory: Option<Arc<crate::memory::MemoryManager>>,
 }
 
 impl Agent {
@@ -50,6 +52,7 @@ impl Agent {
         invocation_registry: Arc<AgentInvocationRegistry>,
         event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
         client: Arc<ChatClient>,
+        memory: Option<Arc<crate::memory::MemoryManager>>,
     ) -> Self {
         // Apply the agent's per-agent reasoning effort: give it its own
         // client clone with the effort set. Off = inherit the global
@@ -69,6 +72,7 @@ impl Agent {
             invocation_registry,
             event_tx,
             client,
+            memory,
         }
     }
 
@@ -100,6 +104,7 @@ impl Agent {
         llm_client: Arc<dyn LlmClient>,
         invocation_registry: Arc<AgentInvocationRegistry>,
         client: Arc<ChatClient>,
+        memory: Option<Arc<crate::memory::MemoryManager>>,
     ) -> Self {
         let tool_registry = Arc::new(crate::tools::registry::ToolRegistry::new(
             vec![],
@@ -113,6 +118,7 @@ impl Agent {
             invocation_registry,
             None,
             client,
+            memory,
         )
     }
 
@@ -176,6 +182,15 @@ impl Agent {
         if !available_agents.is_empty() {
             prompt.push_str("\n\nYou can delegate tasks to other agents using the agent_call tool. Available agents: ");
             prompt.push_str(&available_agents.join(", "));
+        }
+
+        // Inject relevant memories
+        if let Some(memory) = &self.memory {
+            let memory_block = memory.build_context_block("");
+            if !memory_block.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&memory_block);
+            }
         }
 
         prompt
@@ -824,7 +839,7 @@ mod tests {
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
         let invocation_registry = Arc::new(AgentInvocationRegistry::new());
         let client = Arc::new(ChatClient::new("http://localhost:1"));
-        Agent::new(config, llm_client, tool_manager, invocation_registry, None, client)
+        Agent::new(config, llm_client, tool_manager, invocation_registry, None, client, None)
     }
 
     struct NoopLlm;
@@ -873,6 +888,7 @@ mod tests {
             invocation_registry.clone(),
             None,
             global_client.clone(),
+            None,
         );
         assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::High);
         assert!(!Arc::ptr_eq(&agent.client, &global_client));
@@ -888,6 +904,7 @@ mod tests {
             invocation_registry,
             None,
             global_client.clone(),
+            None,
         );
         assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::Medium);
         assert!(Arc::ptr_eq(&agent.client, &global_client));

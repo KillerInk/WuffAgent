@@ -262,6 +262,7 @@ impl AgentRegistry {
         event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
         client: Arc<ChatClient>,
         invocation_registry: Arc<AgentInvocationRegistry>,
+        memory: Option<Arc<crate::memory::MemoryManager>>,
     ) -> Option<Agent> {
         let config = self.agents.get(name)?.clone();
         let tool_manager = Arc::new(Mutex::new(crate::tools::ToolManager::new_empty()));
@@ -272,6 +273,7 @@ impl AgentRegistry {
             invocation_registry,
             event_tx,
             client,
+            memory,
         ))
     }
 
@@ -349,6 +351,7 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
                     invocation_registry,
                     None, // no event tx — sub-agent output is captured in the tool result
                     client,
+                    None, // sub-agents don't have memory access
                 );
                 agent.execute(&request, &CancellationToken::new()).await
             });
@@ -367,6 +370,7 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
                     invocation_registry,
                     None,
                     client,
+                    None, // sub-agents don't have memory access
                 );
                 agent.execute(&request, &CancellationToken::new()).await
             })

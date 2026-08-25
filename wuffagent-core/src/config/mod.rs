@@ -9,6 +9,7 @@ pub use self::encryption::EncryptionSettings;
 pub use self::presets::{get_presets_path, LocalPreset, Preset, PresetError, PresetStore, RemotePreset};
 pub use self::search::{SearchConfig, SearchBackend, SearchRegion, TimeRange};
 pub use paths::get_config_path;
+pub use crate::memory::MemoryConfig;
 
 mod chat;
 mod local;
@@ -81,6 +82,10 @@ pub struct Config {
     // Agent pipeline configuration (legacy, migrated to agents/ directory)
     #[serde(default, deserialize_with = "deserialize_agent_config")]
     pub agent_config: crate::agents::config::AgentConfig,
+
+    // Memory system configuration
+    #[serde(default)]
+    pub memory_config: MemoryConfig,
 }
 
 /// Deserialize `agent_config` with migration support.
@@ -158,6 +163,7 @@ impl Default for Config {
             encryption_enabled: false,
             encryption_password: None,
             agent_config: crate::agents::config::AgentConfig::default(),
+            memory_config: MemoryConfig::default(),
         }
     }
 }

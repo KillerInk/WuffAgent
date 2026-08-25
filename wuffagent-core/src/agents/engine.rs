@@ -28,6 +28,7 @@ pub struct AgentEngine {
     pub(super) event_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     pub(super) client: Arc<crate::client::ChatClient>,
     pub(super) invocation_registry: Arc<AgentInvocationRegistry>,
+    pub(super) memory: Option<Arc<crate::memory::MemoryManager>>,
 }
 
 impl AgentEngine {
@@ -46,7 +47,14 @@ impl AgentEngine {
             event_tx: None,
             client,
             invocation_registry,
+            memory: None,
         }
+    }
+
+    /// Attach a memory manager to the engine.
+    pub fn with_memory(mut self, memory: Arc<crate::memory::MemoryManager>) -> Self {
+        self.memory = Some(memory);
+        self
     }
 
     /// Set the event transmitter for agent chain events.
@@ -178,6 +186,7 @@ impl AgentEngine {
         };
 
         // Create the agent and execute — use the shared invocation registry
+        let memory = self.memory.clone();
         let agent = Agent::new(
             agent_config,
             self.llm_client.clone(),
@@ -185,6 +194,7 @@ impl AgentEngine {
             self.invocation_registry.clone(),
             self.event_tx.clone(),
             self.client.clone(),
+            memory,
         );
 
         agent.execute(request, cancel_token).await

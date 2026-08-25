@@ -200,13 +200,22 @@ fn bootstrap() -> (
     );
     let tool_manager_for_engine: Arc<Mutex<ToolManager>> = Arc::new(Mutex::new((*tool_manager).clone()));
 
+    // Initialize memory manager
+    let memory_config = config.memory_config.clone();
+    let memory_manager = wuffagent_core::memory::MemoryManager::new(memory_config)
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to initialize memory manager: {}", e);
+            wuffagent_core::memory::MemoryManager::new(wuffagent_core::memory::MemoryConfig::default()).unwrap()
+        });
+    let memory_manager = Arc::new(memory_manager);
+
     let agent_engine = AgentEngine::new(
         agent_registry.clone(),
         llm_client,
         tool_manager_for_engine,
         client_for_engine,
         invocation_registry,
-    );
+    ).with_memory(memory_manager);
     let agent_engine = Arc::new(agent_engine);
 
     (config, server, client, tool_manager, agent_engine)
