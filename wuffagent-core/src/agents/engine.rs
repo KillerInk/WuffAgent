@@ -7,6 +7,7 @@ use tracing;
 
 use super::agent::Agent;
 use super::config::AgentConfig;
+use super::invocation_registry::AgentInvocationRegistry;
 use super::llm_client::LlmClient;
 use super::registry::AgentRegistry;
 use crate::tools::ToolManager;
@@ -26,6 +27,7 @@ pub struct AgentEngine {
     pub(super) tool_manager: Arc<Mutex<ToolManager>>,
     pub(super) event_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     pub(super) client: Arc<crate::client::ChatClient>,
+    pub(super) invocation_registry: Arc<AgentInvocationRegistry>,
 }
 
 impl AgentEngine {
@@ -35,6 +37,7 @@ impl AgentEngine {
         llm_client: Arc<dyn LlmClient>,
         tool_manager: Arc<Mutex<ToolManager>>,
         client: Arc<crate::client::ChatClient>,
+        invocation_registry: Arc<AgentInvocationRegistry>,
     ) -> Self {
         Self {
             registry,
@@ -42,6 +45,7 @@ impl AgentEngine {
             tool_manager,
             event_tx: None,
             client,
+            invocation_registry,
         }
     }
 
@@ -58,6 +62,16 @@ impl AgentEngine {
         client.set_reasoning_effort(effort);
         self.client = Arc::new(client);
         self
+    }
+
+    /// Return the comma-separated list of enabled agent names.
+    pub fn available_agent_names(&self) -> Option<String> {
+        let names = self.registry.available_agent_names();
+        if names.is_empty() {
+            None
+        } else {
+            Some(names)
+        }
     }
 
     fn send_chain_event(&self, event: AppEvent) {
@@ -107,7 +121,7 @@ impl AgentEngine {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
-            reasoning_content: None,
+                reasoning_content: None,
             },
             Message {
                 role: "user".to_string(),
@@ -115,7 +129,7 @@ impl AgentEngine {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
-            reasoning_content: None,
+                reasoning_content: None,
             },
         ];
 
@@ -163,12 +177,12 @@ impl AgentEngine {
             }
         };
 
-        // Create the agent and execute
+        // Create the agent and execute — use the shared invocation registry
         let agent = Agent::new(
             agent_config,
             self.llm_client.clone(),
             self.tool_manager.clone(),
-            self.registry.build_invocation_registry(),
+            self.invocation_registry.clone(),
             self.event_tx.clone(),
             self.client.clone(),
         );
@@ -232,7 +246,7 @@ impl AgentEngine {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
-             reasoning_content: None,
+                reasoning_content: None,
             },
             Message {
                 role: "user".to_string(),
@@ -240,7 +254,7 @@ impl AgentEngine {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
-             reasoning_content: None,
+                reasoning_content: None,
             },
         ];
 
@@ -284,11 +298,13 @@ mod tests {
             });
         }
         let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
+        let invocation_registry = Arc::new(AgentInvocationRegistry::new());
         AgentEngine::new(
             Arc::new(registry),
             Arc::new(NoopLlm),
             Arc::new(Mutex::new(crate::tools::ToolManager::new(tool_registry))),
             Arc::new(crate::client::ChatClient::new("http://localhost:1")),
+            invocation_registry,
         )
     }
 

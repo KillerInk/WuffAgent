@@ -21,6 +21,8 @@ pub enum AgentError {
     Cancelled,
     #[error("Worker configuration error: {0}")]
     ConfigError(String),
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 pub type AgentResultType<T> = Result<T, AgentError>;

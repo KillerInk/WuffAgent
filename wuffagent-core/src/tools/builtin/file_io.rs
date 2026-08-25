@@ -60,6 +60,14 @@ impl Default for FileIOTool {
     }
 }
 
+/// Parsed fields of a unified-diff hunk header (`@@ -old_start,old_count +new_start,new_count @@`).
+/// Only the old-file position/count and the new-file count are needed to apply the patch.
+struct HunkHeader {
+    old_start: usize,
+    old_count: usize,
+    new_count: usize,
+}
+
 // ─── Action Implementations ───────────────────────────────────────────────────
 
 impl FileIOTool {
@@ -297,13 +305,15 @@ impl FileIOTool {
 
     /// Apply a unified diff/patch string to an existing file.
     ///
-    /// Supports standard `diff -u` output with `@@` hunk headers.
-    /// Each hunk contains context lines (prefixed with ` `), additions (`+`), and deletions (`-`).
+    /// Supports standard `diff -u` / `git diff` output with `@@` hunk headers,
+    /// including trailing section context (e.g. `@@ -1,3 +1,4 @@ fn main()`).
+    /// Hunk body lines are: context (prefixed with ` `), additions (`+`),
+    /// deletions (`-`), and the optional `\ No newline at end of file` marker.
+    ///
+    /// Hunks are positioned using the **old**-file start from each header, so
+    /// multi-hunk patches where earlier hunks change the line count apply
+    /// correctly.
     fn exec_diff_apply(&self, path: &str, diff: &str) -> crate::tools::types::ToolResult<ToolOutput> {
-        // Parse the unified diff and apply it line by line.
-        let lines: Vec<&str> = diff.lines().collect();
-        let mut result_lines: Vec<String> = Vec::new();
-        let mut file_line_idx: usize = 0;
         let file_content = fs::read_to_string(path).map_err(|e| {
             crate::tools::types::ToolError::Execution(format!(
                 "Failed to read '{}' for diff apply: {}", path, e
@@ -311,96 +321,118 @@ impl FileIOTool {
         })?;
         let ends_with_newline = file_content.ends_with('\n');
         let file_lines: Vec<&str> = file_content.lines().collect();
+        let diff_lines: Vec<&str> = diff.lines().collect();
+
+        let mut result_lines: Vec<String> = Vec::new();
+        let mut file_line_idx: usize = 0; // cursor into the *old* file
         let mut lines_changed: u32 = 0;
+        let mut hunks_applied: u32 = 0;
         let mut i = 0;
 
-        while i < lines.len() {
-            let line = lines[i];
+        while i < diff_lines.len() {
+            let line = diff_lines[i];
 
-            // Skip file header lines (--- / +++ / diff --git)
-            if line.starts_with("--- ") || line.starts_with("+++ ") || line.starts_with("diff ") {
+            if line.trim_start().starts_with("@@") {
+                let hunk = Self::parse_hunk_header(line).ok_or_else(|| {
+                    crate::tools::types::ToolError::Execution(format!(
+                        "Malformed hunk header in diff for '{}': '{}'", path, line
+                    ))
+                })?;
+                // Advance past the header line so the body loop processes
+                // hunk content, not the header again.
                 i += 1;
-                continue;
-            }
 
-            // Skip empty lines (e.g. leading/trailing newlines in diff string)
-            if line.is_empty() {
-                i += 1;
-                continue;
-            }
-
-            // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-            if line.starts_with("@@") {
-                // Extract new file start and count
-                let new_start = Self::parse_hunk_new_start(line);
-                let new_count = Self::parse_hunk_new_count(line);
-                if let (Some(ns), Some(_nc)) = (new_start, new_count) {
-                    // Advance file_line_idx to the hunk's starting position
-                    let target_idx = ns.saturating_sub(1); // 1-indexed to 0-indexed
-                    if target_idx > file_line_idx {
-                        // Copy lines that are not part of this hunk
-                        for line in &file_lines[file_line_idx..target_idx] {
-                            result_lines.push(line.to_string());
-                        }
-                        file_line_idx = target_idx;
-                    }
-                    // Process hunk body
-                    i += 1;
-                    while i < lines.len() {
-                        let hunk_line = lines[i];
-                        if hunk_line.starts_with("@@") || hunk_line.starts_with("diff ") ||
-                           hunk_line.starts_with("--- ") || hunk_line.starts_with("+++ ") {
-                            break;
-                        }
-                        match hunk_line.chars().next() {
-                            Some('+') => {
-                                // Addition: insert the line
-                                result_lines.push(hunk_line[1..].to_string());
-                                lines_changed += 1;
-                            }
-                            Some('-') => {
-                                // Deletion: skip the line (consume from file)
-                                if file_line_idx < file_lines.len() {
-                                    file_line_idx += 1;
-                                    lines_changed += 1;
-                                }
-                            }
-                            Some(' ') | None => {
-                                // Context line: strip leading space and use diff content
-                                let content = if hunk_line.is_empty() {
-                                    String::new()
-                                } else {
-                                    hunk_line[1..].to_string()
-                                };
-                                result_lines.push(content);
-                                if file_line_idx < file_lines.len() {
-                                    file_line_idx += 1;
-                                }
-                            }
-                            _ => {
-                                // Unknown prefix, treat as context
-                                if file_line_idx < file_lines.len() {
-                                    result_lines.push(file_lines[file_line_idx].to_string());
-                                    file_line_idx += 1;
-                                }
-                            }
-                        }
-                        i += 1;
-                    }
-                    continue;
+                // Advance the old-file cursor to the hunk's start position,
+                // copying any untouched lines in between.
+                let target = hunk.old_start.saturating_sub(1); // 1-indexed -> 0-indexed
+                if target > file_line_idx {
+                    let end = target.min(file_lines.len());
+                    result_lines.extend(file_lines[file_line_idx..end].iter().map(|l| l.to_string()));
+                    file_line_idx = end;
                 }
+
+                // Consume hunk body lines until the header's line counts are
+                // satisfied (or the next header begins, for sloppy counts).
+                let mut consumed_old = 0usize;
+                let mut consumed_new = 0usize;
+                loop {
+                    if consumed_old >= hunk.old_count && consumed_new >= hunk.new_count {
+                        break;
+                    }
+                    if i >= diff_lines.len() {
+                        return Err(crate::tools::types::ToolError::Execution(format!(
+                            "Diff for '{}' is truncated: hunk '{}' ran out of lines", path, line
+                        )));
+                    }
+                    let hunk_line = diff_lines[i];
+                    // A new hunk/file header means this hunk ended early
+                    if hunk_line.starts_with("@@ ")
+                        || hunk_line.starts_with("--- ")
+                        || hunk_line.starts_with("diff ")
+                    {
+                        break;
+                    }
+                    match hunk_line.chars().next() {
+                        Some('+') => {
+                            // Addition: insert the line
+                            result_lines.push(hunk_line.strip_prefix('+').unwrap_or("").to_string());
+                            consumed_new += 1;
+                            lines_changed += 1;
+                        }
+                        Some('-') => {
+                            // Deletion: consume the line from the old file
+                            if file_line_idx < file_lines.len() {
+                                file_line_idx += 1;
+                            }
+                            consumed_old += 1;
+                            lines_changed += 1;
+                        }
+                        Some(' ') => {
+                            // Context line: use the diff content
+                            result_lines.push(hunk_line.strip_prefix(' ').unwrap_or("").to_string());
+                            if file_line_idx < file_lines.len() {
+                                file_line_idx += 1;
+                            }
+                            consumed_old += 1;
+                            consumed_new += 1;
+                        }
+                        None => {
+                            // Blank line: treat as an empty context line (some
+                            // tools strip the leading space from blank context lines)
+                            result_lines.push(String::new());
+                            if file_line_idx < file_lines.len() {
+                                file_line_idx += 1;
+                            }
+                            consumed_old += 1;
+                            consumed_new += 1;
+                        }
+                        Some('\\') => {
+                            // "\ No newline at end of file" marker — not a hunk line
+                        }
+                        _ => {
+                            return Err(crate::tools::types::ToolError::Execution(format!(
+                                "Malformed hunk line in diff for '{}': '{}'", path, hunk_line
+                            )));
+                        }
+                    }
+                    i += 1;
+                }
+                hunks_applied += 1;
+                continue;
             }
 
-            // Lines before any hunk (file header / unchanged preamble)
-            result_lines.push(line.to_string());
+            // Skip file headers and other preamble lines (---, +++, diff --git, blanks)
             i += 1;
         }
 
-        // Append any remaining file lines after the last hunk
-        while file_line_idx < file_lines.len() {
-            result_lines.push(file_lines[file_line_idx].to_string());
-            file_line_idx += 1;
+        if hunks_applied == 0 {
+            return Err(crate::tools::types::ToolError::Execution(
+                "No hunks (@@ ... @@) found in diff".to_string(),
+            ));
         }
+
+        // Append any remaining old-file lines after the last hunk
+        result_lines.extend(file_lines[file_line_idx..].iter().map(|l| l.to_string()));
 
         let mut final_content = result_lines.join("\n");
         if ends_with_newline {
@@ -413,39 +445,42 @@ impl FileIOTool {
         Ok(ToolOutput::Success(serde_json::json!({
             "path": path,
             "lines_changed": lines_changed,
+            "hunks_applied": hunks_applied,
             "success": true,
         })))
     }
 
-    /// Parse the new-file start line from a hunk header like `@@ -1,5 +3,4 @@`.
-    fn parse_hunk_new_start(line: &str) -> Option<usize> {
-        let at_at = line.find("@@")?;
-        let rest = &line[at_at + 2..].trim();
-        // rest starts with something like "-1,5 +3,4"
-        let plus_pos = rest.find('+')?;
-        let num_part = &rest[plus_pos + 1..];
-        let comma = num_part.find(',');
-        let num_str = match comma {
-            Some(idx) => &num_part[..idx],
-            None => num_part,
-        };
-        num_str.trim().parse::<usize>().ok()
+    /// Parse a hunk header like `@@ -old_start,old_count +new_start,new_count @@`.
+    ///
+    /// Both counts are optional (defaulting to 1), and any trailing section
+    /// context after the closing `@@` (e.g. `fn main()`) is ignored.
+    fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
+        let after_open = line.find("@@")? + 2;
+        let rest = &line[after_open..];
+        let after_close = rest.find("@@")?;
+        let spec = rest[..after_close].trim(); // e.g. "-1,5 +3,4"
+
+        let (old_spec, new_spec) = spec.split_once('+')?;
+        Some(HunkHeader {
+            old_start: Self::parse_hunk_position(old_spec)?,
+            old_count: Self::parse_hunk_count(old_spec)?,
+            new_count: Self::parse_hunk_count(new_spec)?,
+        })
     }
 
-    /// Parse the new-file line count from a hunk header.
-    fn parse_hunk_new_count(line: &str) -> Option<usize> {
-        let at_at = line.find("@@")?;
-        let rest = &line[at_at + 2..].trim();
-        let plus_pos = rest.find('+')?;
-        let num_part = &rest[plus_pos + 1..];
-        if let Some(comma) = num_part.find(',') {
-            let count_str = &num_part[comma + 1..];
-            // Trim trailing characters (e.g. " @" in "@@ -1,3 +1,3 @@")
-            let count_str = count_str.trim_end_matches(|c: char| c.is_whitespace() || c == '@');
-            count_str.trim().parse::<usize>().ok()
-        } else {
-            // Single number means count=1
-            Some(1)
+    /// Extract the start position from a spec like `-1,5` (the sign char is included).
+    fn parse_hunk_position(spec: &str) -> Option<usize> {
+        let digits = spec.trim().trim_start_matches(|c: char| c == '-' || c.is_whitespace());
+        let num_str = digits.split(',').next()?.trim();
+        num_str.parse::<usize>().ok()
+    }
+
+    /// Extract the count from a spec like `-1,5`; a missing count means 1.
+    fn parse_hunk_count(spec: &str) -> Option<usize> {
+        let digits = spec.trim().trim_start_matches(|c: char| c == '-' || c.is_whitespace());
+        match digits.split(',').nth(1) {
+            Some(count) if !count.trim().is_empty() => count.trim().parse::<usize>().ok(),
+            _ => Some(1),
         }
     }
 
@@ -1412,6 +1447,84 @@ mod tests {
             },
         };
         assert!(tool.execute(params).is_err());
+    }
+
+    #[test]
+    fn test_file_io_diff_apply_multi_hunk() {
+        // Regression: old implementation positioned hunks using the NEW-file
+        // line number, so a second hunk after a line-count change applied to
+        // the wrong lines.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        fs::write(&path, "one\ntwo\nthree\nfour\nfive\nsix\n").unwrap();
+
+        // Hunk 1 inserts a line at line 2 (shifts everything below),
+        // hunk 2 deletes line 6 (old numbering) of the original file.
+        let diff = "
+--- a/f.txt
++++ b/f.txt
+@@ -2,1 +2,2 @@
+ two
++inserted
+@@ -6,1 +7,0 @@
+-six
+";
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("diff_apply"));
+                m.insert("diff".to_string(), json!(diff));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(v["hunks_applied"], 2);
+            }
+            _ => panic!("multi-hunk diff_apply should succeed"),
+        }
+        let result = fs::read_to_string(&path).unwrap();
+        assert_eq!(result, "one\ntwo\ninserted\nthree\nfour\nfive\n");
+    }
+
+    #[test]
+    fn test_file_io_diff_apply_git_header_with_context() {
+        // Regression: git diff headers carry trailing section context
+        // (e.g. `fn main()`); the old count parser failed to parse them,
+        // the hunk was skipped, and its lines were written verbatim.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        fs::write(&path, "fn main() {\n    println!(\"old\");\n}\n").unwrap();
+
+        let diff = "diff --git a/main.rs b/main.rs
+--- a/main.rs
++++ b/main.rs
+@@ -1,3 +1,3 @@ fn main()
+ fn main() {
+-    println!(\"old\");
++    println!(\"new\");
+ }
+";
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("diff_apply"));
+                m.insert("diff".to_string(), json!(diff));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(v["lines_changed"], 2);
+            }
+            _ => panic!("git-style diff_apply should succeed"),
+        }
+        let result = fs::read_to_string(&path).unwrap();
+        assert_eq!(result, "fn main() {\n    println!(\"new\");\n}\n");
     }
 
     // ── File Info Tests ────────────────────────────────────────────────────

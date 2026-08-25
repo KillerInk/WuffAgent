@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use tokio_util::sync::CancellationToken;
 use tracing;
 
 use super::agent::Agent;
@@ -10,7 +11,10 @@ use super::config::{AgentConfig, RecoveryPolicy};
 use super::invocation_registry::AgentInvocationRegistry;
 use super::llm_client::LlmClient;
 use super::traits::AgentError;
+use crate::client::ChatClient;
 use crate::tools::registry::ToolRegistry;
+use crate::tools::ToolManager;
+use crate::types::AppEvent;
 
 /// Registry of all available agents, loaded from JSON config files.
 /// Provides routing prompt caching for efficient agent selection.
@@ -156,7 +160,7 @@ impl AgentRegistry {
     }
 
     /// Get a list of all available agent names as a comma-separated string.
-    pub(crate) fn available_agent_names(&self) -> String {
+    pub fn available_agent_names(&self) -> String {
         self.agents.keys()
             .filter(|k| self.agents.get(*k).map(|a| a.enabled).unwrap_or(false))
             .cloned()
@@ -255,12 +259,12 @@ impl AgentRegistry {
         &self,
         name: &str,
         llm_client: Arc<dyn LlmClient>,
-        event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
-        client: Arc<crate::client::ChatClient>,
+        event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
+        client: Arc<ChatClient>,
+        invocation_registry: Arc<AgentInvocationRegistry>,
     ) -> Option<Agent> {
         let config = self.agents.get(name)?.clone();
         let tool_manager = Arc::new(Mutex::new(crate::tools::ToolManager::new_empty()));
-        let invocation_registry = self.build_invocation_registry();
         Some(Agent::new(
             config,
             llm_client,
@@ -271,8 +275,15 @@ impl AgentRegistry {
         ))
     }
 
-    /// Build an invocation registry that references all enabled agents in this registry.
-    pub(crate) fn build_invocation_registry(&self) -> Arc<AgentInvocationRegistry> {
+    /// Build an invocation registry that references all enabled agents in this registry,
+    /// wiring each entry to actually run the sub-agent via the provided LLM client,
+    /// tool manager, and client.
+    pub fn build_invocation_registry(
+        &self,
+        llm_client: Arc<dyn LlmClient>,
+        tool_manager: Arc<Mutex<ToolManager>>,
+        client: Arc<ChatClient>,
+    ) -> Arc<AgentInvocationRegistry> {
         let registry = Arc::new(AgentInvocationRegistry::new());
         for (name, config) in &self.agents {
             if !config.enabled {
@@ -280,10 +291,16 @@ impl AgentRegistry {
             }
             let name_str = name.clone();
             let config_clone = config.clone();
+            let llm_client_clone = llm_client.clone();
+            let tool_manager_clone = tool_manager.clone();
+            let client_clone = client.clone();
             let inv_reg = registry.clone();
             let agent = Arc::new(RegistryAgentInvocation {
                 name: name_str.clone(),
                 config: config_clone,
+                llm_client: llm_client_clone,
+                tool_manager: tool_manager_clone,
+                client: client_clone,
                 invocation_registry: inv_reg,
             });
             registry.register(&name_str, agent);
@@ -293,10 +310,14 @@ impl AgentRegistry {
 }
 
 /// A wrapper that adapts an AgentConfig into an AgentInvocation.
-/// This allows the registry to invoke agents by name.
+/// This allows the registry to invoke agents by name by actually running
+/// the sub-agent's LLM tool loop.
 struct RegistryAgentInvocation {
     name: String,
     config: AgentConfig,
+    llm_client: Arc<dyn LlmClient>,
+    tool_manager: Arc<Mutex<ToolManager>>,
+    client: Arc<ChatClient>,
     invocation_registry: Arc<AgentInvocationRegistry>,
 }
 
@@ -307,18 +328,74 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
         request: &str,
         _context: &serde_json::Value,
     ) -> super::traits::AgentResultType<super::types::AgentResult> {
-        // Create a simple agent invocation that returns the request as output
-        // In a full implementation, this would create and run an actual Agent
-        Ok(super::types::AgentResult {
-            task_id: format!("inv-{}", uuid::Uuid::new_v4()),
-            agent_id: self.name.clone(),
-            agent_type: super::types::AgentType::General,
-            status: super::types::TaskStatus::Completed,
-            output: serde_json::json!({ "result": request }),
-            summary: format!("Agent '{}' handled request", self.name),
-            duration_ms: 0,
-            completed_at: None,
-        })
+        let config = self.config.clone();
+        let llm_client = self.llm_client.clone();
+        let tool_manager = self.tool_manager.clone();
+        let client = self.client.clone();
+        let invocation_registry = self.invocation_registry.clone();
+
+        // Run the sub-agent's LLM loop synchronously within the current runtime
+        // (or create a temporary one if outside a runtime).
+        let task_id = format!("inv-{}", uuid::Uuid::new_v4());
+        let request = request.to_string();
+        let start = std::time::Instant::now();
+
+        let result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let join = handle.spawn(async move {
+                let agent = Agent::new(
+                    config,
+                    llm_client,
+                    tool_manager,
+                    invocation_registry,
+                    None, // no event tx — sub-agent output is captured in the tool result
+                    client,
+                );
+                agent.execute(&request, &CancellationToken::new()).await
+            });
+            handle.block_on(join)
+                .map_err(|e| AgentError::Internal(format!("Sub-agent join error: {}", e)))?
+        } else {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| AgentError::Internal(format!("Failed to create runtime: {}", e)))?;
+            rt.block_on(async move {
+                let agent = Agent::new(
+                    config,
+                    llm_client,
+                    tool_manager,
+                    invocation_registry,
+                    None,
+                    client,
+                );
+                agent.execute(&request, &CancellationToken::new()).await
+            })
+        };
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(response) => Ok(super::types::AgentResult {
+                task_id,
+                agent_id: self.name.clone(),
+                agent_type: super::types::AgentType::General,
+                status: super::types::TaskStatus::Completed,
+                output: serde_json::json!({ "result": response }),
+                summary: response.chars().take(500).collect(),
+                duration_ms,
+                completed_at: None,
+            }),
+            Err(e) => Ok(super::types::AgentResult {
+                task_id,
+                agent_id: self.name.clone(),
+                agent_type: super::types::AgentType::General,
+                status: super::types::TaskStatus::Failed,
+                output: serde_json::json!({ "error": e }),
+                summary: format!("Sub-agent failed: {}", e),
+                duration_ms,
+                completed_at: None,
+            }),
+        }
     }
 
     fn metadata(&self) -> super::types::AgentMetadata {
@@ -347,11 +424,13 @@ mod tests {
 
     use super::*;
     use crate::tools::builtin;
+    use crate::tools::registry::ToolRegistry;
+    use crate::tools::types::TracingToolLogger;
 
     fn make_test_registry() -> ToolRegistry {
-        let logger = Arc::new(crate::tools::types::TracingToolLogger);
+        let logger = Arc::new(TracingToolLogger);
         let registry = ToolRegistry::new(vec![], logger);
-        let invocation_registry = crate::agents::invocation_registry::AgentInvocationRegistry::new();
+        let invocation_registry = AgentInvocationRegistry::new();
         builtin::register_builtins(&registry, &invocation_registry).expect("failed to register builtins");
         registry
     }

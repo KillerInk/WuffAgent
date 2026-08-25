@@ -251,6 +251,7 @@ impl ChatApp {
             .unwrap_or_else(|| self.config.file_path.clone());
         dirs.push(agents_dir.join("workers"));
 
+        let mut prompt = String::new();
         for dir in dirs {
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for entry in entries.flatten() {
@@ -261,14 +262,29 @@ impl ChatApp {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(cfg) = serde_json::from_str::<crate::agents::WorkerConfig>(&content) {
                             if names.iter().any(|n| cfg.name == *n) {
-                                return cfg.system_prompt;
+                                prompt = cfg.system_prompt;
+                                break;
                             }
                         }
                     }
                 }
             }
+            if !prompt.is_empty() {
+                break;
+            }
         }
-        String::new()
+
+        // Append available subagent hint so the model knows when to delegate.
+        if let Some(names) = self.agent_engine.available_agent_names() {
+            if !names.is_empty() {
+                prompt.push_str(&format!(
+                    "\n\nYou can delegate tasks to other agents using the agent_call tool. Available agents: {}.",
+                    names
+                ));
+            }
+        }
+
+        prompt
     }
 
     /// Return the list of agent names from all known workers directories.

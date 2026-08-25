@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use chrono::{DateTime, Utc};
 
 use crate::tools::types::{Tool, ToolOutput, ToolParams, ToolSchema};

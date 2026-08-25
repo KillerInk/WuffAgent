@@ -118,14 +118,8 @@ fn bootstrap() -> (
     .collect();
 
     let registry = Arc::new(ToolRegistry::new(discovery_paths, logger));
-    let invocation_registry = Arc::new(wuffagent_core::agents::invocation_registry::AgentInvocationRegistry::new());
-    builtin::register_builtins(&registry, &invocation_registry).expect("Failed to register built-in tools");
-    if let Err(e) = registry.discover_plugins() {
-        eprintln!("Warning: failed to discover plugins: {}", e);
-    }
 
-    let tool_manager: Arc<ToolManager> = Arc::new(ToolManager::new(registry.clone()));
-
+    // Resolve search dirs for agent discovery
     let base_url = config.base_url();
     let api_key = config.remote_api_key.clone();
     let mut client = ChatClient::new(&base_url);
@@ -143,6 +137,7 @@ fn bootstrap() -> (
     let llm_client = Arc::new(wuffagent_core::agents::llm_client::ChatClientAdapter::new(
         ChatClient::new(&base_url_clone),
     ));
+    let client_for_engine = Arc::new(client.clone());
 
     let config_path_clone = config_path.clone();
     let config_agents_dir = config_path_clone
@@ -166,6 +161,8 @@ fn bootstrap() -> (
         add_workers_dir(cwd.join("workers"));
     }
 
+    // Load agents FIRST, then build the invocation registry, then register builtins
+    // so that agent_call resolves against a populated registry.
     let agent_registry = match AgentRegistry::load(search_dirs.clone(), &registry) {
         Ok(reg) => {
             tracing::info!("Loaded {} agents from {:?}", reg.agent_count(), search_dirs);
@@ -178,6 +175,21 @@ fn bootstrap() -> (
     };
     let agent_registry = Arc::new(agent_registry);
 
+    // Build the shared invocation registry now that agents are loaded
+    let invocation_registry = agent_registry.build_invocation_registry(
+        llm_client.clone(),
+        Arc::new(Mutex::new(ToolManager::new(registry.clone()))),
+        client_for_engine.clone(),
+    );
+
+    // Register builtins — agent_call will use the populated registry
+    builtin::register_builtins(&registry, &invocation_registry).expect("Failed to register built-in tools");
+    if let Err(e) = registry.discover_plugins() {
+        eprintln!("Warning: failed to discover plugins: {}", e);
+    }
+
+    let tool_manager: Arc<ToolManager> = Arc::new(ToolManager::new(registry.clone()));
+
     let server = ServerManager::new(
         &config.server_path,
         &config.model_path,
@@ -187,12 +199,13 @@ fn bootstrap() -> (
         config.threads,
     );
     let tool_manager_for_engine: Arc<Mutex<ToolManager>> = Arc::new(Mutex::new((*tool_manager).clone()));
-    let client_for_engine = Arc::new(client.clone());
+
     let agent_engine = AgentEngine::new(
         agent_registry.clone(),
         llm_client,
         tool_manager_for_engine,
         client_for_engine,
+        invocation_registry,
     );
     let agent_engine = Arc::new(agent_engine);
 

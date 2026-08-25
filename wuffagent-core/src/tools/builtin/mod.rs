@@ -14,8 +14,6 @@ pub use shell::{ShellTool, ShellConfig};
 
 use crate::tools::types::{ToolMetadata};
 use crate::tools::registry::ToolEntry;
-use crate::config::SearchConfig;
-
 /// Register all built-in tools into the registry.
 pub fn register_builtins(
     registry: &crate::tools::registry::ToolRegistry,
