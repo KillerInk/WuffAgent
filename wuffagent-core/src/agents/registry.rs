@@ -168,6 +168,19 @@ impl AgentRegistry {
             .join(", ")
     }
 
+    /// Write an agent config to a JSON file in the given directory.
+    pub fn write_agent_config(&self, config: &AgentConfig, dir: &Path) -> Result<PathBuf, AgentError> {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| AgentError::ConfigError(format!("Failed to create agents dir {:?}: {}", dir, e)))?;
+        let path = dir.join(format!("{}.json", config.name));
+        let content = serde_json::to_string_pretty(config)
+            .map_err(|e| AgentError::ConfigError(format!("Failed to serialize agent config: {}", e)))?;
+        std::fs::write(&path, content)
+            .map_err(|e| AgentError::ConfigError(format!("Failed to write agent config to {:?}: {}", path, e)))?;
+        tracing::info!("Wrote agent config to {:?}", path);
+        Ok(path)
+    }
+
     /// Find a fallback agent when the LLM uses a wrong name.
     /// Tries exact match first, then substring match, then falls back to "general" or first enabled agent.
     pub(crate) fn find_fallback_agent(&self, requested: &str) -> String {

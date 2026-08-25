@@ -13,3 +13,4 @@ pub mod layout;
 pub mod presets_dialog;
 pub mod agent_config;
 pub mod agent_chain_panel;
+pub mod improvements;

@@ -4,14 +4,19 @@ use std::sync::Mutex;
 use tracing;
 
 use super::types::{MemoryConfig, MemoryEntry, MemoryType};
-use super::search::{keyword_search, get_recent_memories, search_memories};
+use super::search::{get_recent_memories, search_memories};
 use super::storage::{load_memories, save_memories, get_memories_path, count_active_memories};
+use super::extractor::extract_memories;
+use super::improver::suggest_improvements;
+use crate::agents::llm_client::LlmClient;
+use crate::types::Message;
 
 /// Main orchestrator for the memory system.
 pub struct MemoryManager {
     entries: Arc<Mutex<Vec<MemoryEntry>>>,
     config: MemoryConfig,
     storage_path: PathBuf,
+    llm_client: Option<Arc<dyn LlmClient>>,
 }
 
 impl Clone for MemoryManager {
@@ -20,6 +25,7 @@ impl Clone for MemoryManager {
             entries: self.entries.clone(),
             config: self.config.clone(),
             storage_path: self.storage_path.clone(),
+            llm_client: self.llm_client.clone(),
         }
     }
 }
@@ -39,12 +45,45 @@ impl MemoryManager {
             entries: Arc::new(Mutex::new(entries)),
             config,
             storage_path,
+            llm_client: None,
         })
+    }
+
+    /// Create a new MemoryManager with an LLM client for extraction.
+    pub fn new_with_llm(config: MemoryConfig, llm_client: Arc<dyn LlmClient>) -> Result<Self, String> {
+        let mut m = Self::new(config)?;
+        m.llm_client = Some(llm_client);
+        Ok(m)
     }
 
     /// Get the current config.
     pub fn config(&self) -> &MemoryConfig {
         &self.config
+    }
+
+    /// Extract memories from conversation messages and persist them.
+    pub async fn extract_and_save(&self, messages: &[Message], source: &str) -> Result<usize, String> {
+        let entries = extract_memories(self, messages, source, self.llm_client.as_ref().map(|c| c.as_ref())).await?;
+        let count = entries.len();
+        if count == 0 {
+            return Ok(0);
+        }
+        self.add_batch(entries)?;
+        Ok(count)
+    }
+
+    /// Suggest improvements for an agent based on memories and recent task.
+    pub async fn suggest_improvements(
+        &self,
+        agent_config: &crate::agents::config::AgentConfig,
+        task: &str,
+        result: &str,
+    ) -> Result<Vec<super::improver::ImprovementSuggestion>, String> {
+        let llm = match &self.llm_client {
+            Some(c) => c.clone(),
+            None => return Ok(Vec::new()),
+        };
+        suggest_improvements(self, agent_config, task, result, llm.as_ref()).await
     }
 
     /// Get all active (non-expired, non-superseded) memories.

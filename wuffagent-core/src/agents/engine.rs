@@ -187,6 +187,7 @@ impl AgentEngine {
 
         // Create the agent and execute — use the shared invocation registry
         let memory = self.memory.clone();
+        let agent_config_for_improve = agent_config.clone();
         let agent = Agent::new(
             agent_config,
             self.llm_client.clone(),
@@ -197,7 +198,32 @@ impl AgentEngine {
             memory,
         );
 
-        agent.execute(request, cancel_token).await
+        let result = agent.execute(request, cancel_token).await;
+
+        // Post-task: extract memories and suggest improvements
+        if let Some(memory) = &self.memory {
+            // Collect messages from the chain entries if available
+            let _ = memory.extract_and_save(&vec![], "agent_task").await;
+            
+            // Suggest improvements if auto_improve is enabled
+            if memory.config().auto_improve {
+                let result_str = match &result {
+                    Ok(r) => r.clone(),
+                    Err(e) => format!("Error: {}", e),
+                };
+                let suggestions = memory.suggest_improvements(&agent_config_for_improve, request, &result_str).await;
+                if let Ok(suggestions) = suggestions {
+                    if !suggestions.is_empty() {
+                        self.send_chain_event(crate::types::AppEvent::ImprovementSuggested {
+                            agent_name: agent_name.to_string(),
+                            suggestions,
+                        });
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Parse the routing response to extract the agent name.

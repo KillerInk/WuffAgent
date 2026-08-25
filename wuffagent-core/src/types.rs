@@ -161,6 +161,11 @@ pub enum AppEvent {
     AgentChainStopped,
     /// Remote server n_ctx was updated.
     NCtxUpdated { n_ctx: u32 },
+    /// Agent self-improvement suggestions generated.
+    ImprovementSuggested {
+        agent_name: String,
+        suggestions: Vec<crate::memory::ImprovementSuggestion>,
+    },
 }
 
 

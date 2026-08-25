@@ -158,6 +158,12 @@ pub struct MemoryConfig {
     /// Path to memories directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memories_dir: Option<String>,
+    /// Whether to auto-suggest agent prompt improvements.
+    #[serde(default = "default_auto_improve")]
+    pub auto_improve: bool,
+    /// Minimum number of relevant lessons to trigger improvement check.
+    #[serde(default = "default_improvement_trigger_lessons")]
+    pub improvement_trigger_lessons: usize,
 }
 
 fn default_enabled() -> bool { true }
@@ -168,6 +174,8 @@ fn default_auto_extract_after_task() -> bool { true }
 fn default_auto_extract_after_session() -> bool { false }
 fn default_auto_extract_min_confidence() -> f32 { 0.7 }
 fn default_project() -> String { "default".to_string() }
+fn default_auto_improve() -> bool { false }
+fn default_improvement_trigger_lessons() -> usize { 1 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -183,6 +191,8 @@ impl Default for MemoryConfig {
             auto_extract_min_confidence: 0.7,
             project: "default".to_string(),
             memories_dir: None,
+            auto_improve: false,
+            improvement_trigger_lessons: 1,
         }
     }
 }

@@ -101,6 +101,9 @@ impl ChatApp {
             ui.visuals_mut().panel_fill = theme.background;
             self.draw_chat_area(ui);
         });
+
+        // Draw improvements panel on top
+        self.draw_improvements_panel(ctx);
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {

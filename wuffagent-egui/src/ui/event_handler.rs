@@ -164,6 +164,10 @@ impl ChatApp {
             AppEvent::NCtxUpdated { n_ctx } => {
                 tracing::info!(n_ctx, "n_ctx updated");
             }
+            AppEvent::ImprovementSuggested { agent_name, suggestions } => {
+                tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");
+                self.improvements_panel.handle_improvement_suggested(&agent_name, suggestions);
+            }
             _ => {}
         }
     }

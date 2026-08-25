@@ -78,6 +78,8 @@ pub struct ChatApp {
     pub remote_n_ctx_handle: Option<JoinHandle<()>>,
     /// Arc for the remote n_ctx atomic value.
     pub remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
+    /// Pending agent improvement suggestions.
+    pub improvements_panel: super::improvements::ImprovementsPanel,
 }
 
 impl ChatApp {
@@ -122,6 +124,7 @@ impl ChatApp {
             agent_cancel_token: CancellationToken::new(),
             chat_engine: None,
             selected_agent_index: None,
+            improvements_panel: super::improvements::ImprovementsPanel::new(),
             remote_n_ctx: 0,
             remote_n_ctx_handle: None,
             remote_n_ctx_arc: None,
