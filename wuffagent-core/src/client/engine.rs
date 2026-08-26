@@ -31,8 +31,6 @@ pub struct EngineConfig {
     pub send_timeout_secs: u64,
     /// Timeout for tool execution (seconds)
     pub tool_timeout_secs: u64,
-    /// Maximum tool call rounds before giving up
-    pub max_tool_rounds: usize,
 }
 
 impl Default for EngineConfig {
@@ -40,7 +38,6 @@ impl Default for EngineConfig {
         Self {
             send_timeout_secs: 60,
             tool_timeout_secs: 30,
-            max_tool_rounds: 20,
         }
     }
 }
@@ -97,8 +94,6 @@ impl ChatEngine {
         let client = self.client.clone();
         let tool_manager = self.tool_manager.clone();
         let event_tx = self.event_tx.clone();
-        let config = self.config.clone();
-
         let handle = tokio::spawn(async move {
             let result = run_chat_loop(
                 &client,
@@ -106,7 +101,6 @@ impl ChatEngine {
                 &event_tx,
                 &prompt,
                 Some(&tool_defs),
-                config,
             )
             .await;
 
@@ -137,7 +131,6 @@ async fn run_chat_loop(
     event_tx: &mpsc::Sender<AppEvent>,
     prompt: &str,
     initial_tools: Option<&[crate::tools::ToolDefinition]>,
-    config: EngineConfig,
 ) -> Result<(), EngineError> {
     let mut current_prompt = prompt.to_string();
     let tools = initial_tools.map(|t| t.to_vec());
@@ -185,14 +178,6 @@ async fn run_chat_loop(
                 }
                 current_prompt = "You have been thinking. Please take action using tools, or provide your final response if you believe the task is complete.".to_string();
                 round += 1;
-                if round >= config.max_tool_rounds {
-                    tracing::warn!(
-                        "run_chat_loop exiting: max rounds ({}) reached",
-                        config.max_tool_rounds
-                    );
-                    event_tx.send(AppEvent::StreamComplete { content, usage })?;
-                    return Ok(());
-                }
                 continue;
             }
 
@@ -246,21 +231,9 @@ async fn run_chat_loop(
         // 4. Execute succeeded — continue loop to send tool results back to LLM.
         // The LLM will see the tool results and decide next steps (more tool calls
         // or final response). We only exit when the LLM responds without tool calls.
-
-        // 5. Max rounds check
         round += 1;
-        if round >= config.max_tool_rounds {
-            tracing::warn!(
-                "run_chat_loop exiting: max rounds ({}) reached after {} iterations",
-                config.max_tool_rounds,
-                round
-            );
-            // Send the last content as complete instead of error
-            event_tx.send(AppEvent::StreamComplete { content, usage })?;
-            return Ok(());
-        }
 
-        // 6. Continue with explicit prompt to keep using tools if needed
+        // 5. Continue with explicit prompt to keep using tools if needed
         current_prompt = "Please continue with your task. Use tools if needed, otherwise provide your final response.".to_string();
         
     }
