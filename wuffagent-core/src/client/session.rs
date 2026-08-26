@@ -183,6 +183,66 @@ pub fn trim_conversation(
     }
 }
 
+/// Estimate the token count of a message string using a simple character heuristic.
+/// This is a rough estimate; actual tokenizers may differ.
+pub fn estimate_tokens(text: &str) -> usize {
+    // Rough heuristic: ~4 chars per token for most languages.
+    // Also account for tool_call arguments and reasoning_content if present.
+    text.chars().count() / 4 + 1
+}
+
+/// Token-budget trim: remove oldest non-system messages until the estimated
+/// prompt size (all messages excluding the last assistant turn) is below the
+/// target. `target_tokens` is typically ~90% of n_ctx.
+/// Returns the number of messages removed.
+pub fn trim_to_token_budget(
+    conversation: &Arc<Mutex<Vec<Message>>>,
+    target_tokens: usize,
+) -> usize {
+    let mut conv = conversation.lock().unwrap();
+    if conv.is_empty() {
+        return 0;
+    }
+
+    let system_idx = conv.iter().position(|m| m.role == "system");
+    let keep_from = if let Some(idx) = system_idx { idx + 1 } else { 0 };
+
+    // Don't trim if there's nothing to trim
+    if keep_from >= conv.len() {
+        return 0;
+    }
+
+    let mut removed = 0;
+    loop {
+        // Estimate current prompt size: all messages except last assistant turn
+        let prompt_len: usize = conv.iter()
+            .take(conv.len().saturating_sub(1))
+            .map(|m| {
+                let mut total = estimate_tokens(&m.content);
+                if let Some(ref rc) = m.reasoning_content {
+                    total += estimate_tokens(rc);
+                }
+                if let Some(ref tcs) = m.tool_calls {
+                    for tc in tcs {
+                        total += estimate_tokens(&tc.function.arguments);
+                    }
+                }
+                total
+            })
+            .sum();
+        if prompt_len <= target_tokens {
+            break;
+        }
+        // Remove oldest non-system message
+        if keep_from >= conv.len() {
+            break;
+        }
+        conv.remove(keep_from);
+        removed += 1;
+    }
+    removed
+}
+
 /// Clear all messages from the conversation.
 pub fn clear_history(conversation: &Arc<Mutex<Vec<Message>>>) {
     conversation.lock().unwrap().clear();

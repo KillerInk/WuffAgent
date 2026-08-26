@@ -126,6 +126,8 @@ fn bootstrap() -> (
     client.set_api_key(api_key.as_deref());
     client.set_session(config.session_id.clone(), config.sessions_dir.clone());
     client.set_reasoning_effort(config.reasoning_effort);
+    client.set_max_messages(config.max_messages);
+    client.set_n_ctx(config.n_ctx);
     if config.encryption_enabled {
         if let Some(key) = config.encryption_key() {
             client.set_encryption_key(Some(key));

@@ -9,9 +9,17 @@ impl ChatApp {
             AppEvent::StreamChunk { content } => {
                 self.chat.stream_chunk(&content);
             }
-            AppEvent::StreamRoundComplete { content: _, usage: _ } => {
+            AppEvent::StreamRoundComplete { content: _, usage } => {
                 // Intermediate tool round: commit the round's text, keep generating
                 // so the next round's chunks keep rendering live.
+                // Update token gauge with round usage if available.
+                if let Some(u) = &usage {
+                    self.chat.token_count = u.total_tokens as usize;
+                    let n_ctx = self.get_effective_n_ctx();
+                    if n_ctx > 0 {
+                        self.chat.context_used = u.total_tokens as f32 / n_ctx as f32 * 100.0;
+                    }
+                }
                 self.chat.commit_stream();
             }
             AppEvent::StreamComplete { content, usage } => {
@@ -156,6 +164,10 @@ impl ChatApp {
                 let n_ctx = self.get_effective_n_ctx();
                 if n_ctx > 0 {
                     self.chat.context_used = self.chat.token_count as f32 / n_ctx as f32 * 100.0;
+                }
+                // Persist the session after agent engine completion
+                if let Err(e) = self.save_session() {
+                    eprintln!("Failed to save session: {}", e);
                 }
             }
             AppEvent::AgentEngineError { error } => {

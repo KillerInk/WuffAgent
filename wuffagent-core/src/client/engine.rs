@@ -5,7 +5,7 @@ use tracing;
 
 use tokio::task::JoinHandle;
 
-use super::{ChatClient, Error as ClientError};
+use super::{ChatClient, Error as ClientError, trim_conversation, trim_to_token_budget};
 use crate::tools::manager::ToolManager;
 use crate::types::{AppEvent, Usage};
 
@@ -138,6 +138,24 @@ async fn run_chat_loop(
     let mut thinking_rounds = 0;
 
     loop {
+        // Token-budget trim before each request to prevent exceeding n_ctx.
+        // Target is ~90% of n_ctx so the server still has headroom.
+        {
+            let guard = client.lock().unwrap();
+            let n_ctx = guard.n_ctx();
+            let max_msgs = guard.max_messages;
+            // Trim by message count if configured
+            if max_msgs > 0 {
+                trim_conversation(&guard.conversation, max_msgs);
+            }
+            // Also trim by token budget if n_ctx is set and conversation is large
+            if n_ctx > 0 {
+                let target_tokens = (n_ctx as usize) * 9 / 10;
+                if guard.conversation().lock().unwrap().len() > 4 {
+                    trim_to_token_budget(&guard.conversation, target_tokens);
+                }
+            }
+        }
 
         // 1. Stream the request, forwarding chunks as events
         let (content, usage, has_tool_calls, thinking_content) =

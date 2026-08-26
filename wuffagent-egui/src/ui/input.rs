@@ -222,6 +222,13 @@ impl ChatApp {
         };
         self.client.set_tool_event_sender(pending_tx.clone());
 
+        // Sync the remote server's n_ctx to the client before starting the chat loop.
+        // Without this, the engine trims conversations to the config default (e.g. 4096)
+        // instead of the server's actual context window.
+        if self.remote_n_ctx > 0 {
+            self.client = self.client.with_n_ctx(self.remote_n_ctx);
+        }
+
         // Create and start the chat engine
         let client = Arc::new(Mutex::new(self.client.clone()));
         let tool_manager = (*self.tool_manager).clone();

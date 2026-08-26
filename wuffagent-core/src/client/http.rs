@@ -15,6 +15,14 @@ pub struct ChatRequest {
     /// Reasoning effort for reasoning models (omitted when Off).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Request options for streaming (e.g. include_usage).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -38,6 +46,7 @@ pub fn build_request(
     stream: bool,
     tools: Option<&[crate::tools::ToolDefinition]>,
     reasoning_effort: crate::types::ReasoningEffort,
+    #[allow(unused_variables)] n_ctx: u32,
 ) -> ChatRequest {
     let mut messages = Vec::new();
 
@@ -78,6 +87,7 @@ pub fn build_request(
         stream,
         tools: tools.map(|t| t.to_vec()),
         reasoning_effort: reasoning_effort.as_wire_value().map(|s| s.to_string()),
+        stream_options: Some(StreamOptions { include_usage: true }),
     }
 }
 

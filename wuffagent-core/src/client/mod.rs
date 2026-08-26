@@ -21,7 +21,7 @@ pub use session::{
     save_session, load_session,
     enqueue_save_failure, retry_pending_saves, has_save_failure,
     clear_save_failure,
-    trim_conversation, clear_history, clear_session_messages,
+    trim_conversation, trim_to_token_budget, clear_history, clear_session_messages,
 };
 
 #[derive(Clone)]
@@ -36,6 +36,8 @@ pub struct ChatClient {
     session_id: Option<String>,
     session_dir: PathBuf,
     max_messages: usize,
+    /// Context window size in tokens (0 = use server default).
+    n_ctx: u32,
     /// Queue of pending save operations when a save fails.
     save_queue: Arc<Mutex<VecDeque<()>>>,
     /// Whether a save failure notification should be shown in the UI.
@@ -107,6 +109,7 @@ impl ChatClient {
             session_id: None,
             session_dir: PathBuf::new(),
             max_messages: 100,
+            n_ctx: 4096,
             save_queue: Arc::new(Mutex::new(VecDeque::new())),
             save_failed: Arc::new(Mutex::new(false)),
             encryption_key: None,
@@ -120,6 +123,22 @@ impl ChatClient {
 
     pub fn set_max_messages(&mut self, max_messages: usize) {
         self.max_messages = max_messages;
+    }
+
+    pub fn set_n_ctx(&mut self, n_ctx: u32) {
+        self.n_ctx = n_ctx;
+    }
+
+    pub fn n_ctx(&self) -> u32 {
+        self.n_ctx
+    }
+
+    /// Clone this client and update its n_ctx value.
+    /// Used to sync the remote server's reported context size before starting a chat loop.
+    pub fn with_n_ctx(&self, n_ctx: u32) -> Self {
+        let mut cloned = self.clone();
+        cloned.n_ctx = n_ctx;
+        cloned
     }
 
     pub fn set_url(&mut self, url: &str) {
@@ -284,6 +303,7 @@ impl ChatClient {
             stream: false,
             tools: tools.map(|t| t.to_vec()),
             reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
+            stream_options: Some(http::StreamOptions { include_usage: true }),
         };
         send_message(
             &self.http_client,
@@ -306,6 +326,7 @@ impl ChatClient {
             false,
             tools,
             self.reasoning_effort,
+            self.n_ctx,
         );
         let (content, usage) = send_message(
             &self.http_client,
@@ -362,6 +383,7 @@ impl ChatClient {
             true,
             tools,
             self.reasoning_effort,
+            self.n_ctx,
         );
         let builder = build_stream_request(
             &self.http_client,
@@ -443,6 +465,7 @@ impl ChatClient {
             stream: true,
             tools: tools.map(|t| t.to_vec()),
             reasoning_effort: client.lock().unwrap().reasoning_effort.as_wire_value().map(|s| s.to_string()),
+            stream_options: Some(http::StreamOptions { include_usage: true }),
         };
         let body = serde_json::to_string(&request)?;
 
@@ -530,6 +553,7 @@ impl ChatClient {
             stream: true,
             tools: tools.map(|t| t.to_vec()),
             reasoning_effort: client.lock().unwrap().reasoning_effort.as_wire_value().map(|s| s.to_string()),
+            stream_options: Some(http::StreamOptions { include_usage: true }),
         };
         let body = serde_json::to_string(&request)?;
 
@@ -589,6 +613,7 @@ impl ChatClient {
             stream: true,
             tools: tools.map(|t| t.to_vec()),
             reasoning_effort: client.reasoning_effort.as_wire_value().map(|s| s.to_string()),
+            stream_options: Some(http::StreamOptions { include_usage: true }),
         };
         let body = serde_json::to_string(&request)?;
 
