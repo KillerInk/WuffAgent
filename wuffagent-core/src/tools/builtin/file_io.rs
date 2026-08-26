@@ -619,7 +619,7 @@ impl Tool for FileIOTool {
                         "diff".to_string(),
                         crate::tools::types::FieldSchema {
                             type_name: "string".to_string(),
-                            description: "Unified diff/patch string to apply (required for diff_apply action)".to_string(),
+                            description: "Unified diff/patch string in standard unified diff format (required for diff_apply action). Example format:\n--- a/original_file.txt\n+++ b/modified_file.txt\n@@ -1,3 +1,4 @@\n line1\n+added line\n line2\n line3\n\nRules:\n- Lines starting with ' ' are context lines (keep as-is)\n- Lines starting with '+' are new lines to insert\n- Lines starting with '-' are lines to delete from the original file\n- '@@ -old_start,old_count +new_start,new_count @@' is the hunk header\n- The 'old_count' determines how many old-file lines this hunk consumes".to_string(),
                             nullable: true,
                         },
                     );

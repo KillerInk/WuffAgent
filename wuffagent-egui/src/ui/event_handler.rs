@@ -33,8 +33,9 @@ impl ChatApp {
                     }
                 } else {
                     // Server doesn't send usage stats (common with some llama.cpp setups).
-                    // Estimate from content length: ~4 chars per token.
-                    self.chat.token_count = Self::estimate_token_count(&content) as usize;
+                    // Estimate from ALL messages to reflect growing context.
+                    let total_chars: usize = self.chat.messages.iter().map(|m| m.content.len()).sum();
+                    self.chat.token_count = (total_chars as f32 / 4.0).ceil() as usize;
                     let n_ctx = self.get_effective_n_ctx();
                     if n_ctx > 0 {
                         self.chat.context_used = self.chat.token_count as f32 / n_ctx as f32 * 100.0;
@@ -148,6 +149,13 @@ impl ChatApp {
                     self.chat.commit_stream();
                 } else if !response.is_empty() {
                     self.chat.push_message(MessageKind::Normal, "assistant", &response);
+                }
+                // Update token count from all messages to reflect growing context.
+                let total_chars: usize = self.chat.messages.iter().map(|m| m.content.len()).sum();
+                self.chat.token_count = (total_chars as f32 / 4.0).ceil() as usize;
+                let n_ctx = self.get_effective_n_ctx();
+                if n_ctx > 0 {
+                    self.chat.context_used = self.chat.token_count as f32 / n_ctx as f32 * 100.0;
                 }
             }
             AppEvent::AgentEngineError { error } => {

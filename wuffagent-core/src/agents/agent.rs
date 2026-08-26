@@ -41,6 +41,8 @@ pub struct Agent {
     client: Arc<ChatClient>,
     /// Memory manager for persistent context.
     memory: Option<Arc<crate::memory::MemoryManager>>,
+    /// Stored messages from the last execution for memory extraction.
+    messages: Vec<Message>,
 }
 
 impl Agent {
@@ -73,6 +75,7 @@ impl Agent {
             event_tx,
             client,
             memory,
+            messages: Vec::new(),
         }
     }
 
@@ -130,9 +133,14 @@ impl Agent {
         }
     }
 
+    /// Get the messages from the last execution for memory extraction.
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
     /// Execute a request with this agent.
     pub async fn execute(
-        &self,
+        &mut self,
         request: &str,
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {
@@ -148,6 +156,9 @@ impl Agent {
         });
 
         let result = self.run_llm_loop(&mut messages, cancel_token).await;
+
+        // Store the final message history for memory extraction
+        self.messages = messages.clone();
 
         match &result {
             Ok(response) => {

@@ -47,7 +47,7 @@ pub fn register_builtins(
         metadata: ToolMetadata {
             name: "calculation".to_string(),
             version: "1.0.0".to_string(),
-            description: "Perform mathematical calculations".to_string(),
+            description: "Evaluate mathematical expressions. Supports basic arithmetic (+, -, *, /), exponentiation (^), parentheses, negative numbers, common functions (sin, cos, tan, asin, acos, atan, sqrt, log, ln, log2, log10, abs, floor, ceil, exp, round, fact), and constants (pi, e)".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

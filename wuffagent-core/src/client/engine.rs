@@ -142,6 +142,7 @@ async fn run_chat_loop(
     let mut current_prompt = prompt.to_string();
     let tools = initial_tools.map(|t| t.to_vec());
     let mut round = 0;
+    let mut thinking_rounds = 0;
 
     loop {
 
@@ -151,17 +152,50 @@ async fn run_chat_loop(
                 .await?;
 
         // 1.5. Emit thinking complete event if there was thinking content
-        if !thinking_content.is_empty() {
+        let has_thinking = !thinking_content.is_empty();
+        if has_thinking {
             tracing::info!(
                 "run_chat_loop round={} thinking complete, thinking_len={}",
                 round,
                 thinking_content.len()
             );
-            event_tx.send(AppEvent::StreamThinkingComplete { content: thinking_content })?;
+            event_tx.send(AppEvent::StreamThinkingComplete { content: thinking_content.clone() })?;
         }
 
         // 2. Check for tool calls in the response
         if !has_tool_calls {
+            // If the model was thinking but didn't make tool calls, prompt it
+            // to continue — it may have reasoned without taking action.
+            if has_thinking {
+                tracing::info!(
+                    "run_chat_loop round={} thinking present but no tool calls, prompting continuation (thinking_rounds={})",
+                    round,
+                    thinking_rounds + 1
+                );
+                thinking_rounds += 1;
+                // Allow a few thinking-only rounds before giving up
+                if thinking_rounds >= 3 {
+                    tracing::warn!(
+                        "run_chat_loop round={} max thinking rounds ({}) reached, stopping",
+                        round,
+                        thinking_rounds
+                    );
+                    event_tx.send(AppEvent::StreamComplete { content, usage })?;
+                    return Ok(());
+                }
+                current_prompt = "You have been thinking. Please take action using tools, or provide your final response if you believe the task is complete.".to_string();
+                round += 1;
+                if round >= config.max_tool_rounds {
+                    tracing::warn!(
+                        "run_chat_loop exiting: max rounds ({}) reached",
+                        config.max_tool_rounds
+                    );
+                    event_tx.send(AppEvent::StreamComplete { content, usage })?;
+                    return Ok(());
+                }
+                continue;
+            }
+
             tracing::info!(
                 "run_chat_loop round={} normal completion, final_content_len={}",
                 round,

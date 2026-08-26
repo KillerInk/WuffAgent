@@ -362,7 +362,7 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
 
         let result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let join = handle.spawn(async move {
-                let agent = Agent::new(
+                let mut agent = Agent::new(
                     config,
                     llm_client,
                     tool_manager,
@@ -381,7 +381,7 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
                 .build()
                 .map_err(|e| AgentError::Internal(format!("Failed to create runtime: {}", e)))?;
             rt.block_on(async move {
-                let agent = Agent::new(
+                let mut agent = Agent::new(
                     config,
                     llm_client,
                     tool_manager,

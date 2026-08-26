@@ -188,7 +188,7 @@ impl AgentEngine {
         // Create the agent and execute — use the shared invocation registry
         let memory = self.memory.clone();
         let agent_config_for_improve = agent_config.clone();
-        let agent = Agent::new(
+        let mut agent = Agent::new(
             agent_config,
             self.llm_client.clone(),
             self.tool_manager.clone(),
@@ -202,8 +202,11 @@ impl AgentEngine {
 
         // Post-task: extract memories and suggest improvements
         if let Some(memory) = &self.memory {
-            // Collect messages from the chain entries if available
-            let _ = memory.extract_and_save(&vec![], "agent_task").await;
+            // Extract memories from the actual agent conversation messages
+            let agent_messages = agent.messages();
+            if !agent_messages.is_empty() {
+                let _ = memory.extract_and_save(agent_messages, "agent_task").await;
+            }
             
             // Suggest improvements if auto_improve is enabled
             if memory.config().auto_improve {
