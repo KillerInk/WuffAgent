@@ -320,6 +320,9 @@ impl FileIOTool {
             ))
         })?;
         let ends_with_newline = file_content.ends_with('\n');
+        // `str::lines()` drops `\r`, so remember the file's line ending and
+        // restore it on write (patching a CRLF file must not rewrite it as LF).
+        let newline = if file_content.contains("\r\n") { "\r\n" } else { "\n" };
         let file_lines: Vec<&str> = file_content.lines().collect();
         let diff_lines: Vec<&str> = diff.lines().collect();
 
@@ -344,7 +347,15 @@ impl FileIOTool {
 
                 // Advance the old-file cursor to the hunk's start position,
                 // copying any untouched lines in between.
-                let target = hunk.old_start.saturating_sub(1); // 1-indexed -> 0-indexed
+                // For a normal hunk, old_start is the first old line in the
+                // hunk (1-indexed). For a zero-count hunk (`@@ -N,0 +.. @@`,
+                // pure insertion) the position means *after* line N, so the
+                // 0-indexed cursor target is N itself.
+                let target = if hunk.old_count == 0 {
+                    hunk.old_start
+                } else {
+                    hunk.old_start.saturating_sub(1)
+                };
                 if target > file_line_idx {
                     let end = target.min(file_lines.len());
                     result_lines.extend(file_lines[file_line_idx..end].iter().map(|l| l.to_string()));
@@ -365,9 +376,14 @@ impl FileIOTool {
                         )));
                     }
                     let hunk_line = diff_lines[i];
-                    // A new hunk/file header means this hunk ended early
+                    // A new hunk/file header means this hunk ended early.
+                    // `--- ` is only a file header when followed by `+++ `;
+                    // otherwise it is a deletion line (e.g. deleting a line
+                    // that itself starts with `--`).
+                    let is_file_header = hunk_line.starts_with("--- ")
+                        && diff_lines.get(i + 1).is_some_and(|n| n.starts_with("+++ "));
                     if hunk_line.starts_with("@@ ")
-                        || hunk_line.starts_with("--- ")
+                        || is_file_header
                         || hunk_line.starts_with("diff ")
                     {
                         break;
@@ -434,9 +450,9 @@ impl FileIOTool {
         // Append any remaining old-file lines after the last hunk
         result_lines.extend(file_lines[file_line_idx..].iter().map(|l| l.to_string()));
 
-        let mut final_content = result_lines.join("\n");
+        let mut final_content = result_lines.join(newline);
         if ends_with_newline {
-            final_content.push('\n');
+            final_content.push_str(newline);
         }
         fs::write(path, &final_content).map_err(|e| {
             crate::tools::types::ToolError::Execution(format!("Failed to write patched file '{}': {}", path, e))
@@ -1525,6 +1541,155 @@ mod tests {
         }
         let result = fs::read_to_string(&path).unwrap();
         assert_eq!(result, "fn main() {\n    println!(\"new\");\n}\n");
+    }
+
+    #[test]
+    fn test_file_io_diff_apply_deleting_double_dash_line() {
+        // Regression: deleting a line that starts with `-- ` produces the
+        // hunk body line `--- ...`, which was misread as a file header.
+        // The hunk ended early and the line was silently left in the file
+        // while the tool still reported success.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        fs::write(&path, "line1\n-- comment\nline3\n").unwrap();
+
+        let diff = "
+--- a/t.txt
++++ b/t.txt
+@@ -1,3 +1,2 @@
+ line1
+--- comment
+ line3
+";
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("diff_apply"));
+                m.insert("diff".to_string(), json!(diff));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(v["lines_changed"], 1);
+            }
+            _ => panic!("diff_apply of '-- ' line should succeed"),
+        }
+        let result = fs::read_to_string(&path).unwrap();
+        assert_eq!(result, "line1\nline3\n");
+    }
+
+    #[test]
+    fn test_file_io_diff_apply_file_header_still_breaks_hunk() {
+        // Guard: a real `--- ` file header (followed by `+++ `) must still
+        // terminate the current hunk body even when the hunk's line counts
+        // are not fully satisfied.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+
+        let diff = "
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,2 @@
+-one
+ two
+--- a/g.txt
++++ b/g.txt
+@@ -1,1 +1,1 @@
+-three
++THREE
+";
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("diff_apply"));
+                m.insert("diff".to_string(), json!(diff));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(v["hunks_applied"], 2);
+            }
+            _ => panic!("multi-section diff_apply should succeed"),
+        }
+        let result = fs::read_to_string(&path).unwrap();
+        assert_eq!(result, "two\nTHREE\n");
+    }
+
+    #[test]
+    fn test_file_io_diff_apply_zero_count_insertion() {
+        // Regression: `@@ -N,0 +M,1 @@` (pure insertion, as produced by
+        // `git diff -U0`) means insert *after* line N. The old implementation
+        // advanced the cursor to N-1, inserting one line too early.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        fs::write(&path, "a\nb\nc\n").unwrap();
+
+        let diff = "
+--- a/f.txt
++++ b/f.txt
+@@ -3,0 +4,1 @@
++d
+";
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("diff_apply"));
+                m.insert("diff".to_string(), json!(diff));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(v["lines_changed"], 1);
+            }
+            _ => panic!("zero-count diff_apply should succeed"),
+        }
+        let result = fs::read_to_string(&path).unwrap();
+        assert_eq!(result, "a\nb\nc\nd\n");
+    }
+
+    #[test]
+    fn test_file_io_diff_apply_preserves_crlf() {
+        // Regression: `str::lines()` drops `\r`, so patching a CRLF file
+        // rewrote the whole file with LF line endings.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        fs::write(&path, "line1\r\nline2\r\nline3\r\n").unwrap();
+
+        let diff = "
+--- a/t.txt
++++ b/t.txt
+@@ -1,3 +1,3 @@
+ line1
++inserted
+ line2
+ line3
+";
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("diff_apply"));
+                m.insert("diff".to_string(), json!(diff));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(_)) => {}
+            _ => panic!("CRLF diff_apply should succeed"),
+        }
+        let result = fs::read_to_string(&path).unwrap();
+        assert_eq!(result, "line1\r\ninserted\r\nline2\r\nline3\r\n");
     }
 
     // ── File Info Tests ────────────────────────────────────────────────────
