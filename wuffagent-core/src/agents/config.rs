@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing;
 
-/// Shell configuration for a worker.
+/// Shell configuration for an agent.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShellConfig {
     /// Allowed command patterns (regex). Empty means allow all (except dangerous).
@@ -39,7 +39,8 @@ fn default_shell_type() -> String { "powershell".to_string() }
 fn default_shell_timeout() -> u64 { 300_000 }
 fn default_shell_enabled() -> bool { false }
 
-/// Configuration for a single worker, loaded from a JSON file.
+/// Legacy configuration for a single worker, loaded from a JSON file.
+/// Kept for backward compatibility with existing agent JSON files.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerConfig {
     /// Unique name/identifier for this worker.
@@ -74,6 +75,9 @@ pub struct WorkerConfig {
     /// Reasoning effort for this agent (Off = inherit the global toggle).
     #[serde(default)]
     pub reasoning_effort: crate::types::ReasoningEffort,
+    /// Timeout for task execution (milliseconds). Defaults to the global value if not set.
+    #[serde(default)]
+    pub task_timeout_ms: u64,
 }
 
 impl Default for WorkerConfig {
@@ -90,6 +94,7 @@ impl Default for WorkerConfig {
             handoff_enabled: false,
             shell_config: ShellConfig::default(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
+            task_timeout_ms: 300_000,
         }
     }
 }
@@ -102,7 +107,7 @@ fn default_priority() -> u32 { 0 }
 fn default_max_concurrent() -> usize { 1 }
 
 impl WorkerConfig {
-    /// Load all worker configs from a directory.
+    /// Load all Agent configs from a directory.
     pub fn load_all_from_dir(dir: &Path) -> Result<Vec<Self>, crate::agents::AgentError> {
         let mut workers = Vec::new();
         if !dir.exists() {
@@ -111,7 +116,7 @@ impl WorkerConfig {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!("Failed to read workers directory: {}", e);
+                tracing::warn!("Failed to read agents directory: {}", e);
                 return Ok(workers);
             }
         };
@@ -131,11 +136,11 @@ impl WorkerConfig {
     pub fn load_from_file(path: &Path) -> Result<Self, crate::agents::AgentError> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to read worker config from {:?}: {}", path, e
+                "Failed to read Agent config from {:?}: {}", path, e
             )))?;
         let config: WorkerConfig = serde_json::from_str(&content)
             .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to parse worker config from {:?}: {}", path, e
+                "Failed to parse Agent config from {:?}: {}", path, e
             )))?;
         Ok(config)
     }
@@ -149,11 +154,11 @@ impl WorkerConfig {
         }
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to serialize worker config: {}", e
+                "Failed to serialize Agent config: {}", e
             )))?;
         std::fs::write(path, content)
             .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to write worker config to {:?}: {}", path, e
+                "Failed to write Agent config to {:?}: {}", path, e
             )))?;
         Ok(())
     }
@@ -192,28 +197,28 @@ impl WorkerConfig {
     }
 }
 
-/// Manages the lifecycle of worker agent configurations: load, add, edit, remove, reload.
+/// Manages the lifecycle of agent configurations: load, add, edit, remove, reload.
 ///
 /// Agents are discovered from `search_dirs` (read-only scan), but new/edited agents
-/// are persisted to `workers_dir` (the primary config directory).
+/// are persisted to `agents_dir` (the primary config directory).
 pub struct AgentManager {
     /// Primary directory where agents are saved/loaded from.
-    workers_dir: PathBuf,
+    agents_dir: PathBuf,
     /// Additional directories to scan for existing agents.
     search_dirs: Vec<PathBuf>,
 }
 
 impl AgentManager {
-    pub fn new(workers_dir: PathBuf) -> Self {
+    pub fn new(agents_dir: PathBuf) -> Self {
         Self {
-            workers_dir,
+            agents_dir,
             search_dirs: Vec::new(),
         }
     }
 
-    /// Returns the primary workers directory path.
-    pub fn workers_dir(&self) -> &PathBuf {
-        &self.workers_dir
+    /// Returns the primary agents directory path.
+    pub fn agents_dir(&self) -> &PathBuf {
+        &self.agents_dir
     }
 
     /// Add an additional directory to scan for existing agent configs.
@@ -224,95 +229,131 @@ impl AgentManager {
     }
 
     /// Load agent configs from a single directory, deduplicating by name (first wins).
-    fn load_from_dir(&self, dir: &PathBuf, seen: &mut HashMap<String, ()>) -> Result<Vec<WorkerConfig>, crate::agents::AgentError> {
-        let mut workers = Vec::new();
+    /// Tries AgentConfig first, falls back to legacy WorkerConfig.
+    fn load_from_dir(&self, dir: &PathBuf, seen: &mut HashMap<String, ()>) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
+        let mut agents = Vec::new();
         if !dir.exists() {
-            return Ok(workers);
+            return Ok(agents);
         }
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("Failed to read directory {:?}: {}", dir, e);
-                return Ok(workers);
+                return Ok(agents);
             }
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() && path.extension().map(|e| e == "json").unwrap_or(false) {
-                match WorkerConfig::load_from_file(&path) {
-                    Ok(config) => {
+                // Try new AgentConfig format first
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(config) = serde_json::from_str::<AgentConfig>(&content) {
                         if seen.insert(config.name.clone(), ()).is_none() {
                             tracing::info!(
-                                "Discovered agent: {} from {:?} (type={:?}, tools={:?})",
+                                "Discovered agent: {} from {:?} (tools={:?})",
                                 config.name,
                                 dir,
-                                config.infer_agent_type(),
                                 config.allowed_tools
                             );
-                            workers.push(config);
+                            agents.push(config);
                         }
+                        continue;
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to load worker config from {:?}: {}", path, e);
+                    // Fallback to legacy WorkerConfig
+                    if let Ok(legacy) = serde_json::from_str::<WorkerConfig>(&content) {
+                        let config = AgentConfig {
+                            name: legacy.name,
+                            description: legacy.description,
+                            system_prompt: legacy.system_prompt,
+                            allowed_tools: legacy.allowed_tools,
+                            enabled: legacy.enabled,
+                            priority: legacy.priority,
+                            max_concurrent: legacy.max_concurrent,
+                            max_depth: 5,
+                            recovery_policy: RecoveryPolicy::default(),
+                            max_plan_iterations: 5,
+                            max_parallel_workers: 4,
+                            task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
+                            auto_refine: true,
+                            can_invoke: legacy.can_invoke,
+                            handoff_enabled: legacy.handoff_enabled,
+                            shell_config: legacy.shell_config,
+                            agents_dir: self.agents_dir.clone(),
+                            custom_prompts: HashMap::new(),
+                            reasoning_effort: legacy.reasoning_effort,
+                        };
+                        if seen.insert(config.name.clone(), ()).is_none() {
+                            tracing::info!(
+                                "Discovered legacy agent: {} from {:?} (tools={:?})",
+                                config.name,
+                                dir,
+                                config.allowed_tools
+                            );
+                            agents.push(config);
+                        }
+                    } else {
+                        tracing::warn!("Failed to load agent config from {:?}: invalid format", path);
                     }
+                } else {
+                    tracing::warn!("Failed to read agent config from {:?}", path);
                 }
             }
         }
-        Ok(workers)
+        Ok(agents)
     }
 
-    /// Load all worker configs from workers_dir plus any search_dirs.
-    /// Agents from workers_dir take priority (loaded first, deduplication keeps first).
-    pub fn list_agents(&self) -> Result<Vec<WorkerConfig>, crate::agents::AgentError> {
-        let mut workers = Vec::new();
+    /// Load all agent configs from agents_dir plus any search_dirs.
+    /// Agents from agents_dir take priority (loaded first, deduplication keeps first).
+    pub fn list_agents(&self) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
+        let mut agents = Vec::new();
         let mut seen = HashMap::new();
 
         // Primary directory first
-        workers.extend(self.load_from_dir(&self.workers_dir, &mut seen)?);
+        agents.extend(self.load_from_dir(&self.agents_dir, &mut seen)?);
 
         // Additional search directories
         for dir in &self.search_dirs {
-            if dir != &self.workers_dir {
-                workers.extend(self.load_from_dir(dir, &mut seen)?);
+            if dir != &self.agents_dir {
+                agents.extend(self.load_from_dir(dir, &mut seen)?);
             }
         }
 
-        workers.sort_by_key(|w| w.priority);
-        Ok(workers)
+        agents.sort_by_key(|a| a.priority);
+        Ok(agents)
     }
 
     /// Get a single agent config by name.
-    pub fn get_agent(&self, name: &str) -> Option<WorkerConfig> {
+    pub fn get_agent(&self, name: &str) -> Option<AgentConfig> {
         self.list_agents()
             .ok()
             .into_iter()
             .flatten()
-            .find(|w| w.name == name)
+            .find(|a| a.name == name)
     }
 
-    /// Add a new agent config to the workers directory.
-    pub fn add_agent(&self, config: &WorkerConfig) -> Result<(), crate::agents::AgentError> {
-        let path = self.workers_dir.join(format!("{}.json", config.name));
+    /// Add a new agent config to the agents directory.
+    pub fn add_agent(&self, config: &AgentConfig) -> Result<(), crate::agents::AgentError> {
+        let path = self.agents_dir.join(format!("{}.json", config.name));
         config.save_to_file(&path)?;
         tracing::info!("Added agent config: {}", config.name);
         Ok(())
     }
 
     /// Edit an existing agent config (update in place).
-    pub fn edit_agent(&self, name: &str, config: &WorkerConfig) -> Result<(), crate::agents::AgentError> {
+    pub fn edit_agent(&self, name: &str, config: &AgentConfig) -> Result<(), crate::agents::AgentError> {
         if config.name != name {
-            // Name changed — remove old file and save new one
+            // Name changed â€” remove old file and save new one
             self.remove_agent(name)?;
         }
-        let path = self.workers_dir.join(format!("{}.json", config.name));
+        let path = self.agents_dir.join(format!("{}.json", config.name));
         config.save_to_file(&path)?;
         tracing::info!("Edited agent config: {}", config.name);
         Ok(())
     }
 
-    /// Remove an agent config from the workers directory.
+    /// Remove an agent config from the agents directory.
     pub fn remove_agent(&self, name: &str) -> Result<(), crate::agents::AgentError> {
-        let path = self.workers_dir.join(format!("{}.json", name));
+        let path = self.agents_dir.join(format!("{}.json", name));
         if path.exists() {
             std::fs::remove_file(&path)
                 .map_err(|e| crate::agents::AgentError::ConfigError(format!(
@@ -324,10 +365,10 @@ impl AgentManager {
     }
 
     /// Reload all agent configs from disk (use after add/edit/remove).
-    pub fn reload(&self) -> Result<Vec<WorkerConfig>, crate::agents::AgentError> {
-        let workers = self.list_agents();
-        tracing::info!("Reloaded {} agent config(s) from {:?}", workers.as_ref().map(|w| w.len()).unwrap_or(0), self.workers_dir);
-        workers
+    pub fn reload(&self) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
+        let agents = self.list_agents();
+        tracing::info!("Reloaded {} agent config(s) from {:?}", agents.as_ref().map(|a| a.len()).unwrap_or(0), self.agents_dir);
+        agents
     }
 }
 
@@ -465,13 +506,11 @@ mod tests {
         let mgr = AgentManager::new(dir.clone());
 
         // Add
-        let config = WorkerConfig {
+        let config = AgentConfig {
             name: "mgr_test".to_string(),
             description: "Manager test".to_string(),
             system_prompt: "You are a mgr test.".to_string(),
             allowed_tools: vec!["file_io".to_string()],
-            priority: 0,
-            max_concurrent: 1,
             enabled: true,
             ..Default::default()
         };
@@ -506,13 +545,11 @@ mod tests {
         let mgr = AgentManager::new(dir.clone());
         assert_eq!(mgr.reload().unwrap().len(), 0);
 
-        let config = WorkerConfig {
+        let config = AgentConfig {
             name: "reload_test".to_string(),
             description: "Reload test".to_string(),
             system_prompt: "Reload prompt".to_string(),
             allowed_tools: vec![],
-            priority: 0,
-            max_concurrent: 1,
             enabled: true,
             ..Default::default()
         };
@@ -534,26 +571,22 @@ mod tests {
         std::fs::create_dir_all(&search_dir).unwrap();
 
         // Place an agent in the search dir (simulating project workers/)
-        let search_agent = WorkerConfig {
+        let search_agent = AgentConfig {
             name: "search_agent".to_string(),
             description: "From search dir".to_string(),
             system_prompt: "Search prompt".to_string(),
             allowed_tools: vec!["web_search".to_string()],
-            priority: 5,
-            max_concurrent: 1,
             enabled: true,
             ..Default::default()
         };
         search_agent.save_to_file(&search_dir.join("search_agent.json")).unwrap();
 
         // Place an agent in the primary dir
-        let primary_agent = WorkerConfig {
+        let primary_agent = AgentConfig {
             name: "primary_agent".to_string(),
             description: "From primary dir".to_string(),
             system_prompt: "Primary prompt".to_string(),
             allowed_tools: vec!["file_io".to_string()],
-            priority: 3,
-            max_concurrent: 2,
             enabled: true,
             ..Default::default()
         };
@@ -568,13 +601,11 @@ mod tests {
         assert!(agents.iter().any(|a| a.name == "search_agent"));
 
         // Save should go to primary dir
-        let new_agent = WorkerConfig {
+        let new_agent = AgentConfig {
             name: "new_agent".to_string(),
             description: "New agent".to_string(),
             system_prompt: "New prompt".to_string(),
             allowed_tools: vec![],
-            priority: 0,
-            max_concurrent: 1,
             enabled: true,
             ..Default::default()
         };
@@ -617,6 +648,12 @@ pub struct AgentConfig {
     /// Whether this agent is enabled.
     #[serde(default = "default_enabled_agent")]
     pub enabled: bool,
+    /// Priority for Supervisor selection (lower = preferred).
+    #[serde(default = "default_priority")]
+    pub priority: u32,
+    /// Maximum concurrent tasks this agent can handle.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: usize,
     /// Maximum recursion depth for agent calls.
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
@@ -635,9 +672,18 @@ pub struct AgentConfig {
     /// Whether to enable automatic plan refinement.
     #[serde(default = "default_auto_refine")]
     pub auto_refine: bool,
-    /// Directory containing per-worker JSON config files.
-    #[serde(default = "default_workers_dir")]
-    pub workers_dir: PathBuf,
+    /// Names of agents this agent can invoke via agent_call.
+    #[serde(default)]
+    pub can_invoke: Vec<String>,
+    /// Whether runtime handoffs are allowed.
+    #[serde(default = "default_handoff_enabled")]
+    pub handoff_enabled: bool,
+    /// Shell configuration for this agent.
+    #[serde(default)]
+    pub shell_config: ShellConfig,
+    /// Directory containing per-agent JSON config files.
+    #[serde(default = "default_agents_dir")]
+    pub agents_dir: PathBuf,
     /// Custom system prompts per agent type.
     #[serde(default)]
     pub custom_prompts: HashMap<String, String>,
@@ -652,11 +698,11 @@ fn default_max_iterations() -> u32 { 5 }
 fn default_max_parallel() -> usize { 4 }
 fn default_task_timeout_ms() -> u64 { 60_000 }
 fn default_auto_refine() -> bool { true }
-fn default_workers_dir() -> PathBuf {
+fn default_agents_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("wuffagent")
-        .join("workers")
+        .join("agents")
 }
 
 impl Default for AgentConfig {
@@ -667,13 +713,18 @@ impl Default for AgentConfig {
             system_prompt: String::new(),
             allowed_tools: Vec::new(),
             enabled: true,
+            priority: 0,
+            max_concurrent: 1,
             max_depth: 5,
             recovery_policy: RecoveryPolicy::default(),
             max_plan_iterations: 5,
             max_parallel_workers: 4,
             task_timeout_ms: 60_000,
             auto_refine: true,
-            workers_dir: default_workers_dir(),
+            can_invoke: Vec::new(),
+            handoff_enabled: false,
+            shell_config: ShellConfig::default(),
+            agents_dir: default_agents_dir(),
             custom_prompts: HashMap::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
         }
@@ -681,12 +732,31 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    /// Save this config to a JSON file.
+    pub fn save_to_file(&self, path: &Path) -> Result<(), crate::agents::AgentError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| crate::agents::AgentError::ConfigError(format!(
+                    "Failed to create directory {:?}: {}", parent, e
+                )))?;
+        }
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
+                "Failed to serialize agent config: {}", e
+            )))?;
+        std::fs::write(path, content)
+            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
+                "Failed to write agent config to {:?}: {}", path, e
+            )))?;
+        Ok(())
+    }
+
     /// Load agent config from the app's config directory.
     pub fn load(config_path: &Path) -> Result<Self, crate::agents::AgentError> {
-        let workers_dir = config_path
+        let agents_dir = config_path
             .parent()
-            .map(|p| p.join("workers"))
-            .unwrap_or_else(default_workers_dir);
+            .map(|p| p.join("agents"))
+            .unwrap_or_else(default_agents_dir);
 
         // Check if there's an agent-specific config file
         let agent_config_path = config_path.parent().map(|p| p.join("agent.json"));
@@ -700,27 +770,27 @@ impl AgentConfig {
                     .map_err(|e| crate::agents::AgentError::ConfigError(format!(
                         "Failed to parse agent config: {}", e
                     )))?;
-                config.workers_dir = workers_dir;
+                config.agents_dir = agents_dir;
                 return Ok(config);
             }
         }
         Ok(Self::default())
     }
 
-    /// Discover and load all worker configs from the workers directory.
-    pub fn load_workers(&self) -> Result<Vec<WorkerConfig>, crate::agents::AgentError> {
-        let mut workers = Vec::new();
+    /// Discover and load all agent configs from the agents directory.
+    pub fn load_agents(&self) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
+        let mut agents = Vec::new();
 
-        if !self.workers_dir.exists() {
-            tracing::info!("Workers directory does not exist: {:?}, using built-in defaults", self.workers_dir);
-            return Ok(workers);
+        if !self.agents_dir.exists() {
+            tracing::info!("agents directory does not exist: {:?}, using built-in defaults", self.agents_dir);
+            return Ok(agents);
         }
 
-        let entries = match std::fs::read_dir(&self.workers_dir) {
+        let entries = match std::fs::read_dir(&self.agents_dir) {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!("Failed to read workers directory: {}", e);
-                return Ok(workers);
+                tracing::warn!("Failed to read agents directory: {}", e);
+                return Ok(agents);
             }
         };
 
@@ -734,25 +804,52 @@ impl AgentConfig {
             };
             let path = entry.path();
             if path.is_file() && path.extension().map(|e| e == "json").unwrap_or(false) {
-                match WorkerConfig::load_from_file(&path) {
-                    Ok(config) => {
+                // Try AgentConfig first, fall back to legacy WorkerConfig
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(config) = serde_json::from_str::<AgentConfig>(&content) {
                         tracing::info!(
-                            "Loaded worker config: {} (type={:?}, tools={:?})",
+                            "Loaded agent config: {} (tools={:?})",
                             config.name,
-                            config.infer_agent_type(),
                             config.allowed_tools
                         );
-                        workers.push(config);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to load worker config from {:?}: {}", path, e);
+                        agents.push(config);
+                    } else if let Ok(legacy) = serde_json::from_str::<WorkerConfig>(&content) {
+                        tracing::info!(
+                            "Loaded legacy Agent config: {} (tools={:?})",
+                            legacy.name,
+                            legacy.allowed_tools
+                        );
+                        let config = AgentConfig {
+                            name: legacy.name,
+                            description: legacy.description,
+                            system_prompt: legacy.system_prompt,
+                            allowed_tools: legacy.allowed_tools,
+                            enabled: legacy.enabled,
+                            priority: legacy.priority,
+                            max_concurrent: legacy.max_concurrent,
+                            max_depth: 5,
+                            recovery_policy: RecoveryPolicy::default(),
+                            max_plan_iterations: 5,
+                            max_parallel_workers: 4,
+                            task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
+                            auto_refine: true,
+                            can_invoke: legacy.can_invoke,
+                            handoff_enabled: legacy.handoff_enabled,
+                            shell_config: legacy.shell_config,
+                            agents_dir: self.agents_dir.clone(),
+                            custom_prompts: HashMap::new(),
+                            reasoning_effort: legacy.reasoning_effort,
+                        };
+                        agents.push(config);
+                    } else {
+                        tracing::warn!("Failed to load agent config from {:?}", path);
                     }
                 }
             }
         }
 
         // Sort by priority (lower = first)
-        workers.sort_by_key(|w| w.priority);
-        Ok(workers)
+        agents.sort_by_key(|a| a.priority);
+        Ok(agents)
     }
 }

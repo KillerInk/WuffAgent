@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::types::{Message, Usage};
 use super::Error;
@@ -192,26 +193,54 @@ pub async fn process_sse_line(
 
 /// Stream a message and process SSE lines.
 /// `conversation` is updated in place with the new messages.
+/// `cancel_token` can be used to abort the stream early (e.g. user cancellation).
+/// Pass `None` to disable cancellation for this stream.
 pub async fn stream_message(
     resp: reqwest::Response,
     conversation: &Arc<Mutex<Vec<Message>>>,
     callback: &mut (impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static),
+    cancel_token: Option<&CancellationToken>,
 ) -> Result<Option<Usage>, Error> {
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut last_usage: Option<Usage> = None;
 
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
+    if let Some(cancel_token) = cancel_token {
+        return tokio::select! {
+            result = async {
+                while let Some(chunk) = stream.next().await {
+                    let bytes = chunk?;
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-        // Process complete lines
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
+                    // Process complete lines
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].to_string();
+                        buffer = buffer[newline_pos + 1..].to_string();
 
-            if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
-                last_usage = Some(usage);
+                        if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
+                            last_usage = Some(usage);
+                        }
+                    }
+                }
+                Ok::<_, Error>(last_usage)
+            } => result,
+            _ = cancel_token.cancelled() => {
+                Err(Error::Cancelled)
+            }
+        };
+    } else {
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            // Process complete lines
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
+                    last_usage = Some(usage);
+                }
             }
         }
     }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -35,7 +35,7 @@ impl AgentRegistry {
     }
 
     /// Load agents from the given directories.
-    /// Scans both `agents/` and legacy `workers/` directories.
+    /// Scans both `agents/` and legacy `agents/` directories.
     /// First-seen name wins for deduplication.
     pub fn load(search_dirs: Vec<PathBuf>, global_registry: &ToolRegistry) -> Result<Self, AgentError> {
         let mut agents = HashMap::new();
@@ -99,7 +99,7 @@ impl AgentRegistry {
             return Ok(config);
         }
 
-        // Fallback: legacy WorkerConfig format — migrate to AgentConfig
+        // Fallback: legacy WorkerConfig format â€” migrate to AgentConfig
         let legacy: super::config::WorkerConfig = serde_json::from_str(&content)
             .map_err(|e| AgentError::ConfigError(format!(
                 "Failed to parse config from {:?} as either AgentConfig or WorkerConfig: {}", path, e
@@ -117,13 +117,18 @@ impl AgentRegistry {
             system_prompt: legacy.system_prompt,
             allowed_tools: legacy.allowed_tools,
             enabled: legacy.enabled,
+            priority: legacy.priority,
+            max_concurrent: legacy.max_concurrent,
             max_depth: 5,
             recovery_policy: RecoveryPolicy::default(),
             max_plan_iterations: 5,
             max_parallel_workers: 4,
-            task_timeout_ms: 60_000,
+            task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
             auto_refine: true,
-            workers_dir: PathBuf::from(""),
+            can_invoke: legacy.can_invoke,
+            handoff_enabled: legacy.handoff_enabled,
+            shell_config: legacy.shell_config,
+            agents_dir: PathBuf::from(""),
             custom_prompts: HashMap::new(),
             reasoning_effort: legacy.reasoning_effort,
         };
@@ -224,7 +229,7 @@ impl AgentRegistry {
         self.prompt_dirty = true;
     }
 
-    /// Internal build — constructs the routing prompt from all enabled agents.
+    /// Internal build â€” constructs the routing prompt from all enabled agents.
     fn build_routing_prompt_internal(&mut self) -> String {
         let mut prompt = String::from("You are a multi-agent system router. Choose the best agent for each task.\n\n");
         prompt.push_str("Available agents (you MUST use only these names):\n");
@@ -362,7 +367,7 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
                     llm_client,
                     tool_manager,
                     invocation_registry,
-                    None, // no event tx — sub-agent output is captured in the tool result
+                    None, // no event tx â€” sub-agent output is captured in the tool result
                     client,
                     None, // sub-agents don't have memory access
                 );
@@ -477,7 +482,7 @@ mod tests {
             max_parallel_workers: 2,
             task_timeout_ms: 30_000,
             auto_refine: false,
-            workers_dir: dir.clone(),
+            agents_dir: dir.clone(),
             ..Default::default()
         };
         let path = dir.join("test_agent.json");

@@ -1,6 +1,8 @@
+﻿use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
+use tokio_util::sync::CancellationToken;
 
 use super::state::ChatApp;
 use crate::types::{AppEvent, AppStatus, MessageKind};
@@ -26,17 +28,17 @@ impl ChatApp {
         // Image preview area
         if let Some(ref _image) = self.chat.pending_image {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("📷 Image attached").size(11.0).color(theme.text_secondary));
-                if ui.button("✕").clicked() {
+                ui.label(egui::RichText::new("ðŸ“· Image attached").size(11.0).color(theme.text_secondary));
+                if ui.button("âœ•").clicked() {
                     self.chat.pending_image = None;
                 }
             });
         }
 
         // Input area: text field + button row below
-        let input_width = ui.available_width(); // Full width — button is on its own row
+        let input_width = ui.available_width(); // Full width â€” button is on its own row
         ui.vertical(|ui| {
-            // Text input — constrained width, multiline
+            // Text input â€” constrained width, multiline
             ui.scope(|ui| {
                 ui.set_max_width(input_width);
                 let text_edit = egui::TextEdit::multiline(&mut self.chat.input_text)
@@ -190,7 +192,7 @@ impl ChatApp {
         let tool_defs = self.tool_manager.get_tool_definitions();
 
         // Apply the selected agent profile's system prompt for this request
-        // (None = "Auto" → the general profile).
+        // (None = "Auto" â†’ the general profile).
         let agent_prompt = match self.selected_agent_index {
             Some(i) => {
                 let name = self.get_agent_names().get(i).cloned().unwrap_or_default();
@@ -204,7 +206,7 @@ impl ChatApp {
             self.client.set_system_prompt(&agent_prompt);
             tracing::info!("Applied agent system prompt ({} chars)", agent_prompt.len());
         } else {
-            tracing::warn!("No agent system prompt found — chat will run without one");
+            tracing::warn!("No agent system prompt found â€” chat will run without one");
         }
 
         // Cancel any in-flight engine (previous send)
@@ -213,7 +215,7 @@ impl ChatApp {
         }
 
         // Engine and client tool events both flow straight into the single
-        // pending_tx the UI polls each frame — no relay task needed.
+        // pending_tx the UI polls each frame â€” no relay task needed.
         let pending_tx = match self.pending_tx.clone() {
             Some(tx) => tx.lock().unwrap().clone(),
             None => return,
@@ -231,25 +233,25 @@ impl ChatApp {
         self.chat_engine.as_ref().unwrap().start_chat(input, tool_defs);
     }
 
-    /// Load the system prompt of the first matching worker profile.
-    /// Searches the same workers directories as `get_agent_names` and
+    /// Load the system prompt of the first matching agent profile.
+    /// Searches the same agents directories as `get_agent_names` and
     /// matches the profile's `name` field (not the file name).
     /// Returns an empty string when no candidate profile exists.
     fn load_agent_system_prompt(&self, names: &[&str]) -> String {
         let mut dirs = Vec::new();
         if let Ok(cwd) = std::env::current_dir() {
-            dirs.push(cwd.join("workers"));
+            dirs.push(cwd.join("agents"));
         }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
-                dirs.push(exe_dir.join("workers"));
+                dirs.push(exe_dir.join("agents"));
             }
         }
         let agents_dir = self.config.file_path
             .parent()
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| self.config.file_path.clone());
-        dirs.push(agents_dir.join("workers"));
+        dirs.push(agents_dir.join("agents"));
 
         let mut prompt = String::new();
         for dir in dirs {
@@ -260,7 +262,12 @@ impl ChatApp {
                         continue;
                     }
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(cfg) = serde_json::from_str::<crate::agents::WorkerConfig>(&content) {
+                        if let Ok(cfg) = serde_json::from_str::<crate::agents::config::AgentConfig>(&content) {
+                            if names.iter().any(|n| cfg.name == *n) {
+                                prompt = cfg.system_prompt;
+                                break;
+                            }
+                        } else if let Ok(cfg) = serde_json::from_str::<crate::agents::config::WorkerConfig>(&content) {
                             if names.iter().any(|n| cfg.name == *n) {
                                 prompt = cfg.system_prompt;
                                 break;
@@ -287,37 +294,42 @@ impl ChatApp {
         prompt
     }
 
-    /// Return the list of agent names from all known workers directories.
+    /// Return the list of agent names from all known agents directories.
     fn get_agent_names(&self) -> Vec<String> {
         let config_path = &self.config.file_path;
         let mut names: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // Scan project-level workers/ directory (relative to cwd or exe)
-        if let Ok(cwd) = std::env::current_dir() {
-            let workers_dir = cwd.join("workers");
-            if workers_dir.exists() {
-                if let Ok(workers) = crate::agents::WorkerConfig::load_all_from_dir(&workers_dir) {
-                    for w in workers {
-                        if seen.insert(w.name.clone()) {
-                            names.push(w.name);
+        // Helper: scan a directory for agent names
+        let mut scan_dir = |dir: PathBuf| {
+            if dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                            continue;
                         }
-                    }
-                }
-            }
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                let workers_dir = exe_dir.join("workers");
-                if workers_dir.exists() {
-                    if let Ok(workers) = crate::agents::WorkerConfig::load_all_from_dir(&workers_dir) {
-                        for w in workers {
-                            if seen.insert(w.name.clone()) {
-                                names.push(w.name);
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            if let Ok(cfg) = serde_json::from_str::<crate::agents::config::AgentConfig>(&content) {
+                                let _ = seen.insert(cfg.name.clone());
+                                names.push(cfg.name);
+                            } else if let Ok(cfg) = serde_json::from_str::<crate::agents::config::WorkerConfig>(&content) {
+                                let _ = seen.insert(cfg.name.clone());
+                                names.push(cfg.name);
                             }
                         }
                     }
                 }
+            }
+        };
+
+        // Scan project-level agents/ directory (relative to cwd or exe)
+        if let Ok(cwd) = std::env::current_dir() {
+            scan_dir(cwd.join("agents"));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                scan_dir(exe_dir.join("agents"));
             }
         }
 
@@ -326,16 +338,7 @@ impl ChatApp {
             .parent()
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| config_path.clone());
-        let config_workers = agents_dir.join("workers");
-        if config_workers.exists() {
-            if let Ok(workers) = crate::agents::WorkerConfig::load_all_from_dir(&config_workers) {
-                for w in workers {
-                    if seen.insert(w.name.clone()) {
-                        names.push(w.name);
-                    }
-                }
-            }
-        }
+        scan_dir(agents_dir.join("agents"));
 
         names
     }
@@ -361,8 +364,8 @@ impl ChatApp {
         self.agent_chain_state.active = true;
         self.chat.is_pipeline_running = true;
 
-        // Clone dependencies
-        let cancel_token = self.agent_cancel_token.clone();
+        // Create a fresh cancellation token so stop/resume works correctly
+        let cancel_token = CancellationToken::new();
         let event_tx = self.pending_tx.clone();
         let request = request.to_string();
 

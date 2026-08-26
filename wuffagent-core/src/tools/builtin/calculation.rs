@@ -56,6 +56,13 @@ impl Tool for CalculationTool {
                 crate::tools::types::ToolError::InvalidParams("expression is required".to_string())
             })?;
 
+        // Detect shell commands and guide the agent to use the `shell` tool instead.
+        if looks_like_shell_command(&expression) {
+            return Err(crate::tools::types::ToolError::Execution(
+                "This appears to be a shell command, not a mathematical expression. Use the 'shell' tool to execute shell commands.".to_string()
+            ));
+        }
+
         // Use the `evalu8` crate for safe expression evaluation.
         // For now we use a simple parser; replace with a proper library in production.
         let result = evaluate_expression(&expression).map_err(|e| {
@@ -67,6 +74,20 @@ impl Tool for CalculationTool {
             "result": result
         })))
     }
+}
+
+/// Detect if the string looks like a shell command rather than a math expression.
+fn looks_like_shell_command(input: &str) -> bool {
+    let trimmed = input.trim();
+    // Common shell command indicators
+    let shell_indicators = [
+        "cargo ", "npm ", "git ", "python ", "node ", "docker ", "make ", "cmake ",
+        "rustc ", "clang ", "gcc ", "g++ ", "rust-analyzer ",
+        "echo ", "ls ", "cd ", "mkdir ", "rm ", "cp ", "mv ", "cat ",
+        "curl ", "wget ", "pip ", "conda ", "brew ", "apt ", "yum ",
+        "--manifest-path", "2>&1", "&&", ";", "|", ">",
+    ];
+    shell_indicators.iter().any(|&ind| trimmed.contains(ind))
 }
 
 /// Simple expression evaluator supporting +, -, *, /, parentheses.
@@ -228,5 +249,14 @@ mod tests {
     fn test_evaluate_error() {
         assert!(evaluate_expression("2 +").is_err());
         assert!(evaluate_expression("10 / 0").is_err());
+    }
+
+    #[test]
+    fn test_shell_command_detection() {
+        assert!(looks_like_shell_command("cargo check --manifest-path M:/repos/WuffAgent/Cargo.toml 2>&1"));
+        assert!(looks_like_shell_command("git status"));
+        assert!(looks_like_shell_command("npm run build"));
+        assert!(!looks_like_shell_command("2 + 2"));
+        assert!(!looks_like_shell_command("(10 * 5) / 2"));
     }
 }

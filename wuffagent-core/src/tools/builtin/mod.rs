@@ -75,5 +75,22 @@ pub fn register_builtins(
         loaded_at: std::time::Instant::now(),
     })?;
 
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(ShellTool::new(ShellConfig {
+            allowed_commands: Vec::new(),
+            shell_type: "powershell".to_string(),
+            timeout_ms: 300_000,
+            enabled: true,
+            working_dir: None,
+        })),
+        metadata: ToolMetadata {
+            name: "shell".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Execute shell commands on the local system".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+    })?;
+
     Ok(())
 }

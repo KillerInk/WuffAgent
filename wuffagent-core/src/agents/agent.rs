@@ -282,10 +282,12 @@ impl Agent {
                     }
                     Ok(())
                 },
+                Some(cancel_token),
             )
             .await
             {
                 Ok((msg, usage)) => (msg, usage),
+                Err(crate::client::Error::Cancelled) => return Err("Cancelled".to_string()),
                 Err(e) => return Err(format!("LLM call failed: {}", e)),
             };
 
@@ -550,9 +552,15 @@ impl Agent {
             },
         ];
 
-        let response = match self.llm_client.complete(&verification_messages).await {
-            Ok(r) => r,
-            Err(e) => return Err(format!("Verification LLM call failed: {}", e)),
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            self.llm_client.complete(&verification_messages),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(format!("Verification LLM call failed: {}", e)),
+            Err(_) => return Err("Verification LLM call timed out".to_string()),
         };
 
         Ok(response.to_uppercase().contains("VERIFIED") && !response.to_uppercase().contains("NEEDS_FIX"))

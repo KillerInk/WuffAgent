@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+﻿use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 
 use crate::config::{get_presets_path, PresetStore};
@@ -60,13 +60,13 @@ impl ChatApp {
             .unwrap_or_else(|| PathBuf::from("agents"));
         if self.show_agent_config && self.agent_config_dialog.is_none() {
             let mut agent_manager = crate::agents::config::AgentManager::new(agents_dir.clone());
-            // Scan project-level workers dirs for discovery (same as get_agent_names)
+            // Scan project-level agents dirs for discovery (same as get_agent_names)
             if let Ok(cwd) = std::env::current_dir() {
-                agent_manager.add_search_dir(cwd.join("workers"));
+                agent_manager.add_search_dir(cwd.join("agents"));
             }
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(exe_dir) = exe.parent() {
-                    agent_manager.add_search_dir(exe_dir.join("workers"));
+                    agent_manager.add_search_dir(exe_dir.join("agents"));
                 }
             }
             self.agent_config_dialog =
@@ -75,11 +75,11 @@ impl ChatApp {
         if let Some(dialog) = self.agent_config_dialog.as_mut() {
             let mut agent_manager = crate::agents::config::AgentManager::new(agents_dir.clone());
             if let Ok(cwd) = std::env::current_dir() {
-                agent_manager.add_search_dir(cwd.join("workers"));
+                agent_manager.add_search_dir(cwd.join("agents"));
             }
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(exe_dir) = exe.parent() {
-                    agent_manager.add_search_dir(exe_dir.join("workers"));
+                    agent_manager.add_search_dir(exe_dir.join("agents"));
                 }
             }
             let closed = dialog.show(ctx, &Arc::new(Mutex::new(agent_manager)));
@@ -93,7 +93,7 @@ impl ChatApp {
     pub fn process_pending_events(&mut self) {
         // Drain all buffered events from the channel and handle them.
         // Events are produced by:
-        //  - the merge task (engine_rx → AppEvent + tool_rx → AppEvent)
+        //  - the merge task (engine_rx â†’ AppEvent + tool_rx â†’ AppEvent)
         //  - any direct AppEvent sends from the client (tool calls)
         // Take the receiver out of the Option to avoid borrowing self mutably
         // while also calling self.handle_event().
@@ -141,11 +141,11 @@ impl ChatApp {
             self.client.set_session(Some(id.to_string()), session_dir);
             self.client.load_session();
             // Populate the UI display with the loaded session messages.
-            // Derive message kind from legacy conventions (tool role, 💭 prefix).
+            // Derive message kind from legacy conventions (tool role, ðŸ’­ prefix).
             self.chat.messages = session.messages.iter().map(|m| {
                 let (content, kind) = if m.role == "tool" {
                     (m.content.clone(), crate::types::MessageKind::Tool)
-                } else if let Some(t) = m.content.strip_prefix("💭 ") {
+                } else if let Some(t) = m.content.strip_prefix("ðŸ’­ ") {
                     (t.to_string(), crate::types::MessageKind::Thinking)
                 } else {
                     (m.content.clone(), crate::types::MessageKind::Normal)

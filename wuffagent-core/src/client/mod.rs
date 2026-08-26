@@ -1,4 +1,5 @@
 use std::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing;
 
 pub mod engine;
@@ -97,7 +98,11 @@ impl ChatClient {
             system_prompt: String::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
             conversation: Arc::new(Mutex::new(Vec::new())),
-            http_client: reqwest::Client::new(),
+            http_client: {
+                let builder = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(300));
+                builder.build().unwrap()
+            },
             api_key: None,
             session_id: None,
             session_dir: PathBuf::new(),
@@ -383,7 +388,7 @@ impl ChatClient {
         let mut boxed_cb = Box::new(move |chunk: String, _is_thinking: bool| -> Result<(), Error> {
             (callback)(chunk)
         });
-        sse::stream_message(resp, &self.conversation, &mut boxed_cb).await
+        sse::stream_message(resp, &self.conversation, &mut boxed_cb, None).await
     }
 
     /// Arc-based streaming method that clones necessary data before calling
@@ -469,7 +474,7 @@ impl ChatClient {
 
         // Box the callback to erase the concrete type
         let mut boxed_cb = Box::new(callback);
-        sse::stream_message(resp, &conversation, &mut boxed_cb).await
+        sse::stream_message(resp, &conversation, &mut boxed_cb, None).await
     }
 
     /// Arc-based streaming that also handles `<think>`-wrapped reasoning content
@@ -554,7 +559,7 @@ impl ChatClient {
         // Add user message to history
         add_streaming_messages(&conversation, prompt);
 
-        sse::stream_message(resp, &conversation, &mut callback).await
+        sse::stream_message(resp, &conversation, &mut callback, None).await
     }
 
     /// Stream a request built from an EXPLICIT message list, without touching
@@ -572,6 +577,7 @@ impl ChatClient {
         messages: &[Message],
         tools: Option<&[crate::tools::ToolDefinition]>,
         callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
+        cancel_token: Option<&CancellationToken>,
     ) -> Result<(Message, Option<Usage>), Error> {
         let http_client = client.http_client.clone();
         let base_url = client.base_url.clone();
@@ -617,7 +623,7 @@ impl ChatClient {
         }]));
 
         let mut boxed_cb = Box::new(callback);
-        let usage = sse::stream_message(resp, &local_conv, &mut boxed_cb).await?;
+        let usage = sse::stream_message(resp, &local_conv, &mut boxed_cb, cancel_token).await?;
 
         let msg = local_conv.lock().unwrap().pop().unwrap_or_else(|| Message {
             role: "assistant".to_string(),
@@ -870,6 +876,8 @@ pub enum Error {
     Stream(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 impl From<reqwest::Error> for Error {

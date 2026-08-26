@@ -60,6 +60,7 @@ impl LlmClient for ChatClientAdapter {
                 chunk_handler(chunk);
                 Ok(())
             },
+            None,
         )
         .await
         {
@@ -117,6 +118,7 @@ impl LlmClient for ToolLlmClient {
                 chunk_handler(chunk);
                 Ok(())
             },
+            None,
         )
         .await
         {

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+﻿use std::sync::{Arc, Mutex};
 
 use wuffagent_core::{
     agents::{AgentEngine, AgentRegistry},
@@ -146,7 +146,7 @@ fn bootstrap() -> (
         .unwrap_or_else(|| config_path_clone.clone());
 
     let mut search_dirs = vec![config_agents_dir.clone()];
-    let mut add_workers_dir = |path: std::path::PathBuf| {
+    let mut add_agents_dir = |path: std::path::PathBuf| {
         if path.exists() {
             search_dirs.push(path);
         }
@@ -154,11 +154,11 @@ fn bootstrap() -> (
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            add_workers_dir(exe_dir.parent().map(|p| p.join("workers")).unwrap_or_default());
+            add_agents_dir(exe_dir.parent().map(|p| p.join("agents")).unwrap_or_default());
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        add_workers_dir(cwd.join("workers"));
+        add_agents_dir(cwd.join("agents"));
     }
 
     // Load agents FIRST, then build the invocation registry, then register builtins
@@ -182,7 +182,7 @@ fn bootstrap() -> (
         client_for_engine.clone(),
     );
 
-    // Register builtins — agent_call will use the populated registry
+    // Register builtins â€” agent_call will use the populated registry
     builtin::register_builtins(&registry, &invocation_registry).expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
         eprintln!("Warning: failed to discover plugins: {}", e);

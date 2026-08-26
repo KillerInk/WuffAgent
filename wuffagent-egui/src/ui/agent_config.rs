@@ -1,14 +1,14 @@
-use eframe::egui;
+﻿use eframe::egui;
 use std::sync::{Arc, Mutex};
 
-use crate::agents::config::{AgentManager, WorkerConfig};
+use crate::agents::config::{AgentConfig, AgentManager};
 use crate::tools::ToolManager;
 use super::theme::Theme;
 
 /// UI dialog for adding/editing/removing agent configurations.
 pub struct AgentConfigDialog {
     /// Loaded agents from disk.
-    agents: Vec<WorkerConfig>,
+    agents: Vec<AgentConfig>,
     /// Currently selected agent index (-1 = none).
     selected_index: isize,
     /// Whether we're creating a new agent.
@@ -125,7 +125,7 @@ impl AgentConfigDialog {
                                         let button_data: Vec<AgentButtonData> = self.agents.iter().enumerate().map(|(i, agent)| {
                                             let selected = i as isize == self.selected_index;
                                             AgentButtonData {
-                                                label: format!("{} {}", if agent.enabled { "✓" } else { "○" }, agent.name),
+                                                label: format!("{} {}", if agent.enabled { "âœ“" } else { "â—‹" }, agent.name),
                                                 bg: if selected { egui::Color32::from_rgb(0x33, 0x66, 0xCC) } else { egui::Color32::from_rgb(0x33, 0x33, 0x33) },
                                                 idx: i,
                                                 name: agent.name.clone(),
@@ -232,7 +232,7 @@ impl AgentConfigDialog {
                                             }
                                         });
                                     } else {
-                                        // No agent selected — show info
+                                        // No agent selected â€” show info
                                         ui.vertical_centered(|ui| {
                                             ui.label(egui::RichText::new("Select an agent from the list, or click \"+ Add Agent\" to create one.").strong());
                                         });
@@ -252,23 +252,31 @@ impl AgentConfigDialog {
         }
 
         self.sync_tools_from_checkboxes();
-        let config = WorkerConfig {
+        let config = AgentConfig {
             name: self.name.trim().to_string(),
             description: self.description.trim().to_string(),
             system_prompt: self.system_prompt.clone(),
             allowed_tools: self.allowed_tools.clone(),
+            enabled: self.enabled,
             priority: 0,
             max_concurrent: 1,
-            enabled: self.enabled,
-            can_invoke: vec![],
+            max_depth: 5,
+            recovery_policy: wuffagent_core::agents::config::RecoveryPolicy::default(),
+            max_plan_iterations: 5,
+            max_parallel_workers: 4,
+            task_timeout_ms: 60_000,
+            auto_refine: true,
+            can_invoke: Vec::new(),
             handoff_enabled: false,
             shell_config: wuffagent_core::agents::config::ShellConfig::default(),
+            agents_dir: std::path::PathBuf::from(""),
+            custom_prompts: std::collections::HashMap::new(),
             reasoning_effort: self.reasoning_effort,
-       };
+        };
 
         // Ensure the directory exists before saving
         if let Ok(m) = agent_manager.lock() {
-            if let Err(e) = std::fs::create_dir_all(m.workers_dir()) {
+            if let Err(e) = std::fs::create_dir_all(m.agents_dir()) {
                 self.message = Some(format!("Failed to create directory: {}", e));
                 return false;
             }
@@ -347,7 +355,7 @@ impl AgentConfigDialog {
         self.clear_form();
     }
 
-    fn start_edit(&mut self, agent: WorkerConfig) {
+    fn start_edit(&mut self, agent: AgentConfig) {
         self.is_new = false;
         if let Some(idx) = self.agents.iter().position(|a| a.name == agent.name) {
             self.select_agent(idx);

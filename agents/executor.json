@@ -7,6 +7,7 @@
     "max_concurrent": 1,
     "can_invoke": ["generalist", "coder"],
     "handoff_enabled": true,
+    "task_timeout_ms": 300000,
     "shell_config": {
         "shell_enabled": true,
         "allowed_commands": [
