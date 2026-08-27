@@ -689,6 +689,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub custom_prompts: HashMap<String, String>,
     /// Reasoning effort for this agent (Off = inherit the global toggle).
+    /// Also accepts legacy string values "off", "low", "medium", "high" for backward compat.
     #[serde(default)]
     pub reasoning_effort: crate::types::ReasoningEffort,
     /// Configuration for intelligent context trimming.

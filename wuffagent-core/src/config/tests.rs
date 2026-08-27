@@ -1,4 +1,4 @@
-use super::*;
+// Tests for config module
 use crate::config::{ChatMessage, Config, ConnectionType, Error};
 use tempfile::tempdir;
 

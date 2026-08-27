@@ -64,8 +64,10 @@ pub fn save_session(
             }
             Err(e) if retries < 3 => {
                 retries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(50u64.pow(retries as u32)));
-                eprintln!("Session save attempt {} failed: {}, retrying...", retries, e);
+                // Cap backoff at 1s to avoid long freezes on persistent failures
+                let backoff_ms = (50u64.pow(retries as u32)).min(1000);
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                tracing::error!("Session save attempt {} failed: {}, retrying...", retries, e);
             }
             Err(e) => {
                 // All retries exhausted — enqueue for later retry and signal UI
@@ -91,12 +93,16 @@ pub fn load_session(
     } else {
         sessions::load_session(session_dir, id)
     };
-    let session = session?;
-    let mut conv = conversation.lock().unwrap();
+    let mut session = session?;
+    let mut conv = conversation
+        .lock()
+        .ok()?;
     *conv = session.messages.clone();
     if !session.system_prompt.is_empty() {
         *system_prompt = session.system_prompt.clone();
     }
+    // Truncate agent_chain on load to prevent unbounded growth
+    session.truncate_agent_chain(100);
     Some(session)
 }
 
@@ -106,12 +112,13 @@ pub fn enqueue_save_failure(
     save_failed: &Arc<Mutex<bool>>,
     error: &anyhow::Error,
 ) {
-    let mut queue = save_queue.lock().unwrap();
-    queue.push_back(());
-    drop(queue);
-    let mut flagged = save_failed.lock().unwrap();
-    *flagged = true;
-    eprintln!("Session save failed, enqueued for retry: {}", error);
+    if let Ok(mut queue) = save_queue.lock() {
+        queue.push_back(());
+    }
+    if let Ok(mut flagged) = save_failed.lock() {
+        *flagged = true;
+    }
+    tracing::error!("Session save failed, enqueued for retry: {}", error);
 }
 
 /// Try to retry any pending saves and clear the queue on success.
@@ -121,7 +128,10 @@ pub fn retry_pending_saves(
     save_failed: &Arc<Mutex<bool>>,
     save_session_fn: &dyn Fn() -> Result<(), anyhow::Error>,
 ) -> bool {
-    let mut queue = save_queue.lock().unwrap();
+    let mut queue = match save_queue.lock() {
+        Ok(q) => q,
+        Err(_) => return false,
+    };
     let count = queue.len();
     if count == 0 {
         return true;
@@ -136,30 +146,35 @@ pub fn retry_pending_saves(
         enqueue_save_failure(save_queue, save_failed, &e);
         false
     } else {
-        let mut flagged = save_failed.lock().unwrap();
-        *flagged = false;
+        if let Ok(mut flagged) = save_failed.lock() {
+            *flagged = false;
+        }
         true
     }
 }
 
 /// Returns true if there is a pending save failure notification to show.
 pub fn has_save_failure(save_failed: &Arc<Mutex<bool>>) -> bool {
-    *save_failed.lock().unwrap()
+    save_failed
+        .lock()
+        .map(|m| *m)
+        .unwrap_or(false)
 }
 
 /// Clear the save failure flag (call after a successful save or user dismissal).
 pub fn clear_save_failure(save_failed: &Arc<Mutex<bool>>) {
-    let mut flagged = save_failed.lock().unwrap();
-    *flagged = false;
+    if let Ok(mut flagged) = save_failed.lock() {
+        *flagged = false;
+    }
 }
 
 /// Clear the internal retry queue without attempting a save.
+/// Clear the internal retry queue without attempting a save.
 pub fn clear_save_queue(save_queue: &Arc<Mutex<VecDeque<()>>>, save_failed: &Arc<Mutex<bool>>) {
-    let mut queue = save_queue.lock().unwrap();
-    queue.clear();
-    drop(queue);
-    let mut flagged = save_failed.lock().unwrap();
-    *flagged = false;
+    let _ = save_failed; // keep the parameter for API compatibility
+    if let Ok(mut queue) = save_queue.lock() {
+        queue.clear();
+    }
 }
 
 /// Trim the conversation to the given max_messages, preserving the system message.
@@ -255,7 +270,7 @@ pub fn clear_session_messages(
 ) {
     conversation.lock().unwrap().clear();
     if let Err(e) = save_session_fn() {
-        eprintln!("Failed to save session after clear: {}", e);
+        tracing::error!("Failed to save session after clear: {}", e);
     }
 }
 

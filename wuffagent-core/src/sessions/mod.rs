@@ -9,8 +9,8 @@ const SESSIONS_DIR: &str = "sessions";
 pub fn sessions_dir(config_path: &Path) -> PathBuf {
     config_path
         .parent()
-        .expect("config path must have parent")
-        .join(SESSIONS_DIR)
+        .map(|p| p.join(SESSIONS_DIR))
+        .unwrap_or_else(|| PathBuf::from(SESSIONS_DIR))
 }
 
 /// Magic bytes written at the start of an encrypted session file.
@@ -30,6 +30,8 @@ pub fn load_session(dir: &Path, id: &str) -> Option<Session> {
                 return None;
             }
         }
+    } else {
+        tracing::warn!("Session file not found: {}", path.display());
     }
     let path = dir.join(format!("{}.json", id));
     fs::read_to_string(&path)
@@ -398,7 +400,6 @@ mod tar_builder {
 mod tests {
     use super::*;
     use crate::types::Message;
-    use std::io::Write;
     use rand::RngCore;
     fn gen_key() -> [u8; 32] {
         let mut key = [0u8; 32];

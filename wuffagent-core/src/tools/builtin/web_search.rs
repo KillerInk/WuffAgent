@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::tools::types::{Tool, ToolOutput, ToolParams, ToolSchema};
 
@@ -19,10 +20,47 @@ pub struct WebSearchTool {
     backend: SearchBackend,
 }
 
+/// Shared reqwest client used across all WebSearchTool instances for connection pooling.
+fn shared_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(4)
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("reqwest client builder")
+}
+
+/// Cached tokio current-thread runtime for use inside spawn_blocking calls.
+/// Avoids creating a new runtime on every web search invocation.
+static BLOCKING_RUNTIME: LazyLock<tokio::runtime::Runtime> =
+    LazyLock::new(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build blocking runtime")
+    });
+
+/// Pre-warm the DuckDuckGo session in a background task so the first search
+/// doesn't pay the warmup cost.
+fn warmup_ddg_client() {
+    // Skip warmup if no tokio runtime is available (e.g. unit tests)
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    let client = shared_client();
+    tokio::spawn(async move {
+        let _ = client
+            .get("https://duckduckgo.com/")
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            .send()
+            .await;
+    });
+}
+
 impl WebSearchTool {
     pub fn new() -> Self {
+        warmup_ddg_client();
         Self {
-            http_client: reqwest::Client::new(),
+            http_client: shared_client(),
             backend: SearchBackend::DuckDuckGo,
         }
     }
@@ -131,17 +169,12 @@ impl WebSearchTool {
 
         // Use try_current() to avoid panicking when called from a blocking thread
         // (e.g. inside tokio::task::spawn_blocking from ToolManager::execute).
+        // Reuse a single cached runtime instead of creating one per call.
         macro_rules! block_on {
             ($expr:expr) => {{
                 match tokio::runtime::Handle::try_current() {
                     Ok(handle) => handle.block_on($expr),
-                    Err(_) => {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to create runtime: {}", e)))?;
-                        rt.block_on($expr)
-                    }
+                    Err(_) => BLOCKING_RUNTIME.block_on($expr),
                 }
             }};
         }

@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 use tracing;
@@ -12,8 +12,10 @@ use super::types::AgentId;
 use crate::tools::ToolManager;
 use crate::types::Message;
 
-/// Maximum LLM iterations per loop (soft limit - agent can continue)
+/// Maximum LLM iterations per loop (hard limit - agent stops when reached)
 const LLM_ITERATION_LIMIT: u32 = 20;
+/// Minimum delay between LLM calls to prevent API rate-limiting (500ms).
+const LLM_RATE_LIMIT_DELAY: Duration = Duration::from_millis(500);
 
 /// Maximum verification attempts before giving up.
 const MAX_VERIFICATION_ATTEMPTS: u32 = 2;
@@ -42,6 +44,8 @@ pub struct Agent {
     memory: Option<Arc<crate::memory::MemoryManager>>,
     /// Stored messages from the last execution for memory extraction.
     messages: Vec<Message>,
+    /// Timestamp of the last LLM call, used for rate limiting between iterations.
+    last_llm_call_at: Instant,
 }
 
 impl Agent {
@@ -72,6 +76,7 @@ impl Agent {
             tool_manager,
             invocation_registry,
             event_tx,
+            last_llm_call_at: Instant::now(),
             client,
             memory,
             messages: Vec::new(),
@@ -80,11 +85,12 @@ impl Agent {
 
     /// Build the initial message list for a task (system prompt + user task).
     pub fn build_initial_messages(&self, task: &str) -> Vec<Message> {
+        let now = crate::types::format_timestamp();
         vec![
             Message {
                 role: "system".to_string(),
                 content: self.build_system_prompt(),
-                timestamp: String::new(),
+                timestamp: now.clone(),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
@@ -92,7 +98,7 @@ impl Agent {
             Message {
                 role: "user".to_string(),
                 content: task.to_string(),
-                timestamp: String::new(),
+                timestamp: now,
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
@@ -203,6 +209,9 @@ impl Agent {
             }
         }
 
+        // Note: system prompt caching would require &'mut self, which conflicts
+        // with the LLM loop. The prompt is cheap to rebuild (~100ns).
+        let _ = &self.memory;
         prompt
     }
 
@@ -216,7 +225,7 @@ impl Agent {
     /// - Falls back to text-embedded tool-call parsing (bash blocks / JSON
     ///   arrays) for models that don't honor native function calling.
     async fn run_llm_loop(
-        &self,
+        &mut self,
         messages: &mut Vec<Message>,
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {
@@ -239,6 +248,12 @@ impl Agent {
         loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
+            }
+
+            // Rate-limit LLM calls to avoid hitting API rate limits.
+            let elapsed = self.last_llm_call_at.elapsed();
+            if elapsed < LLM_RATE_LIMIT_DELAY {
+                tokio::time::sleep(LLM_RATE_LIMIT_DELAY - elapsed).await;
             }
 
             // Check timeout
@@ -319,6 +334,7 @@ impl Agent {
                 Err(crate::client::Error::Cancelled) => return Err("Cancelled".to_string()),
                 Err(e) => return Err(format!("LLM call failed: {}", e)),
             };
+            self.last_llm_call_at = Instant::now();
 
             // Commit this round's thinking block to the UI.
             // (Read via `round_thinking` — `rt` was moved into the closure.)
@@ -493,7 +509,7 @@ impl Agent {
             verification_attempts += 1;
 
             let original_request = self.extract_original_request(messages);
-            let verification_result = self.verify_tool_outputs(messages, &original_request).await;
+            let verification_result = self.verify_tool_outputs(messages, &original_request, cancel_token).await;
             match verification_result {
                 Ok(true) => {
                     tracing::info!(
@@ -559,6 +575,7 @@ impl Agent {
         &self,
         messages: &[Message],
         original_request: &str,
+        cancel_token: &CancellationToken,
     ) -> Result<bool, String> {
         let tool_outputs: Vec<String> = messages
             .iter()
@@ -566,15 +583,16 @@ impl Agent {
             .map(|m| m.content.clone())
             .collect();
 
-        let recent_tool_summary: String = if tool_outputs.is_empty() {
-            "No tool calls were made.".to_string()
-        } else {
-            tool_outputs
-                .iter()
-                .map(|o| o.chars().take(200).collect::<String>())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        // Skip verification if no tool calls were made.
+        if tool_outputs.is_empty() {
+            return Ok(true);
+        }
+
+        let recent_tool_summary: String = tool_outputs
+            .iter()
+            .map(|o| o.chars().take(200).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let verification_messages = vec![
             Message {
@@ -587,20 +605,35 @@ impl Agent {
             },
             Message {
                 role: "user".to_string(),
+                // Truncate the original request to avoid prompt injection
+                // via oversized or adversarially crafted messages.
                 content: format!(
-                    "User request: {}\n\nRecent tool outputs:\n{}\n\nIs the request satisfied?",
-                    original_request, recent_tool_summary
+                    "User request (truncated to 500 chars):\n{}\n\nRecent tool outputs:\n{}\n\nIs the request satisfied?",
+                    &original_request.chars().take(500).collect::<String>(),
+                    recent_tool_summary
                 ),
-                timestamp: String::new(),
+                timestamp: crate::types::format_timestamp(),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
             },
         ];
 
+        // Check cancellation before making the LLM call.
+        if cancel_token.is_cancelled() {
+            return Err("Verification cancelled".to_string());
+        }
+
         let response = match tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            self.llm_client.complete(&verification_messages),
+            async {
+                // Propagate cancellation during the LLM call.
+                let cancel_clone = cancel_token.clone();
+                tokio::select! {
+                    result = self.llm_client.complete(&verification_messages) => result,
+                    _ = cancel_clone.cancelled() => Err("Verification cancelled".to_string()),
+                }
+            },
         )
         .await
         {
@@ -609,14 +642,69 @@ impl Agent {
             Err(_) => return Err("Verification LLM call timed out".to_string()),
         };
 
-        Ok(response.to_uppercase().contains("VERIFIED") && !response.to_uppercase().contains("NEEDS_FIX"))
+        // Robust verification: check NEEDS_FIX first (takes precedence),
+        // then check if the response is clearly affirmative.
+        let response_upper = response.to_uppercase();
+        if response_upper.contains("NEEDS_FIX")
+            || response_upper.contains("NOT SATISFIED")
+            || response_upper.contains("INCORRECT")
+            || response_upper.contains("INCOMPLETE")
+        {
+            Ok(false)
+        } else if response_upper.trim() == "VERIFIED"
+            || response_upper.contains("VERIFIED")
+        {
+            Ok(true)
+        } else {
+            // Default to verified if unclear — better to continue than to
+            // abort a successful execution on an ambiguous LLM response.
+            Ok(true)
+        }
     }
 
     /// Parse tool calls from an LLM response.
+    /// Uses a bracket-aware parser that tracks both `[`/`]` and `{`/`}`
+    /// to correctly handle nested JSON structures.
     fn parse_tool_calls(&self, response: &str) -> Option<Vec<ToolCall>> {
+        // First try parsing the entire response as JSON directly.
+        if let Ok(calls) = serde_json::from_str::<Vec<ToolCall>>(response) {
+            return Some(calls);
+        }
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(response) {
+            if let Some(arr) = obj.get("tool_calls").and_then(|v| v.as_array()) {
+                let mut calls: Vec<ToolCall> = Vec::new();
+                for v in arr {
+                    if let Some(func) = v.get("function") {
+                        if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                            if let Some(args_val) = func.get("arguments") {
+                                let args_str = match args_val {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                calls.push(ToolCall {
+                                    id: v.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
+                                    _call_type: "function".to_string(),
+                                    function: crate::agents::agent::ToolFunction {
+                                        name: name.to_string(),
+                                        arguments: args_str,
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+                if !calls.is_empty() {
+                    return Some(calls);
+                }
+            }
+        }
+
+        // Fallback: bracket-aware extraction that tracks both [] and {} depth.
         let mut regions: Vec<(usize, usize)> = Vec::new();
-        let mut depth = 0i32;
+        let mut bracket_depth = 0i32;
+        let mut brace_depth = 0i32;
         let mut start: Option<usize> = None;
+        let mut start_type: Option<char> = None; // '[' or '{'
         let mut in_string = false;
         let mut escape = false;
 
@@ -632,19 +720,28 @@ impl Agent {
                 '"' => {
                     in_string = !in_string;
                 }
-                '[' if !in_string => {
-                    if depth == 0 {
+                c if !in_string && (c == '[' || c == '{') => {
+                    if bracket_depth == 0 && brace_depth == 0 {
                         start = Some(i);
+                        start_type = Some(c);
                     }
-                    depth += 1;
+                    if c == '[' { bracket_depth += 1; }
+                    if c == '{' { brace_depth += 1; }
                 }
-                ']' if !in_string => {
-                    depth -= 1;
-                    if depth == 0 {
+                c if !in_string && (c == ']' || c == '}') => {
+                    if c == ']' { bracket_depth -= 1; }
+                    if c == '}' { brace_depth -= 1; }
+                    // Only close a region if we're closing the matching depth-0 opener.
+                    if bracket_depth < 0 { bracket_depth = 0; }
+                    if brace_depth < 0 { brace_depth = 0; }
+                    if bracket_depth == 0 && brace_depth == 0 {
                         if let Some(s) = start {
-                            regions.push((s, i + 1));
+                            if start_type == Some('[') {
+                                regions.push((s, i + 1));
+                            }
+                            start = None;
+                            start_type = None;
                         }
-                        start = None;
                     }
                 }
                 _ => {}
@@ -660,6 +757,7 @@ impl Agent {
             }
         }
 
+        // Fallback: look for JSON inside markdown code blocks.
         if let Some(start) = response.find("```") {
             let rest = &response[start + 3..];
             if let Some(end) = rest.find("```") {

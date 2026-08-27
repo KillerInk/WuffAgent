@@ -202,10 +202,13 @@ impl AgentEngine {
 
         // Post-task: extract memories and suggest improvements
         if let Some(memory) = &self.memory {
-            // Extract memories from the actual agent conversation messages
-            let agent_messages = agent.messages();
-            if !agent_messages.is_empty() {
-                let _ = memory.extract_and_save(agent_messages, "agent_task").await;
+            // Only extract memories when memory is enabled to avoid unnecessary LLM calls.
+            if memory.config().enabled {
+                // Extract memories from the actual agent conversation messages
+                let agent_messages = agent.messages();
+                if !agent_messages.is_empty() {
+                    let _ = memory.extract_and_save(agent_messages, "agent_task").await;
+                }
             }
             
             // Suggest improvements if auto_improve is enabled

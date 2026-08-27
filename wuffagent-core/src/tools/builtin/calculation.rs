@@ -75,16 +75,40 @@ impl Tool for CalculationTool {
 }
 
 /// Detect if the string looks like a shell command rather than a math expression.
+///
+/// Shell commands typically start with a command name (e.g. "cargo", "git").
+/// Math expressions start with a digit or a function name (e.g. "sin", "sqrt").
+/// Strong shell indicators: `&&`, `||`, `;`, `|`, `>`, `2>&1`, known command prefixes.
 fn looks_like_shell_command(input: &str) -> bool {
     let trimmed = input.trim();
-    let shell_indicators = [
-        "cargo ", "npm ", "git ", "python ", "node ", "docker ", "make ", "cmake ",
-        "rustc ", "clang ", "gcc ", "g++ ", "rust-analyzer ",
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Strong shell indicators that are almost never part of math
+    let strong_shell = ["&&", "||", "2>&1", "; ", " | ", " >"];
+    if strong_shell.iter().any(|s| trimmed.contains(s)) {
+        return true;
+    }
+    // Shell commands typically start with a known command name.
+    // Math expressions start with a digit, '(', or a function name.
+    let shell_command_prefixes = [
+        "cargo ", "npm ", "npx ", "git ", "python ", "python3 ", "node ", "docker ",
+        "make ", "cmake ", "rustc ", "clang ", "gcc ", "g++ ", "rust-analyzer ",
         "echo ", "ls ", "cd ", "mkdir ", "rm ", "cp ", "mv ", "cat ",
-        "curl ", "wget ", "pip ", "conda ", "brew ", "apt ", "yum ",
-        "--manifest-path", "2>&1", "&&", ";", "|", ">",
+        "curl ", "wget ", "pip ", "pip3 ", "conda ", "brew ", "apt ", "yum ",
+        "find ", "grep ", "sed ", "awk ", "chmod ", "chown ", "ssh ", "scp ",
+        "tar ", "zip ", "unzip ", "ping ", "ps ", "kill ", "top ", "htop ",
+        "--manifest-path",
     ];
-    shell_indicators.iter().any(|&ind| trimmed.contains(ind))
+    // Only match if input starts with a shell command prefix
+    if shell_command_prefixes.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+    // As a last resort, check for bare shell operators at start (e.g. "| ls", "; rm")
+    if trimmed.starts_with(|c: char| c == '|' || c == ';' || c == '>') {
+        return true;
+    }
+    false
 }
 
 /// Evaluate a mathematical expression supporting:
@@ -134,16 +158,19 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             ')' => { tokens.push(Token::RParen); i += 1; }
             c if c.is_ascii_digit() || (c == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()) => {
                 let mut num_str = String::new();
-                // Handle scientific notation (e.g. 1.5e10)
+                // Collect the integer/fractional part
                 num_str.push(c);
                 while i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '.') {
                     i += 1;
                     num_str.push(chars[i]);
                 }
-                if i + 1 < chars.len() && (chars[i + 1].to_lowercase().next() == Some('e')) {
-                    // Check for scientific notation
+                // Handle scientific notation (e.g. 1.5e10, 1e-3, 2.5E+4)
+                if i + 1 < chars.len()
+                    && (chars[i + 1].to_lowercase().next() == Some('e'))
+                    && (i + 2 < chars.len() && (chars[i + 2].is_ascii_digit() || chars[i + 2] == '+' || chars[i + 2] == '-'))
+                {
                     i += 1;
-                    num_str.push(chars[i]); // 'e'
+                    num_str.push(chars[i]); // 'e' or 'E'
                     if i + 1 < chars.len() && (chars[i + 1] == '+' || chars[i + 1] == '-') {
                         i += 1;
                         num_str.push(chars[i]);
@@ -156,7 +183,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 let n: f64 = num_str.parse()
                     .map_err(|_| format!("Invalid number: {}", num_str))?;
                 tokens.push(Token::Number(n));
-                i += 1; // advance past the last digit (inner loops may not have moved i)
+                i += 1; // advance past the last digit consumed
             }
             c if c.is_alphabetic() || c == '_' => {
                 let mut name = String::new();

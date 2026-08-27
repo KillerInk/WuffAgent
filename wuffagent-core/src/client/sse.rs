@@ -215,7 +215,7 @@ pub async fn stream_message(
                     // Process complete lines
                     while let Some(newline_pos) = buffer.find('\n') {
                         let line = buffer[..newline_pos].to_string();
-                        buffer = buffer[newline_pos + 1..].to_string();
+                        buffer.drain(..newline_pos + 1);
 
                         if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
                             last_usage = Some(usage);
@@ -236,7 +236,7 @@ pub async fn stream_message(
             // Process complete lines
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..newline_pos].to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
+                buffer.drain(..newline_pos + 1);
 
                 if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
                     last_usage = Some(usage);

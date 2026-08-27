@@ -18,10 +18,12 @@
 /// let trimming = ContextTrimming::new();
 /// let config = TrimConfig::default();
 ///
-/// // Summarize a tool result
-/// let summarized = trimming.summarize_tool_result(&result, &config);
+/// // Summarize a long tool result
+/// let tool_output = "line1\nline2\nline3";
+/// let summarized = trimming.summarize_tool_result(tool_output, &config);
 ///
 /// // Inline summarize tool results in messages
+/// let mut messages: Vec<wuffagent_core::types::Message> = Vec::new();
 /// trimming.inline_summarize(&mut messages, &config);
 /// ```
 

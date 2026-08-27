@@ -20,7 +20,7 @@ impl AgentCallTool {
     }
 
     /// Parse parameters from tool input.
-    fn parse_params(&self, params: &ToolParams) -> Result<(String, String, serde_json::Value), ToolError> {
+    fn parse_params(&self, params: &ToolParams) -> Result<(String, String), ToolError> {
         let target = params
             .get::<String>("target")
             .ok_or_else(|| ToolError::InvalidParams("Missing required field: target".to_string()))?;
@@ -29,12 +29,18 @@ impl AgentCallTool {
             .get::<String>("task")
             .ok_or_else(|| ToolError::InvalidParams("Missing required field: task".to_string()))?;
 
+        Ok((target, task))
+    }
+
+    /// Parse parameters, also returning the optional input field for testing.
+    #[cfg(test)]
+    fn parse_params_with_input(&self, params: &ToolParams) -> Result<(String, String, serde_json::Value), ToolError> {
+        let (target, task) = self.parse_params(params)?;
         let input = params
             .values
             .get("input")
             .cloned()
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-
         Ok((target, task, input))
     }
 }
@@ -72,14 +78,6 @@ impl Tool for AgentCallTool {
                             nullable: false,
                         },
                     );
-                    map.insert(
-                        "input".to_string(),
-                        crate::tools::types::FieldSchema {
-                            type_name: "object".to_string(),
-                            description: "Input parameters for the sub-task (optional)".to_string(),
-                            nullable: true,
-                        },
-                    );
                     map
                 }),
                 required: vec!["target".to_string(), "task".to_string()],
@@ -88,11 +86,10 @@ impl Tool for AgentCallTool {
     }
 
     fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
-        let (target, task, _input) = self.parse_params(&params)?;
+        let (target, task) = self.parse_params(&params)?;
 
         // Empty context for tool-invoked calls
         let context = serde_json::Value::Object(serde_json::Map::new());
-
         let registry = self.registry.clone();
         let task_clone = task.clone();
         let context_clone = context.clone();
@@ -138,7 +135,7 @@ mod tests {
         params.values.insert("task".to_string(), serde_json::json!("Search for X"));
         params.values.insert("input".to_string(), serde_json::json!({ "query": "test" }));
 
-        let (target, task, input) = tool.parse_params(&params).unwrap();
+        let (target, task, input) = tool.parse_params_with_input(&params).unwrap();
         assert_eq!(target, "researcher");
         assert_eq!(task, "Search for X");
         assert_eq!(input["query"], "test");

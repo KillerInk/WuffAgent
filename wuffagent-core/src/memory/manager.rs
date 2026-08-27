@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use tracing;
 
 use super::types::{MemoryConfig, MemoryEntry, MemoryType};
-use super::search::{get_recent_memories, search_memories};
+use super::search::search_memories;
 use super::storage::{load_memories, save_memories, get_memories_path, count_active_memories};
 use super::extractor::extract_memories;
 use super::improver::suggest_improvements;
@@ -86,35 +86,50 @@ impl MemoryManager {
         suggest_improvements(self, agent_config, task, result, llm.as_ref()).await
     }
 
-    /// Get all active (non-expired, non-superseded) memories.
-    pub fn get_all_memories(&self) -> Vec<MemoryEntry> {
-        let entries = self.entries.lock().unwrap();
-        entries.iter()
-            .filter(|e| !e.is_expired() && e.supersedes.is_none())
-            .cloned()
-            .collect()
-    }
-
     /// Search for relevant memories.
+    /// Releases the mutex before running the search to avoid blocking other operations.
     pub fn search(&self, query: &str) -> Vec<MemoryEntry> {
         if !self.config.enabled {
             return Vec::new();
         }
 
-        let entries = self.entries.lock().unwrap();
+        let entries = {
+            let entries = self.entries.lock().unwrap();
+            entries.clone()
+        }; // mutex released before search
         let results = search_memories(&entries, query, &self.config);
         results.into_iter().cloned().collect()
     }
 
     /// Get recent memories (for fallback).
+    /// Releases the mutex before copying to avoid blocking other operations.
     pub fn get_recent(&self, count: usize) -> Vec<MemoryEntry> {
         if !self.config.enabled {
             return Vec::new();
         }
 
-        let entries = self.entries.lock().unwrap();
-        let results = get_recent_memories(&entries, count);
-        results.into_iter().cloned().collect()
+        let entries = {
+            let entries = self.entries.lock().unwrap();
+            entries.iter()
+                .rev()
+                .take(count)
+                .cloned()
+                .collect::<Vec<_>>()
+        }; // mutex released
+        entries
+    }
+
+    /// Get all active (non-expired, non-superseded) memories.
+    /// Releases the mutex before copying.
+    pub fn get_all_memories(&self) -> Vec<MemoryEntry> {
+        let entries = {
+            let entries = self.entries.lock().unwrap();
+            entries.iter()
+                .filter(|e| !e.is_expired() && e.supersedes.is_none())
+                .cloned()
+                .collect::<Vec<_>>()
+        }; // mutex released
+        entries
     }
 
     /// Add a new memory entry.
@@ -129,14 +144,30 @@ impl MemoryManager {
     }
 
     /// Add multiple memory entries.
+    /// Uses fuzzy deduplication to avoid near-duplicate entries.
     pub fn add_batch(&self, entries: Vec<MemoryEntry>) -> Result<(), String> {
         let mut mem_entries = self.entries.lock().unwrap();
         for entry in entries {
-            // Check for duplicates
+            // Check for duplicates with fuzzy matching.
             let is_duplicate = mem_entries.iter().any(|existing| {
-                existing.content == entry.content
+                // Exact match first
+                if existing.content == entry.content
                     && existing.r#type == entry.r#type
                     && existing.tags == entry.tags
+                {
+                    return true;
+                }
+                // Fuzzy match: same type and high token overlap on content.
+                if existing.r#type != entry.r#type {
+                    return false;
+                }
+                let existing_tokens: std::collections::HashSet<&str> =
+                    existing.content.split_whitespace().collect();
+                let entry_tokens: std::collections::HashSet<&str> =
+                    entry.content.split_whitespace().collect();
+                let intersection = existing_tokens.intersection(&entry_tokens).count();
+                let union = existing_tokens.union(&entry_tokens).count();
+                union > 0 && (intersection as f64 / union as f64) > 0.75
             });
             if !is_duplicate {
                 mem_entries.push(entry);

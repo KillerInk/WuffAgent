@@ -38,26 +38,8 @@ pub async fn extract_memories(
 
     let conversation = recent.join("\n");
 
-    // Build extraction prompt
-    let prompt = format!(
-        "You are analyzing a conversation to extract persistent memories about the project.\n\n\
-         Project: {}\n\n\
-         Conversation (last 30 messages):\n{}\n\n\
-         Extract memories in this JSON format:\n\
-         [\n  {{\"type\": \"fact\", \"content\": \"...\", \"tags\": [\"tag1\", \"tag2\"]}},\n  {{\"type\": \"lesson\", \"content\": \"...\", \"tags\": [\"tag1\"]}},\n  {{\"type\": \"decision\", \"content\": \"...\", \"tags\": [\"tag1\"]}}\n]\n\n\
-         Rules:\n\
-         - Only extract information that is likely useful in future sessions\n\
-         - Facts: project structure, architecture decisions, known issues\n\
-         - Lessons: things that went wrong, gotchas, patterns to avoid\n\
-         - Decisions: explicit choices made with rationale\n\
-         - Context: environment details, constraints, dependencies\n\
-         - Goals: ongoing objectives or TODOs\n\
-         - Do NOT repeat memories that already exist\n\
-         - Keep content concise but complete\n\
-         - Return an empty array [] if nothing new to extract",
-        manager.config().project,
-        conversation
-    );
+    // Build extraction prompt (delegates to shared helper)
+    let prompt = build_extraction_prompt_from_conversation(&manager.config().project, &conversation);
 
     // Call LLM to extract memories
     let messages = vec![Message {
@@ -114,16 +96,18 @@ pub async fn extract_memories(
     Ok(result)
 }
 
-/// Build an extraction prompt for manual use.
+/// Build an extraction prompt from messages (public API).
 pub fn build_extraction_prompt(project: &str, messages: &[super::super::types::Message]) -> String {
     let recent: Vec<String> = messages.iter()
         .rev()
         .take(30)
         .map(|m| format!("[{}] {}", m.role, m.content))
         .collect();
+    build_extraction_prompt_from_conversation(project, &recent.join("\n"))
+}
 
-    let conversation = recent.join("\n");
-
+/// Internal helper used by `extract_memories` to build the prompt from a pre-joined conversation string.
+pub(crate) fn build_extraction_prompt_from_conversation(project: &str, conversation: &str) -> String {
     format!(
         "You are analyzing a conversation to extract persistent memories about the project.\n\n\
          Project: {}\n\n\

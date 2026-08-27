@@ -112,7 +112,9 @@ where
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| config_path.clone());
 
-        fs::create_dir_all(&agents_dir).ok();
+        if let Err(e) = fs::create_dir_all(&agents_dir) {
+            tracing::warn!("Failed to create agents config dir {:?}: {}", agents_dir, e);
+        }
         let general_path = agents_dir.join("general.json");
 
         let config = crate::agents::config::AgentConfig {

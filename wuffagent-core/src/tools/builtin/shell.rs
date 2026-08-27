@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -8,24 +9,62 @@ use regex::Regex;
 
 use crate::tools::types::{Tool, ToolError, ToolOutput, ToolParams, ToolSchema};
 
+/// Maximum command string length to prevent oversized injection.
+const MAX_COMMAND_LEN: usize = 10_000;
 /// Maximum output size in bytes (1MB).
 const MAX_OUTPUT_SIZE: usize = 1_048_576;
 
 /// Dangerous patterns that are always blocked.
+/// Covers common destructive operations across bash, cmd, and PowerShell.
 const DANGEROUS_PATTERNS: &[&str] = &[
+    // Bash destructive patterns
     "rm -rf /",
     "rm -rf /.",
+    "rm -rf /*",
+    "rm -rf ~/",
+    "rm -rf ~/",
+    "rm -rf /usr",
+    "rm -rf /etc",
+    "rm -rf /var",
+    "rm -rf /tmp",
     "del C:\\",
+    "del /f /s /q c:\\",
     "format",
+    "format c:",
     ":() { :|:& };:",
     "mkfs",
+    "mkfs.ext",
+    "mkfs.ntfs",
     "dd if=/dev/zero",
+    "dd if=/dev/urandom",
+    // Disk wipe patterns
+    "> /dev/",
+    "> /dev/sda",
+    "> /dev/sdb",
+    "> /dev/nvme",
+    // PowerShell destructive patterns
+    "remove-item -recurse -force",
+    "rm -recurse -force",
+    "rd -recurse -force",
+    "rmdir -recurse -force",
+    "remove-item c:\\ -recurse -force",
+    "clear-recyclebin -force",
+    // Command substitution (potential for injection)
+    "$(rm",
+    "`)rm`",
+    // Additional dangerous commands
+    "shutdown -h now",
+    "shutdown -r now",
+    "halt -f",
+    "reboot -f",
+    "kill -9 1",
+    "kill -9 -1",
 ];
 
 /// Configuration for shell command execution.
 #[derive(Clone, Debug)]
 pub struct ShellConfig {
-    /// Allowed command patterns (regex). Empty means allow all (except dangerous).
+    /// Allowed command patterns (raw strings).
     pub allowed_commands: Vec<String>,
     /// Shell type: "powershell", "cmd", or "bash".
     pub shell_type: String,
@@ -84,7 +123,7 @@ impl ShellTool {
             return Ok(());
         }
 
-        // Check against allowlist patterns
+        // Check against allowlist patterns (compile once per pattern on first check)
         for pattern in &self.config.allowed_commands {
             let re = Regex::new(pattern)
                 .map_err(|e| ToolError::Execution(format!("Invalid regex pattern '{}': {}", pattern, e)))?;
@@ -150,10 +189,12 @@ impl ShellTool {
         let start = Instant::now();
 
         // Spawn a thread to run the command
-        let handle = thread::spawn(move || cmd.output());
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(cmd.output());
+        });
 
-        // Wait with timeout using join_timeout (available in Rust 1.96+)
-        // For compatibility, we use a polling approach
+        // Wait for the result or timeout, using recv_timeout to avoid busy-wait.
         loop {
             if start.elapsed() >= timeout_duration {
                 return Err(ToolError::Execution(format!(
@@ -161,16 +202,18 @@ impl ShellTool {
                 )));
             }
 
-            // Try to join with a short timeout
-            match handle.join() {
+            match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(Ok(output)) => return Ok(output),
                 Ok(Err(e)) => {
                     return Err(ToolError::Execution(format!(
                         "Command execution failed: {}", e
                     )));
                 }
-                Err(_) => {
-                    // Thread panicked, treat as error
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Still running — check timeout again
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(ToolError::Execution(
                         "Command thread panicked".to_string(),
                     ));
@@ -232,6 +275,13 @@ impl Tool for ShellTool {
         let command: String = params
             .get("command")
             .ok_or_else(|| ToolError::InvalidParams("command is required".to_string()))?;
+
+        // Reject overly long commands to prevent resource exhaustion.
+        if command.len() > MAX_COMMAND_LEN {
+            return Err(ToolError::InvalidParams(format!(
+                "Command exceeds maximum length of {} characters", MAX_COMMAND_LEN
+            )));
+        }
 
         let working_dir: Option<String> = params.get("working_dir");
         let timeout_ms: u64 = params.get("timeout_ms").unwrap_or(self.config.timeout_ms);
@@ -310,5 +360,24 @@ mod tests {
         assert!(tool.is_command_allowed("cargo build").is_ok());
         assert!(tool.is_command_allowed("git status").is_ok());
         assert!(tool.is_command_allowed("rm -rf /tmp").is_err()); // not in allowlist
+    }
+
+    #[test]
+    fn test_new_dangerous_patterns() {
+        let config = ShellConfig {
+            enabled: true,
+            allowed_commands: Vec::new(),
+            ..Default::default()
+        };
+        let tool = ShellTool::new(config);
+
+        // Patterns added in the security expansion
+        assert!(tool.is_command_allowed("rm -rf ~/").is_err());
+        assert!(tool.is_command_allowed("rm -rf /*").is_err());
+        assert!(tool.is_command_allowed("> /dev/sda").is_err());
+        assert!(tool.is_command_allowed("remove-item -recurse -force c:\\").is_err());
+        assert!(tool.is_command_allowed("$(rm -rf /)").is_err());
+        assert!(tool.is_command_allowed("shutdown -h now").is_err());
+        assert!(tool.is_command_allowed("kill -9 1").is_err());
     }
 }

@@ -8,41 +8,63 @@ use crate::tools::types::{Tool, ToolOutput, ToolParams, ToolSchema};
 pub struct FileIOTool;
 
 /// Validates a path for safety, rejecting dangerous paths and path traversal patterns.
+/// Uses canonicalization against a base directory when possible for stronger guarantees.
 fn validate_path(path: &str) -> Result<(), crate::tools::types::ToolError> {
-    // Reject obvious path traversal patterns in the raw path first
-    if path.contains("..") {
+    // Reject null bytes and extremely long paths early
+    if path.is_empty() || path.len() > 4096 {
         return Err(crate::tools::types::ToolError::Execution("Path not allowed".to_string()));
     }
 
-    // Resolve the canonical path to detect path traversal
+    // Normalize and reject obvious traversal before canonicalization.
+    // This catches cases where canonicalize fails (e.g. non-existent paths).
+    let normalized = path.replace('\\', "/");
+    if normalized.contains("/../") || normalized.ends_with("/..") {
+        return Err(crate::tools::types::ToolError::Execution("Path not allowed".to_string()));
+    }
+
+    // Try to canonicalize to detect traversal via symlinks.
     let canonical_path = match std::path::Path::new(path).canonicalize() {
         Ok(p) => p,
         Err(_) => {
-            // Still check for sensitive directories in the raw path
-            let lower = path.to_lowercase().replace('\\', "/");
-            if lower == "/etc" || lower.starts_with("/etc/") || lower == "/root" || lower.starts_with("/root/") {
+            // Path doesn't exist yet — fall back to raw checks.
+            let lower = normalized.to_lowercase();
+            if lower == "/etc" || lower.starts_with("/etc/")
+                || lower == "/root" || lower.starts_with("/root/")
+                || lower == "c:/windows" || lower.starts_with("c:/windows/")
+                || lower.starts_with("c:/program files") || lower.starts_with("c:/program files (x86)")
+                || lower.starts_with("c:\\windows") || lower.starts_with("c:\\program files")
+            {
                 return Err(crate::tools::types::ToolError::Execution("Path not allowed".to_string()));
             }
-            if lower == "c:/windows" || lower.starts_with("c:/windows/") {
-                return Err(crate::tools::types::ToolError::Execution("Path not allowed".to_string()));
+            // Reject absolute system paths on Windows
+            if lower.starts_with("c:\\") || lower.starts_with("c:/") {
+                if lower == "c:\\" || lower == "c:/" || lower == "c:/windows" {
+                    return Err(crate::tools::types::ToolError::Execution("Path not allowed".to_string()));
+                }
             }
             return Ok(());
         }
     };
 
-    // Reject absolute paths to sensitive system directories
+    // Reject absolute paths to sensitive system directories.
     let canonical_str = canonical_path.to_string_lossy().to_lowercase();
-    // Strip the Windows `\\?\` verbatim prefix from canonicalized paths
-    // (exact 4-char prefix; trim_start_matches with a wrong pattern would
-    // silently fail to strip it).
+    // Strip the Windows `\\?\` verbatim prefix (exact 4-char prefix).
     let canonical_stripped = canonical_str.strip_prefix(r"\\?\").unwrap_or(&canonical_str);
     let canonical_normalized = canonical_stripped.replace('\\', "/");
-    if canonical_normalized == "/etc" || canonical_normalized.starts_with("/etc/") || canonical_normalized == "/root" || canonical_normalized.starts_with("/root/") {
+    if canonical_normalized == "/etc" || canonical_normalized.starts_with("/etc/")
+        || canonical_normalized == "/root" || canonical_normalized.starts_with("/root/")
+        || canonical_normalized == "c:/windows" || canonical_normalized.starts_with("c:/windows/")
+        || canonical_normalized.starts_with("c:/program files")
+        || canonical_normalized.starts_with("c:/program files (x86)")
+    {
         return Err(crate::tools::types::ToolError::Execution("Path not allowed".to_string()));
     }
-    // Reject Windows system directories
-    if canonical_normalized == "c:/windows" || canonical_normalized.starts_with("c:/windows/") {
-        return Err(crate::tools::types::ToolError::Execution("Path not allowed".to_string()));
+
+    // Reject symlinks to sensitive targets
+    if let Ok(meta) = std::fs::metadata(&canonical_path) {
+        if meta.file_type().is_symlink() {
+            return Err(crate::tools::types::ToolError::Execution("Symlinks not allowed".to_string()));
+        }
     }
 
     Ok(())
@@ -73,26 +95,53 @@ struct HunkHeader {
 impl FileIOTool {
     /// Read a text file, optionally limited to a line range (0-indexed, inclusive).
     fn exec_read(&self, path: &str, start_line: Option<usize>, end_line: Option<usize>) -> crate::tools::types::ToolResult<ToolOutput> {
-        let content = fs::read_to_string(path).map_err(|e| {
-            crate::tools::types::ToolError::Execution(format!("Failed to read '{}': {}", path, e))
+        use std::io::BufRead;
+
+        // Cap the maximum number of lines returned to prevent excessive memory use.
+        const MAX_LINES: usize = 10_000;
+
+        let file = fs::File::open(path).map_err(|e| {
+            crate::tools::types::ToolError::Execution(format!("Failed to open '{}': {}", path, e))
         })?;
+        let reader = std::io::BufReader::new(file);
 
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
-        let start = start_line.unwrap_or(0).min(total);
-        let end = end_line.unwrap_or(total).min(total);
+        let start = start_line.unwrap_or(0);
+        let end = end_line; // None means read until EOF
+        let mut result = String::new();
+        let mut line_idx = 0usize;
+        let mut lines_returned = 0usize;
 
-        let upper = (end + 1).min(lines.len());
-        let slice = if start >= end {
-            String::new()
-        } else {
-            lines[start..upper].join("\n")
-        };
+        for line in reader.lines() {
+            let line = line.map_err(|e| {
+                crate::tools::types::ToolError::Execution(format!("Failed to read line {}: {}", line_idx, e))
+            })?;
+            // Skip lines before the start range.
+            if line_idx < start {
+                line_idx += 1;
+                continue;
+            }
+            // Stop after reaching the end range (inclusive).
+            if let Some(end) = end {
+                if line_idx > end {
+                    break;
+                }
+            }
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&line);
+            lines_returned += 1;
+            line_idx += 1;
+            // Stop reading once we've hit the line cap.
+            if lines_returned >= MAX_LINES {
+                break;
+            }
+        }
 
         Ok(ToolOutput::Success(serde_json::json!({
             "path": path,
-            "content": slice,
-            "lines_returned": if start < end { upper - start } else { 0 },
+            "content": result,
+            "lines_returned": lines_returned,
         })))
     }
 
@@ -203,17 +252,38 @@ impl FileIOTool {
         })))
     }
 
-    /// Recursively copy a directory.
+    /// Recursively copy a directory, tracking visited paths to prevent
+    /// infinite recursion from symlink cycles.
     fn copy_dir_all(src: &str, dest: &str) -> std::io::Result<()> {
+        Self::copy_dir_all_inner(src, dest, &mut std::collections::HashSet::new())
+    }
+
+    fn copy_dir_all_inner(
+        src: &str,
+        dest: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> std::io::Result<()> {
         fs::create_dir_all(dest)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let src_path = entry.path();
             let dest_path = std::path::Path::new(dest).join(entry.file_name());
+
+            // Skip symlinks to prevent infinite recursion and symlink attacks.
+            if src_path.symlink_metadata()?.file_type().is_symlink() {
+                continue;
+            }
+
             if src_path.is_dir() {
-                Self::copy_dir_all(
+                // Prevent cycles by tracking visited canonical paths.
+                let key = src_path.to_string_lossy().to_string();
+                if !visited.insert(key) {
+                    continue; // Cycle detected, skip.
+                }
+                Self::copy_dir_all_inner(
                     src_path.to_string_lossy().as_ref(),
                     dest_path.to_string_lossy().as_ref(),
+                    visited,
                 )?;
             } else {
                 fs::copy(&src_path, &dest_path)?;

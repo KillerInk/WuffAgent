@@ -79,7 +79,6 @@ pub fn strip_think_tags(text: &str) -> String {
                     None => {
                         // Unclosed tag: keep the remainder as-is
                         out.push_str(&rest[o..]);
-                        rest = "";
                         break;
                     }
                 }
@@ -94,7 +93,15 @@ pub fn strip_think_tags(text: &str) -> String {
 }
 
 impl ChatClient {
+    /// Default HTTP timeout of 5 minutes.
+    const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
     pub fn new(base_url: &str) -> Self {
+        Self::new_with_timeout(base_url, Self::DEFAULT_TIMEOUT_SECS)
+    }
+
+    /// Create a ChatClient with a custom HTTP timeout (in seconds).
+    pub fn new_with_timeout(base_url: &str, timeout_secs: u64) -> Self {
         Self {
             base_url: base_url.to_string(),
             system_prompt: String::new(),
@@ -102,7 +109,9 @@ impl ChatClient {
             conversation: Arc::new(Mutex::new(Vec::new())),
             http_client: {
                 let builder = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(300));
+                    .timeout(std::time::Duration::from_secs(timeout_secs))
+                    .pool_max_idle_per_host(10)
+                    .pool_idle_timeout(Some(std::time::Duration::from_secs(90)));
                 builder.build().unwrap()
             },
             api_key: None,
@@ -515,12 +524,18 @@ impl ChatClient {
         tools: Option<&[crate::tools::ToolDefinition]>,
         mut callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
     ) -> Result<Option<Usage>, Error> {
-        // Clone the data we need before calling the async method
-        let http_client = client.lock().unwrap().http_client.clone();
-        let base_url = client.lock().unwrap().base_url.clone();
-        let api_key = client.lock().unwrap().api_key.clone();
-        let conversation = client.lock().unwrap().conversation.clone();
-        let system_prompt = client.lock().unwrap().system_prompt.clone();
+        // Clone the data we need before calling the async method.
+        // Acquire the lock once to minimize contention.
+        let (http_client, base_url, api_key, conversation, system_prompt) = {
+            let c = client.lock().map_err(|e| Error::Stream(format!("mutex poisoned: {}", e)))?;
+            (
+                c.http_client.clone(),
+                c.base_url.clone(),
+                c.api_key.clone(),
+                c.conversation.clone(),
+                c.system_prompt.clone(),
+            )
+        };
 
         // Build the request with the cloned data
         let mut messages = Vec::new();
@@ -558,7 +573,10 @@ impl ChatClient {
             messages,
             stream: true,
             tools: tools.map(|t| t.to_vec()),
-            reasoning_effort: client.lock().unwrap().reasoning_effort.as_wire_value().map(|s| s.to_string()),
+            reasoning_effort: {
+                let c = client.lock().map_err(|e| Error::Stream(format!("mutex poisoned: {}", e)))?;
+                c.reasoning_effort.as_wire_value().map(|s| s.to_string())
+            },
             stream_options: Some(http::StreamOptions { include_usage: true }),
         };
         let body = serde_json::to_string(&request)?;
@@ -765,8 +783,12 @@ impl ChatClient {
                 tc.function.arguments
             );
 
-            // Send start event
-            if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
+            // Send start event — acquire once instead of double-locking
+            let event_tx = match client.lock() {
+                Ok(c) => c.tool_event_tx.lock().ok().and_then(|t| t.as_ref().cloned()),
+                Err(_) => None,
+            };
+            if let Some(tx) = event_tx {
                 let _ = tx.send(crate::types::AppEvent::ToolCallStart {
                     tool_name: tc.function.name.clone(),
                     call_id: tc.id.clone(),
@@ -934,6 +956,7 @@ mod tests {
             false,
             None,
             client.reasoning_effort(),
+            4096,
         );
         assert!(request.reasoning_effort.is_none());
         let json = serde_json::to_string(&request).unwrap();
@@ -948,6 +971,7 @@ mod tests {
             false,
             None,
             client.reasoning_effort(),
+            4096,
         );
         assert_eq!(request.reasoning_effort.as_deref(), Some("xhigh"));
         let json = serde_json::to_string(&request).unwrap();
@@ -964,6 +988,7 @@ mod tests {
             false,
             None,
             crate::types::ReasoningEffort::default(),
+            4096,
         );
         assert_eq!(request.model, "local");
         assert!(!request.stream);
@@ -983,6 +1008,7 @@ mod tests {
             false,
             None,
             crate::types::ReasoningEffort::default(),
+            4096,
         );
         assert_eq!(request.model, "local");
         assert_eq!(request.messages.len(), 2);
@@ -1002,6 +1028,7 @@ mod tests {
             true,
             None,
             crate::types::ReasoningEffort::default(),
+            4096,
         );
         assert!(request.stream);
         assert_eq!(request.messages.len(), 1);
@@ -1031,6 +1058,7 @@ mod tests {
             false,
             Some(&tools),
             crate::types::ReasoningEffort::default(),
+            4096,
         );
         assert!(request.tools.is_some());
         assert_eq!(request.tools.as_ref().unwrap().len(), 1);
@@ -1051,6 +1079,7 @@ mod tests {
             false,
             None,
             crate::types::ReasoningEffort::default(),
+            4096,
         );
         assert_eq!(request.messages.len(), 3);
         assert_eq!(request.messages[0].role, "user");
@@ -1076,6 +1105,7 @@ mod tests {
             false,
             None,
             crate::types::ReasoningEffort::default(),
+            4096,
         );
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].role, "user");

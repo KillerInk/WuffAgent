@@ -31,7 +31,7 @@ pub fn classify_content(content: &str) -> ContentType {
         return ContentType::FreeText;
     }
 
-    let lower = content.to_lowercase();
+    let _lower = content.to_lowercase();
 
     // Tool errors: check first so we don't misclassify error output.
     if is_tool_error(content) {
@@ -98,7 +98,13 @@ fn is_build_log(content: &str) -> bool {
 /// Check if content is a JSON tool result wrapper.
 fn is_json_wrapper(content: &str) -> bool {
     let trimmed = content.trim();
+    // Quick pre-check: skip if not clearly JSON-shaped
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return false;
+    }
+    // Skip obviously non-JSON content (too short, contains newlines suggesting pretty-printed
+    // large payloads, or clearly not a small wrapper object)
+    if trimmed.len() > 4096 {
         return false;
     }
 

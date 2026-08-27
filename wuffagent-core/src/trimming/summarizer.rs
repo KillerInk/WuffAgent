@@ -18,7 +18,7 @@ pub trait ContentSummarizer: Send + Sync {
 pub struct BuildLogSummarizer;
 
 impl ContentSummarizer for BuildLogSummarizer {
-    fn summarize(&self, content: &str, budget_chars: usize, config: &TrimConfig) -> String {
+    fn summarize(&self, content: &str, _budget_chars: usize, config: &TrimConfig) -> String {
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
         let max_lines = config.log_max_lines;
@@ -45,7 +45,7 @@ impl ContentSummarizer for BuildLogSummarizer {
 pub struct CodeSummarizer;
 
 impl ContentSummarizer for CodeSummarizer {
-    fn summarize(&self, content: &str, budget_chars: usize, config: &TrimConfig) -> String {
+    fn summarize(&self, content: &str, _budget_chars: usize, config: &TrimConfig) -> String {
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
         let max_lines = config.code_max_lines;
@@ -81,8 +81,20 @@ impl ContentSummarizer for ListSummarizer {
             return content.to_string();
         }
 
-        let keep_front = 20.min(max_items.saturating_sub(5));
-        let keep_back = 5;
+        // Budget-aware: estimate per-line cost and cap total items to fit budget.
+        // Typical line: ~20-40 chars + newline. Reserve ~40 chars for the omitted line.
+        let sample_lines: Vec<usize> = items.iter().take(5).map(|l| l.len()).collect();
+        let avg_line_len = if sample_lines.is_empty() { 30 } else {
+            sample_lines.iter().sum::<usize>() / sample_lines.len()
+        };
+        let line_cost = avg_line_len + 1; // +1 for newline
+        let reserved_for_omit = 50usize; // room for "... N items omitted ..."
+        let available = budget_chars.saturating_sub(reserved_for_omit);
+        let budget_items = (available / line_cost).max(3);
+
+        let max_keep = budget_items.min(max_items);
+        let keep_front = (max_keep / 2).max(2);
+        let keep_back = max_keep - keep_front;
 
         let mut result: Vec<String> = Vec::new();
         result.extend(items.iter().copied().map(|s| s.to_string()).take(keep_front));
@@ -150,7 +162,7 @@ impl ContentSummarizer for SearchResultsSummarizer {
 pub struct ErrorSummarizer;
 
 impl ContentSummarizer for ErrorSummarizer {
-    fn summarize(&self, content: &str, budget_chars: usize, config: &TrimConfig) -> String {
+    fn summarize(&self, content: &str, budget_chars: usize, _config: &TrimConfig) -> String {
         let lines: Vec<&str> = content.lines().collect();
         if lines.is_empty() {
             return String::new();
