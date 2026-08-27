@@ -281,6 +281,7 @@ impl AgentManager {
                             agents_dir: self.agents_dir.clone(),
                             custom_prompts: HashMap::new(),
                             reasoning_effort: legacy.reasoning_effort,
+                            trim_config: crate::trimming::config::TrimConfig::default(),
                         };
                         if seen.insert(config.name.clone(), ()).is_none() {
                             tracing::info!(
@@ -690,6 +691,9 @@ pub struct AgentConfig {
     /// Reasoning effort for this agent (Off = inherit the global toggle).
     #[serde(default)]
     pub reasoning_effort: crate::types::ReasoningEffort,
+    /// Configuration for intelligent context trimming.
+    #[serde(default)]
+    pub trim_config: crate::trimming::config::TrimConfig,
 }
 
 fn default_enabled_agent() -> bool { true }
@@ -727,6 +731,7 @@ impl Default for AgentConfig {
             agents_dir: default_agents_dir(),
             custom_prompts: HashMap::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
+            trim_config: crate::trimming::config::TrimConfig::default(),
         }
     }
 }
@@ -839,6 +844,7 @@ impl AgentConfig {
                             agents_dir: self.agents_dir.clone(),
                             custom_prompts: HashMap::new(),
                             reasoning_effort: legacy.reasoning_effort,
+                            trim_config: crate::trimming::config::TrimConfig::default(),
                         };
                         agents.push(config);
                     } else {

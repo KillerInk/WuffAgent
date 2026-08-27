@@ -6,3 +6,4 @@ pub mod sessions;
 pub mod tools;
 pub mod agents;
 pub mod memory;
+pub mod trimming;

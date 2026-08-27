@@ -199,6 +199,12 @@ impl ChatClient {
         session::trim_conversation(&self.conversation, max_messages);
     }
 
+    /// Trim the client's conversation to the given token budget.
+    /// Returns the number of messages removed.
+    pub fn trim_to_token_budget(&self, target_tokens: usize) -> usize {
+        session::trim_to_token_budget(&self.conversation, target_tokens)
+    }
+
     pub fn set_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {
         self.session_id = session_id;
         self.session_dir = session_dir;

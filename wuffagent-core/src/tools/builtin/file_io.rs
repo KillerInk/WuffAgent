@@ -182,6 +182,7 @@ impl FileIOTool {
 
     /// Copy a file or directory (recursively).
     fn exec_copy(&self, src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+        validate_path(src)?;
         validate_path(dest)?;
         let metadata = fs::metadata(src).map_err(|e| {
             crate::tools::types::ToolError::Execution(format!("Source '{}' not found: {}", src, e))
@@ -223,6 +224,7 @@ impl FileIOTool {
 
     /// Move/rename a file or directory.
     fn exec_move(&self, src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+        validate_path(src)?;
         validate_path(dest)?;
         // Fallback: copy + delete for cross-device moves
         if fs::metadata(src).is_err() {

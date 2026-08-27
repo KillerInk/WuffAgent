@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
@@ -267,6 +266,25 @@ impl Agent {
                 ));
             }
 
+            // ── Token-budget trim before each LLM call ──────────────────
+            // The agent keeps its own message history (not the client's),
+            // so we must trim it manually. Without this, a single large
+            // tool result (100k+ tokens) can exceed n_ctx and the server
+            // rejects the request.
+            if self.client.n_ctx() > 0 {
+                let target_tokens = (self.client.n_ctx() as usize) * 9 / 10;
+                let msg_count = messages.len();
+                if msg_count > 4 {
+                    let removed = self.client.trim_to_token_budget(target_tokens);
+                    if removed > 0 {
+                        tracing::info!(
+                            "[AGENT] Agent '{}' trimmed {} messages (n_ctx={}, target={})",
+                            self.config.name, removed, self.client.n_ctx(), target_tokens
+                        );
+                    }
+                }
+            }
+
             // ── LLM call (streaming with native tools) ──────────────────
             // The callback must be 'static, so it captures cloned Arcs rather
             // than `self`.
@@ -368,6 +386,8 @@ impl Agent {
                                 format!("Error: {}", e)
                             }
                         };
+                        // Apply inline summarization if configured
+                        let result_str = self.summarize_result(&result_str);
                         self.send_event(crate::types::AppEvent::ToolCallComplete {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
@@ -425,6 +445,8 @@ impl Agent {
                             Ok(output) => format!("{}", output),
                             Err(e) => format!("Error: {}", e),
                         };
+                        // Apply inline summarization if configured
+                        let result_str = self.summarize_result(&result_str);
                         self.send_event(crate::types::AppEvent::ToolCallComplete {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
@@ -510,6 +532,19 @@ impl Agent {
         }
     }
 
+    /// Summarize a tool result if it exceeds the inline threshold.
+    fn summarize_result(&self, result: &str) -> String {
+        let trim_config = self.config.trim_config.clone();
+        if trim_config.inline_threshold_chars > 0
+            && result.len() > trim_config.inline_threshold_chars
+        {
+            crate::trimming::ContextTrimming::new()
+                .summarize_tool_result(result, &trim_config)
+        } else {
+            result.to_string()
+        }
+    }
+
     /// Extract the original user request from the message history.
     fn extract_original_request(&self, messages: &[Message]) -> String {
         messages
@@ -548,7 +583,7 @@ impl Agent {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
-            reasoning_content: None,
+                reasoning_content: None,
             },
             Message {
                 role: "user".to_string(),
@@ -559,7 +594,7 @@ impl Agent {
                 timestamp: String::new(),
                 tool_calls: None,
                 tool_call_id: None,
-            reasoning_content: None,
+                reasoning_content: None,
             },
         ];
 

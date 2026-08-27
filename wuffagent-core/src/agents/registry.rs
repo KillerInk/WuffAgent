@@ -131,6 +131,7 @@ impl AgentRegistry {
             agents_dir: PathBuf::from(""),
             custom_prompts: HashMap::new(),
             reasoning_effort: legacy.reasoning_effort,
+            trim_config: crate::trimming::config::TrimConfig::default(),
         };
 
         Self::validate_config(global_registry, &config)?;

@@ -129,43 +129,57 @@ impl WebSearchTool {
     fn fetch_ddg(&self, query: &str) -> Result<String, crate::tools::types::ToolError> {
         let warmup_url = "https://duckduckgo.com/";
 
+        // Use try_current() to avoid panicking when called from a blocking thread
+        // (e.g. inside tokio::task::spawn_blocking from ToolManager::execute).
+        macro_rules! block_on {
+            ($expr:expr) => {{
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => handle.block_on($expr),
+                    Err(_) => {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to create runtime: {}", e)))?;
+                        rt.block_on($expr)
+                    }
+                }
+            }};
+        }
+
         // Step 1: Warm up session by visiting the homepage
-        let _warmup = tokio::runtime::Handle::current()
-            .block_on(async {
-                self.http_client
-                    .get(warmup_url)
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                    .header("Accept", "text/html")
-                    .header("Accept-Language", "en-US,en;q=0.9,de;q=0.8")
-                    .header("Accept-Encoding", "gzip, deflate, br")
-                    .header("Connection", "keep-alive")
-                    .send()
-                    .await
-            })
-            .ok();
+        let _warmup = block_on!(async {
+            self.http_client
+                .get(warmup_url)
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .header("Accept", "text/html")
+                .header("Accept-Language", "en-US,en;q=0.9,de;q=0.8")
+                .header("Accept-Encoding", "gzip, deflate, br")
+                .header("Connection", "keep-alive")
+                .send()
+                .await
+        });
 
         // Small delay to simulate human behavior
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         // Step 2: Perform the search
-        let html = tokio::runtime::Handle::current()
-            .block_on(async {
-                self.http_client
-                    .get("https://html.duckduckgo.com/html/")
-                    .query(&[("q", query)])
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64")
-                    .header("Accept", "text/html")
-                    .header("Accept-Language", "en-US,en;q=0.9,de;q=0.8")
-                    .header("Accept-Encoding", "identity")
-                    .header("Connection", "keep-alive")
-                    .header("Upgrade-Insecure-Requests", "1")
-                    .send()
-                    .await
-                    .map_err(|e| crate::tools::types::ToolError::Execution(format!("DDG HTTP request failed: {}", e)))?
-                    .text()
-                    .await
-                    .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read DDG response: {}", e)))
-            })?;
+        let html = block_on!(async {
+            self.http_client
+                .get("https://html.duckduckgo.com/html/")
+                .query(&[("q", query)])
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64")
+                .header("Accept", "text/html")
+                .header("Accept-Language", "en-US,en;q=0.9,de;q=0.8")
+                .header("Accept-Encoding", "identity")
+                .header("Connection", "keep-alive")
+                .header("Upgrade-Insecure-Requests", "1")
+                .send()
+                .await
+                .map_err(|e| crate::tools::types::ToolError::Execution(format!("DDG HTTP request failed: {}", e)))?
+                .text()
+                .await
+                .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read DDG response: {}", e)))
+        })?;
 
         // Check if we got a bot challenge page instead of results
         if html.contains("anomaly-modal") || html.contains("Unfortunately, bots use DuckDuckGo") {
@@ -185,16 +199,30 @@ impl WebSearchTool {
         query: &str,
         max_results: usize,
     ) -> Result<Vec<serde_json::Value>, crate::tools::types::ToolError> {
-        let resp = tokio::runtime::Handle::current()
-            .block_on(async {
-                self.http_client
-                    .get(format!("{}/search", base_url.trim_end_matches('/')))
-                    .query(&[("q", query), ("format", "json")])
-                    .header("User-Agent", "WuffAgent/1.0")
-                    .send()
-                    .await
-                    .map_err(|e| crate::tools::types::ToolError::Execution(format!("SearXNG HTTP request failed: {}", e)))
-            })?;
+        macro_rules! block_on {
+            ($expr:expr) => {{
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => handle.block_on($expr),
+                    Err(_) => {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to create runtime: {}", e)))?;
+                        rt.block_on($expr)
+                    }
+                }
+            }};
+        }
+
+        let resp = block_on!(async {
+            self.http_client
+                .get(format!("{}/search", base_url.trim_end_matches('/')))
+                .query(&[("q", query), ("format", "json")])
+                .header("User-Agent", "WuffAgent/1.0")
+                .send()
+                .await
+                .map_err(|e| crate::tools::types::ToolError::Execution(format!("SearXNG HTTP request failed: {}", e)))
+        })?;
 
         if !resp.status().is_success() {
             return Err(crate::tools::types::ToolError::Execution(
@@ -202,14 +230,13 @@ impl WebSearchTool {
             ));
         }
 
-        let body: serde_json::Value = tokio::runtime::Handle::current()
-            .block_on(async {
-                resp.text()
-                    .await
-                    .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read SearXNG response: {}", e)))
-            })?
-            .parse()
-            .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to parse SearXNG JSON: {}", e)))?;
+        let body: serde_json::Value = block_on!(async {
+            resp.text()
+                .await
+                .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read SearXNG response: {}", e)))
+        })?
+        .parse()
+        .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to parse SearXNG JSON: {}", e)))?;
 
         let results = body
             .get("results")
@@ -236,22 +263,36 @@ impl WebSearchTool {
         query: &str,
         max_results: usize,
     ) -> Result<Vec<serde_json::Value>, crate::tools::types::ToolError> {
-        let body = tokio::runtime::Handle::current()
-            .block_on(async {
-                self.http_client
-                    .get("https://api.search.brave.com/res/v1/web/search")
-                    .query(&[("q", query), ("count", &max_results.to_string())])
-                    .header("User-Agent", "WuffAgent/1.0")
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .header("Accept", "application/json")
-                    .header("Accept-Encoding", "identity")
-                    .send()
-                    .await
-                    .map_err(|e| crate::tools::types::ToolError::Execution(format!("Brave HTTP request failed: {}", e)))?
-                    .text()
-                    .await
-                    .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read Brave response: {}", e)))
-            })?;
+        macro_rules! block_on {
+            ($expr:expr) => {{
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => handle.block_on($expr),
+                    Err(_) => {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to create runtime: {}", e)))?;
+                        rt.block_on($expr)
+                    }
+                }
+            }};
+        }
+
+        let body = block_on!(async {
+            self.http_client
+                .get("https://api.search.brave.com/res/v1/web/search")
+                .query(&[("q", query), ("count", &max_results.to_string())])
+                .header("User-Agent", "WuffAgent/1.0")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Accept", "application/json")
+                .header("Accept-Encoding", "identity")
+                .send()
+                .await
+                .map_err(|e| crate::tools::types::ToolError::Execution(format!("Brave HTTP request failed: {}", e)))?
+                .text()
+                .await
+                .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read Brave response: {}", e)))
+        })?;
 
         let resp: serde_json::Value = body
             .parse()
