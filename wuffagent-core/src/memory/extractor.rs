@@ -26,11 +26,7 @@ pub async fn extract_memories(
     };
 
     // Take last N messages for context
-    let recent: Vec<String> = messages.iter()
-        .rev()
-        .take(30)
-        .map(|m| format!("[{}] {}", m.role, m.content))
-        .collect();
+    let recent = recent_messages(messages);
 
     if recent.is_empty() {
         return Ok(Vec::new());
@@ -98,12 +94,17 @@ pub async fn extract_memories(
 
 /// Build an extraction prompt from messages (public API).
 pub fn build_extraction_prompt(project: &str, messages: &[super::super::types::Message]) -> String {
-    let recent: Vec<String> = messages.iter()
+    let recent = recent_messages(messages);
+    build_extraction_prompt_from_conversation(project, &recent.join("\n"))
+}
+
+/// Helper to extract the last N recent messages as formatted strings.
+fn recent_messages(messages: &[super::super::types::Message]) -> Vec<String> {
+    messages.iter()
         .rev()
         .take(30)
         .map(|m| format!("[{}] {}", m.role, m.content))
-        .collect();
-    build_extraction_prompt_from_conversation(project, &recent.join("\n"))
+        .collect()
 }
 
 /// Internal helper used by `extract_memories` to build the prompt from a pre-joined conversation string.

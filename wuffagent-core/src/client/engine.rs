@@ -132,6 +132,10 @@ async fn run_chat_loop(
     prompt: &str,
     initial_tools: Option<&[crate::tools::ToolDefinition]>,
 ) -> Result<(), EngineError> {
+    const CONTEXT_TARGET_RATIO: f32 = 0.8;
+    const MIN_MESSAGES_FOR_TRIM: usize = 4;
+    const MAX_THINKING_ROUNDS: usize = 3;
+
     let mut current_prompt = prompt.to_string();
     let tools = initial_tools.map(|t| t.to_vec());
     let mut round = 0;
@@ -152,8 +156,8 @@ async fn run_chat_loop(
             if n_ctx > 0 {
                 // Use 80% of n_ctx as target to leave headroom for the
                 // ~10-15% underestimation inherent in the char-count heuristic.
-                let target_tokens = (n_ctx as usize) * 8 / 10;
-                if guard.conversation().lock().unwrap().len() > 4 {
+                let target_tokens = (n_ctx as usize) * CONTEXT_TARGET_RATIO as usize;
+                if guard.conversation().lock().unwrap().len() > MIN_MESSAGES_FOR_TRIM {
                     trim_to_token_budget(&guard.conversation, target_tokens);
                 }
             }
@@ -187,7 +191,7 @@ async fn run_chat_loop(
                 );
                 thinking_rounds += 1;
                 // Allow a few thinking-only rounds before giving up
-                if thinking_rounds >= 3 {
+                if thinking_rounds >= MAX_THINKING_ROUNDS {
                     tracing::warn!(
                         "run_chat_loop round={} max thinking rounds ({}) reached, stopping",
                         round,
@@ -247,6 +251,9 @@ async fn run_chat_loop(
             let result = crate::client::ChatClient::execute_pending_tool_calls_arc(&client_clone, &tm).await;
             result?;
         }
+
+        // Reset thinking_rounds counter since tool calls were executed
+        thinking_rounds = 0;
 
         // 4. Execute succeeded — continue loop to send tool results back to LLM.
         // The LLM will see the tool results and decide next steps (more tool calls
@@ -338,8 +345,14 @@ async fn stream_request(
 
                 if chars.peek() == Some(&'/') {
                     // Possible closing tag: </think> (7 chars after '<')
-                    let peeked: String = chars.by_ref().take(7).collect();
-                    if peeked == "/think>" {
+                    let mut peek_buf = ['\0'; 7];
+                    let peek_len = chars.by_ref().take(7).fold(0, |i, c| {
+                        if i < 7 { peek_buf[i] = c; i + 1 } else { i }
+                    });
+                    let peeked_str = std::str::from_utf8(
+                        unsafe { std::slice::from_raw_parts(peek_buf.as_ptr() as *const u8, peek_len) }
+                    ).unwrap_or("");
+                    if peeked_str == "/think>" {
                         if in_think {
                             emit_seg(&seg, true, &streamed_content_clone, &thinking_content_clone, &event_tx_clone);
                             seg.clear();
@@ -351,16 +364,22 @@ async fn stream_request(
                         } else {
                             // Literal </think> outside think mode — pass through
                             buf.push('<');
-                            buf.push_str(&peeked);
+                            buf.push_str(peeked_str);
                         }
                     } else {
                         buf.push('<');
-                        buf.push_str(&peeked);
+                        buf.push_str(peeked_str);
                     }
                 } else {
                     // Possible opening tag: <think> (6 chars after '<')
-                    let peeked: String = chars.by_ref().take(6).collect();
-                    if peeked == "think>" {
+                    let mut peek_buf = ['\0'; 6];
+                    let peek_len = chars.by_ref().take(6).fold(0, |i, c| {
+                        if i < 6 { peek_buf[i] = c; i + 1 } else { i }
+                    });
+                    let peeked_str = std::str::from_utf8(
+                        unsafe { std::slice::from_raw_parts(peek_buf.as_ptr() as *const u8, peek_len) }
+                    ).unwrap_or("");
+                    if peeked_str == "think>" {
                         if !in_think {
                             emit_seg(&seg, false, &streamed_content_clone, &thinking_content_clone, &event_tx_clone);
                             seg.clear();
@@ -369,11 +388,11 @@ async fn stream_request(
                         } else {
                             // Literal <think> while already thinking — pass through
                             buf.push('<');
-                            buf.push_str(&peeked);
+                            buf.push_str(peeked_str);
                         }
                     } else {
                         buf.push('<');
-                        buf.push_str(&peeked);
+                        buf.push_str(peeked_str);
                     }
                 }
             } else {

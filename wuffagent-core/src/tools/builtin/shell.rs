@@ -91,12 +91,19 @@ impl Default for ShellConfig {
 /// A tool that executes shell commands with safety controls.
 pub struct ShellTool {
     config: Arc<ShellConfig>,
+    compiled_regexes: Vec<Regex>,
 }
 
 impl ShellTool {
     pub fn new(config: ShellConfig) -> Self {
+        let compiled_regexes: Vec<Regex> = config
+            .allowed_commands
+            .iter()
+            .filter_map(|p| Regex::new(p).ok())
+            .collect();
         Self {
             config: Arc::new(config),
+            compiled_regexes,
         }
     }
 
@@ -111,7 +118,7 @@ impl ShellTool {
         // Check dangerous patterns first
         let lower_cmd = command.to_lowercase();
         for dangerous in DANGEROUS_PATTERNS {
-            if lower_cmd.contains(dangerous.to_lowercase().as_str()) {
+            if lower_cmd.contains(dangerous) {
                 return Err(ToolError::Execution(format!(
                     "Dangerous command pattern detected: {}", dangerous
                 )));
@@ -123,10 +130,8 @@ impl ShellTool {
             return Ok(());
         }
 
-        // Check against allowlist patterns (compile once per pattern on first check)
-        for pattern in &self.config.allowed_commands {
-            let re = Regex::new(pattern)
-                .map_err(|e| ToolError::Execution(format!("Invalid regex pattern '{}': {}", pattern, e)))?;
+        // Check against pre-compiled allowlist patterns
+        for re in &self.compiled_regexes {
             if re.is_match(command) {
                 return Ok(());
             }

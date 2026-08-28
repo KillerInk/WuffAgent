@@ -206,12 +206,10 @@ impl AgentRegistry {
         }
         let lower = requested.to_lowercase();
         for name in self.agents.keys() {
-            if name.to_lowercase() == lower {
+            let name_lower = name.to_lowercase();
+            if name_lower == lower {
                 return name.clone();
             }
-        }
-        for name in self.agents.keys() {
-            let name_lower = name.to_lowercase();
             if name_lower.contains(&lower) || lower.contains(&name_lower) {
                 return name.clone();
             }

@@ -19,6 +19,19 @@ const LLM_RATE_LIMIT_DELAY: Duration = Duration::from_millis(500);
 /// Maximum verification attempts before giving up.
 const MAX_VERIFICATION_ATTEMPTS: u32 = 2;
 
+/// Minimum number of messages required before trimming is attempted.
+#[allow(dead_code)]
+const MIN_MESSAGES_FOR_TRIM: usize = 4;
+
+/// Maximum characters of tool output to include in summary.
+const TOOL_OUTPUT_SUMMARY_CHARS: usize = 200;
+
+/// Maximum characters of user request for verification prompts.
+const REQUEST_TRUNCATION_CHARS: usize = 500;
+
+/// Timeout in seconds for verification LLM calls.
+const VERIFICATION_TIMEOUT_SECS: u64 = 60;
+
 /// System prompt for tool-output verification.
 static VERIFICATION_SYSTEM_PROMPT: &str =
     "You are verifying whether tool outputs answer the user's request. \
@@ -286,7 +299,6 @@ impl Agent {
 
         // Note: system prompt caching would require &'mut self, which conflicts
         // with the LLM loop. The prompt is cheap to rebuild (~100ns).
-        let _ = &self.memory;
         prompt
     }
 
@@ -682,7 +694,7 @@ impl Agent {
 
         let recent_tool_summary: String = tool_outputs
             .iter()
-            .map(|o| o.chars().take(200).collect::<String>())
+            .map(|o| o.chars().take(TOOL_OUTPUT_SUMMARY_CHARS).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -700,8 +712,9 @@ impl Agent {
                 // Truncate the original request to avoid prompt injection
                 // via oversized or adversarially crafted messages.
                 content: format!(
-                    "User request (truncated to 500 chars):\n{}\n\nRecent tool outputs:\n{}\n\nIs the request satisfied?",
-                    &original_request.chars().take(500).collect::<String>(),
+                    "User request (truncated to {} chars):\n{}\n\nRecent tool outputs:\n{}\n\nIs the request satisfied?",
+                    REQUEST_TRUNCATION_CHARS,
+                    &original_request.chars().take(REQUEST_TRUNCATION_CHARS).collect::<String>(),
                     recent_tool_summary
                 ),
                 timestamp: crate::types::format_timestamp(),
@@ -717,7 +730,7 @@ impl Agent {
         }
 
         let response = match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(VERIFICATION_TIMEOUT_SECS),
             async {
                 // Propagate cancellation during the LLM call.
                 let cancel_clone = cancel_token.clone();

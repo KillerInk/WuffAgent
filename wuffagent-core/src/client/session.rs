@@ -59,7 +59,7 @@ pub fn save_session(
         match save_result {
             Ok(()) => {
                 // Success: clear any pending queue and failure flag
-                clear_save_queue(save_queue, save_failed);
+                clear_save_queue(save_queue);
                 return Ok(());
             }
             Err(e) if retries < 3 => {
@@ -169,9 +169,7 @@ pub fn clear_save_failure(save_failed: &Arc<Mutex<bool>>) {
 }
 
 /// Clear the internal retry queue without attempting a save.
-/// Clear the internal retry queue without attempting a save.
-pub fn clear_save_queue(save_queue: &Arc<Mutex<VecDeque<()>>>, save_failed: &Arc<Mutex<bool>>) {
-    let _ = save_failed; // keep the parameter for API compatibility
+pub fn clear_save_queue(save_queue: &Arc<Mutex<VecDeque<()>>>) {
     if let Ok(mut queue) = save_queue.lock() {
         queue.clear();
     }

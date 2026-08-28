@@ -11,7 +11,6 @@ pub struct ToolEntry {
     pub metadata: ToolMetadata,
     pub loaded_at: Instant,
 }
-
 impl Clone for ToolEntry {
     fn clone(&self) -> Self {
         Self {

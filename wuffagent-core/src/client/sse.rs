@@ -103,8 +103,7 @@ pub async fn process_sse_line(
                 // Extract id (may be null/missing in delta chunks after the first)
                 let id = tc_chunk
                     .get("id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                    .and_then(|v| v.as_str());
                 // Extract index (used when id is not present)
                 let index = tc_chunk.get("index").and_then(|v| v.as_u64());
                 let func = tc_chunk.get("function");
@@ -113,13 +112,11 @@ pub async fn process_sse_line(
                     let name = func
                         .get("name")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                        .unwrap_or("");
                     let args = func
                         .get("arguments")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                        .unwrap_or("");
 
                     // Accumulate partial args from streaming
                     let mut conv = conversation.lock().unwrap();
@@ -138,19 +135,19 @@ pub async fn process_sse_line(
 
                         if let Some(tc) = found {
                             // Accumulate args into existing tool call
-                            tc.function.arguments.push_str(&args);
+                            tc.function.arguments.push_str(args);
                         } else if let Some(idx) = index {
                             // Find by index when id is not present
                             if let Some(tc) = tcs.get_mut(idx as usize) {
-                                tc.function.arguments.push_str(&args);
-                            } else if let Some(ref id) = id {
+                                tc.function.arguments.push_str(args);
+                            } else if let Some(id) = id {
                                 // Index doesn't exist yet but we have an id - create new tool call
                                 tcs.push(crate::types::ToolCall {
                                     id: id.to_string(),
                                     call_type: "function".to_string(),
                                     function: crate::types::ToolFunction {
-                                        name,
-                                        arguments: args.clone(),
+                                        name: name.to_string(),
+                                        arguments: args.to_string(),
                                     },
                                 });
                             } else {
@@ -159,14 +156,14 @@ pub async fn process_sse_line(
                                     idx, tcs.len()
                                 );
                             }
-                        } else if let Some(ref id) = id {
+                        } else if let Some(id) = id {
                             // Create new tool call
                             tcs.push(crate::types::ToolCall {
                                 id: id.to_string(),
                                 call_type: "function".to_string(),
                                 function: crate::types::ToolFunction {
-                                    name,
-                                    arguments: args.clone(),
+                                    name: name.to_string(),
+                                    arguments: args.to_string(),
                                 },
                             });
                         } else {
@@ -214,12 +211,12 @@ pub async fn stream_message(
 
                     // Process complete lines
                     while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].to_string();
-                        buffer.drain(..newline_pos + 1);
-
+                        let line = buffer.split_off(newline_pos);
+                        buffer.pop(); // remove trailing '\n'
                         if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
                             last_usage = Some(usage);
                         }
+                        buffer = line;
                     }
                 }
                 Ok::<_, Error>(last_usage)
@@ -235,12 +232,12 @@ pub async fn stream_message(
 
             // Process complete lines
             while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].to_string();
-                buffer.drain(..newline_pos + 1);
-
+                let line = buffer.split_off(newline_pos);
+                buffer.pop(); // remove trailing '\n'
                 if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
                     last_usage = Some(usage);
                 }
+                buffer = line;
             }
         }
     }

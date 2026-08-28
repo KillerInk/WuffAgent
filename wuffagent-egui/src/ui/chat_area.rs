@@ -20,7 +20,9 @@ impl ChatApp {
         }
 
         // Move messages out so the scroll closure borrows only the local,
-        // not `self.chat` (avoids the per-frame deep clone of every message).
+        // not `self.chat`. This avoids the per-frame deep clone of every message.
+        // Note: ChatMessage fields are Arc-based (role, content, tool_calls), so
+        // iter() does not clone the underlying strings — only the small wrapper.
         let messages = std::mem::take(&mut self.chat.messages);
 
         // Stick to bottom when the user is already there or forced the button.

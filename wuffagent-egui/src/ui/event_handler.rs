@@ -51,7 +51,7 @@ impl ChatApp {
                 }
                 // Persist the session after each complete response
                 if let Err(e) = self.save_session() {
-                    eprintln!("Failed to save session: {}", e);
+                    tracing::warn!("Failed to save session: {}", e);
                 }
             }
             AppEvent::StreamError { error } => {

@@ -6,6 +6,21 @@
 use super::classifier::{classify_content, ContentType};
 use super::config::TrimConfig;
 
+/// Minimum lines to keep from build logs when summarizing.
+const BUILD_LOG_MIN_KEEP: usize = 3;
+
+/// Minimum lines to keep from source code when summarizing.
+const CODE_MIN_KEEP: usize = 5;
+
+/// Default estimated average line length in characters.
+const DEFAULT_AVG_LINE_LEN: usize = 30;
+
+/// Reserved character budget for the "omitted" indicator text.
+const OMIT_TEXT_RESERVED_CHARS: usize = 50;
+
+/// Minimum items to keep from lists when summarizing.
+const LIST_MIN_KEEP: usize = 2;
+
 /// A trait for content-specific summarizers.
 pub trait ContentSummarizer: Send + Sync {
     /// Summarize the given content, respecting the budget.
@@ -19,7 +34,7 @@ pub struct BuildLogSummarizer;
 
 impl ContentSummarizer for BuildLogSummarizer {
     fn summarize(&self, content: &str, _budget_chars: usize, config: &TrimConfig) -> String {
-        let lines: Vec<&str> = content.lines().collect();
+        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
         let total = lines.len();
         let max_lines = config.log_max_lines;
 
@@ -28,12 +43,12 @@ impl ContentSummarizer for BuildLogSummarizer {
         }
 
         let keep_each = max_lines.saturating_sub(1) / 2;
-        let keep_each = keep_each.max(3);
+        let keep_each = keep_each.max(BUILD_LOG_MIN_KEEP);
 
         let mut result: Vec<String> = Vec::new();
-        result.extend(lines.iter().copied().map(|s| s.to_string()).take(keep_each));
+        result.extend(lines.iter().take(keep_each).cloned());
         result.push(format!("<{} lines omitted>", total.saturating_sub(keep_each * 2)));
-        result.extend(lines.iter().copied().map(|s| s.to_string()).skip(total.saturating_sub(keep_each)));
+        result.extend(lines.iter().skip(total.saturating_sub(keep_each)).cloned());
 
         result.join("\n")
     }
@@ -46,7 +61,7 @@ pub struct CodeSummarizer;
 
 impl ContentSummarizer for CodeSummarizer {
     fn summarize(&self, content: &str, _budget_chars: usize, config: &TrimConfig) -> String {
-        let lines: Vec<&str> = content.lines().collect();
+        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
         let total = lines.len();
         let max_lines = config.code_max_lines;
 
@@ -55,12 +70,12 @@ impl ContentSummarizer for CodeSummarizer {
         }
 
         let keep_each = max_lines.saturating_sub(1) / 2;
-        let keep_each = keep_each.max(5);
+        let keep_each = keep_each.max(CODE_MIN_KEEP);
 
         let mut result: Vec<String> = Vec::new();
-        result.extend(lines.iter().copied().map(|s| s.to_string()).take(keep_each));
+        result.extend(lines.iter().take(keep_each).cloned());
         result.push(format!("// ... <{} lines omitted> ...", total.saturating_sub(keep_each * 2)));
-        result.extend(lines.iter().copied().map(|s| s.to_string()).skip(total.saturating_sub(keep_each)));
+        result.extend(lines.iter().skip(total.saturating_sub(keep_each)).cloned());
 
         result.join("\n")
     }
@@ -84,16 +99,18 @@ impl ContentSummarizer for ListSummarizer {
         // Budget-aware: estimate per-line cost and cap total items to fit budget.
         // Typical line: ~20-40 chars + newline. Reserve ~40 chars for the omitted line.
         let sample_lines: Vec<usize> = items.iter().take(5).map(|l| l.len()).collect();
-        let avg_line_len = if sample_lines.is_empty() { 30 } else {
+        let avg_line_len = if sample_lines.is_empty() {
+            DEFAULT_AVG_LINE_LEN
+        } else {
             sample_lines.iter().sum::<usize>() / sample_lines.len()
         };
         let line_cost = avg_line_len + 1; // +1 for newline
-        let reserved_for_omit = 50usize; // room for "... N items omitted ..."
+        let reserved_for_omit = OMIT_TEXT_RESERVED_CHARS;
         let available = budget_chars.saturating_sub(reserved_for_omit);
         let budget_items = (available / line_cost).max(3);
 
         let max_keep = budget_items.min(max_items);
-        let keep_front = (max_keep / 2).max(2);
+        let keep_front = (max_keep / 2).max(LIST_MIN_KEEP);
         let keep_back = max_keep - keep_front;
 
         let mut result: Vec<String> = Vec::new();
@@ -297,13 +314,13 @@ impl ContextTrimming {
             return 0;
         }
 
+        let mut total_chars: usize = messages[keep_from..]
+            .iter()
+            .map(|m| m.content.len() + m.timestamp.len())
+            .sum();
+
         let mut removed = 0;
         loop {
-            let total_chars: usize = messages.iter()
-                .take(messages.len().saturating_sub(1))
-                .map(|m| m.content.len() + m.timestamp.len())
-                .sum();
-
             if total_chars <= target_chars {
                 break;
             }
@@ -312,6 +329,7 @@ impl ContextTrimming {
                 break;
             }
 
+            total_chars -= messages[keep_from].content.len() + messages[keep_from].timestamp.len();
             messages.remove(keep_from);
             removed += 1;
         }

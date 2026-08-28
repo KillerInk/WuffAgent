@@ -93,12 +93,8 @@ impl MemoryManager {
             return Vec::new();
         }
 
-        let entries = {
-            let entries = self.entries.lock().unwrap();
-            entries.clone()
-        }; // mutex released before search
-        let results = search_memories(&entries, query, &self.config);
-        results.into_iter().cloned().collect()
+        let entries = self.entries.lock().unwrap();
+        search_memories(&*entries, query, &self.config).into_iter().map(|e| (*e).clone()).collect()
     }
 
     /// Get recent memories (for fallback).

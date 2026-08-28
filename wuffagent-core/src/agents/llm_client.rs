@@ -50,8 +50,7 @@ impl LlmClient for ChatClientAdapter {
         messages: &[Message],
         mut chunk_handler: Box<dyn FnMut(String) + Send + Sync + 'static>,
     ) -> Result<String, String> {
-        let client = self.client.clone();
-        let arc = std::sync::Arc::new(client);
+        let arc = self.client.clone();
         match ChatClient::stream_with_messages_arc(
             &arc,
             messages,

@@ -73,18 +73,14 @@ impl AgentEngine {
     /// Return a clone of the engine with the LLM client's reasoning effort
     /// updated (used so the agent tool loop honors the current UI setting).
     pub fn with_reasoning_effort(mut self, effort: crate::types::ReasoningEffort) -> Self {
-        let mut client = (*self.client).clone();
-        client.set_reasoning_effort(effort);
-        self.client = Arc::new(client);
+        Arc::make_mut(&mut self.client).set_reasoning_effort(effort);
         self
     }
 
     /// Return a clone of the engine with the LLM client's n_ctx updated.
     /// Used to sync the remote server's reported context size before starting a chat loop.
     pub fn with_n_ctx(mut self, n_ctx: u32) -> Self {
-        let mut client = (*self.client).clone();
-        client.set_n_ctx(n_ctx);
-        self.client = Arc::new(client);
+        Arc::make_mut(&mut self.client).set_n_ctx(n_ctx);
         self
     }
 
@@ -137,7 +133,7 @@ impl AgentEngine {
         }
 
         // Build the routing prompt (cached in registry)
-        let routing_prompt = self.registry.routing_prompt().to_string();
+        let routing_prompt = self.registry.routing_prompt();
 
         // Get all enabled agents for routing
         let enabled_agents: Vec<&AgentConfig> = self
