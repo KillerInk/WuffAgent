@@ -132,6 +132,8 @@ impl AgentRegistry {
             custom_prompts: HashMap::new(),
             reasoning_effort: legacy.reasoning_effort,
             trim_config: crate::trimming::config::TrimConfig::default(),
+            agent_session_id: None,
+            agent_session_dir: PathBuf::new(),
         };
 
         Self::validate_config(global_registry, &config)?;
@@ -172,6 +174,15 @@ impl AgentRegistry {
             .cloned()
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    /// Returns all enabled agent names.
+    pub fn agent_names(&self) -> Vec<&str> {
+        self.agents
+            .keys()
+            .filter(|k| self.agents.get(*k).map(|a| a.enabled).unwrap_or(false))
+            .map(|k| k.as_str())
+            .collect()
     }
 
     /// Write an agent config to a JSON file in the given directory.
@@ -293,6 +304,8 @@ impl AgentRegistry {
             event_tx,
             client,
             memory,
+            None,
+            PathBuf::new(),
         ))
     }
 
@@ -368,9 +381,11 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
                     llm_client,
                     tool_manager,
                     invocation_registry,
-                    None, // no event tx â€” sub-agent output is captured in the tool result
+                    None, // no event tx — sub-agent output is captured in the tool result
                     client,
                     None, // sub-agents don't have memory access
+                    None,
+                    PathBuf::new(),
                 );
                 agent.execute(&request, &CancellationToken::new()).await
             });
@@ -390,6 +405,8 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
                     None,
                     client,
                     None, // sub-agents don't have memory access
+                    None,
+                    PathBuf::new(),
                 );
                 agent.execute(&request, &CancellationToken::new()).await
             })

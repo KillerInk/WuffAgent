@@ -107,6 +107,7 @@ impl ChatApp {
                 self.agent_chain_state.active = true;
                 self.agent_chain_state.current_agent = Some(agent_name);
                 self.agent_chain_state.cancelled = false;
+                self.show_agent_chain = true;
             }
             AppEvent::AgentChainCompleted { agent_name, result, depth } => {
                 tracing::info!(agent_name, depth, "Agent chain completed");
@@ -146,40 +147,7 @@ impl ChatApp {
                 tracing::info!("Agent chain complete");
                 self.agent_chain_state.entries = entries;
                 self.chat.push_message(MessageKind::Normal, "assistant", &response);
-            }
-            AppEvent::AgentEngineComplete { response } => {
-                tracing::info!("Agent engine complete");
-                // The agent streams content via StreamChunk during execution;
-                // commit the accumulated buffer if present. Only fall back to
-                // the final response when nothing was streamed (e.g. the
-                // non-streaming direct-LLM fallback), to avoid duplicates.
-                if !self.chat.stream_buffer.is_empty() {
-                    self.chat.commit_stream();
-                } else if !response.is_empty() {
-                    self.chat.push_message(MessageKind::Normal, "assistant", &response);
-                }
-                // Update token count from all messages to reflect growing context.
-                let total_chars: usize = self.chat.messages.iter().map(|m| m.content.len()).sum();
-                self.chat.token_count = (total_chars as f32 / 4.0).ceil() as usize;
-                let n_ctx = self.get_effective_n_ctx();
-                if n_ctx > 0 {
-                    self.chat.context_used = self.chat.token_count as f32 / n_ctx as f32 * 100.0;
-                }
-                // Persist the session after agent engine completion
-                if let Err(e) = self.save_session() {
-                    eprintln!("Failed to save session: {}", e);
-                }
-            }
-            AppEvent::AgentEngineError { error } => {
-                tracing::error!(error, "Agent engine error");
-                self.chat.push_message(MessageKind::Normal, "system", &format!("Engine error: {}", error));
-            }
-            AppEvent::AgentEngineStopped => {
-                tracing::info!("Agent engine stopped");
-                self.chat.is_generating = false;
-                self.chat.is_pipeline_running = false;
-                self.status = AppStatus::Ready;
-                self.chat.status = AppStatus::Ready;
+                self.show_agent_chain = false;
             }
             AppEvent::NCtxUpdated { n_ctx } => {
                 tracing::info!(n_ctx, "n_ctx updated");

@@ -150,7 +150,9 @@ async fn run_chat_loop(
             }
             // Also trim by token budget if n_ctx is set and conversation is large
             if n_ctx > 0 {
-                let target_tokens = (n_ctx as usize) * 9 / 10;
+                // Use 80% of n_ctx as target to leave headroom for the
+                // ~10-15% underestimation inherent in the char-count heuristic.
+                let target_tokens = (n_ctx as usize) * 8 / 10;
                 if guard.conversation().lock().unwrap().len() > 4 {
                     trim_to_token_budget(&guard.conversation, target_tokens);
                 }

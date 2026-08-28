@@ -61,13 +61,14 @@ pub struct ChatApp {
     pub agent_config_dialog: Option<super::agent_config::AgentConfigDialog>,
     pub agent_chain_state: AgentChainState,
     pub agent_chain_expanded: Vec<usize>,
+    pub show_agent_chain: bool,
     /// Channel sender for relaying core events (EngineEvent, AppEvent) to the UI thread.
     /// The corresponding receiver is stored separately so `process_pending_events` can poll it.
     pub pending_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     pub pending_rx: Option<mpsc::Receiver<AppEvent>>,
     pub agent_cancel_token: CancellationToken,
-    /// Persistent chat engine — created once in `new()` and reused across sends.
-    pub chat_engine: Option<crate::client::engine::ChatEngine>,
+    /// Persistent chat pipeline — created once in `new()` and reused across sends.
+    pub chat_pipeline: Option<crate::client::ChatPipeline>,
     /// Index of the currently selected agent for chat (None = auto-select).
     pub selected_agent_index: Option<usize>,
     /// Reasoning effort for reasoning models (Off = omitted from requests).
@@ -119,10 +120,11 @@ impl ChatApp {
             agent_config_dialog: None,
             agent_chain_state: AgentChainState::default(),
             agent_chain_expanded: Vec::new(),
+            show_agent_chain: false,
             pending_tx: Some(Arc::new(Mutex::new(tx))),
             pending_rx: Some(rx),
             agent_cancel_token: CancellationToken::new(),
-            chat_engine: None,
+            chat_pipeline: None,
             selected_agent_index: None,
             improvements_panel: super::improvements::ImprovementsPanel::new(),
             remote_n_ctx: 0,
@@ -160,7 +162,6 @@ pub struct ChatAreaState {
     pub messages: Vec<ChatMessage>,
     pub input_text: String,
     pub stream_buffer: String,
-    pub is_pipeline_running: bool,
     pub pending_error: Option<String>,
     pub is_generating: bool,
     pub scroll_to_bottom_requested: bool,
@@ -194,7 +195,6 @@ impl ChatAreaState {
             messages: Vec::new(),
             input_text: String::new(),
             stream_buffer: String::new(),
-            is_pipeline_running: false,
             pending_error: None,
             is_generating: false,
             scroll_to_bottom_requested: false,

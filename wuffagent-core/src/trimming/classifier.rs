@@ -38,6 +38,15 @@ pub fn classify_content(content: &str) -> ContentType {
         return ContentType::ToolError;
     }
 
+    // Source code: check before JSON wrapper because source-code tool results
+    // (e.g. file reads returning {"content":"...","total_lines":N}) must be
+    // classified as SourceCode so the CodeSummarizer preserves line structure
+    // instead of the generic char-based truncator mashing them into
+    // "head...[...]...tail" and losing the middle content.
+    if is_source_code(content) {
+        return ContentType::SourceCode;
+    }
+
     // JSON wrapper: tool results often come back as JSON with a "result" key.
     if is_json_wrapper(content) {
         return ContentType::JsonWrapper;
@@ -56,11 +65,6 @@ pub fn classify_content(content: &str) -> ContentType {
     // File lists: look for path-like entries.
     if is_file_list(content) {
         return ContentType::FileList;
-    }
-
-    // Source code: multi-line with indentation, braces, language markers.
-    if is_source_code(content) {
-        return ContentType::SourceCode;
     }
 
     ContentType::FreeText

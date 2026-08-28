@@ -148,10 +148,6 @@ pub enum AppEvent {
     // Thinking output events (e.g. Claude-style reasoning)
     StreamThinkingChunk { content: String },
     StreamThinkingComplete { content: String },
-    // Agent engine events
-    AgentEngineComplete { response: String },
-    AgentEngineError { error: String },
-    AgentEngineStopped,
     // Agent chain events
     AgentChainStarted { agent_name: String, depth: u32 },
     AgentChainCompleted { agent_name: String, result: String, depth: u32 },

@@ -273,6 +273,8 @@ impl AgentConfigDialog {
             custom_prompts: std::collections::HashMap::new(),
             reasoning_effort: self.reasoning_effort,
             trim_config: wuffagent_core::trimming::config::TrimConfig::default(),
+            agent_session_id: None,
+            agent_session_dir: std::path::PathBuf::new(),
         };
 
         // Ensure the directory exists before saving

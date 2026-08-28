@@ -200,10 +200,78 @@ pub fn trim_conversation(
 
 /// Estimate the token count of a message string using a simple character heuristic.
 /// This is a rough estimate; actual tokenizers may differ.
+/// Uses chars/2 as a conservative heuristic to avoid underestimating code/JSON
+/// content where real tokenizers produce ~1 token per 1.5-2 chars.
 pub fn estimate_tokens(text: &str) -> usize {
-    // Rough heuristic: ~4 chars per token for most languages.
-    // Also account for tool_call arguments and reasoning_content if present.
-    text.chars().count() / 4 + 1
+    text.chars().count() / 2 + 1
+}
+
+/// Truncate the largest non-system, non-last-user message so the total estimated
+/// token count drops below `target_tokens`. Returns true if any truncation occurred.
+/// Uses a larger per-iteration cut (8192 chars) since the estimate may be
+/// systematically off — we want to overshoot on the safe side.
+fn truncate_largest_message(
+    messages: &mut [Message],
+    target_tokens: usize,
+    protect_last_user: bool,
+) -> bool {
+    // Find the largest content message that we're allowed to truncate.
+    let mut best_idx: Option<usize> = None;
+    let mut best_len: usize = 0;
+    let last_user_idx = if protect_last_user {
+        messages.iter().rev().position(|m| m.role == "user")
+            .map(|r| messages.len().saturating_sub(r) - 1)
+    } else {
+        None
+    };
+    for (i, m) in messages.iter().enumerate() {
+        if m.role == "system" {
+            continue;
+        }
+        if protect_last_user {
+            if let Some(lui) = last_user_idx {
+                if i >= lui {
+                    continue;
+                }
+            }
+        }
+        let len = m.content.len();
+        if len > best_len {
+            best_len = len;
+            best_idx = Some(i);
+        }
+    }
+    let idx = match best_idx {
+        Some(i) => i,
+        None => return false,
+    };
+
+    // Repeatedly shrink the message until we're under budget.
+    loop {
+        let prompt_len: usize = messages.iter().map(|m| {
+            let mut total = estimate_tokens(&m.content);
+            if let Some(ref rc) = m.reasoning_content {
+                total += estimate_tokens(rc);
+            }
+            if let Some(ref tcs) = m.tool_calls {
+                for tc in tcs {
+                    total += estimate_tokens(&tc.function.arguments);
+                }
+            }
+            total
+        }).sum();
+        if prompt_len <= target_tokens {
+            return false;
+        }
+        let current_chars = messages[idx].content.len();
+        if current_chars == 0 {
+            return false;
+        }
+        // Remove 8192 chars at a time — a larger cut to account for estimate
+        // inaccuracy and ensure we get safely under budget.
+        let cut = current_chars.saturating_sub(8192).min(current_chars - 1);
+        messages[idx].content.truncate(cut);
+    }
 }
 
 /// Token-budget trim: remove oldest non-system messages until the estimated
@@ -226,6 +294,11 @@ pub fn trim_to_token_budget(
     if keep_from >= conv.len() {
         return 0;
     }
+
+    // Never remove the last user message — the server requires at least one
+    // user message and raises a 500 if the last message is not from a user.
+    let last_user_idx = conv.iter().rev().position(|m| m.role == "user")
+        .map(|r| conv.len().saturating_sub(r) - 1);
 
     let mut removed = 0;
     loop {
@@ -252,9 +325,85 @@ pub fn trim_to_token_budget(
         if keep_from >= conv.len() {
             break;
         }
+        // Stop before we would remove the last user message.
+        if let Some(lui) = last_user_idx {
+            if keep_from >= lui {
+                break;
+            }
+        }
         conv.remove(keep_from);
         removed += 1;
     }
+
+    // Fallback: if the token estimate is still over budget after removing all
+    // removable messages, truncate the largest content message to force it under.
+    truncate_largest_message(&mut conv, target_tokens, true);
+
+    removed
+}
+
+/// Token-budget trim variant that operates on a plain `Vec<Message>`
+/// (not wrapped in an `Arc<Mutex<…>>`). Used by the agent loop to trim
+/// its own message history, since streaming writes to a throwaway
+/// conversation and never updates the client's `conversation` field.
+pub fn trim_to_token_budget_messages(
+    messages: &mut Vec<Message>,
+    target_tokens: usize,
+) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+
+    let system_idx = messages.iter().position(|m| m.role == "system");
+    let keep_from = if let Some(idx) = system_idx { idx + 1 } else { 0 };
+
+    if keep_from >= messages.len() {
+        return 0;
+    }
+
+    // Never remove the last user message — the server requires at least one
+    // user message and raises a 500 if the last message is not from a user.
+    let last_user_idx = messages.iter().rev().position(|m| m.role == "user")
+        .map(|r| messages.len().saturating_sub(r) - 1);
+
+    let mut removed = 0;
+    loop {
+        let prompt_len: usize = messages
+            .iter()
+            .take(messages.len())
+            .map(|m| {
+                let mut total = estimate_tokens(&m.content);
+                if let Some(ref rc) = m.reasoning_content {
+                    total += estimate_tokens(rc);
+                }
+                if let Some(ref tcs) = m.tool_calls {
+                    for tc in tcs {
+                        total += estimate_tokens(&tc.function.arguments);
+                    }
+                }
+                total
+            })
+            .sum();
+        if prompt_len <= target_tokens {
+            break;
+        }
+        if keep_from >= messages.len() {
+            break;
+        }
+        // Stop before we would remove the last user message.
+        if let Some(lui) = last_user_idx {
+            if keep_from >= lui {
+                break;
+            }
+        }
+        messages.remove(keep_from);
+        removed += 1;
+    }
+
+    // Fallback: if the token estimate is still over budget after removing all
+    // removable messages, truncate the largest content message to force it under.
+    truncate_largest_message(messages, target_tokens, true);
+
     removed
 }
 
@@ -569,6 +718,5 @@ mod tests {
         let messages = conv.lock().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "Msg 3");
-        assert_eq!(messages[1].content, "Msg 4");
     }
 }

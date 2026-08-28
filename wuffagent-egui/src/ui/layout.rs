@@ -56,6 +56,13 @@ impl ChatApp {
                         self.toggle_theme(ctx);
                     }
 
+                    // Agent chain button
+                    let chain_btn = egui::Button::new("🔗")
+                        .fill(theme.surface_light)
+                        .rounding(4.0);
+                    if ui.add(chain_btn).clicked() {
+                        self.show_agent_chain = !self.show_agent_chain;
+                    }
                     // Agent config button
                     let agent_btn = egui::Button::new("🤖")
                         .fill(theme.surface_light)
@@ -101,6 +108,20 @@ impl ChatApp {
             ui.visuals_mut().panel_fill = theme.background;
             self.draw_chat_area(ui);
         });
+
+        // Agent chain side panel
+        if self.show_agent_chain
+            || !self.agent_chain_state.entries.is_empty()
+            || self.agent_chain_state.cancelled {
+            egui::SidePanel::right("agent_chain_panel")
+                .default_width(280.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    let theme = Theme::from_name(&self.config.theme);
+                    ui.visuals_mut().panel_fill = theme.surface;
+                    self.draw_agent_chain_panel(ui);
+                });
+        }
 
         // Draw improvements panel on top
         self.draw_improvements_panel(ctx);

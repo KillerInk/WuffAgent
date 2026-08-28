@@ -2,7 +2,6 @@ use eframe::egui;
 
 use super::state::ChatApp;
 use crate::sessions::model::AgentChainEntry;
-use crate::types::AppEvent;
 
 impl ChatApp {
     /// Show the agent chain side panel on the right.
@@ -13,7 +12,7 @@ impl ChatApp {
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
             ui.label(egui::RichText::new("Agent Chain").strong());
             if ui.small_button("✕").clicked() {
-                // Could toggle visibility here if needed
+                self.show_agent_chain = false;
             }
         });
 
@@ -85,78 +84,4 @@ impl ChatApp {
         ui.add_space(2.0);
     }
 
-    /// Handle an incoming AppEvent and update agent_chain_state.
-    pub(super) fn process_chain_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::AgentChainStarted { agent_name, depth } => {
-                tracing::info!(agent = %agent_name, depth, "Agent chain started");
-                self.agent_chain_state.current_agent = Some(agent_name.clone());
-                self.agent_chain_state.active = true;
-                self.agent_chain_state.cancelled = false;
-            }
-            AppEvent::AgentChainCompleted { agent_name, result, depth } => {
-                tracing::info!(agent = %agent_name, depth, "Agent chain completed");
-                let entry = AgentChainEntry {
-                    agent_name: agent_name.clone(),
-                    request: String::new(),
-                    result: result.clone(),
-                    depth: *depth,
-                    tool_calls: Vec::new(),
-                    completed_at: chrono::Utc::now(),
-                    error: None,
-                    status: crate::sessions::model::AgentChainEntryStatus::Completed,
-                };
-                self.agent_chain_state.entries.push(entry);
-                if self.agent_chain_state.current_agent.as_ref() == Some(agent_name) {
-                    self.agent_chain_state.current_agent = None;
-                }
-            }
-            AppEvent::AgentChainError { agent_name, error, depth } => {
-                tracing::warn!(agent = %agent_name, depth, error = %error, "Agent chain error");
-                let entry = AgentChainEntry {
-                    agent_name: agent_name.clone(),
-                    request: String::new(),
-                    result: String::new(),
-                    depth: *depth,
-                    tool_calls: Vec::new(),
-                    completed_at: chrono::Utc::now(),
-                    error: Some(error.clone()),
-                    status: crate::sessions::model::AgentChainEntryStatus::Failed,
-                };
-                self.agent_chain_state.entries.push(entry);
-                if self.agent_chain_state.current_agent.as_ref() == Some(agent_name) {
-                    self.agent_chain_state.current_agent = None;
-                }
-            }
-            AppEvent::AgentChainCancelled { agent_name } => {
-                tracing::info!(agent = %agent_name, "Agent chain cancelled");
-                self.agent_chain_state.cancelled = true;
-                if self.agent_chain_state.current_agent.as_ref() == Some(agent_name) {
-                    self.agent_chain_state.current_agent = None;
-                }
-            }
-            AppEvent::AgentChainComplete { response, entries } => {
-                tracing::info!(response_len = response.len(), entries_count = entries.len(), "Agent chain complete");
-                self.agent_chain_state.entries.clear();
-                self.agent_chain_state.entries.extend(entries.clone());
-                self.agent_chain_state.active = false;
-                self.agent_chain_state.current_agent = None;
-                self.agent_chain_state.cancelled = false;
-            }
-            AppEvent::AgentChainStopped => {
-                tracing::info!("Agent chain stopped");
-                self.agent_chain_state.active = false;
-                self.agent_chain_state.current_agent = None;
-                self.agent_chain_state.cancelled = false;
-            }
-            _ => {}
-        }
-    }
-
-    /// Returns whether the panel should be shown.
-    pub(super) fn agent_chain_panel_shown(&self) -> bool {
-        self.agent_chain_state.active
-            || !self.agent_chain_state.entries.is_empty()
-            || self.agent_chain_state.cancelled
-    }
 }

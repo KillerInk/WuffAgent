@@ -95,7 +95,7 @@ impl SettingsDialog {
                     ui.text_edit_singleline(&mut self.model_path);
                     ui.add(egui::Slider::new(&mut self.port, 1..=65535).text("Port"));
                     ui.add(egui::Slider::new(&mut self.n_gpu_layers, -1..=100).text("GPU layers"));
-                    ui.add(egui::Slider::new(&mut self.n_ctx, 256..=8192).text("Context size"));
+                    ui.add(egui::Slider::new(&mut self.n_ctx, 256..=1048576).text("Context size"));
                     ui.add(egui::Slider::new(&mut self.threads, 1..=16).text("Threads"));
                 });
 

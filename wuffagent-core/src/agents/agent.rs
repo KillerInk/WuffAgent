@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,8 +13,6 @@ use super::types::AgentId;
 use crate::tools::ToolManager;
 use crate::types::Message;
 
-/// Maximum LLM iterations per loop (hard limit - agent stops when reached)
-const LLM_ITERATION_LIMIT: u32 = 20;
 /// Minimum delay between LLM calls to prevent API rate-limiting (500ms).
 const LLM_RATE_LIMIT_DELAY: Duration = Duration::from_millis(500);
 
@@ -46,6 +45,10 @@ pub struct Agent {
     messages: Vec<Message>,
     /// Timestamp of the last LLM call, used for rate limiting between iterations.
     last_llm_call_at: Instant,
+    /// Session ID for this agent's persistent conversation.
+    agent_session_id: Option<String>,
+    /// Directory where this agent's session files are stored.
+    agent_session_dir: PathBuf,
 }
 
 impl Agent {
@@ -58,6 +61,8 @@ impl Agent {
         event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
         client: Arc<ChatClient>,
         memory: Option<Arc<crate::memory::MemoryManager>>,
+        agent_session_id: Option<String>,
+        agent_session_dir: PathBuf,
     ) -> Self {
         // Apply the agent's per-agent reasoning effort: give it its own
         // client clone with the effort set. Off = inherit the global
@@ -80,30 +85,59 @@ impl Agent {
             client,
             memory,
             messages: Vec::new(),
+            agent_session_id,
+            agent_session_dir,
         }
     }
 
-    /// Build the initial message list for a task (system prompt + user task).
+    /// Build the initial message list for a task (system prompt + existing history + user task).
+    ///
+    /// The system prompt is always fresh (rebuilt with current memory context).
+    /// Previous conversation history is taken from the shared client conversation
+    /// so that subsequent turns within the same session retain full context.
     pub fn build_initial_messages(&self, task: &str) -> Vec<Message> {
         let now = crate::types::format_timestamp();
-        vec![
-            Message {
-                role: "system".to_string(),
-                content: self.build_system_prompt(),
-                timestamp: now.clone(),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-            Message {
-                role: "user".to_string(),
-                content: task.to_string(),
-                timestamp: now,
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            },
-        ]
+        let mut messages: Vec<Message> = Vec::new();
+
+        // Load agent session if it has one (ensures context is current)
+        if self.agent_session_id.is_some() {
+            // We can't load mutably here since self is &self, so this is done
+            // in execute() before calling build_initial_messages.
+        }
+
+        // Start with the fresh system prompt
+        messages.push(Message {
+            role: "system".to_string(),
+            content: self.build_system_prompt(),
+            timestamp: now.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+
+        // Append existing conversation history from the shared client conversation,
+        // skipping any system message already present there to avoid duplication.
+        {
+            let conv = self.client.conversation();
+            let guard = conv.lock().unwrap();
+            let skip_system = !guard.is_empty() && guard[0].role == "system";
+            let start_idx = if skip_system { 1 } else { 0 };
+            for msg in guard.iter().skip(start_idx) {
+                messages.push(msg.clone());
+            }
+        }
+
+        // Add the new user request
+        messages.push(Message {
+            role: "user".to_string(),
+            content: task.to_string(),
+            timestamp: now,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+
+        messages
     }
 
     /// Create an agent from config with an empty tool manager.
@@ -127,6 +161,8 @@ impl Agent {
             None,
             client,
             memory,
+            None,
+            PathBuf::new(),
         )
     }
 
@@ -153,6 +189,17 @@ impl Agent {
             return Err("Cancelled".to_string());
         }
 
+        // Load agent session before starting if we have one
+        if self.agent_session_id.is_some() && !self.agent_session_dir.as_os_str().is_empty() {
+            let mut c = (*self.client).clone();
+            c.set_session(self.agent_session_id.clone(), self.agent_session_dir.clone());
+            c.load_session();
+            // Update self.client with the loaded conversation
+            let loaded_conv = c.conversation().lock().unwrap().clone();
+            let mut my_conv = self.client.conversation().lock().unwrap();
+            *my_conv = loaded_conv;
+        }
+
         let mut messages = self.build_initial_messages(request);
 
         self.send_event(crate::types::AppEvent::AgentChainStarted {
@@ -164,6 +211,34 @@ impl Agent {
 
         // Store the final message history for memory extraction
         self.messages = messages.clone();
+
+        // Sync self.messages into client.conversation so that save_session()
+        // writes the agent's full history (stream_with_messages_arc writes to a
+        // throwaway local_conv, never touches self.client.conversation).
+        {
+            let conv = self.client.conversation();
+            let mut guard = conv.lock().unwrap();
+            let has_system = !guard.is_empty() && guard[0].role == "system";
+            if has_system {
+                // Trim the leading system message from messages to avoid duplication
+                // when the client's conversation already has its own system message.
+                if messages.first().map(|m| m.role.as_str()) == Some("system") {
+                    guard.extend(messages[1..].iter().cloned());
+                } else {
+                    guard.extend(messages.iter().cloned());
+                }
+            } else {
+                guard.extend(messages.iter().cloned());
+            }
+        }
+
+        // Save agent session after completion
+        if self.agent_session_id.is_some() && !self.agent_session_dir.as_path().as_os_str().is_empty() {
+            let c = self.client.clone();
+            if let Err(e) = c.save_session() {
+                tracing::warn!("Failed to save agent session: {}", e);
+            }
+        }
 
         match &result {
             Ok(response) => {
@@ -230,7 +305,6 @@ impl Agent {
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {
         let mut verification_attempts = 0u32;
-        let mut iteration_count = 0u32;
         let start = Instant::now();
 
         // Tool definitions for native function calling, filtered per-agent.
@@ -266,36 +340,52 @@ impl Agent {
                 ));
             }
 
-            iteration_count += 1;
-
-            // Hard cap on iterations to prevent runaway LLM loops
-            if iteration_count > LLM_ITERATION_LIMIT {
-                tracing::warn!(
-                    "[AGENT] Agent '{}' exceeded iteration limit ({}), stopping",
-                    self.config.name,
-                    LLM_ITERATION_LIMIT
-                );
-                return Err(format!(
-                    "Agent '{}' exceeded iteration limit of {}",
-                    self.config.name, LLM_ITERATION_LIMIT
-                ));
-            }
-
             // ── Token-budget trim before each LLM call ──────────────────
             // The agent keeps its own message history (not the client's),
             // so we must trim it manually. Without this, a single large
             // tool result (100k+ tokens) can exceed n_ctx and the server
             // rejects the request.
             if self.client.n_ctx() > 0 {
-                let target_tokens = (self.client.n_ctx() as usize) * 9 / 10;
+                // Use 80% of n_ctx as target to leave headroom for the
+                // ~10-15% underestimation inherent in the char-count heuristic.
+                let target_tokens = (self.client.n_ctx() as usize) * 8 / 10;
                 let msg_count = messages.len();
                 if msg_count > 4 {
-                    let removed = self.client.trim_to_token_budget(target_tokens);
+                    // Trim self.messages directly: stream_with_messages_arc writes to a
+                    // throwaway local_conv and never touches self.client.conversation,
+                    // so trimming the client's conversation would be a no-op.
+                    let removed = ChatClient::trim_to_token_budget_messages(messages, target_tokens);
                     if removed > 0 {
                         tracing::info!(
                             "[AGENT] Agent '{}' trimmed {} messages (n_ctx={}, target={})",
                             self.config.name, removed, self.client.n_ctx(), target_tokens
                         );
+                    }
+                    // Post-trim verification: re-check estimate and truncate largest
+                    // message if still over budget (safety net for edge cases).
+                    let post_trim_total: usize = messages.iter()
+                        .map(|m| crate::client::session::estimate_tokens(&m.content))
+                        .sum();
+                    if post_trim_total > target_tokens {
+                        tracing::warn!(
+                            "[AGENT] Post-trim estimate {} > target {}, truncating largest message",
+                            post_trim_total, target_tokens
+                        );
+                        // Find and truncate the largest non-system message
+                        let mut best_idx: Option<usize> = None;
+                        let mut best_len: usize = 0;
+                        for (i, m) in messages.iter().enumerate() {
+                            if m.role == "system" { continue; }
+                            if m.content.len() > best_len {
+                                best_len = m.content.len();
+                                best_idx = Some(i);
+                            }
+                        }
+                        if let Some(idx) = best_idx {
+                            let new_len = messages[idx].content.len() / 2;
+                            messages[idx].content.truncate(new_len);
+                            tracing::info!("[AGENT] Truncated message {} to {} chars", idx, new_len);
+                        }
                     }
                 }
             }
@@ -307,7 +397,7 @@ impl Agent {
             let round_thinking = Arc::new(Mutex::new(String::new()));
             let rt = round_thinking.clone();
 
-            let (assistant_msg, _usage) = match ChatClient::stream_with_messages_arc(
+            let (assistant_msg, usage) = match ChatClient::stream_with_messages_arc(
                 &self.client,
                 messages,
                 tool_defs.as_deref(),
@@ -362,6 +452,14 @@ impl Agent {
             // Display-friendly content (think tags stripped if embedded)
             let display_content = crate::client::strip_think_tags(&content);
 
+            // Commit the current round's text to the UI so the stream buffer
+            // is flushed between tool-call iterations, and update the token
+            // gauge with the server-reported usage.
+            self.send_event(crate::types::AppEvent::StreamRoundComplete {
+                content: display_content.clone(),
+                usage: usage.clone(),
+            });
+
             // ── Native tool calls ───────────────────────────────────────
             if let Some(calls) = &tool_calls {
                 if !calls.is_empty() {
@@ -402,8 +500,6 @@ impl Agent {
                                 format!("Error: {}", e)
                             }
                         };
-                        // Apply inline summarization if configured
-                        let result_str = self.summarize_result(&result_str);
                         self.send_event(crate::types::AppEvent::ToolCallComplete {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
@@ -461,8 +557,6 @@ impl Agent {
                             Ok(output) => format!("{}", output),
                             Err(e) => format!("Error: {}", e),
                         };
-                        // Apply inline summarization if configured
-                        let result_str = self.summarize_result(&result_str);
                         self.send_event(crate::types::AppEvent::ToolCallComplete {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
@@ -500,10 +594,14 @@ impl Agent {
             // ── No more tool calls ──────────────────────────────────────
             if verification_attempts >= MAX_VERIFICATION_ATTEMPTS {
                 tracing::info!(
-                    "[AGENT] Agent '{}' completed in {} iterations",
+                    "[AGENT] Agent '{}' completed ({} verification attempts)",
                     self.config.name,
-                    iteration_count
+                    verification_attempts
                 );
+                self.send_event(crate::types::AppEvent::StreamComplete {
+                    content: display_content.clone(),
+                    usage: usage.clone(),
+                });
                 return Ok(display_content);
             }
             verification_attempts += 1;
@@ -513,10 +611,13 @@ impl Agent {
             match verification_result {
                 Ok(true) => {
                     tracing::info!(
-                        "[AGENT] Agent '{}' completed in {} iterations (verified)",
-                        self.config.name,
-                        iteration_count
+                        "[AGENT] Agent '{}' completed (verified)",
+                        self.config.name
                     );
+                    self.send_event(crate::types::AppEvent::StreamComplete {
+                        content: display_content.clone(),
+                        usage: usage.clone(),
+                    });
                     return Ok(display_content);
                 }
                 Ok(false) => {
@@ -542,22 +643,13 @@ impl Agent {
                         self.config.name,
                         e
                     );
+                    self.send_event(crate::types::AppEvent::StreamComplete {
+                        content: display_content.clone(),
+                        usage: usage.clone(),
+                    });
                     return Ok(display_content);
                 }
             }
-        }
-    }
-
-    /// Summarize a tool result if it exceeds the inline threshold.
-    fn summarize_result(&self, result: &str) -> String {
-        let trim_config = self.config.trim_config.clone();
-        if trim_config.inline_threshold_chars > 0
-            && result.len() > trim_config.inline_threshold_chars
-        {
-            crate::trimming::ContextTrimming::new()
-                .summarize_tool_result(result, &trim_config)
-        } else {
-            result.to_string()
         }
     }
 
@@ -991,7 +1083,7 @@ mod tests {
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
         let invocation_registry = Arc::new(AgentInvocationRegistry::new());
         let client = Arc::new(ChatClient::new("http://localhost:1"));
-        Agent::new(config, llm_client, tool_manager, invocation_registry, None, client, None)
+        Agent::new(config, llm_client, tool_manager, invocation_registry, None, client, None, None, PathBuf::new())
     }
 
     struct NoopLlm;
@@ -1041,6 +1133,8 @@ mod tests {
             None,
             global_client.clone(),
             None,
+            None,
+            PathBuf::new(),
         );
         assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::High);
         assert!(!Arc::ptr_eq(&agent.client, &global_client));
@@ -1057,6 +1151,8 @@ mod tests {
             None,
             global_client.clone(),
             None,
+            None,
+            PathBuf::new(),
         );
         assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::Medium);
         assert!(Arc::ptr_eq(&agent.client, &global_client));

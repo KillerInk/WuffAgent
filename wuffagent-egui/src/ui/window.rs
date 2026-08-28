@@ -138,14 +138,14 @@ impl ChatApp {
             let mut conv = self.client.conversation().lock().unwrap();
             *conv = session.messages.clone();
             drop(conv);
-            self.client.set_session(Some(id.to_string()), session_dir);
+            self.client.set_session(Some(id.to_string()), session_dir.clone());
             self.client.load_session();
             // Populate the UI display with the loaded session messages.
-            // Derive message kind from legacy conventions (tool role, ðŸ’­ prefix).
+            // Derive message kind from legacy conventions (tool role, ðŸ'­ prefix).
             self.chat.messages = session.messages.iter().map(|m| {
                 let (content, kind) = if m.role == "tool" {
                     (m.content.clone(), crate::types::MessageKind::Tool)
-                } else if let Some(t) = m.content.strip_prefix("ðŸ’­ ") {
+                } else if let Some(t) = m.content.strip_prefix("ðŸ'­ ") {
                     (t.to_string(), crate::types::MessageKind::Thinking)
                 } else {
                     (m.content.clone(), crate::types::MessageKind::Normal)
@@ -164,6 +164,18 @@ impl ChatApp {
             let n_ctx = self.get_effective_n_ctx();
             if n_ctx > 0 {
                 self.chat.context_used = self.chat.token_count as f32 / n_ctx as f32 * 100.0;
+            }
+        }
+
+        // Also sync the agent engine's session so subsequent agent calls
+        // load/save against the correct agent session directory.
+        let agent_sid = self.agent_engine.agent_session_id().map(|s| s.to_string());
+        if let Some(agent_name) = &agent_sid {
+            let agent_dir = session_dir.join("agents").join(agent_name);
+            if Arc::get_mut(&mut self.agent_engine).is_some() {
+                if let Some(ref mut engine) = Arc::get_mut(&mut self.agent_engine) {
+                    engine.set_agent_session(Some(agent_name.clone()), agent_dir);
+                }
             }
         }
     }

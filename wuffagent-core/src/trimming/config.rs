@@ -16,11 +16,6 @@ pub struct TrimConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 
-    /// Tool results above this character count are summarized inline
-    /// after each tool call.
-    #[serde(default = "default_inline_threshold_chars")]
-    pub inline_threshold_chars: usize,
-
     /// Hard cap on any tool result stored in messages.
     /// Results exceeding this are truncated regardless of type.
     #[serde(default = "default_max_tool_result_chars")]
@@ -44,7 +39,6 @@ pub struct TrimConfig {
 }
 
 fn default_enabled() -> bool { true }
-fn default_inline_threshold_chars() -> usize { 2000 }
 fn default_max_tool_result_chars() -> usize { 1000 }
 fn default_max_chain_entries() -> usize { 50 }
 fn default_code_max_lines() -> usize { 30 }
@@ -55,7 +49,6 @@ impl Default for TrimConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            inline_threshold_chars: default_inline_threshold_chars(),
             max_tool_result_chars: default_max_tool_result_chars(),
             max_chain_entries: default_max_chain_entries(),
             code_max_lines: default_code_max_lines(),
@@ -70,13 +63,6 @@ impl TrimConfig {
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
-
-    /// Returns true if the given content should be summarized inline.
-    pub fn should_inline_summarize(&self, content: &str) -> bool {
-        self.enabled
-            && !content.is_empty()
-            && content.len() > self.inline_threshold_chars
-    }
 }
 
 #[cfg(test)]
@@ -87,7 +73,6 @@ mod tests {
     fn test_default_config() {
         let config = TrimConfig::default();
         assert!(config.enabled);
-        assert_eq!(config.inline_threshold_chars, 2000);
         assert_eq!(config.max_tool_result_chars, 1000);
         assert_eq!(config.max_chain_entries, 50);
         assert_eq!(config.code_max_lines, 30);
@@ -100,14 +85,5 @@ mod tests {
         let mut config = TrimConfig::default();
         config.enabled = false;
         assert!(!config.is_enabled());
-        assert!(!config.should_inline_summarize("a".repeat(10000).as_str()));
-    }
-
-    #[test]
-    fn test_inline_threshold() {
-        let config = TrimConfig::default();
-        assert!(!config.should_inline_summarize("small"));
-        assert!(config.should_inline_summarize(&"x".repeat(2001)));
-        assert!(!config.should_inline_summarize(&"x".repeat(2000)));
     }
 }

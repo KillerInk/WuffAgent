@@ -213,13 +213,34 @@ fn bootstrap() -> (
         });
     let memory_manager = Arc::new(memory_manager);
 
-    let agent_engine = AgentEngine::new(
+    let mut agent_engine = AgentEngine::new(
         agent_registry.clone(),
         llm_client,
         tool_manager_for_engine,
         client_for_engine,
         invocation_registry,
     ).with_memory(memory_manager);
+
+    // Load the most recent agent session for the selected agent so the engine
+    // starts with conversation context from a previous session.
+    if let Some(agent_name) = agent_registry.agent_names().first() {
+        let agent_dir = wuffagent_core::sessions::sessions_dir(&config_path)
+            .join("agents")
+            .join(agent_name);
+        if agent_dir.exists() {
+            let sessions = wuffagent_core::sessions::list_sessions(&agent_dir);
+            if let Some(latest) = sessions.first() {
+                tracing::info!(
+                    "Loading most recent agent session for '{}': {} ({} messages)",
+                    agent_name,
+                    latest.id,
+                    latest.messages.len()
+                );
+                agent_engine.set_agent_session(Some(latest.id.clone()), agent_dir.clone());
+            }
+        }
+    }
+
     let agent_engine = Arc::new(agent_engine);
 
     (config, server, client, tool_manager, agent_engine)

@@ -138,10 +138,12 @@ impl FileIOTool {
             }
         }
 
+        // Return as a JSON object with content + total_lines so the classifier
+        // can recognise it as source code (not FreeText) and apply the
+        // CodeSummarizer instead of the generic char-based truncator.
         Ok(ToolOutput::Success(serde_json::json!({
-            "path": path,
             "content": result,
-            "lines_returned": lines_returned,
+            "total_lines": lines_returned,
         })))
     }
 
@@ -192,15 +194,22 @@ impl FileIOTool {
         })))
     }
 
-    /// Delete a file or an empty directory.
-    fn exec_delete(&self, path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    /// Delete a file or directory. If `recursive` is true, delete directories
+    /// and all their contents.
+    fn exec_delete(&self, path: &str, recursive: bool) -> crate::tools::types::ToolResult<ToolOutput> {
         let metadata = fs::metadata(path).map_err(|e| {
             crate::tools::types::ToolError::Execution(format!("Failed to stat '{}': {}", path, e))
         })?;
         if metadata.is_dir() {
-            fs::remove_dir(path).map_err(|e| {
-                crate::tools::types::ToolError::Execution(format!("Failed to remove directory '{}': {} (directory may not be empty)", path, e))
-            })?;
+            if recursive {
+                fs::remove_dir_all(path).map_err(|e| {
+                    crate::tools::types::ToolError::Execution(format!("Failed to remove directory '{}': {}", path, e))
+                })?;
+            } else {
+                fs::remove_dir(path).map_err(|e| {
+                    crate::tools::types::ToolError::Execution(format!("Failed to remove directory '{}': {} (directory may not be empty; use recursive: true to delete non-empty directories)", path, e))
+                })?;
+            }
         } else {
             fs::remove_file(path).map_err(|e| {
                 crate::tools::types::ToolError::Execution(format!("Failed to remove file '{}': {}", path, e))
@@ -336,11 +345,9 @@ impl FileIOTool {
                 crate::tools::types::ToolError::Execution(format!("Failed to read binary '{}': {}", path, e))
             })?;
         let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-        Ok(ToolOutput::Success(serde_json::json!({
-            "path": path,
-            "content_base64": encoded,
-            "size": bytes.len(),
-        })))
+        // Wrap the content as a JSON string value so the classifier sees it
+        // as FreeText and does not truncate it as a JSON wrapper.
+        Ok(ToolOutput::Success(serde_json::json!(encoded)))
     }
 
     /// Write base64-decoded binary data to a file.
@@ -439,27 +446,38 @@ impl FileIOTool {
                 let mut consumed_old = 0usize;
                 let mut consumed_new = 0usize;
                 loop {
+                    // Normal exit: both counts satisfied.
                     if consumed_old >= hunk.old_count && consumed_new >= hunk.new_count {
                         break;
                     }
+                    // Graceful exit: one count is satisfied and we've hit a
+                    // boundary (next hunk, file header, or EOF). This handles
+                    // diffs where hunk counts are approximate (e.g. `diff -u`
+                    // may report wrong counts for large hunks).
+                    // File headers also terminate hunks even when counts are
+                    // unsatisfied (multi-file diffs).
+                    let is_boundary = {
+                        if i >= diff_lines.len() {
+                            true
+                        } else {
+                            let hunk_line = diff_lines[i];
+                            let is_file_header = hunk_line.starts_with("--- ")
+                                && diff_lines.get(i + 1).is_some_and(|n| n.starts_with("+++ "));
+                            hunk_line.starts_with("@@ ")
+                                || is_file_header
+                                || hunk_line.starts_with("diff ")
+                        }
+                    };
+                    if is_boundary {
+                        break;
+                    }
                     if i >= diff_lines.len() {
+                        // Should be caught by is_boundary above, but keep as safety net.
                         return Err(crate::tools::types::ToolError::Execution(format!(
                             "Diff for '{}' is truncated: hunk '{}' ran out of lines", path, line
                         )));
                     }
                     let hunk_line = diff_lines[i];
-                    // A new hunk/file header means this hunk ended early.
-                    // `--- ` is only a file header when followed by `+++ `;
-                    // otherwise it is a deletion line (e.g. deleting a line
-                    // that itself starts with `--`).
-                    let is_file_header = hunk_line.starts_with("--- ")
-                        && diff_lines.get(i + 1).is_some_and(|n| n.starts_with("+++ "));
-                    if hunk_line.starts_with("@@ ")
-                        || is_file_header
-                        || hunk_line.starts_with("diff ")
-                    {
-                        break;
-                    }
                     match hunk_line.chars().next() {
                         Some('+') => {
                             // Addition: insert the line
@@ -683,7 +701,7 @@ impl Tool for FileIOTool {
                         "recursive".to_string(),
                         crate::tools::types::FieldSchema {
                             type_name: "boolean".to_string(),
-                            description: "Create parent directories for mkdir (default false).".to_string(),
+                            description: "For mkdir: create parent directories as needed. For delete: recursively delete directory contents.".to_string(),
                             nullable: true,
                         },
                     );
@@ -765,7 +783,8 @@ impl Tool for FileIOTool {
                     .get("path")
                     .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("path is required for delete action".to_string()))?;
                 validate_path(&path)?;
-                self.exec_delete(&path)
+                let recursive: bool = params.get("recursive").unwrap_or(false);
+                self.exec_delete(&path, recursive)
             }
             "mkdir" => {
                 let path: String = params
@@ -939,7 +958,8 @@ mod tests {
         };
         match tool.execute(read_params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"], content);
+                assert_eq!(v["content"].as_str().unwrap(), content);
+                assert_eq!(v["total_lines"].as_u64().unwrap(), 1);
             }
             _ => panic!("read should succeed"),
         }
@@ -967,8 +987,8 @@ mod tests {
         };
         match tool.execute(params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"], "line1\nline2\nline3");
-                assert_eq!(v["lines_returned"], 3);
+                assert_eq!(v["content"].as_str().unwrap(), "line1\nline2\nline3");
+                assert_eq!(v["total_lines"].as_u64().unwrap(), 3);
             }
             _ => panic!("read with line range should succeed"),
         }
@@ -985,7 +1005,8 @@ mod tests {
         };
         match tool.execute(params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"], "line2\nline3\nline4");
+                assert_eq!(v["content"].as_str().unwrap(), "line2\nline3\nline4");
+                assert_eq!(v["total_lines"].as_u64().unwrap(), 3);
             }
             _ => panic!("read from line 2 should succeed"),
         }
@@ -1003,7 +1024,8 @@ mod tests {
         };
         match tool.execute(params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"], content.trim_end_matches('\n'));
+                assert_eq!(v["content"].as_str().unwrap(), content.trim_end_matches('\n'));
+                assert_eq!(v["total_lines"].as_u64().unwrap(), 5);
             }
             _ => panic!("read with out-of-range end_line should succeed"),
         }
@@ -1028,8 +1050,8 @@ mod tests {
         };
         match tool.execute(params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"], "");
-                assert_eq!(v["lines_returned"], 0);
+                assert_eq!(v["content"].as_str().unwrap(), "");
+                assert_eq!(v["total_lines"].as_u64().unwrap(), 0);
             }
             _ => panic!("empty range should succeed"),
         }
@@ -1173,6 +1195,27 @@ mod tests {
             },
         };
         assert!(tool.execute(params).is_err());
+    }
+
+    #[test]
+    fn test_file_io_delete_non_empty_dir_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("a").join("b")).unwrap();
+        fs::write(dir.path().join("a").join("b").join("file.txt"), "data").unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+
+        let tool = FileIOTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("delete"));
+                m.insert("recursive".to_string(), json!(true));
+                m
+            },
+        };
+        assert!(tool.execute(params).is_ok());
+        assert!(!std::path::Path::new(&path).exists());
     }
 
     // ── Mkdir Tests ────────────────────────────────────────────────────────
@@ -1368,8 +1411,7 @@ mod tests {
         };
         match tool.execute(read_params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content_base64"], encoded);
-                assert_eq!(v["size"], 6);
+                assert_eq!(v.as_str().unwrap(), encoded);
             }
             _ => panic!("read_binary should succeed"),
         }

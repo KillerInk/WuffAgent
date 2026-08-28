@@ -195,12 +195,19 @@ impl ContentSummarizer for GenericSummarizer {
         }
 
         // Keep first and last portion, with ellipsis in the middle.
+        // Snap byte offsets to char boundaries to avoid panics on
+        // multi-byte UTF-8 content.
         let head = budget_chars / 2;
         let tail = budget_chars / 2;
+        let head_end = content.floor_char_boundary(head);
+        let tail_start = content.ceil_char_boundary(content.len().saturating_sub(tail));
+        if tail_start <= head_end {
+            return content.to_string();
+        }
         format!(
             "{} ... [...] ... {}",
-            &content[..head],
-            &content[content.len().saturating_sub(tail)..]
+            &content[..head_end],
+            &content[tail_start..]
         )
     }
 }
@@ -219,35 +226,41 @@ impl ContextTrimming {
 
     /// Summarize a tool result based on its content type.
     ///
-    /// If the result is within budget, returns it unchanged.
-    /// Otherwise, applies the appropriate summarizer.
+    /// If the result is within the configured `max_tool_result_chars`,
+    /// returns it unchanged. Otherwise, applies the appropriate summarizer.
     pub fn summarize_tool_result(&self, content: &str, config: &TrimConfig) -> String {
         if !config.is_enabled() {
             return content.to_string();
         }
+        self.summarize_to_budget(content, config.max_tool_result_chars, config)
+    }
 
-        let content_type = classify_content(content);
-        let budget = config.max_tool_result_chars;
-
+    /// Summarize content to fit within an explicit character budget.
+    ///
+    /// Returns the content unchanged if it already fits within the budget.
+    /// Dispatches to the type-specific summarizer, with a final generic
+    /// hard cap as a fallback.
+    pub fn summarize_to_budget(&self, content: &str, budget_chars: usize, config: &TrimConfig) -> String {
         // Hard cap: always enforce the max.
-        if content.len() <= budget {
+        if content.len() <= budget_chars {
             return content.to_string();
         }
 
+        let content_type = classify_content(content);
         let result = match content_type {
-            ContentType::BuildLog => BuildLogSummarizer.summarize(content, budget, config),
-            ContentType::SourceCode => CodeSummarizer.summarize(content, budget, config),
-            ContentType::FileList => ListSummarizer.summarize(content, budget, config),
-            ContentType::SearchResults => SearchResultsSummarizer.summarize(content, budget, config),
-            ContentType::ToolError => ErrorSummarizer.summarize(content, budget, config),
+            ContentType::BuildLog => BuildLogSummarizer.summarize(content, budget_chars, config),
+            ContentType::SourceCode => CodeSummarizer.summarize(content, budget_chars, config),
+            ContentType::FileList => ListSummarizer.summarize(content, budget_chars, config),
+            ContentType::SearchResults => SearchResultsSummarizer.summarize(content, budget_chars, config),
+            ContentType::ToolError => ErrorSummarizer.summarize(content, budget_chars, config),
             ContentType::JsonWrapper | ContentType::FreeText => {
-                GenericSummarizer.summarize(content, budget, config)
+                GenericSummarizer.summarize(content, budget_chars, config)
             }
         };
 
         // Final hard cap after summarization.
-        if result.len() > budget {
-            GenericSummarizer.summarize(&result, budget, config)
+        if result.len() > budget_chars {
+            GenericSummarizer.summarize(&result, budget_chars, config)
         } else {
             result
         }
@@ -265,7 +278,7 @@ impl ContextTrimming {
     }
 
     /// Trim a conversation to fit within a token budget.
-    /// Uses character-count heuristic (~4 chars/token).
+    /// Uses character-count heuristic (~2 chars/token, matching estimate_tokens).
     pub fn trim_to_token_budget(
         &self,
         messages: &mut Vec<crate::types::Message>,
@@ -276,7 +289,7 @@ impl ContextTrimming {
             return 0;
         }
 
-        let target_chars = target_tokens * 4;
+        let target_chars = target_tokens * 2;
         let system_idx = messages.iter().position(|m| m.role == "system");
         let keep_from = if let Some(idx) = system_idx { idx + 1 } else { 0 };
 
@@ -305,20 +318,6 @@ impl ContextTrimming {
 
         removed
     }
-
-    /// Apply inline summarization to tool results in a message list.
-    /// Summarizes results that exceed the inline threshold.
-    pub fn inline_summarize(&self, messages: &mut Vec<crate::types::Message>, config: &TrimConfig) {
-        if !config.is_enabled() {
-            return;
-        }
-
-        for message in messages.iter_mut() {
-            if message.role == "tool" && config.should_inline_summarize(&message.content) {
-                message.content = self.summarize_tool_result(&message.content, config);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -329,7 +328,6 @@ mod tests {
     fn make_config() -> TrimConfig {
         TrimConfig {
             enabled: true,
-            inline_threshold_chars: 2000,
             max_tool_result_chars: 200,
             max_chain_entries: 50,
             code_max_lines: 10,

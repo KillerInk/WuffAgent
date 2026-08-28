@@ -1,11 +1,10 @@
-﻿use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use eframe::egui;
-use tokio_util::sync::CancellationToken;
 
 use super::state::ChatApp;
-use crate::types::{AppEvent, AppStatus, MessageKind};
+use crate::types::{AppStatus, MessageKind};
 use super::theme::Theme;
 
 impl ChatApp {
@@ -42,7 +41,7 @@ impl ChatApp {
             ui.scope(|ui| {
                 ui.set_max_width(input_width);
                 let text_edit = egui::TextEdit::multiline(&mut self.chat.input_text)
-                    .hint_text("Type a message... (use /plan to trigger multi-agent pipeline)")
+                    .hint_text("Type a message...")
                     .desired_width(f32::INFINITY);
                 let response = ui.add(text_edit);
                 // Send on Ctrl+Enter when focus is lost
@@ -51,7 +50,6 @@ impl ChatApp {
                     && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
                     && modifiers.ctrl
                     && !self.chat.is_generating
-                    && !self.chat.is_pipeline_running
                     && !self.chat.input_text.trim().is_empty()
                 {
                     let input = self.chat.input_text.trim().to_string();
@@ -107,7 +105,7 @@ impl ChatApp {
                     });
                 ui.add_space(6.0);
 
-                if !self.chat.is_generating && !self.chat.is_pipeline_running {
+                if !self.chat.is_generating {
                     let send_btn = egui::Button::new("Send")
                         .fill(theme.primary)
                         .rounding(6.0)
@@ -139,17 +137,7 @@ impl ChatApp {
             return;
         }
 
-        if let Some(rest) = input.strip_prefix("/plan") {
-            let request = rest.trim().to_string();
-            if request.is_empty() {
-                self.chat.status = AppStatus::Error("Please provide a request after /plan".to_string());
-                self.chat.pending_error = Some("Please provide a request after /plan".to_string());
-            } else {
-                self.send_plan_request(&request);
-            }
-        } else {
-            self.send_message();
-        }
+        self.send_message();
     }
 
     fn validate_input(&self, text: &str) -> Result<(), String> {
@@ -188,11 +176,8 @@ impl ChatApp {
             image: image.map(|_| String::new()),
         });
 
-        // Get tool definitions
-        let tool_defs = self.tool_manager.get_tool_definitions();
-
         // Apply the selected agent profile's system prompt for this request
-        // (None = "Auto" â†’ the general profile).
+        // (None = "Auto" -> the general profile).
         let agent_prompt = match self.selected_agent_index {
             Some(i) => {
                 let name = self.get_agent_names().get(i).cloned().unwrap_or_default();
@@ -202,42 +187,63 @@ impl ChatApp {
                 self.load_agent_system_prompt(&["general", "generalist"])
             }
         };
-        if !agent_prompt.is_empty() {
-            self.client.set_system_prompt(&agent_prompt);
-            tracing::info!("Applied agent system prompt ({} chars)", agent_prompt.len());
-        } else {
-            tracing::warn!("No agent system prompt found â€” chat will run without one");
+        if agent_prompt.is_empty() {
+            tracing::warn!("No agent system prompt found - chat will run without one");
         }
 
-        // Cancel any in-flight engine (previous send)
-        if let Some(ref engine) = self.chat_engine {
-            engine.cancel();
+        // Cancel any in-flight pipeline (previous send)
+        if let Some(ref pipeline) = self.chat_pipeline {
+            pipeline.cancel();
         }
 
         // Engine and client tool events both flow straight into the single
-        // pending_tx the UI polls each frame â€” no relay task needed.
+        // pending_tx the UI polls each frame - no relay task needed.
         let pending_tx = match self.pending_tx.clone() {
             Some(tx) => tx.lock().unwrap().clone(),
             None => return,
         };
         self.client.set_tool_event_sender(pending_tx.clone());
 
-        // Sync the remote server's n_ctx to the client before starting the chat loop.
+        // Sync the remote server's n_ctx to the client and engine before starting the chat loop.
         // Without this, the engine trims conversations to the config default (e.g. 4096)
         // instead of the server's actual context window.
         if self.remote_n_ctx > 0 {
             self.client = self.client.with_n_ctx(self.remote_n_ctx);
+            self.agent_engine = Arc::new((*self.agent_engine).clone().with_n_ctx(self.remote_n_ctx));
         }
 
-        // Create and start the chat engine
-        let client = Arc::new(Mutex::new(self.client.clone()));
-        let tool_manager = (*self.tool_manager).clone();
-        let engine = crate::client::engine::ChatEngine::new(client, tool_manager, pending_tx);
-        // Store the engine for potential cancellation
-        self.chat_engine = Some(engine);
+        // Load the agent session if one is configured so the agent starts with
+        // context from a previous session. This is done here (on the engine) rather
+        // than inside execute() because execute() takes &mut self and we need the
+        // loaded conversation to be reflected in the engine before the pipeline starts.
+        if let Some(sid) = self.agent_engine.agent_session_id() {
+            let dir = self.agent_engine.agent_session_dir().clone();
+            if !dir.as_os_str().is_empty() {
+                let mut engine_clone = (*self.agent_engine).clone();
+                if let Some(session) = crate::sessions::load_session(&dir, sid) {
+                    let mut conv = self.client.conversation().lock().unwrap();
+                    *conv = session.messages.clone();
+                    drop(conv);
+                    self.client.set_session(Some(sid.to_string()), dir.clone());
+                    self.client.load_session();
+                    // Also update the engine clone so execute() uses the right client
+                    engine_clone.set_agent_session(Some(sid.to_string()), dir);
+                    self.agent_engine = Arc::new(engine_clone);
+                }
+            }
+        }
+
+        // Create and start the chat pipeline
+        let pipeline = crate::client::ChatPipeline::new(
+            self.agent_engine.clone(),
+            pending_tx,
+            self.reasoning_effort,
+        );
+        // Store the pipeline for potential cancellation
+        self.chat_pipeline = Some(pipeline);
 
         // Start the chat
-        self.chat_engine.as_ref().unwrap().start_chat(input, tool_defs);
+        self.chat_pipeline.as_ref().unwrap().start(&input, &agent_prompt);
     }
 
     /// Load the system prompt of the first matching agent profile.
@@ -350,86 +356,12 @@ impl ChatApp {
         names
     }
 
-    /// Send a /plan request to the agent engine.
-    pub(super) fn send_plan_request(&mut self, request: &str) {
-        tracing::info!("[AGENT ENGINE] send_plan_request called with: {}", request);
-
-        self.chat.input_text.clear();
-        self.chat.is_generating = true;
-        self.status = AppStatus::Generating;
-        self.chat.status = AppStatus::Generating;
-        self.chat.messages.push(crate::types::ChatMessage {
-            kind: MessageKind::Normal,
-            role: "user".to_string(),
-            content: format!("/plan {}", request),
-            timestamp: crate::types::format_timestamp(),
-            image: None,
-        });
-
-        // Reset agent chain state
-        self.agent_chain_state = super::state::AgentChainState::default();
-        self.agent_chain_state.active = true;
-        self.chat.is_pipeline_running = true;
-
-        // Create a fresh cancellation token so stop/resume works correctly
-        let cancel_token = CancellationToken::new();
-        let event_tx = self.pending_tx.clone();
-        let request = request.to_string();
-
-        // Wire the event tx so the engine can emit chain events, and apply
-        // the current reasoning effort to the engine's LLM client.
-        let engine = if let Some(ref tx) = self.pending_tx {
-            let inner_tx = tx.lock().unwrap().clone();
-            let inner = (*self.agent_engine).clone();
-            Arc::new(
-                inner
-                    .with_event_tx(Arc::new(Mutex::new(inner_tx)))
-                    .with_reasoning_effort(self.reasoning_effort),
-            )
-        } else {
-            Arc::new((*self.agent_engine).clone().with_reasoning_effort(self.reasoning_effort))
-        };
-
-        // Clone event_tx for the async block
-        let event_tx_for_spawn = event_tx.clone();
-
-        // Spawn async task
-        tokio::spawn(async move {
-            tracing::info!("[AGENT ENGINE] Running agent engine for: {}", request);
-
-            let result = tokio::select! {
-                result = engine.execute(&request, &cancel_token) => result,
-                _ = cancel_token.cancelled() => {
-                    Ok(String::from("[CANCELLED]"))
-                }
-            };
-
-            if let Some(ref tx) = event_tx_for_spawn {
-                match &result {
-                    Ok(response) => {
-                        tracing::info!("[AGENT ENGINE] Completed with {} chars", response.len());
-                        let _ = tx.lock().unwrap().send(AppEvent::AgentEngineComplete {
-                            response: response.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::error!("[AGENT ENGINE] Failed: {}", e);
-                        let _ = tx.lock().unwrap().send(AppEvent::AgentEngineError {
-                            error: e.clone(),
-                        });
-                    }
-                }
-                let _ = tx.lock().unwrap().send(AppEvent::AgentEngineStopped);
-            }
-        });
-    }
-
     pub(super) fn stop_generation(&mut self) {
         tracing::info!("[CANCEL] Stopping all generation");
 
-        // Cancel the chat engine and agent engine
-        if let Some(ref engine) = self.chat_engine {
-            engine.cancel();
+        // Cancel the chat pipeline and agent engine
+        if let Some(ref pipeline) = self.chat_pipeline {
+            pipeline.cancel();
         }
         self.agent_cancel_token.cancel();
 

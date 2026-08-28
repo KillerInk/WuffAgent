@@ -282,6 +282,8 @@ impl AgentManager {
                             custom_prompts: HashMap::new(),
                             reasoning_effort: legacy.reasoning_effort,
                             trim_config: crate::trimming::config::TrimConfig::default(),
+                            agent_session_id: None,
+                            agent_session_dir: PathBuf::new(),
                         };
                         if seen.insert(config.name.clone(), ()).is_none() {
                             tracing::info!(
@@ -695,6 +697,13 @@ pub struct AgentConfig {
     /// Configuration for intelligent context trimming.
     #[serde(default)]
     pub trim_config: crate::trimming::config::TrimConfig,
+    /// Session ID for this agent's persistent conversation history.
+    /// When set, the agent loads its session before each send and saves after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    /// Directory where this agent's session files are stored.
+    #[serde(default)]
+    pub agent_session_dir: PathBuf,
 }
 
 fn default_enabled_agent() -> bool { true }
@@ -733,6 +742,8 @@ impl Default for AgentConfig {
             custom_prompts: HashMap::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
             trim_config: crate::trimming::config::TrimConfig::default(),
+            agent_session_id: None,
+            agent_session_dir: PathBuf::new(),
         }
     }
 }
@@ -846,6 +857,8 @@ impl AgentConfig {
                             custom_prompts: HashMap::new(),
                             reasoning_effort: legacy.reasoning_effort,
                             trim_config: crate::trimming::config::TrimConfig::default(),
+                            agent_session_id: None,
+                            agent_session_dir: PathBuf::new(),
                         };
                         agents.push(config);
                     } else {

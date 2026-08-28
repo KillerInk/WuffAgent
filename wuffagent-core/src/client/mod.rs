@@ -7,6 +7,9 @@ pub mod http;
 pub mod sse;
 pub mod session;
 pub mod reasoning_state;
+pub mod pipeline;
+
+pub use pipeline::ChatPipeline;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -212,6 +215,13 @@ impl ChatClient {
     /// Returns the number of messages removed.
     pub fn trim_to_token_budget(&self, target_tokens: usize) -> usize {
         session::trim_to_token_budget(&self.conversation, target_tokens)
+    }
+
+    /// Trim a standalone message vec to the given token budget.
+    /// Used by the agent loop to trim its own history, since streaming
+    /// writes to a throwaway conversation and never updates this field.
+    pub fn trim_to_token_budget_messages(messages: &mut Vec<Message>, target_tokens: usize) -> usize {
+        session::trim_to_token_budget_messages(messages, target_tokens)
     }
 
     pub fn set_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {

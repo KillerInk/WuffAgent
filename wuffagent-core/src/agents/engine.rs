@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc;
@@ -29,6 +30,10 @@ pub struct AgentEngine {
     pub(super) client: Arc<crate::client::ChatClient>,
     pub(super) invocation_registry: Arc<AgentInvocationRegistry>,
     pub(super) memory: Option<Arc<crate::memory::MemoryManager>>,
+    /// Session ID for this agent engine's persistent conversation.
+    pub(super) agent_session_id: Option<String>,
+    /// Directory where this agent engine's session files are stored.
+    pub(super) agent_session_dir: PathBuf,
 }
 
 impl AgentEngine {
@@ -48,6 +53,8 @@ impl AgentEngine {
             client,
             invocation_registry,
             memory: None,
+            agent_session_id: None,
+            agent_session_dir: PathBuf::new(),
         }
     }
 
@@ -70,6 +77,31 @@ impl AgentEngine {
         client.set_reasoning_effort(effort);
         self.client = Arc::new(client);
         self
+    }
+
+    /// Return a clone of the engine with the LLM client's n_ctx updated.
+    /// Used to sync the remote server's reported context size before starting a chat loop.
+    pub fn with_n_ctx(mut self, n_ctx: u32) -> Self {
+        let mut client = (*self.client).clone();
+        client.set_n_ctx(n_ctx);
+        self.client = Arc::new(client);
+        self
+    }
+
+    /// Set the agent session for this engine.
+    pub fn set_agent_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {
+        self.agent_session_id = session_id;
+        self.agent_session_dir = session_dir;
+    }
+
+    /// Return the current agent session ID.
+    pub fn agent_session_id(&self) -> Option<&str> {
+        self.agent_session_id.as_deref()
+    }
+
+    /// Return the current agent session dir.
+    pub fn agent_session_dir(&self) -> &PathBuf {
+        &self.agent_session_dir
     }
 
     /// Return the comma-separated list of enabled agent names.
@@ -196,6 +228,8 @@ impl AgentEngine {
             self.event_tx.clone(),
             self.client.clone(),
             memory,
+            self.agent_session_id.clone(),
+            self.agent_session_dir.clone(),
         );
 
         let result = agent.execute(request, cancel_token).await;
@@ -226,6 +260,67 @@ impl AgentEngine {
                         });
                     }
                 }
+            }
+        }
+
+        result
+    }
+
+    /// Execute a chat request using the agent engine's tool pipeline with a
+    /// custom system prompt (instead of an agent's own system prompt).
+    /// This is the chat path — same native tool-calling loop as /plan but with
+    /// the prompt provided by the selected agent profile in the UI.
+    pub async fn execute_with_tools(
+        &self,
+        request: &str,
+        system_prompt: &str,
+        cancel_token: &CancellationToken,
+    ) -> Result<String, String> {
+        if cancel_token.is_cancelled() {
+            self.send_chain_event(AppEvent::AgentChainCancelled {
+                agent_name: "chat".to_string(),
+            });
+            return Err("Cancelled".to_string());
+        }
+
+        let mut chat_config = AgentConfig::default();
+        chat_config.name = "chat".to_string();
+        chat_config.system_prompt = system_prompt.to_string();
+        chat_config.task_timeout_ms = 0; // no timeout for chat
+
+        let mut agent = Agent::new(
+            chat_config,
+            self.llm_client.clone(),
+            self.tool_manager.clone(),
+            self.invocation_registry.clone(),
+            self.event_tx.clone(),
+            self.client.clone(),
+            None, // no memory for chat
+            self.agent_session_id.clone(),
+            self.agent_session_dir.clone(),
+        );
+
+        self.send_chain_event(AppEvent::AgentChainStarted {
+            agent_name: "chat".to_string(),
+            depth: 0,
+        });
+
+        let result = agent.execute(request, cancel_token).await;
+
+        match &result {
+            Ok(response) => {
+                self.send_chain_event(AppEvent::AgentChainCompleted {
+                    agent_name: "chat".to_string(),
+                    result: response.clone(),
+                    depth: 0,
+                });
+            }
+            Err(e) => {
+                self.send_chain_event(AppEvent::AgentChainError {
+                    agent_name: "chat".to_string(),
+                    error: e.clone(),
+                    depth: 0,
+                });
             }
         }
 
