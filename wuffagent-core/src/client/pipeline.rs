@@ -85,20 +85,12 @@ impl ChatPipeline {
                 }
             };
 
-            match &result {
-                Ok(response) => {
-                    tracing::info!("[CHAT PIPELINE] Completed with {} chars", response.len());
-                    let _ = event_tx.send(AppEvent::StreamComplete {
-                        content: response.clone(),
-                        usage: None,
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("[CHAT PIPELINE] Failed: {}", e);
-                    let _ = event_tx.send(AppEvent::StreamError {
-                        error: e.clone(),
-                    });
-                }
+            // On success the agent loop already emitted StreamComplete (with
+            // usage), so we only surface failures here — re-sending
+            // StreamComplete makes the UI append the response a second time.
+            if let Err(e) = result {
+                tracing::error!("[CHAT PIPELINE] Failed: {}", e);
+                let _ = event_tx.send(AppEvent::StreamError { error: e });
             }
         });
 

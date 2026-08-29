@@ -3,7 +3,7 @@ use tracing;
 
 use super::manager::MemoryManager;
 use crate::agents::config::AgentConfig;
-use crate::agents::llm_client::LlmClient;
+use crate::llm::LlmClient;
 use crate::types::Message;
 
 /// A suggested improvement to an agent's configuration.

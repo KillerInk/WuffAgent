@@ -136,7 +136,7 @@ fn bootstrap() -> (
     let _ = client.load_session();
 
     let base_url_clone = base_url.clone();
-    let llm_client = Arc::new(wuffagent_core::agents::llm_client::ChatClientAdapter::new(
+    let llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(
         ChatClient::new(&base_url_clone),
     ));
     let client_for_engine = Arc::new(client.clone());

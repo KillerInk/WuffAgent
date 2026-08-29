@@ -8,7 +8,7 @@ use super::search::search_memories;
 use super::storage::{load_memories, save_memories, get_memories_path, count_active_memories};
 use super::extractor::extract_memories;
 use super::improver::suggest_improvements;
-use crate::agents::llm_client::LlmClient;
+use crate::llm::LlmClient;
 use crate::types::Message;
 
 /// Main orchestrator for the memory system.

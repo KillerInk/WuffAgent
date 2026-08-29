@@ -7,7 +7,7 @@ use tracing;
 
 use super::config::AgentConfig;
 use super::invocation_registry::AgentInvocationRegistry;
-use super::llm_client::LlmClient;
+use super::LlmClient;
 use crate::client::ChatClient;
 use super::types::AgentId;
 use crate::tools::ToolManager;
@@ -466,11 +466,16 @@ impl Agent {
 
             // Commit the current round's text to the UI so the stream buffer
             // is flushed between tool-call iterations, and update the token
-            // gauge with the server-reported usage.
-            self.send_event(crate::types::AppEvent::StreamRoundComplete {
-                content: display_content.clone(),
-                usage: usage.clone(),
-            });
+            // gauge with the server-reported usage. Only for INTERMEDIATE
+            // rounds (tool calls present): on the final round the buffer is
+            // left intact so StreamComplete commits it exactly once — emitting
+            // RoundComplete here too would make the UI append the text twice.
+            if tool_calls.as_ref().map(|c| !c.is_empty()).unwrap_or(false) {
+                self.send_event(crate::types::AppEvent::StreamRoundComplete {
+                    content: display_content.clone(),
+                    usage: usage.clone(),
+                });
+            }
 
             // ── Native tool calls ───────────────────────────────────────
             if let Some(calls) = &tool_calls {

@@ -1,3 +1,8 @@
+//! Configuration system: connection settings, encryption, presets, and agent/memory config re-exports.
+//!
+//! Re-exports `AgentConfig` from `agents::config` and `MemoryConfig` from `memory::types`
+//! to provide a unified import path for consumers.
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -9,7 +14,8 @@ pub use self::encryption::EncryptionSettings;
 pub use self::presets::{get_presets_path, LocalPreset, Preset, PresetError, PresetStore, RemotePreset};
 pub use self::search::{SearchConfig, SearchBackend, SearchRegion, TimeRange};
 pub use paths::get_config_path;
-pub use crate::memory::MemoryConfig;
+pub use crate::agents::config::{AgentConfig, RecoveryPolicy, ShellConfig, WorkerConfig};
+pub use crate::memory::types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};
 
 mod chat;
 mod local;

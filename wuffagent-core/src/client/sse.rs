@@ -25,7 +25,20 @@ pub async fn process_sse_line(
     }
 
     let data = &line["data: ".len()..];
-    let chunk: Value = serde_json::from_str(data)?;
+    // Some servers emit non-JSON data lines (keep-alives, partial frames).
+    // Skip them instead of failing the whole stream.
+    let chunk = match serde_json::from_str::<Value>(data) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(
+                "SSE: skipping unparseable data line (len={}): {:?} (error: {})",
+                data.len(),
+                &data[..data.len().min(120)],
+                e
+            );
+            return Ok(None);
+        }
+    };
 
     if let Some(text) = chunk
         .get("choices")
@@ -211,12 +224,11 @@ pub async fn stream_message(
 
                     // Process complete lines
                     while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer.split_off(newline_pos);
-                        buffer.pop(); // remove trailing '\n'
+                        let line = buffer[..=newline_pos].to_string();
+                        buffer.drain(..=newline_pos);
                         if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
                             last_usage = Some(usage);
                         }
-                        buffer = line;
                     }
                 }
                 Ok::<_, Error>(last_usage)
@@ -232,12 +244,11 @@ pub async fn stream_message(
 
             // Process complete lines
             while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer.split_off(newline_pos);
-                buffer.pop(); // remove trailing '\n'
+                let line = buffer[..=newline_pos].to_string();
+                buffer.drain(..=newline_pos);
                 if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
                     last_usage = Some(usage);
                 }
-                buffer = line;
             }
         }
     }

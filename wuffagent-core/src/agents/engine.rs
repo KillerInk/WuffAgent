@@ -9,7 +9,7 @@ use tracing;
 use super::agent::Agent;
 use super::config::AgentConfig;
 use super::invocation_registry::AgentInvocationRegistry;
-use super::llm_client::LlmClient;
+use super::LlmClient;
 use super::registry::AgentRegistry;
 use crate::tools::ToolManager;
 use crate::types::{AppEvent, Message};

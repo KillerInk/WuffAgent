@@ -3,6 +3,9 @@
 //! Persistent, project-scoped memory that allows the AI to learn across sessions.
 //! Supports storing facts, lessons, decisions, context, and goals.
 //! Memories are injected into agent system prompts and can be auto-extracted from conversations.
+//!
+//! Module dependency: `memory` uses `llm` for extraction and improvement,
+//! but `llm` does not depend on `memory`.
 
 pub mod types;
 pub mod storage;

@@ -1,3 +1,8 @@
+//! LLM client abstraction for agents.
+//!
+//! Defines the `LlmClient` trait (minimal interface for LLM interaction)
+//! and adapters that wrap `ChatClient` for use by agents.
+
 use async_trait::async_trait;
 use std::sync::Arc;
 

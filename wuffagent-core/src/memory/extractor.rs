@@ -1,6 +1,6 @@
 use super::types::MemoryEntry;
 use super::manager::MemoryManager;
-use crate::agents::llm_client::LlmClient;
+use crate::llm::LlmClient;
 use crate::types::Message;
 
 /// Extract memories from conversation history.

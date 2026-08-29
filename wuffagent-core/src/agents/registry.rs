@@ -9,7 +9,7 @@ use tracing;
 use super::agent::Agent;
 use super::config::{AgentConfig, RecoveryPolicy};
 use super::invocation_registry::AgentInvocationRegistry;
-use super::llm_client::LlmClient;
+use super::LlmClient;
 use super::traits::AgentError;
 use crate::client::ChatClient;
 use crate::tools::registry::ToolRegistry;
