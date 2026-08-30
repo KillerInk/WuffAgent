@@ -86,12 +86,12 @@ impl ChatApp {
                 );
             }
             AppEvent::StreamThinkingChunk { content } => {
-                tracing::debug!("UI: StreamThinkingChunk received, content_len={}", content.len());
+                tracing::trace!("UI: StreamThinkingChunk received, content_len={}", content.len());
                 // Accumulate for live display only.
                 self.chat.current_thinking.push_str(&content);
             }
             AppEvent::StreamThinkingComplete { content: _ } => {
-                tracing::debug!("UI: StreamThinkingComplete received, current_thinking_len={}", self.chat.current_thinking.len());
+                tracing::trace!("UI: StreamThinkingComplete received, current_thinking_len={}", self.chat.current_thinking.len());
                 // Commit the thinking as a typed message, then clear live state.
                 // Note: do NOT commit_stream() here — the round's text stays in
                 // stream_buffer and is committed by RoundComplete/StreamComplete,

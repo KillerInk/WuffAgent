@@ -13,6 +13,7 @@ pub async fn extract_memories(
 ) -> Result<Vec<MemoryEntry>, String> {
     use super::types::MemoryType;
 
+    tracing::debug!("[MEMORY] extract_memories: enabled={}, auto_extract_after_task={}", manager.config().enabled, manager.config().auto_extract_after_task);
     if !manager.config().enabled || !manager.config().auto_extract_after_task {
         return Ok(Vec::new());
     }

@@ -285,6 +285,12 @@ impl ContextTrimming {
         }
 
         let content_type = classify_content(content);
+        tracing::info!(
+            "trimming: summarizing content (type={:?}, len={}, budget={})",
+            content_type,
+            content.len(),
+            budget_chars
+        );
         let result = match content_type {
             ContentType::BuildLog => BuildLogSummarizer.summarize(content, budget_chars, config),
             ContentType::SourceCode => CodeSummarizer.summarize(content, budget_chars, config),
@@ -298,6 +304,11 @@ impl ContextTrimming {
 
         // Final hard cap after summarization.
         if result.len() > budget_chars {
+            tracing::warn!(
+                "trimming: post-summarize still over budget (len={}, budget={}), applying hard cap",
+                result.len(),
+                budget_chars
+            );
             GenericSummarizer.summarize(&result, budget_chars, config)
         } else {
             result
@@ -414,6 +425,16 @@ impl ContextTrimming {
         let last_user_idx = messages.iter().rev().position(|m| m.role == "user")
             .map(|r| messages.len().saturating_sub(r) - 1);
 
+        let initial_count = messages.len();
+        let initial_chars = Self::message_char_count(messages);
+        tracing::info!(
+            "trimming: trim_messages called (messages={}, chars={}, target={}, keep_from={})",
+            initial_count,
+            initial_chars,
+            target_chars,
+            keep_from
+        );
+
         let mut removed = 0;
         loop {
             let prompt_len = Self::message_char_count(messages);
@@ -435,6 +456,17 @@ impl ContextTrimming {
         // Fallback: if still over budget after removing all removable messages,
         // truncate the largest shrinkable message to force it under.
         Self::truncate_largest_message(messages, target_chars);
+
+        let final_count = messages.len();
+        let final_chars = Self::message_char_count(messages);
+        tracing::info!(
+            "trimming: trim_messages done (removed={}, messages: {} -> {}, chars: {} -> {})",
+            removed,
+            initial_count,
+            final_count,
+            initial_chars,
+            final_chars
+        );
 
         removed
     }

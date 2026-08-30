@@ -62,10 +62,17 @@ pub fn build_request(
     }
 
     // Include conversation history, excluding any in-progress empty assistant message
+    // and any stray system messages (system must be first per OpenAI API spec).
     let conv = conversation.lock().unwrap();
     for msg in &*conv {
         // Skip empty assistant messages that are being accumulated during streaming
         if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
+            continue;
+        }
+        // Skip system messages — a fresh one is already prepended above.
+        // Stray system messages in history cause the server to reject with
+        // "System message must be at the beginning."
+        if msg.role == "system" {
             continue;
         }
         messages.push(msg.clone());

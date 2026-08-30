@@ -58,6 +58,8 @@ pub async fn suggest_improvements(
         return Ok(Vec::new());
     }
 
+    tracing::info!("[MEMORY] Improvement check for agent '{}': found {} relevant lesson(s), triggering LLM analysis", agent_config.name, lessons.len());
+
     let memories_text = lessons.join("\n");
     let prompt = agent_config.system_prompt.clone();
 

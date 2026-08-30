@@ -85,7 +85,7 @@ pub async fn process_sse_line(
         });
     if let Some(thinking) = thinking {
         if !thinking.is_empty() {
-            tracing::debug!(
+            tracing::trace!(
                 "SSE: thinking/reasoning chunk received (len={}), source=delta.thinking or delta.reasoning",
                 thinking.len()
             );

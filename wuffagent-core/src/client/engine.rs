@@ -163,12 +163,28 @@ async fn run_chat_loop(
                     // token budget (bounded by the message-count cap).
                     let max_msgs = guard.max_messages;
                     if max_msgs > 0 {
+                        let before = guard.conversation.lock().unwrap().len();
                         trim_conversation(&guard.conversation, max_msgs);
+                        let after = guard.conversation.lock().unwrap().len();
+                        if before != after {
+                            tracing::info!(
+                                "trimming: chat loop count trim ({} -> {}, max={})",
+                                before, after, max_msgs
+                            );
+                        }
                     }
                     if guard.conversation().lock().unwrap().len() > MIN_MESSAGES_FOR_TRIM {
+                        let before_chars = estimate_conversation_tokens(&guard.conversation);
                         let trimming = ContextTrimming::new();
                         let config = TrimConfig::default();
                         trimming.trim_conversation(&guard.conversation, target_chars, &config);
+                        let after_chars = estimate_conversation_tokens(&guard.conversation);
+                        if before_chars > after_chars {
+                            tracing::info!(
+                                "trimming: chat loop char trim ({} -> {}, target={})",
+                                before_chars, after_chars, target_chars
+                            );
+                        }
                     }
                 }
             } else if guard.max_messages > 0 {

@@ -181,7 +181,8 @@ pub fn trim_conversation(
     max_messages: usize,
 ) {
     let mut conv = conversation.lock().unwrap();
-    if conv.len() <= max_messages {
+    let initial_len = conv.len();
+    if initial_len <= max_messages {
         return;
     }
     // The client conversation has no stored system prompt (it is prepended at
@@ -192,6 +193,13 @@ pub fn trim_conversation(
     let trim_at = conv.len().saturating_sub(max_messages);
     if trim_at > keep_from {
         conv.drain(keep_from..trim_at);
+        tracing::info!(
+            "trimming: trim_conversation (count) removed {} messages ({} -> {}, max={})",
+            trim_at - keep_from,
+            initial_len,
+            conv.len(),
+            max_messages
+        );
     }
 }
 

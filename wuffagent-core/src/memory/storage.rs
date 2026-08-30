@@ -8,7 +8,9 @@ use super::types::{MemoryEntry, MemoryConfig};
 /// Backwards-compatible with the old format that used plain objects without
 /// confidence/session_id/project/supersedes fields.
 pub fn load_memories(path: &Path) -> Result<Vec<MemoryEntry>, String> {
+    tracing::debug!("[MEMORY] Loading memories from {:?}", path);
     if !path.exists() {
+        tracing::debug!("[MEMORY] Memory file does not exist, starting fresh: {:?}", path);
         return Ok(Vec::new());
     }
 
@@ -52,7 +54,7 @@ pub fn save_memories(path: &Path, entries: &[MemoryEntry]) -> Result<(), String>
     fs::rename(&temp_path, path)
         .map_err(|e| format!("Failed to rename temp file to {:?}: {}", path, e))?;
 
-    tracing::debug!("Saved {} memories to {:?}", entries.len(), path);
+    tracing::debug!("[MEMORY] Saved {} memories to {:?}", entries.len(), path);
     Ok(())
 }
 
@@ -68,7 +70,9 @@ pub fn get_memories_path(config: &MemoryConfig) -> PathBuf {
             .join("memories")
             .join("projects")
     };
-    memories_dir.join(format!("{}.json", config.project))
+    let path = memories_dir.join(format!("{}.json", config.project));
+    tracing::debug!("[MEMORY] Memory storage path: {:?}", path);
+    path
 }
 
 /// Count active (non-expired, non-superseded) memories.
