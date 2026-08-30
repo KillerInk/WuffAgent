@@ -5,6 +5,27 @@
 
 use super::classifier::{classify_content, ContentType};
 use super::config::TrimConfig;
+use crate::types::Message;
+use std::sync::{Arc, Mutex};
+
+/// Token count of a message string: 1 char = 1 token unit (exact, no estimation).
+/// Since real tokens are sub-strings, tokens <= chars, so this is always an
+/// upper bound on the true token count — trimming triggers early rather than
+/// letting the server reject an over-budget request.
+pub fn estimate_tokens(text: &str) -> usize {
+    ContextTrimming::estimate_tokens(text)
+}
+
+/// Token count of a single message: content + reasoning content + tool-call
+/// arguments, each counted by `estimate_tokens` (1 char = 1 unit).
+pub fn message_tokens(m: &Message) -> usize {
+    ContextTrimming::message_tokens(m)
+}
+
+/// Total token count of a message list (content + reasoning + tool args).
+pub fn message_char_count(messages: &[Message]) -> usize {
+    ContextTrimming::message_char_count(messages)
+}
 
 /// Minimum lines to keep from build logs when summarizing.
 const BUILD_LOG_MIN_KEEP: usize = 3;
@@ -230,7 +251,7 @@ impl ContentSummarizer for GenericSummarizer {
 }
 
 /// The main trimming engine that dispatches to the right summarizer.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ContextTrimming {
     _private: (),
 }
@@ -294,47 +315,154 @@ impl ContextTrimming {
         }
     }
 
-    /// Trim a conversation to fit within a token budget.
-    /// Uses character-count heuristic (~2 chars/token, matching estimate_tokens).
-    pub fn trim_to_token_budget(
+    /// Token count of a message string: 1 char = 1 token unit (exact, no estimation).
+    /// Since real tokens are sub-strings, tokens <= chars, so this is always an
+    /// upper bound on the true token count — trimming triggers early rather than
+    /// letting the server reject an over-budget request.
+    pub fn estimate_tokens(text: &str) -> usize {
+        text.chars().count()
+    }
+
+    /// Token count of a single message: content + reasoning content + tool-call
+    /// arguments, each counted by `estimate_tokens` (1 char = 1 unit).
+    pub fn message_tokens(m: &Message) -> usize {
+        let mut total = Self::estimate_tokens(&m.content);
+        if let Some(ref rc) = m.reasoning_content {
+            total += Self::estimate_tokens(rc);
+        }
+        if let Some(ref tcs) = m.tool_calls {
+            for tc in tcs {
+                total += Self::estimate_tokens(&tc.function.arguments);
+            }
+        }
+        total
+    }
+
+    /// Total token count of a message list (content + reasoning + tool args).
+    pub fn message_char_count(messages: &[Message]) -> usize {
+        messages.iter().map(Self::message_tokens).sum()
+    }
+
+    /// Truncate the largest non-leading-system message so the total token count
+    /// drops below `target_tokens` (chars). Truncating in place preserves the
+    /// tool_call/tool_call_id pairing that removing whole messages would break.
+    fn truncate_largest_message(messages: &mut [Message], target_tokens: usize) -> bool {
+        let mut best_idx: Option<usize> = None;
+        let mut best_len: usize = 0;
+        let leading_system = messages.first().map(|m| m.role.as_str()) == Some("system");
+        for (i, m) in messages.iter().enumerate() {
+            if i == 0 && leading_system {
+                continue;
+            }
+            let len = m.content.len();
+            if len > best_len {
+                best_len = len;
+                best_idx = Some(i);
+            }
+        }
+        let idx = match best_idx {
+            Some(i) => i,
+            None => return false,
+        };
+
+        let mut truncated = false;
+        loop {
+            if Self::message_char_count(messages) <= target_tokens {
+                return truncated;
+            }
+            let current_chars = messages[idx].content.chars().count();
+            if current_chars == 0 {
+                return truncated;
+            }
+            let target_chars = current_chars / 2;
+            let byte_pos = messages[idx]
+                .content
+                .char_indices()
+                .take(target_chars)
+                .last()
+                .map(|(b, _)| b)
+                .unwrap_or(0);
+            messages[idx].content.truncate(byte_pos);
+            truncated = true;
+        }
+    }
+
+    /// Token-budget trim: remove oldest non-system messages until the token
+    /// count (chars of all messages incl. reasoning and tool-call args) is below
+    /// the target. Returns the number of messages removed.
+    pub fn trim_messages(
         &self,
-        messages: &mut Vec<crate::types::Message>,
-        target_tokens: usize,
+        messages: &mut Vec<Message>,
+        target_chars: usize,
         config: &TrimConfig,
     ) -> usize {
         if !config.is_enabled() {
             return 0;
         }
+        if messages.is_empty() {
+            return 0;
+        }
 
-        let target_chars = target_tokens * 2;
-        let system_idx = messages.iter().position(|m| m.role == "system");
-        let keep_from = if let Some(idx) = system_idx { idx + 1 } else { 0 };
+        let keep_from = if messages.first().map(|m| m.role.as_str()) == Some("system") { 1 } else { 0 };
 
         if keep_from >= messages.len() {
             return 0;
         }
 
-        let mut total_chars: usize = messages[keep_from..]
-            .iter()
-            .map(|m| m.content.len() + m.timestamp.len())
-            .sum();
+        // Never remove the last user message — the server requires at least one
+        // user message and raises a 500 if the last message is not from a user.
+        let last_user_idx = messages.iter().rev().position(|m| m.role == "user")
+            .map(|r| messages.len().saturating_sub(r) - 1);
 
         let mut removed = 0;
         loop {
-            if total_chars <= target_chars {
+            let prompt_len = Self::message_char_count(messages);
+            if prompt_len <= target_chars {
                 break;
             }
-
             if keep_from >= messages.len() {
                 break;
             }
-
-            total_chars -= messages[keep_from].content.len() + messages[keep_from].timestamp.len();
+            if let Some(lui) = last_user_idx {
+                if keep_from >= lui {
+                    break;
+                }
+            }
             messages.remove(keep_from);
             removed += 1;
         }
 
+        // Fallback: if still over budget after removing all removable messages,
+        // truncate the largest shrinkable message to force it under.
+        Self::truncate_largest_message(messages, target_chars);
+
         removed
+    }
+
+    /// Token-budget trim for Arc<Mutex<Vec<Message>>> (chat client conversation).
+    pub fn trim_conversation(
+        &self,
+        conversation: &Arc<Mutex<Vec<Message>>>,
+        target_chars: usize,
+        config: &TrimConfig,
+    ) -> usize {
+        if !config.is_enabled() {
+            return 0;
+        }
+        let mut conv = conversation.lock().unwrap();
+        self.trim_messages(&mut conv, target_chars, config)
+    }
+
+    /// Token-budget trim: remove oldest non-system messages until the token
+    /// count is below the target. Legacy wrapper — delegates to `trim_messages`.
+    /// `target_tokens` is in char units (same as `estimate_tokens` returns chars).
+    pub fn trim_to_token_budget(
+        &self,
+        messages: &mut Vec<Message>,
+        target_tokens: usize,
+        config: &TrimConfig,
+    ) -> usize {
+        self.trim_messages(messages, target_tokens, config)
     }
 }
 

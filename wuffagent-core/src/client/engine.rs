@@ -5,8 +5,12 @@ use tracing;
 
 use tokio::task::JoinHandle;
 
-use super::{ChatClient, Error as ClientError, trim_conversation, trim_to_token_budget};
+use super::{
+    ChatClient, Error as ClientError, CHARS_PER_TOKEN, estimate_conversation_tokens,
+    trim_conversation,
+};
 use crate::tools::manager::ToolManager;
+use crate::trimming::{ContextTrimming, TrimConfig};
 use crate::types::{AppEvent, Usage};
 
 /// Errors that can occur during chat engine operations
@@ -142,24 +146,34 @@ async fn run_chat_loop(
     let mut thinking_rounds = 0;
 
     loop {
-        // Token-budget trim before each request to prevent exceeding n_ctx.
-        // Target is ~90% of n_ctx so the server still has headroom.
+        // Trim before each request, but only once the context limit is reached.
+        // The message-count cap (max_messages) is a hard floor: the conversation
+        // is trimmed to that count only when its exact char count exceeds
+        // 80% of n_ctx. While the count stays below the limit, history is kept.
         {
             let guard = client.lock().unwrap();
             let n_ctx = guard.n_ctx();
-            let max_msgs = guard.max_messages;
-            // Trim by message count if configured
-            if max_msgs > 0 {
-                trim_conversation(&guard.conversation, max_msgs);
-            }
-            // Also trim by token budget if n_ctx is set and conversation is large
             if n_ctx > 0 {
-                // Use 80% of n_ctx as target to leave headroom for the
-                // ~10-15% underestimation inherent in the char-count heuristic.
-                let target_tokens = (n_ctx as usize) * CONTEXT_TARGET_RATIO as usize;
-                if guard.conversation().lock().unwrap().len() > MIN_MESSAGES_FOR_TRIM {
-                    trim_to_token_budget(&guard.conversation, target_tokens);
+                // Budget in char units: n_ctx tokens × CHARS_PER_TOKEN, capped at
+                // CONTEXT_TARGET_RATIO to leave headroom for the new response.
+                let target_chars = (n_ctx as usize) * CHARS_PER_TOKEN * CONTEXT_TARGET_RATIO as usize;
+                let estimated = estimate_conversation_tokens(&guard.conversation);
+                if estimated > target_chars {
+                    // Context limit reached: trim oldest messages down to the
+                    // token budget (bounded by the message-count cap).
+                    let max_msgs = guard.max_messages;
+                    if max_msgs > 0 {
+                        trim_conversation(&guard.conversation, max_msgs);
+                    }
+                    if guard.conversation().lock().unwrap().len() > MIN_MESSAGES_FOR_TRIM {
+                        let trimming = ContextTrimming::new();
+                        let config = TrimConfig::default();
+                        trimming.trim_conversation(&guard.conversation, target_chars, &config);
+                    }
                 }
+            } else if guard.max_messages > 0 {
+                // No context size configured: fall back to plain count-based trim.
+                trim_conversation(&guard.conversation, guard.max_messages);
             }
         }
 

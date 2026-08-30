@@ -37,12 +37,18 @@ impl ChatApp {
         });
     }
 
-    /// Rough token count estimation: ~4 chars per token is a common rule of thumb
-    pub(super) fn estimate_token_count(text: &str) -> u32 {
-        if text.is_empty() {
-            0
-        } else {
-            (text.len() as f32 / 4.0).ceil() as u32
+    /// Refresh the token gauge from the client conversation using the exact
+    /// char counter shared with the trim logic — the gauge always reflects
+    /// what the trimmer sees. Sets `chat.token_count` (approximate tokens)
+    /// and `chat.context_used` (percent of the effective n_ctx budget).
+    pub(super) fn refresh_token_gauge(&mut self) {
+        let chars = crate::client::estimate_conversation_tokens(self.client.conversation());
+        self.chat.token_count = chars / crate::client::CHARS_PER_TOKEN;
+        let n_ctx = self.get_effective_n_ctx();
+        if n_ctx > 0 {
+            // Both numerator and denominator are in char units, so the ratio
+            // is a true percentage of the context window.
+            self.chat.context_used = chars as f32 / (n_ctx as f32 * crate::client::CHARS_PER_TOKEN as f32) * 100.0;
         }
     }
 

@@ -12,6 +12,7 @@ use crate::client::ChatClient;
 use super::types::AgentId;
 use crate::tools::ToolManager;
 use crate::types::Message;
+use crate::trimming::ContextTrimming;
 
 /// Minimum delay between LLM calls to prevent API rate-limiting (500ms).
 const LLM_RATE_LIMIT_DELAY: Duration = Duration::from_millis(500);
@@ -62,6 +63,8 @@ pub struct Agent {
     agent_session_id: Option<String>,
     /// Directory where this agent's session files are stored.
     agent_session_dir: PathBuf,
+    /// Centralized trimming engine.
+    trimming: ContextTrimming,
 }
 
 impl Agent {
@@ -100,6 +103,7 @@ impl Agent {
             messages: Vec::new(),
             agent_session_id,
             agent_session_dir,
+            trimming: ContextTrimming::new(),
         }
     }
 
@@ -273,6 +277,55 @@ impl Agent {
         result
     }
 
+    /// Pause the agent and save a message checkpoint to the agent session.
+    pub fn pause(&mut self) -> Option<Vec<Message>> {
+        if self.agent_session_id.is_none() {
+            return None;
+        }
+        let checkpoint = self.messages.clone();
+        // Save the checkpoint to the agent session
+        if let Some(ref sid) = self.agent_session_id {
+            let mut c = (*self.client).clone();
+            c.set_session(Some(sid.clone()), self.agent_session_dir.clone());
+            // Save the checkpoint by writing it as part of the session
+            if let Err(e) = c.save_session() {
+                tracing::warn!("Failed to save agent session on pause: {}", e);
+            }
+        }
+        self.send_event(crate::types::AppEvent::SessionPaused {
+            session_id: self.agent_session_id.clone().unwrap_or_default(),
+            message_count: checkpoint.len(),
+        });
+        Some(checkpoint)
+    }
+
+    /// Resume the agent from a previously saved checkpoint.
+    pub fn resume(&mut self, checkpoint: Vec<Message>) -> Result<(), String> {
+        if self.agent_session_id.is_none() {
+            return Err("No agent session configured".to_string());
+        }
+        self.messages = checkpoint.clone();
+        // Sync checkpoint into client conversation
+        {
+            let conv = self.client.conversation();
+            let mut guard = conv.lock().unwrap();
+            guard.clear();
+            guard.extend(checkpoint.iter().cloned());
+        }
+        // Save the resumed state
+        if self.agent_session_id.is_some() {
+            let c = self.client.clone();
+            if let Err(e) = c.save_session() {
+                tracing::warn!("Failed to save agent session on resume: {}", e);
+            }
+        }
+        self.send_event(crate::types::AppEvent::SessionResumed {
+            session_id: self.agent_session_id.clone().unwrap_or_default(),
+            message_count: checkpoint.len(),
+        });
+        Ok(())
+    }
+
     /// Build the system prompt for this agent.
     fn build_system_prompt(&self) -> String {
         let mut prompt = if self.config.system_prompt.is_empty() {
@@ -358,46 +411,31 @@ impl Agent {
             // tool result (100k+ tokens) can exceed n_ctx and the server
             // rejects the request.
             if self.client.n_ctx() > 0 {
-                // Use 80% of n_ctx as target to leave headroom for the
-                // ~10-15% underestimation inherent in the char-count heuristic.
-                let target_tokens = (self.client.n_ctx() as usize) * 8 / 10;
+                // Budget in char units: n_ctx tokens × CHARS_PER_TOKEN, capped at
+                // 80% to leave headroom for the new response.
+                let target_chars =
+                    self.client.n_ctx() as usize * crate::client::CHARS_PER_TOKEN * 8 / 10;
                 let msg_count = messages.len();
                 if msg_count > 4 {
                     // Trim self.messages directly: stream_with_messages_arc writes to a
                     // throwaway local_conv and never touches self.client.conversation,
                     // so trimming the client's conversation would be a no-op.
-                    let removed = ChatClient::trim_to_token_budget_messages(messages, target_tokens);
+                    let config = crate::trimming::TrimConfig::default();
+                    let removed = self.trimming.trim_messages(messages, target_chars, &config);
                     if removed > 0 {
                         tracing::info!(
-                            "[AGENT] Agent '{}' trimmed {} messages (n_ctx={}, target={})",
-                            self.config.name, removed, self.client.n_ctx(), target_tokens
+                            "[AGENT] Agent '{}' trimmed {} messages (n_ctx={}, target_chars={})",
+                            self.config.name, removed, self.client.n_ctx(), target_chars
                         );
                     }
-                    // Post-trim verification: re-check estimate and truncate largest
-                    // message if still over budget (safety net for edge cases).
-                    let post_trim_total: usize = messages.iter()
-                        .map(|m| crate::client::session::estimate_tokens(&m.content))
-                        .sum();
-                    if post_trim_total > target_tokens {
+                    // Post-trim verification: the trim already truncates the largest
+                    // message as a fallback; log if we're still over budget.
+                    let post_trim_total = crate::trimming::message_char_count(messages);
+                    if post_trim_total > target_chars {
                         tracing::warn!(
-                            "[AGENT] Post-trim estimate {} > target {}, truncating largest message",
-                            post_trim_total, target_tokens
+                            "[AGENT] Post-trim count {} > target {}",
+                            post_trim_total, target_chars
                         );
-                        // Find and truncate the largest non-system message
-                        let mut best_idx: Option<usize> = None;
-                        let mut best_len: usize = 0;
-                        for (i, m) in messages.iter().enumerate() {
-                            if m.role == "system" { continue; }
-                            if m.content.len() > best_len {
-                                best_len = m.content.len();
-                                best_idx = Some(i);
-                            }
-                        }
-                        if let Some(idx) = best_idx {
-                            let new_len = messages[idx].content.len() / 2;
-                            messages[idx].content.truncate(new_len);
-                            tracing::info!("[AGENT] Truncated message {} to {} chars", idx, new_len);
-                        }
                     }
                 }
             }

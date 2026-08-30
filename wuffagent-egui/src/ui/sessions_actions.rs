@@ -10,6 +10,8 @@ pub enum PanelAction {
     Delete(String),
     Export { session_id: String },
     Import,
+    Pause,
+    Resume,
 }
 
 /// Result of applying a panel action.
@@ -75,6 +77,14 @@ pub fn apply_actions(
                     PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false }
                 }
             }
+        }
+        PanelAction::Pause => {
+            // Pause is handled by the event handler via SessionPaused event
+            PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false }
+        }
+        PanelAction::Resume => {
+            // Resume is handled by the event handler via SessionResumed event
+            PanelActionResult { selected_id: panel.selected_id().clone(), clear_client_session: false }
         }
         PanelAction::Export { session_id } => {
             let output_path = if panel.export_path().is_empty() {

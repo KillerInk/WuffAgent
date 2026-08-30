@@ -24,8 +24,29 @@ pub use session::{
     save_session, load_session,
     enqueue_save_failure, retry_pending_saves, has_save_failure,
     clear_save_failure,
-    trim_conversation, trim_to_token_budget, clear_history, clear_session_messages,
+    CHARS_PER_TOKEN, trim_conversation, clear_history, clear_session_messages,
 };
+// Re-export trimming helpers for backward compatibility
+pub use crate::trimming::{estimate_tokens, message_char_count, ContextTrimming};
+
+/// Backward-compat wrapper: delegates to `ContextTrimming::trim_to_token_budget`.
+pub fn trim_to_token_budget(conversation: &std::sync::Arc<std::sync::Mutex<Vec<crate::types::Message>>>, target_tokens: usize) -> usize {
+    let trimming = ContextTrimming::new();
+    let config = crate::trimming::TrimConfig::default();
+    trimming.trim_to_token_budget(&mut conversation.lock().unwrap(), target_tokens, &config)
+}
+
+/// Backward-compat wrapper: delegates to `ContextTrimming::trim_messages`.
+pub fn trim_to_token_budget_messages(messages: &mut Vec<crate::types::Message>, target_tokens: usize) -> usize {
+    let trimming = ContextTrimming::new();
+    let config = crate::trimming::TrimConfig::default();
+    trimming.trim_messages(messages, target_tokens, &config)
+}
+
+/// Backward-compat wrapper: estimates conversation tokens via `message_char_count`.
+pub fn estimate_conversation_tokens(conversation: &std::sync::Arc<std::sync::Mutex<Vec<crate::types::Message>>>) -> usize {
+    message_char_count(&conversation.lock().unwrap())
+}
 
 #[derive(Clone)]
 pub struct ChatClient {
@@ -35,6 +56,15 @@ pub struct ChatClient {
     reasoning_effort: crate::types::ReasoningEffort,
     conversation: Arc<Mutex<Vec<Message>>>,
     http_client: reqwest::Client,
+    /// Dedicated client for SSE streaming requests.
+    ///
+    /// Uses connect + read (idle) timeouts instead of a *total* request
+    /// timeout: a total timeout cancels long local-model generations
+    /// mid-stream (reqwest surfaces the cancellation as
+    /// "error decoding response body"). The read timeout only fires when
+    /// the connection stays silent for the given duration, so streams of
+    /// arbitrary length survive as long as tokens keep flowing.
+    stream_http_client: reqwest::Client,
     api_key: Option<String>,
     session_id: Option<String>,
     session_dir: PathBuf,
@@ -105,17 +135,33 @@ impl ChatClient {
 
     /// Create a ChatClient with a custom HTTP timeout (in seconds).
     pub fn new_with_timeout(base_url: &str, timeout_secs: u64) -> Self {
+        let d = std::time::Duration::from_secs(timeout_secs);
         Self {
             base_url: base_url.to_string(),
             system_prompt: String::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
             conversation: Arc::new(Mutex::new(Vec::new())),
             http_client: {
-                let builder = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(timeout_secs))
+                // Non-streaming calls: total request timeout is fine
+                // (short round-trips).
+                reqwest::Client::builder()
+                    .timeout(d)
                     .pool_max_idle_per_host(10)
-                    .pool_idle_timeout(Some(std::time::Duration::from_secs(90)));
-                builder.build().unwrap()
+                    .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+                    .build()
+                    .unwrap()
+            },
+            stream_http_client: {
+                // Streaming calls: NO total timeout — generation can
+                // legitimately run for many minutes. The read timeout
+                // acts as an idle/dead-connection guard instead.
+                reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(30))
+                    .read_timeout(d)
+                    .pool_max_idle_per_host(10)
+                    .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+                    .build()
+                    .unwrap()
             },
             api_key: None,
             session_id: None,
@@ -214,14 +260,18 @@ impl ChatClient {
     /// Trim the client's conversation to the given token budget.
     /// Returns the number of messages removed.
     pub fn trim_to_token_budget(&self, target_tokens: usize) -> usize {
-        session::trim_to_token_budget(&self.conversation, target_tokens)
+        let trimming = ContextTrimming::new();
+        let config = crate::trimming::TrimConfig::default();
+        trimming.trim_conversation(&self.conversation, target_tokens, &config)
     }
 
     /// Trim a standalone message vec to the given token budget.
     /// Used by the agent loop to trim its own history, since streaming
     /// writes to a throwaway conversation and never updates this field.
     pub fn trim_to_token_budget_messages(messages: &mut Vec<Message>, target_tokens: usize) -> usize {
-        session::trim_to_token_budget_messages(messages, target_tokens)
+        let trimming = ContextTrimming::new();
+        let config = crate::trimming::TrimConfig::default();
+        trimming.trim_messages(messages, target_tokens, &config)
     }
 
     pub fn set_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {
@@ -381,7 +431,18 @@ impl ChatClient {
         });
         drop(conv);
 
-        self.trim_conversation(self.max_messages);
+        // Only trim once the context limit is reached (same policy as the
+        // streaming chat loop): while the exact char count stays below 80% of
+        // n_ctx (in char units), the full history is kept.
+        if self.n_ctx > 0 {
+            let target_chars = self.n_ctx as usize * session::CHARS_PER_TOKEN * 8 / 10;
+            if estimate_conversation_tokens(&self.conversation) > target_chars {
+                self.trim_conversation(self.max_messages);
+                self.trim_to_token_budget(target_chars);
+            }
+        } else if self.max_messages > 0 {
+            self.trim_conversation(self.max_messages);
+        }
 
         Ok((content, usage))
     }
@@ -411,7 +472,7 @@ impl ChatClient {
             self.n_ctx,
         );
         let builder = build_stream_request(
-            &self.http_client,
+            &self.stream_http_client,
             &self.base_url,
             self.api_key.as_deref(),
             &request,
@@ -447,7 +508,7 @@ impl ChatClient {
         callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
     ) -> Result<Option<Usage>, Error> {
         // Clone the data we need before calling the async method
-        let http_client = client.lock().unwrap().http_client.clone();
+        let http_client = client.lock().unwrap().stream_http_client.clone();
         let base_url = client.lock().unwrap().base_url.clone();
         let api_key = client.lock().unwrap().api_key.clone();
         let conversation = client.lock().unwrap().conversation.clone();
@@ -539,7 +600,7 @@ impl ChatClient {
         let (http_client, base_url, api_key, conversation, system_prompt) = {
             let c = client.lock().map_err(|e| Error::Stream(format!("mutex poisoned: {}", e)))?;
             (
-                c.http_client.clone(),
+                c.stream_http_client.clone(),
                 c.base_url.clone(),
                 c.api_key.clone(),
                 c.conversation.clone(),
@@ -637,7 +698,7 @@ impl ChatClient {
         callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<(Message, Option<Usage>), Error> {
-        let http_client = client.http_client.clone();
+        let http_client = client.stream_http_client.clone();
         let base_url = client.base_url.clone();
         let api_key = client.api_key.clone();
 

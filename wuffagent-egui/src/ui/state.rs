@@ -238,6 +238,25 @@ impl ChatAreaState {
             self.append_message("assistant", &buffer);
         }
     }
+
+    /// Show a brief notification message (stored in pending_error for display).
+    pub fn show_notification(&mut self, msg: &str, _success: bool) {
+        // Store as a temporary notification message
+        self.messages.push(ChatMessage {
+            kind: MessageKind::Normal,
+            role: "system".to_string(),
+            content: format!("⚡ {}", msg),
+            timestamp: crate::types::format_timestamp(),
+            image: None,
+        });
+    }
+
+    /// Reload the chat display from the client's current conversation.
+    pub fn reload_messages_from_client(&mut self) {
+        // This will be called after a session resume to refresh the display
+        // The actual message reload happens via the session loading mechanism
+        self.messages.clear();
+    }
 }
 
 impl Default for ChatAreaState {

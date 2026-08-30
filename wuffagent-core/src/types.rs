@@ -162,6 +162,10 @@ pub enum AppEvent {
         agent_name: String,
         suggestions: Vec<crate::memory::ImprovementSuggestion>,
     },
+    /// Session paused with checkpoint available.
+    SessionPaused { session_id: String, message_count: usize },
+    /// Session resumed from checkpoint.
+    SessionResumed { session_id: String, message_count: usize },
 }
 
 

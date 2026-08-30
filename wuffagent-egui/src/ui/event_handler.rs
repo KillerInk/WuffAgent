@@ -12,15 +12,19 @@ impl ChatApp {
             AppEvent::StreamRoundComplete { content: _, usage } => {
                 // Intermediate tool round: commit the round's text, keep generating
                 // so the next round's chunks keep rendering live.
-                // Update token gauge with round usage if available.
+                self.chat.commit_stream();
+                // Gauge: prefer the server's exact usage (input+output tokens of
+                // this round); fall back to the exact char counter of the
+                // stored conversation when the backend omits usage.
                 if let Some(u) = &usage {
                     self.chat.token_count = u.total_tokens as usize;
                     let n_ctx = self.get_effective_n_ctx();
                     if n_ctx > 0 {
                         self.chat.context_used = u.total_tokens as f32 / n_ctx as f32 * 100.0;
                     }
+                } else {
+                    self.refresh_token_gauge();
                 }
-                self.chat.commit_stream();
             }
             AppEvent::StreamComplete { content, usage } => {
                 // Fallback for backends that never sent StreamChunks
@@ -40,14 +44,10 @@ impl ChatApp {
                         self.chat.context_used = usage.total_tokens as f32 / n_ctx as f32 * 100.0;
                     }
                 } else {
-                    // Server doesn't send usage stats (common with some llama.cpp setups).
-                    // Estimate from ALL messages to reflect growing context.
-                    let total_chars: usize = self.chat.messages.iter().map(|m| m.content.len()).sum();
-                    self.chat.token_count = (total_chars as f32 / 4.0).ceil() as usize;
-                    let n_ctx = self.get_effective_n_ctx();
-                    if n_ctx > 0 {
-                        self.chat.context_used = self.chat.token_count as f32 / n_ctx as f32 * 100.0;
-                    }
+                    // Server doesn't send usage stats (common with some llama.cpp
+                    // setups): use the exact char counter of the stored
+                    // conversation to reflect the growing context.
+                    self.refresh_token_gauge();
                 }
                 // Persist the session after each complete response
                 if let Err(e) = self.save_session() {
@@ -122,6 +122,7 @@ impl ChatApp {
                         completed_at: chrono::Utc::now(),
                         error: None,
                         status: crate::sessions::model::AgentChainEntryStatus::Completed,
+                        checkpoint: None,
                     });
                 }
             }
@@ -137,6 +138,7 @@ impl ChatApp {
                     completed_at: chrono::Utc::now(),
                     error: Some(error),
                     status: crate::sessions::model::AgentChainEntryStatus::Failed,
+                    checkpoint: None,
                 });
             }
             AppEvent::AgentChainCancelled { agent_name } => {
@@ -155,6 +157,16 @@ impl ChatApp {
             AppEvent::ImprovementSuggested { agent_name, suggestions } => {
                 tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");
                 self.improvements_panel.handle_improvement_suggested(&agent_name, suggestions);
+            }
+            AppEvent::SessionPaused { session_id, message_count } => {
+                tracing::info!(session_id, message_count, "Session paused");
+                self.chat.show_notification(&format!("Session '{}' paused ({} messages)", session_id, message_count), true);
+            }
+            AppEvent::SessionResumed { session_id, message_count } => {
+                tracing::info!(session_id, message_count, "Session resumed");
+                self.chat.show_notification(&format!("Session '{}' resumed ({} messages)", session_id, message_count), true);
+                // Reload messages from the client conversation into the chat display
+                self.chat.reload_messages_from_client();
             }
             _ => {}
         }

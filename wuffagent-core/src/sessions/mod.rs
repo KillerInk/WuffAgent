@@ -1,5 +1,5 @@
 pub mod model;
-pub use model::Session;
+pub use model::{Session, SessionStatus};
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -30,3 +30,6 @@ pub mod summarizer;
 pub use classifier::classify_content;
 pub use config::TrimConfig;
 pub use summarizer::ContextTrimming;
+
+// Re-export helper functions for backward compatibility
+pub use summarizer::{estimate_tokens, message_tokens, message_char_count};
