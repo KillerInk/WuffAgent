@@ -44,9 +44,9 @@ impl ChatApp {
                     .hint_text("Type a message...")
                     .desired_width(f32::INFINITY);
                 let response = ui.add(text_edit);
-                // Send on Ctrl+Enter when focus is lost
+                // Send on Ctrl+Enter
                 let modifiers = ui.ctx().input(|i| i.modifiers);
-                if response.lost_focus()
+                if response.has_focus()
                     && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
                     && modifiers.ctrl
                     && !self.chat.is_generating
