@@ -283,6 +283,7 @@ impl AgentEngine {
         chat_config.name = "chat".to_string();
         chat_config.system_prompt = system_prompt.to_string();
         chat_config.task_timeout_ms = 0; // no timeout for chat
+        let chat_config_for_improve = chat_config.clone();
 
         let mut agent = Agent::new(
             chat_config,
@@ -291,7 +292,7 @@ impl AgentEngine {
             self.invocation_registry.clone(),
             self.event_tx.clone(),
             self.client.clone(),
-            None, // no memory for chat
+            self.memory.clone(),
             self.agent_session_id.clone(),
             self.agent_session_dir.clone(),
         );
@@ -317,6 +318,31 @@ impl AgentEngine {
                     error: e.clone(),
                     depth: 0,
                 });
+            }
+        }
+
+        // Post-task: extract memories and suggest improvements (mirrors execute_with_agent)
+        if let Some(memory) = &self.memory {
+            if memory.config().enabled {
+                let agent_messages = agent.messages();
+                if !agent_messages.is_empty() {
+                    let _ = memory.extract_and_save(agent_messages, "chat").await;
+                }
+            }
+            if memory.config().auto_improve {
+                let result_str = match &result {
+                    Ok(r) => r.clone(),
+                    Err(e) => format!("Error: {}", e),
+                };
+                let suggestions = memory.suggest_improvements(&chat_config_for_improve, request, &result_str).await;
+                if let Ok(suggestions) = suggestions {
+                    if !suggestions.is_empty() {
+                        self.send_chain_event(crate::types::AppEvent::ImprovementSuggested {
+                            agent_name: "chat".to_string(),
+                            suggestions,
+                        });
+                    }
+                }
             }
         }
 

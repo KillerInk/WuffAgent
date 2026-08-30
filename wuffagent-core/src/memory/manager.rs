@@ -256,9 +256,12 @@ impl MemoryManager {
     }
 
     /// Save memories to disk.
+    ///
+    /// Clones the entries and releases the mutex *before* the filesystem I/O so
+    /// concurrent readers/writers are not blocked during a slow disk write.
     pub fn save(&self) -> Result<(), String> {
-        let entries = self.entries.lock().unwrap();
-        save_memories(&self.storage_path, &entries)
+        let snapshot: Vec<MemoryEntry> = self.entries.lock().unwrap().clone();
+        save_memories(&self.storage_path, &snapshot)
     }
 
     /// Build the memory context block for injection into system prompts.

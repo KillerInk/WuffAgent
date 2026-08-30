@@ -229,16 +229,13 @@ impl Agent {
         // Store the final message history for memory extraction
         self.messages = messages.clone();
 
-        // Sync self.messages into client.conversation so that save_session()
-        // writes the agent's full history (stream_with_messages_arc writes to a
-        // throwaway local_conv, never touches self.client.conversation).
+        // Sync self.messages into client.conversation (do this before any early return)
+        // so that the session save below captures the full history including cancelled runs.
         {
             let conv = self.client.conversation();
             let mut guard = conv.lock().unwrap();
             let has_system = !guard.is_empty() && guard[0].role == "system";
             if has_system {
-                // Trim the leading system message from messages to avoid duplication
-                // when the client's conversation already has its own system message.
                 if messages.first().map(|m| m.role.as_str()) == Some("system") {
                     guard.extend(messages[1..].iter().cloned());
                 } else {
@@ -249,7 +246,8 @@ impl Agent {
             }
         }
 
-        // Save agent session after completion
+        // Save agent session after completion (or cancellation) so that the full
+        // conversation history — including the interrupted run — is persisted.
         if self.agent_session_id.is_some() && !self.agent_session_dir.as_path().as_os_str().is_empty() {
             let c = self.client.clone();
             if let Err(e) = c.save_session() {
@@ -412,16 +410,16 @@ impl Agent {
             // rejects the request.
             if self.client.n_ctx() > 0 {
                 // Budget in char units: n_ctx tokens × CHARS_PER_TOKEN, capped at
-                // 80% to leave headroom for the new response.
+                // 90% to leave headroom for the new response.
                 let target_chars =
-                    self.client.n_ctx() as usize * crate::client::CHARS_PER_TOKEN * 8 / 10;
+                    self.client.n_ctx() as usize * crate::client::CHARS_PER_TOKEN * 9 / 10;
                 let msg_count = messages.len();
                 if msg_count > 4 {
                     // Trim self.messages directly: stream_with_messages_arc writes to a
                     // throwaway local_conv and never touches self.client.conversation,
                     // so trimming the client's conversation would be a no-op.
-                    let config = crate::trimming::TrimConfig::default();
-                    let removed = self.trimming.trim_messages(messages, target_chars, &config);
+                    let removed = self.trimming
+                        .trim_messages(messages, target_chars, &self.config.trim_config);
                     if removed > 0 {
                         tracing::info!(
                             "[AGENT] Agent '{}' trimmed {} messages (n_ctx={}, target_chars={})",

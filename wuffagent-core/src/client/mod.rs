@@ -432,10 +432,10 @@ impl ChatClient {
         drop(conv);
 
         // Only trim once the context limit is reached (same policy as the
-        // streaming chat loop): while the exact char count stays below 80% of
+        // streaming chat loop): while the exact char count stays below 90% of
         // n_ctx (in char units), the full history is kept.
         if self.n_ctx > 0 {
-            let target_chars = self.n_ctx as usize * session::CHARS_PER_TOKEN * 8 / 10;
+            let target_chars = self.n_ctx as usize * session::CHARS_PER_TOKEN * 9 / 10;
             if estimate_conversation_tokens(&self.conversation) > target_chars {
                 self.trim_conversation(self.max_messages);
                 self.trim_to_token_budget(target_chars);

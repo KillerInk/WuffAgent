@@ -229,6 +229,7 @@ fn bootstrap() -> (
             .join(agent_name);
         if agent_dir.exists() {
             let sessions = wuffagent_core::sessions::list_sessions(&agent_dir);
+            // list_sessions sorts by created_at descending, so the newest session is first.
             if let Some(latest) = sessions.first() {
                 tracing::info!(
                     "Loading most recent agent session for '{}': {} ({} messages)",

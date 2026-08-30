@@ -136,7 +136,7 @@ async fn run_chat_loop(
     prompt: &str,
     initial_tools: Option<&[crate::tools::ToolDefinition]>,
 ) -> Result<(), EngineError> {
-    const CONTEXT_TARGET_RATIO: f32 = 0.8;
+    const CONTEXT_TARGET_RATIO: f32 = 0.9;
     const MIN_MESSAGES_FOR_TRIM: usize = 4;
     const MAX_THINKING_ROUNDS: usize = 3;
 
@@ -149,7 +149,7 @@ async fn run_chat_loop(
         // Trim before each request, but only once the context limit is reached.
         // The message-count cap (max_messages) is a hard floor: the conversation
         // is trimmed to that count only when its exact char count exceeds
-        // 80% of n_ctx. While the count stays below the limit, history is kept.
+        // 90% of n_ctx. While the count stays below the limit, history is kept.
         {
             let guard = client.lock().unwrap();
             let n_ctx = guard.n_ctx();

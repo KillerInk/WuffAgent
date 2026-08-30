@@ -100,11 +100,29 @@ pub fn build_extraction_prompt(project: &str, messages: &[super::super::types::M
 }
 
 /// Helper to extract the last N recent messages as formatted strings.
+/// Includes reasoning content and tool calls so the extractor LLM sees the
+/// full picture (decisions, actions taken, and the reasoning behind them).
 fn recent_messages(messages: &[super::super::types::Message]) -> Vec<String> {
     messages.iter()
         .rev()
         .take(30)
-        .map(|m| format!("[{}] {}", m.role, m.content))
+        .map(|m| {
+            let mut parts = vec![format!("[{}] {}", m.role, m.content)];
+            if let Some(ref reasoning) = m.reasoning_content {
+                if !reasoning.is_empty() {
+                    parts.push(format!("  [reasoning] {}", reasoning));
+                }
+            }
+            if let Some(ref calls) = m.tool_calls {
+                for call in calls {
+                    parts.push(format!(
+                        "  [tool_call] {}({})",
+                        call.function.name, call.function.arguments
+                    ));
+                }
+            }
+            parts.join("\n")
+        })
         .collect()
 }
 

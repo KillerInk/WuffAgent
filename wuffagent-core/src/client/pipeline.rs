@@ -56,9 +56,14 @@ impl ChatPipeline {
         // Create a fresh cancel token for this request
         let cancel_token = CancellationToken::new();
         let new_ptr = Box::into_raw(Box::new(cancel_token));
-        // Swap in the new token; the old one will be dropped when the
-        // previous task finishes or gets aborted.
-        let _old = self.current_token.swap(new_ptr, Ordering::AcqRel);
+        // Swap in the new token. The old one is no longer referenced by any
+        // live task (we just aborted it above and `cancel()` already signalled
+        // it), so free it now — otherwise each `start()` leaks a boxed
+        // CancellationToken.
+        let old_ptr = self.current_token.swap(new_ptr, Ordering::AcqRel);
+        if !old_ptr.is_null() {
+            unsafe { drop(Box::from_raw(old_ptr)) };
+        }
 
         let agent_engine = self.agent_engine.clone();
         let cancel_token = unsafe { &*new_ptr };
