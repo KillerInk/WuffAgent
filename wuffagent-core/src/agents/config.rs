@@ -174,7 +174,10 @@ impl WorkerConfig {
         {
             return crate::agents::types::AgentType::Research;
         }
-        if tool_names.contains(&"file_io")
+        if tool_names.contains(&"read_file")
+            || tool_names.contains(&"write_file")
+            || tool_names.contains(&"file_ops")
+            || tool_names.contains(&"file_io")
             || desc_lower.contains("code") || desc_lower.contains("write") || desc_lower.contains("read")
         {
             return crate::agents::types::AgentType::Coding;
@@ -749,6 +752,15 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    /// Get the shell configuration, returning a default if not explicitly set.
+    pub fn get_shell_config(&self) -> ShellConfig {
+        if self.shell_config.shell_enabled || !self.shell_config.allowed_commands.is_empty() {
+            self.shell_config.clone()
+        } else {
+            ShellConfig::default()
+        }
+    }
+
     /// Save this config to a JSON file.
     pub fn save_to_file(&self, path: &Path) -> Result<(), crate::agents::AgentError> {
         if let Some(parent) = path.parent() {

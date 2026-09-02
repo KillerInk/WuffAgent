@@ -6,13 +6,16 @@ pub mod time;
 pub mod shell;
 
 pub use calculation::CalculationTool;
-pub use file_io::FileIOTool;
+pub use file_io::{
+    AppendFileTool, ApplyDiffTool, FileIOTool, FileOpsTool, ListDirTool, ReadFileTool,
+    SearchFilesTool, WriteFileTool,
+};
 pub use web_search::WebSearchTool;
 pub use agent_call::AgentCallTool;
 pub use time::TimeTool;
 pub use shell::{ShellTool, ShellConfig};
 
-use crate::tools::types::{ToolMetadata};
+use crate::tools::types::{Tool, ToolMetadata};
 use crate::tools::registry::ToolEntry;
 /// Register all built-in tools into the registry.
 pub fn register_builtins(
@@ -31,16 +34,56 @@ pub fn register_builtins(
         loaded_at: std::time::Instant::now(),
     })?;
 
-    registry.register(ToolEntry {
-        tool: std::sync::Arc::new(FileIOTool::new()),
-        metadata: ToolMetadata {
-            name: "file_io".to_string(),
-            version: "1.0.0".to_string(),
-            description: "Read, write, and list files on the local system".to_string(),
-            dependencies: vec![],
-        },
-        loaded_at: std::time::Instant::now(),
-    })?;
+    // Named file tools (split from the old 14-action file_io god-tool so the
+    // model routes by clear tool names instead of an `action` string).
+    for (name, desc, tool) in [
+        (
+            "read_file",
+            "Read a text file, optionally limited to a line range",
+            std::sync::Arc::new(ReadFileTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "write_file",
+            "Write (overwrite) a text file with the given content",
+            std::sync::Arc::new(WriteFileTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "append_file",
+            "Append content to the end of a file",
+            std::sync::Arc::new(AppendFileTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "list_dir",
+            "List the entries in a directory",
+            std::sync::Arc::new(ListDirTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "search_files",
+            "Find files matching a glob pattern",
+            std::sync::Arc::new(SearchFilesTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "apply_diff",
+            "Apply a unified diff/patch to an existing file",
+            std::sync::Arc::new(ApplyDiffTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "file_ops",
+            "File operations: copy, move, rename, mkdir, delete, read_binary, write_binary, file_info",
+            std::sync::Arc::new(FileOpsTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+    ] {
+        registry.register(ToolEntry {
+            tool,
+            metadata: ToolMetadata {
+                name: name.to_string(),
+                version: "1.0.0".to_string(),
+                description: desc.to_string(),
+                dependencies: vec![],
+            },
+            loaded_at: std::time::Instant::now(),
+        })?;
+    }
 
     registry.register(ToolEntry {
         tool: std::sync::Arc::new(CalculationTool::new()),

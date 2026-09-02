@@ -88,6 +88,21 @@ impl Default for ShellConfig {
     }
 }
 
+/// Convert a per-agent `ShellConfig` (from the agent JSON) into the shell
+/// tool's runtime config. This is what lets each agent run its own shell
+/// allowlist instead of sharing one global allow-all shell.
+impl From<crate::agents::config::ShellConfig> for ShellConfig {
+    fn from(c: crate::agents::config::ShellConfig) -> Self {
+        Self {
+            allowed_commands: c.allowed_commands,
+            shell_type: c.shell_type,
+            timeout_ms: c.shell_timeout_ms,
+            enabled: c.shell_enabled,
+            working_dir: c.working_dir,
+        }
+    }
+}
+
 /// A tool that executes shell commands with safety controls.
 pub struct ShellTool {
     config: Arc<ShellConfig>,
@@ -115,10 +130,13 @@ impl ShellTool {
             ));
         }
 
-        // Check dangerous patterns first
+        // Check dangerous patterns first. Both sides are lowercased so the
+        // match is case-insensitive (e.g. `del C:\` still matches the `del c:\`
+        // pattern); matching on the raw command would let upper-cased variants
+        // slip through.
         let lower_cmd = command.to_lowercase();
         for dangerous in DANGEROUS_PATTERNS {
-            if lower_cmd.contains(dangerous) {
+            if lower_cmd.contains(dangerous.to_lowercase().as_str()) {
                 return Err(ToolError::Execution(format!(
                     "Dangerous command pattern detected: {}", dangerous
                 )));

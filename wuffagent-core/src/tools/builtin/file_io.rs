@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 
-use crate::tools::types::{Tool, ToolOutput, ToolParams, ToolSchema};
+use crate::tools::types::{FieldSchema, JsonSchema, Tool, ToolOutput, ToolParams, ToolSchema};
 
 /// A tool that performs read/write/list/copy/move/etc. operations on the local filesystem.
 pub struct FileIOTool;
@@ -94,7 +94,7 @@ struct HunkHeader {
 
 impl FileIOTool {
     /// Read a text file, optionally limited to a line range (0-indexed, inclusive).
-    fn exec_read(&self, path: &str, start_line: Option<usize>, end_line: Option<usize>) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_read(&self, path: &str, start_line: Option<usize>, end_line: Option<usize>) -> crate::tools::types::ToolResult<ToolOutput> {
         use std::io::BufRead;
 
         // Cap the maximum number of lines returned to prevent excessive memory use.
@@ -148,7 +148,7 @@ impl FileIOTool {
     }
 
     /// Write (overwrite) a text file.
-    fn exec_write(&self, path: &str, content: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_write(&self, path: &str, content: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         fs::write(path, content).map_err(|e| {
             crate::tools::types::ToolError::Execution(format!("Failed to write '{}': {}", path, e))
         })?;
@@ -160,7 +160,7 @@ impl FileIOTool {
     }
 
     /// List entries in a directory.
-    fn exec_list(&self, path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_list(&self, path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         let entries: Vec<String> = fs::read_dir(path)
             .map_err(|e| {
                 crate::tools::types::ToolError::Execution(format!("Failed to list '{}': {}", path, e))
@@ -175,7 +175,7 @@ impl FileIOTool {
     }
 
     /// Append content to the end of a file.
-    fn exec_append(&self, path: &str, content: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_append(&self, path: &str, content: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -196,7 +196,7 @@ impl FileIOTool {
 
     /// Delete a file or directory. If `recursive` is true, delete directories
     /// and all their contents.
-    fn exec_delete(&self, path: &str, recursive: bool) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_delete(&self, path: &str, recursive: bool) -> crate::tools::types::ToolResult<ToolOutput> {
         let metadata = fs::metadata(path).map_err(|e| {
             crate::tools::types::ToolError::Execution(format!("Failed to stat '{}': {}", path, e))
         })?;
@@ -222,7 +222,7 @@ impl FileIOTool {
     }
 
     /// Create a directory. If `recursive` is true, create parent directories as needed.
-    fn exec_mkdir(&self, path: &str, recursive: bool) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_mkdir(&self, path: &str, recursive: bool) -> crate::tools::types::ToolResult<ToolOutput> {
         if recursive {
             fs::create_dir_all(path).map_err(|e| {
                 crate::tools::types::ToolError::Execution(format!("Failed to create directory '{}': {}", path, e))
@@ -239,7 +239,7 @@ impl FileIOTool {
     }
 
     /// Copy a file or directory (recursively).
-    fn exec_copy(&self, src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_copy(&self, src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         validate_path(src)?;
         validate_path(dest)?;
         let metadata = fs::metadata(src).map_err(|e| {
@@ -302,7 +302,7 @@ impl FileIOTool {
     }
 
     /// Move/rename a file or directory.
-    fn exec_move(&self, src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_move(&self, src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         validate_path(src)?;
         validate_path(dest)?;
         // Fallback: copy + delete for cross-device moves
@@ -334,7 +334,7 @@ impl FileIOTool {
     }
 
     /// Read a file as base64-encoded binary data.
-    fn exec_read_binary(&self, path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_read_binary(&self, path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         let mut bytes = Vec::new();
         fs::File::open(path)
             .map_err(|e| {
@@ -351,7 +351,7 @@ impl FileIOTool {
     }
 
     /// Write base64-decoded binary data to a file.
-    fn exec_write_binary(&self, path: &str, content_base64: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_write_binary(&self, path: &str, content_base64: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content_base64)
             .map_err(|e| {
                 crate::tools::types::ToolError::Execution(format!("Invalid base64 content: {}", e))
@@ -367,7 +367,7 @@ impl FileIOTool {
     }
 
     /// Glob search with `*`, `?`, `[cls]`, and `**` (recursive) support.
-    fn exec_glob(&self, pattern: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_glob(&self, pattern: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         let matches: Vec<String> = glob::glob(pattern)
             .map_err(|e| {
                 crate::tools::types::ToolError::Execution(format!("Invalid glob pattern '{}': {}", pattern, e))
@@ -392,7 +392,7 @@ impl FileIOTool {
     /// Hunks are positioned using the **old**-file start from each header, so
     /// multi-hunk patches where earlier hunks change the line count apply
     /// correctly.
-    fn exec_diff_apply(&self, path: &str, diff: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_diff_apply(&self, path: &str, diff: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         let file_content = fs::read_to_string(path).map_err(|e| {
             crate::tools::types::ToolError::Execution(format!(
                 "Failed to read '{}' for diff apply: {}", path, e
@@ -591,7 +591,7 @@ impl FileIOTool {
     }
 
     /// Get file metadata as JSON.
-    fn exec_file_info(&self, path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    pub(crate) fn exec_file_info(&self, path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
         let metadata = fs::metadata(path).map_err(|e| {
             crate::tools::types::ToolError::Execution(format!("Failed to stat '{}': {}", path, e))
         })?;
@@ -868,6 +868,318 @@ impl Tool for FileIOTool {
                 "action must be one of: read, write, list, append, delete, mkdir, copy, move, rename, read_binary, write_binary, glob, diff_apply, file_info".to_string(),
             )),
         }
+    }
+}
+
+// ─── Named file tools (split from the old 14-action file_io god-tool) ────────
+//
+// Each is a thin Tool that names a single operation, so the model routes by
+// clear tool names instead of picking an `action` string. They delegate to the
+// shared `FileIOTool` engine's exec_* methods.
+
+/// Build a ToolSchema from a flat list of (name, type, description, nullable) fields.
+fn build_schema(
+    name: &str,
+    desc: &str,
+    props: &[(&str, &str, &str, bool)],
+    required: &[&str],
+) -> ToolSchema {
+    let mut map = HashMap::new();
+    for (k, t, d, n) in props {
+        map.insert(
+            k.to_string(),
+            FieldSchema {
+                type_name: t.to_string(),
+                description: d.to_string(),
+                nullable: *n,
+            },
+        );
+    }
+    ToolSchema {
+        name: name.to_string(),
+        description: desc.to_string(),
+        input_type: Some(JsonSchema {
+            type_name: "object".to_string(),
+            properties: Some(map),
+            required: required.iter().map(|s| s.to_string()).collect(),
+        }),
+    }
+}
+
+/// Read a text file, optionally limited to a line range.
+pub struct ReadFileTool;
+
+impl ReadFileTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tool for ReadFileTool {
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn description(&self) -> &str {
+        "Read a text file, optionally limited to a line range. Returns the file content."
+    }
+    fn parameters_schema(&self) -> ToolSchema {
+        build_schema(
+            "read_file",
+            "Read a text file, optionally limited to a line range",
+            &[
+                ("path", "string", "Path of the file to read.", false),
+                ("start_line", "integer", "First line to read (0-indexed). Defaults to 0.", true),
+                ("end_line", "integer", "Last line to read (0-indexed, inclusive). Defaults to end of file.", true),
+            ],
+            &["path"],
+        )
+    }
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        let path: String = params
+            .get("path")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("path is required".to_string()))?;
+        validate_path(&path)?;
+        let start_line: Option<usize> = params.get("start_line");
+        let end_line: Option<usize> = params.get("end_line");
+        FileIOTool.exec_read(&path, start_line, end_line)
+    }
+}
+
+/// Overwrite a text file with new content.
+pub struct WriteFileTool;
+
+impl WriteFileTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tool for WriteFileTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+    fn description(&self) -> &str {
+        "Write (overwrite) a text file with the given content."
+    }
+    fn parameters_schema(&self) -> ToolSchema {
+        build_schema(
+            "write_file",
+            "Write (overwrite) a text file with the given content",
+            &[
+                ("path", "string", "Path of the file to write.", false),
+                ("content", "string", "Full content to write to the file.", false),
+            ],
+            &["path", "content"],
+        )
+    }
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        let path: String = params
+            .get("path")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("path is required".to_string()))?;
+        validate_path(&path)?;
+        let content: String = params
+            .get("content")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("content is required".to_string()))?;
+        FileIOTool.exec_write(&path, &content)
+    }
+}
+
+/// Append content to the end of a text file.
+pub struct AppendFileTool;
+
+impl AppendFileTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tool for AppendFileTool {
+    fn name(&self) -> &str {
+        "append_file"
+    }
+    fn description(&self) -> &str {
+        "Append content to the end of a file, creating it if it does not exist."
+    }
+    fn parameters_schema(&self) -> ToolSchema {
+        build_schema(
+            "append_file",
+            "Append content to the end of a file",
+            &[
+                ("path", "string", "Path of the file to append to.", false),
+                ("content", "string", "Content to append.", false),
+            ],
+            &["path", "content"],
+        )
+    }
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        let path: String = params
+            .get("path")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("path is required".to_string()))?;
+        validate_path(&path)?;
+        let content: String = params
+            .get("content")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("content is required".to_string()))?;
+        FileIOTool.exec_append(&path, &content)
+    }
+}
+
+/// List the entries in a directory.
+pub struct ListDirTool;
+
+impl ListDirTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tool for ListDirTool {
+    fn name(&self) -> &str {
+        "list_dir"
+    }
+    fn description(&self) -> &str {
+        "List the files and directories inside a directory."
+    }
+    fn parameters_schema(&self) -> ToolSchema {
+        build_schema(
+            "list_dir",
+            "List the entries in a directory",
+            &[("path", "string", "Path of the directory to list.", false)],
+            &["path"],
+        )
+    }
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        let path: String = params
+            .get("path")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("path is required".to_string()))?;
+        validate_path(&path)?;
+        FileIOTool.exec_list(&path)
+    }
+}
+
+/// Search for files matching a glob pattern.
+pub struct SearchFilesTool;
+
+impl SearchFilesTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tool for SearchFilesTool {
+    fn name(&self) -> &str {
+        "search_files"
+    }
+    fn description(&self) -> &str {
+        "Find files matching a glob pattern (e.g. 'src/**/*.rs'). Returns matching paths."
+    }
+    fn parameters_schema(&self) -> ToolSchema {
+        build_schema(
+            "search_files",
+            "Find files matching a glob pattern",
+            &[(
+                "pattern",
+                "string",
+                "Glob pattern to match, e.g. 'src/**/*.rs' or '*.json'.",
+                false,
+            )],
+            &["pattern"],
+        )
+    }
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        let pattern: String = params
+            .get("pattern")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("pattern is required".to_string()))?;
+        FileIOTool.exec_glob(&pattern)
+    }
+}
+
+/// Apply a unified diff/patch to an existing file.
+pub struct ApplyDiffTool;
+
+impl ApplyDiffTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tool for ApplyDiffTool {
+    fn name(&self) -> &str {
+        "apply_diff"
+    }
+    fn description(&self) -> &str {
+        "Apply a unified diff/patch to an existing file. Use for targeted edits to existing files."
+    }
+    fn parameters_schema(&self) -> ToolSchema {
+        build_schema(
+            "apply_diff",
+            "Apply a unified diff/patch to an existing file",
+            &[
+                ("path", "string", "Path of the file to patch.", false),
+                ("diff", "string", "Unified diff/patch (standard diff -u format with @@ hunk headers).", false),
+            ],
+            &["path", "diff"],
+        )
+    }
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        let path: String = params
+            .get("path")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("path is required".to_string()))?;
+        validate_path(&path)?;
+        let diff: String = params
+            .get("diff")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("diff is required".to_string()))?;
+        FileIOTool.exec_diff_apply(&path, &diff)
+    }
+}
+
+/// Catch-all for the less-common file operations: copy, move, rename, mkdir,
+/// delete, read_binary, write_binary, file_info.
+pub struct FileOpsTool;
+
+impl FileOpsTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tool for FileOpsTool {
+    fn name(&self) -> &str {
+        "file_ops"
+    }
+    fn description(&self) -> &str {
+        "File operations: copy, move, rename, mkdir, delete, read_binary, write_binary, file_info."
+    }
+    fn parameters_schema(&self) -> ToolSchema {
+        build_schema(
+            "file_ops",
+            "File operations (copy, move, rename, mkdir, delete, read_binary, write_binary, file_info)",
+            &[
+                ("action", "string", "Operation: copy, move, rename, mkdir, delete, read_binary, write_binary, file_info.", false),
+                ("path", "string", "Target path (for mkdir, delete, read_binary, write_binary, file_info).", true),
+                ("src", "string", "Source path (for copy, move, rename).", true),
+                ("dest", "string", "Destination path (for copy, move, rename).", true),
+                ("recursive", "boolean", "For mkdir: create parent dirs. For delete: remove non-empty directories.", true),
+                ("content_base64", "string", "Base64-encoded binary content (for write_binary).", true),
+            ],
+            &["action"],
+        )
+    }
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        let action: String = params
+            .get("action")
+            .ok_or_else(|| crate::tools::types::ToolError::InvalidParams("action is required".to_string()))?;
+        // Restrict to the ops this tool advertises; read/write/append/list/search/
+        // diff each have their own dedicated tools.
+        const ALLOWED: &[&str] = &[
+            "copy", "move", "rename", "mkdir", "delete", "read_binary", "write_binary", "file_info",
+        ];
+        if !ALLOWED.contains(&action.as_str()) {
+            return Err(crate::tools::types::ToolError::InvalidParams(format!(
+                "file_ops action must be one of: {}",
+                ALLOWED.join(", ")
+            )));
+        }
+        FileIOTool.execute(params)
     }
 }
 
@@ -1940,5 +2252,135 @@ mod tests {
             },
         };
         assert!(tool.execute(params).is_err());
+    }
+
+    // ── Named tool tests (split from file_io) ───────────────────────────────
+
+    #[test]
+    fn test_read_file_round_trip() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "a\nb\nc").unwrap();
+        let tool = ReadFileTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(tmp.path().to_string_lossy().to_string()));
+                m
+            },
+        };
+        let out = tool.execute(params).unwrap();
+        let v = match out {
+            ToolOutput::Success(v) => v,
+            _ => panic!("expected success"),
+        };
+        assert_eq!(v["content"], "a\nb\nc");
+    }
+
+    #[test]
+    fn test_write_file_creates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.txt");
+        let tool = WriteFileTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(path.to_string_lossy().to_string()));
+                m.insert("content".to_string(), json!("hello world"));
+                m
+            },
+        };
+        assert!(tool.execute(params).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_list_dir_lists_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("one.txt"), "x").unwrap();
+        let tool = ListDirTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(tmp.path().to_string_lossy().to_string()));
+                m
+            },
+        };
+        let out = match tool.execute(params).unwrap() {
+            ToolOutput::Success(v) => v,
+            _ => panic!("expected success"),
+        };
+        assert!(!out["entries"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_search_files_globs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "x").unwrap();
+        let tool = SearchFilesTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("pattern".to_string(), json!(tmp.path().join("*.rs").to_string_lossy().to_string()));
+                m
+            },
+        };
+        let out = match tool.execute(params).unwrap() {
+            ToolOutput::Success(v) => v,
+            _ => panic!("expected success"),
+        };
+        assert_eq!(out["count"], 1);
+    }
+
+    #[test]
+    fn test_apply_diff_edits_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "line1\nline2\nline3\n").unwrap();
+        let tool = ApplyDiffTool::new();
+        let diff = "--- a/f\n+++ b/f\n@@ -2,1 +2,2 @@\n line2\n+inserted\n line3\n";
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(tmp.path().to_string_lossy().to_string()));
+                m.insert("diff".to_string(), json!(diff));
+                m
+            },
+        };
+        assert!(tool.execute(params).is_ok());
+        assert!(std::fs::read_to_string(tmp.path()).unwrap().contains("inserted"));
+    }
+
+    #[test]
+    fn test_file_ops_rejects_dedicated_action() {
+        // "read" is not a file_ops action (it has its own read_file tool).
+        let tool = FileOpsTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!("/tmp/x.txt"));
+                m.insert("action".to_string(), json!("read"));
+                m
+            },
+        };
+        assert!(matches!(
+            tool.execute(params),
+            Err(crate::tools::types::ToolError::InvalidParams(_))
+        ));
+    }
+
+    #[test]
+    fn test_file_ops_allows_catch_all_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("info.txt");
+        std::fs::write(&path, "x").unwrap();
+        let tool = FileOpsTool::new();
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(path.to_string_lossy().to_string()));
+                m.insert("action".to_string(), json!("file_info"));
+                m
+            },
+        };
+        assert!(tool.execute(params).is_ok());
     }
 }

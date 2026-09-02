@@ -90,6 +90,15 @@ impl Agent {
         } else {
             client
         };
+        // Give this agent its own tool manager whose `shell` honors the agent's
+        // shell config (allowlist/enabled/timeout), instead of sharing the global
+        // allow-all shell. All other tools are shared. This is what makes an
+        // agent's `shell` respect its per-agent restrictions on both the chat and
+        // /plan paths.
+        let tool_manager = {
+            let shared = tool_manager.lock().unwrap();
+            Arc::new(Mutex::new(shared.with_shell_config(config.get_shell_config())))
+        };
         Self {
             id: AgentId::generate(),
             config,
@@ -970,7 +979,8 @@ impl Agent {
         Some((agent, task))
     }
 
-    /// Extract bash/code blocks from LLM responses and convert them to file_io tool calls.
+    /// Extract bash/code blocks from LLM responses and convert them to the
+    /// named file tools (read_file, list_dir, search_files, file_ops, ...).
     fn extract_bash_as_tool_calls(&self, response: &str) -> Option<Vec<ToolCall>> {
         let mut calls = Vec::new();
         let mut id_counter = 0u32;
@@ -1008,15 +1018,15 @@ impl Agent {
                     .copied()
                     .collect();
 
-                let mut emit = |action: &str, value: &str| {
-                    let args = serde_json::to_string(
-                        &serde_json::json!({ "action": action, "path": value }),
-                    )
-                    .unwrap_or_default();
+                // Emit a single tool call with the given name and JSON arguments.
+                let mut emit_tool = |name: &str, args: serde_json::Value| {
                     calls.push(ToolCall {
                         id: format!("call_{}", id_counter),
                         _call_type: "function".to_string(),
-                        function: ToolFunction { name: "file_io".to_string(), arguments: args },
+                        function: ToolFunction {
+                            name: name.to_string(),
+                            arguments: serde_json::to_string(&args).unwrap_or_default(),
+                        },
                     });
                     id_counter += 1;
                 };
@@ -1025,82 +1035,44 @@ impl Agent {
                 match cmd {
                     "ls" => {
                         let path = args_parts.first().copied().unwrap_or(".");
-                        emit("list", path);
+                        emit_tool("list_dir", serde_json::json!({ "path": path }));
                     }
                     "cat" => {
                         for path in &args_parts {
-                            emit("read", path);
+                            emit_tool("read_file", serde_json::json!({ "path": path }));
                         }
                     }
                     "find" => {
                         let path = args_parts.first().copied().unwrap_or(".");
-                        calls.push(ToolCall {
-                            id: format!("call_{}", id_counter),
-                            _call_type: "function".to_string(),
-                            function: ToolFunction {
-                                name: "file_io".to_string(),
-                                arguments: serde_json::to_string(
-                                    &serde_json::json!({ "action": "glob", "path": path, "pattern": "*" }),
-                                )
-                                .unwrap_or_default(),
-                            },
-                        });
-                        id_counter += 1;
+                        emit_tool("search_files", serde_json::json!({ "path": path, "pattern": "*" }));
                     }
                     "pwd" => {
-                        emit("file_info", ".");
+                        emit_tool("file_ops", serde_json::json!({ "action": "file_info", "path": "." }));
                     }
                     "mkdir" => {
                         if let Some(path) = args_parts.first() {
                             let recursive = raw_parts.iter().any(|p| *p == "-p" || *p == "--parents");
-                            let args = serde_json::to_string(
-                                &serde_json::json!({ "action": "mkdir", "path": path, "recursive": recursive }),
-                            )
-                            .unwrap_or_default();
-                            calls.push(ToolCall {
-                                id: format!("call_{}", id_counter),
-                                _call_type: "function".to_string(),
-                                function: ToolFunction { name: "file_io".to_string(), arguments: args },
-                            });
-                            id_counter += 1;
+                            emit_tool("file_ops", serde_json::json!({ "action": "mkdir", "path": path, "recursive": recursive }));
                         }
                     }
                     "rm" => {
                         for path in &args_parts {
-                            emit("delete", path);
+                            emit_tool("file_ops", serde_json::json!({ "action": "delete", "path": path }));
                         }
                     }
                     "cp" => {
                         if args_parts.len() >= 2 {
-                            let args = serde_json::to_string(
-                                &serde_json::json!({ "action": "copy", "src": args_parts[0], "dest": args_parts[1] }),
-                            )
-                            .unwrap_or_default();
-                            calls.push(ToolCall {
-                                id: format!("call_{}", id_counter),
-                                _call_type: "function".to_string(),
-                                function: ToolFunction { name: "file_io".to_string(), arguments: args },
-                            });
-                            id_counter += 1;
+                            emit_tool("file_ops", serde_json::json!({ "action": "copy", "src": args_parts[0], "dest": args_parts[1] }));
                         }
                     }
                     "mv" => {
                         if args_parts.len() >= 2 {
-                            let args = serde_json::to_string(
-                                &serde_json::json!({ "action": "move", "src": args_parts[0], "dest": args_parts[1] }),
-                            )
-                            .unwrap_or_default();
-                            calls.push(ToolCall {
-                                id: format!("call_{}", id_counter),
-                                _call_type: "function".to_string(),
-                                function: ToolFunction { name: "file_io".to_string(), arguments: args },
-                            });
-                            id_counter += 1;
+                            emit_tool("file_ops", serde_json::json!({ "action": "move", "src": args_parts[0], "dest": args_parts[1] }));
                         }
                     }
                     "head" | "tail" => {
                         if let Some(path) = args_parts.last() {
-                            emit("read", path);
+                            emit_tool("read_file", serde_json::json!({ "path": path }));
                         }
                     }
                     _ => continue,

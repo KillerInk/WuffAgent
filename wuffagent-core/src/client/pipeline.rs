@@ -6,8 +6,36 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::agents::config::ShellConfig;
 use crate::agents::AgentEngine;
 use crate::types::{AppEvent, ReasoningEffort};
+
+/// The selected chat profile's tool policy, carried onto the chat path so the
+/// chat agent runs with that profile's tool set and shell restrictions
+/// (instead of the old "all tools + allow-all shell" default).
+#[derive(Clone)]
+pub struct ChatToolPolicy {
+    /// Tool names the profile authorizes. The chat agent is given all available
+    /// tools plus `shell`, so an empty list does not strip tools from chat.
+    pub allowed_tools: Vec<String>,
+    /// The profile's shell config (allowlist/enabled/timeout).
+    pub shell_config: ShellConfig,
+}
+
+impl ChatToolPolicy {
+    /// A permissive policy: all tools + an unrestricted (allow-all) shell.
+    /// Used when no profile is selected or none is found.
+    pub fn unrestricted() -> Self {
+        Self {
+            allowed_tools: Vec::new(),
+            shell_config: ShellConfig {
+                shell_enabled: true,
+                allowed_commands: Vec::new(),
+                ..ShellConfig::default()
+            },
+        }
+    }
+}
 
 /// ChatPipeline routes chat requests through the AgentEngine's tool pipeline,
 /// using the selected agent's system prompt instead of routing through the
@@ -48,8 +76,8 @@ impl ChatPipeline {
         }
     }
 
-    /// Start a chat session with the given prompt and system prompt.
-    pub fn start(&self, prompt: &str, system_prompt: &str) {
+    /// Start a chat session with the given prompt, system prompt, and tool policy.
+    pub fn start(&self, prompt: &str, system_prompt: &str, tool_policy: &ChatToolPolicy) {
         // Cancel any existing task
         self.cancel();
 
@@ -71,6 +99,7 @@ impl ChatPipeline {
         let reasoning_effort = self.reasoning_effort;
         let prompt = prompt.to_string();
         let system_prompt = system_prompt.to_string();
+        let tool_policy = tool_policy.clone();
         let handle = tokio::spawn(async move {
             // Wire the event tx into the engine so chain events reach the UI,
             // and apply the current reasoning effort setting.
@@ -84,7 +113,7 @@ impl ChatPipeline {
             tracing::info!("[CHAT PIPELINE] Starting chat with prompt: {}", prompt);
 
             let result = tokio::select! {
-                result = engine.execute_with_tools(&prompt, &system_prompt, cancel_token) => result,
+                result = engine.execute_with_tools(&prompt, &system_prompt, &tool_policy, cancel_token) => result,
                 _ = cancel_token.cancelled() => {
                     Ok(String::from("[CANCELLED]"))
                 }

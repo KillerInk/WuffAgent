@@ -70,6 +70,51 @@ impl ToolManager {
         }
     }
 
+    /// Rebuild a registry from the current one, swapping the shared `shell` tool
+    /// for a `ShellTool` built from the given per-agent config. Pass `None` to
+    /// keep the shared shell unchanged.
+    fn rebuild_registry(&self, shell_cfg: Option<crate::agents::config::ShellConfig>) -> Arc<ToolRegistry> {
+        let mut entries = self.registry.list();
+        if let Some(cfg) = shell_cfg {
+            let new_shell = crate::tools::builtin::shell::ShellTool::new(
+                crate::tools::builtin::shell::ShellConfig::from(cfg),
+            );
+            let meta = entries
+                .iter()
+                .find(|e| e.metadata.name == "shell")
+                .map(|e| e.metadata.clone())
+                .unwrap_or_else(|| crate::tools::types::ToolMetadata {
+                    name: "shell".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Execute shell commands on the local system".to_string(),
+                    dependencies: vec![],
+                });
+            entries.retain(|e| e.metadata.name != "shell");
+            entries.push(crate::tools::registry::ToolEntry {
+                tool: std::sync::Arc::new(new_shell),
+                metadata: meta,
+                loaded_at: std::time::Instant::now(),
+            });
+        }
+        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Arc::new(registry)
+    }
+
+    /// Create a new ToolManager whose `shell` tool honors the given per-agent
+    /// shell config (allowlist/enabled/timeout), while all other tools and the
+    /// allowlist are preserved. This is how an agent gets a shell restricted to
+    /// its own allowed commands instead of the shared allow-all shell.
+    pub fn with_shell_config(&self, cfg: crate::agents::config::ShellConfig) -> Self {
+        Self {
+            registry: self.rebuild_registry(Some(cfg)),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+        }
+    }
+
     /// Execute a tool by name with the given parameters.
     pub async fn execute(
         &self,

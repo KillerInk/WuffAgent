@@ -156,6 +156,7 @@ impl ChatApp {
                 text: input.to_string(),
                 image,
                 agent_prompt: self.resolve_agent_prompt(),
+                tool_policy: self.resolve_tool_policy(),
             });
             self.chat.show_notification(
                 &format!("Queued — will run after the current task ({} waiting)", self.queued_messages.len()),
@@ -186,7 +187,75 @@ impl ChatApp {
         }
 
         let image = self.chat.pending_image.take();
-        self.start_pipeline(&input, image, self.resolve_agent_prompt(), false);
+        self.start_pipeline(&input, image, self.resolve_agent_prompt(), self.resolve_tool_policy(), false);
+    }
+
+    /// Resolve the selected agent profile's tool policy (allowed_tools +
+    /// shell config) for the current selection. None/"Auto" or a profile not
+    /// found yields an unrestricted policy (all tools + allow-all shell).
+    fn resolve_tool_policy(&self) -> crate::client::pipeline::ChatToolPolicy {
+        let policy = match self.selected_agent_index {
+            Some(i) => {
+                let name = self.get_agent_names().get(i).cloned().unwrap_or_default();
+                self.load_agent_config(&[name.as_str()])
+            }
+            None => self.load_agent_config(&["general", "generalist"]),
+        };
+        match policy {
+            Some(cfg) => crate::client::pipeline::ChatToolPolicy {
+                allowed_tools: cfg.allowed_tools,
+                shell_config: cfg.shell_config,
+            },
+            None => crate::client::pipeline::ChatToolPolicy::unrestricted(),
+        }
+    }
+
+    /// Load the first matching agent profile (by `name`) from the known agents
+    /// directories, handling both current `AgentConfig` and legacy `WorkerConfig`.
+    fn load_agent_config(&self, names: &[&str]) -> Option<crate::agents::config::AgentConfig> {
+        let mut dirs = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            dirs.push(cwd.join("agents"));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                dirs.push(exe_dir.join("agents"));
+            }
+        }
+        let agents_dir = self.config.file_path
+            .parent()
+            .map(|p| p.join("agents"))
+            .unwrap_or_else(|| self.config.file_path.clone());
+        dirs.push(agents_dir.join("agents"));
+
+        for dir in dirs {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                        continue;
+                    }
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(cfg) = serde_json::from_str::<crate::agents::config::AgentConfig>(&content) {
+                            if names.iter().any(|n| cfg.name == *n) {
+                                return Some(cfg);
+                            }
+                        } else if let Ok(cfg) = serde_json::from_str::<crate::agents::config::WorkerConfig>(&content) {
+                            if names.iter().any(|n| cfg.name == *n) {
+                                let allowed_tools = cfg.allowed_tools.clone();
+                                let shell_config = cfg.shell_config.clone();
+                                return Some(crate::agents::config::AgentConfig {
+                                    allowed_tools,
+                                    shell_config,
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Resolve the selected agent profile's system prompt for the current
@@ -212,7 +281,7 @@ impl ChatApp {
     ///
     /// `already_displayed` is true when the user message is already in the chat
     /// (queue drain) and false for a direct send (still needs to be pushed).
-    fn start_pipeline(&mut self, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, already_displayed: bool) {
+    fn start_pipeline(&mut self, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: crate::client::pipeline::ChatToolPolicy, already_displayed: bool) {
         tracing::info!("[CHAT PATH] start_pipeline called with: {}", text);
 
         self.chat.is_generating = true;
@@ -269,7 +338,7 @@ impl ChatApp {
         self.chat_pipeline = Some(pipeline);
 
         // Start the chat
-        self.chat_pipeline.as_ref().unwrap().start(text, &agent_prompt);
+        self.chat_pipeline.as_ref().unwrap().start(text, &agent_prompt, &tool_policy);
     }
 
     /// After a run finished, process the next queued message (if any).
@@ -288,9 +357,10 @@ impl ChatApp {
             // time); start_pipeline won't push it again.
             let image = next.image;
             let agent_prompt = next.agent_prompt;
+            let tool_policy = next.tool_policy;
             // Remove the message we are about to run, keep the rest queued.
             self.queued_messages.remove(0);
-            self.start_pipeline(&next.text, image, agent_prompt, true);
+            self.start_pipeline(&next.text, image, agent_prompt, tool_policy, true);
         }
     }
 

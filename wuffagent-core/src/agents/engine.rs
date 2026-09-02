@@ -270,6 +270,7 @@ impl AgentEngine {
         &self,
         request: &str,
         system_prompt: &str,
+        tool_policy: &crate::client::pipeline::ChatToolPolicy,
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {
         if cancel_token.is_cancelled() {
@@ -283,6 +284,12 @@ impl AgentEngine {
         chat_config.name = "chat".to_string();
         chat_config.system_prompt = system_prompt.to_string();
         chat_config.task_timeout_ms = 0; // no timeout for chat
+        // Apply the selected profile's tool policy. An empty allowed_tools means
+        // the chat agent gets all available tools (the old default); the shell
+        // config is what lets a profile like "coder" restrict the shell to its
+        // own allowlist instead of the global allow-all shell.
+        chat_config.allowed_tools = tool_policy.allowed_tools.clone();
+        chat_config.shell_config = tool_policy.shell_config.clone();
         let chat_config_for_improve = chat_config.clone();
 
         let mut agent = Agent::new(

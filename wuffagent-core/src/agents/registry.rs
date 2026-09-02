@@ -372,23 +372,25 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
         let request = request.to_string();
         let start = std::time::Instant::now();
 
-        let result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let join = handle.spawn(async move {
-                let mut agent = Agent::new(
-                    config,
-                    llm_client,
-                    tool_manager,
-                    invocation_registry,
-                    None, // no event tx — sub-agent output is captured in the tool result
-                    client,
-                    None, // sub-agents don't have memory access
-                    None,
-                    PathBuf::new(),
-                );
-                agent.execute(&request, &CancellationToken::new()).await
-            });
-            handle.block_on(join)
-                .map_err(|e| AgentError::Internal(format!("Sub-agent join error: {}", e)))?
+        let result = if let Ok(_handle) = tokio::runtime::Handle::try_current() {
+            // Already inside a tokio runtime (the normal case — the chat pipeline
+            // and agent loops run on a runtime worker thread): run the sub-agent by
+            // awaiting it directly. We must NOT call `handle.block_on` here — it
+            // panics with "Cannot start a runtime from within a runtime" when the
+            // current thread is a runtime worker, which is exactly where `invoke`
+            // runs when reached from the agent loop / chat pipeline.
+            let mut agent = Agent::new(
+                config,
+                llm_client,
+                tool_manager,
+                invocation_registry,
+                None, // no event tx — sub-agent output is captured in the tool result
+                client,
+                None, // sub-agents don't have memory access
+                None,
+                PathBuf::new(),
+            );
+            agent.execute(&request, &CancellationToken::new()).await
         } else {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

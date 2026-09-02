@@ -52,6 +52,8 @@ pub struct QueuedMessage {
     pub image: Option<egui::ImageSource<'static>>,
     /// System prompt resolved from the selected agent at send time.
     pub agent_prompt: String,
+    /// Tool policy (allowed_tools + shell config) resolved from the selected agent.
+    pub tool_policy: crate::client::pipeline::ChatToolPolicy,
 }
 
 /// Main application state for the egui UI.
