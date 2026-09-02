@@ -44,12 +44,12 @@ impl ChatApp {
                     .hint_text("Type a message...")
                     .desired_width(f32::INFINITY);
                 let response = ui.add(text_edit);
-                // Send on Ctrl+Enter
+                // Send on Ctrl+Enter (allowed while generating — queues the
+                // message to run after the current task finishes).
                 let modifiers = ui.ctx().input(|i| i.modifiers);
                 if response.has_focus()
                     && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter))
                     && modifiers.ctrl
-                    && !self.chat.is_generating
                     && !self.chat.input_text.trim().is_empty()
                 {
                     let input = self.chat.input_text.trim().to_string();
@@ -105,16 +105,18 @@ impl ChatApp {
                     });
                 ui.add_space(6.0);
 
-                if !self.chat.is_generating {
-                    let send_btn = egui::Button::new("Send")
-                        .fill(theme.primary)
-                        .rounding(6.0)
-                        .min_size(egui::vec2(60.0, 28.0));
-                    if ui.add(send_btn).clicked() {
-                        let input = self.chat.input_text.trim().to_string();
-                        self.handle_send_input(&input);
-                    }
-                } else {
+                // Send is always available: while the AI is working it queues
+                // the message for the next turn, otherwise it starts a run.
+                let send_btn = egui::Button::new("Send")
+                    .fill(theme.primary)
+                    .rounding(6.0)
+                    .min_size(egui::vec2(60.0, 28.0));
+                if ui.add(send_btn).clicked() {
+                    let input = self.chat.input_text.trim().to_string();
+                    self.handle_send_input(&input);
+                }
+                if self.chat.is_generating {
+                    ui.add_space(6.0);
                     let stop_btn = egui::Button::new("Stop")
                         .fill(theme.error)
                         .rounding(6.0)
@@ -137,7 +139,31 @@ impl ChatApp {
             return;
         }
 
-        self.send_message();
+        if self.chat.is_generating {
+            // AI is still working: display the message immediately and queue it
+            // to run as the next turn once the current run (and any earlier
+            // queued messages) finishes.
+            let image = self.chat.pending_image.take();
+            self.chat.messages.push(crate::types::ChatMessage {
+                kind: MessageKind::Normal,
+                role: "user".to_string(),
+                content: input.to_string(),
+                timestamp: crate::types::format_timestamp(),
+                image: image.as_ref().map(|_| String::new()),
+            });
+            self.chat.input_text.clear();
+            self.queued_messages.push(super::state::QueuedMessage {
+                text: input.to_string(),
+                image,
+                agent_prompt: self.resolve_agent_prompt(),
+            });
+            self.chat.show_notification(
+                &format!("Queued — will run after the current task ({} waiting)", self.queued_messages.len()),
+                true,
+            );
+        } else {
+            self.send_message();
+        }
     }
 
     fn validate_input(&self, text: &str) -> Result<(), String> {
@@ -159,26 +185,14 @@ impl ChatApp {
             return;
         }
 
-        tracing::info!("[CHAT PATH] send_message called with: {}", input);
-
-        self.chat.input_text.clear();
-        self.chat.is_generating = true;
-        self.status = AppStatus::Generating;
-        self.chat.status = AppStatus::Generating;
-
-        // Add user message to chat display
         let image = self.chat.pending_image.take();
-        self.chat.messages.push(crate::types::ChatMessage {
-            kind: MessageKind::Normal,
-            role: "user".to_string(),
-            content: input.clone(),
-            timestamp: crate::types::format_timestamp(),
-            image: image.map(|_| String::new()),
-        });
+        self.start_pipeline(&input, image, self.resolve_agent_prompt(), false);
+    }
 
-        // Apply the selected agent profile's system prompt for this request
-        // (None = "Auto" -> the general profile).
-        let agent_prompt = match self.selected_agent_index {
+    /// Resolve the selected agent profile's system prompt for the current
+    /// selection (None = "Auto" -> the general profile).
+    fn resolve_agent_prompt(&self) -> String {
+        let prompt = match self.selected_agent_index {
             Some(i) => {
                 let name = self.get_agent_names().get(i).cloned().unwrap_or_default();
                 self.load_agent_system_prompt(&[name.as_str()])
@@ -187,8 +201,34 @@ impl ChatApp {
                 self.load_agent_system_prompt(&["general", "generalist"])
             }
         };
-        if agent_prompt.is_empty() {
+        if prompt.is_empty() {
             tracing::warn!("No agent system prompt found - chat will run without one");
+        }
+        prompt
+    }
+
+    /// Start a fresh pipeline run for `text`. Used both for direct sends and
+    /// for draining the queue of messages sent while the AI was working.
+    ///
+    /// `already_displayed` is true when the user message is already in the chat
+    /// (queue drain) and false for a direct send (still needs to be pushed).
+    fn start_pipeline(&mut self, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, already_displayed: bool) {
+        tracing::info!("[CHAT PATH] start_pipeline called with: {}", text);
+
+        self.chat.is_generating = true;
+        self.status = AppStatus::Generating;
+        self.chat.status = AppStatus::Generating;
+
+        // Add the user message to the chat display. Queued messages are already
+        // displayed (pushed at queue time), so only direct sends need to push.
+        if !already_displayed {
+            self.chat.messages.push(crate::types::ChatMessage {
+                kind: MessageKind::Normal,
+                role: "user".to_string(),
+                content: text.to_string(),
+                timestamp: crate::types::format_timestamp(),
+                image: image.map(|_| String::new()),
+            });
         }
 
         // Cancel any in-flight pipeline (previous send)
@@ -212,26 +252,12 @@ impl ChatApp {
             self.agent_engine = Arc::new((*self.agent_engine).clone().with_n_ctx(self.remote_n_ctx));
         }
 
-        // Load the agent session if one is configured so the agent starts with
-        // context from a previous session. This is done here (on the engine) rather
-        // than inside execute() because execute() takes &mut self and we need the
-        // loaded conversation to be reflected in the engine before the pipeline starts.
-        if let Some(sid) = self.agent_engine.agent_session_id() {
-            let dir = self.agent_engine.agent_session_dir().clone();
-            if !dir.as_os_str().is_empty() {
-                let mut engine_clone = (*self.agent_engine).clone();
-                if let Some(session) = crate::sessions::load_session(&dir, sid) {
-                    let mut conv = self.client.conversation().lock().unwrap();
-                    *conv = session.messages.clone();
-                    drop(conv);
-                    self.client.set_session(Some(sid.to_string()), dir.clone());
-                    self.client.load_session();
-                    // Also update the engine clone so execute() uses the right client
-                    engine_clone.set_agent_session(Some(sid.to_string()), dir);
-                    self.agent_engine = Arc::new(engine_clone);
-                }
-            }
-        }
+        // The agent operates on the client's active session conversation (the
+        // shared store): it appends the user turn at start of each turn and the
+        // assistant/tool tail as it runs, and the UI persists the result on
+        // StreamComplete. There is no separate per-agent store to reload here —
+        // doing so previously hijacked the client's session pointer and leaked
+        // agent context into the wrong session.
 
         // Create and start the chat pipeline
         let pipeline = crate::client::ChatPipeline::new(
@@ -243,7 +269,29 @@ impl ChatApp {
         self.chat_pipeline = Some(pipeline);
 
         // Start the chat
-        self.chat_pipeline.as_ref().unwrap().start(&input, &agent_prompt);
+        self.chat_pipeline.as_ref().unwrap().start(text, &agent_prompt);
+    }
+
+    /// After a run finished, process the next queued message (if any).
+    /// Called from the StreamComplete / StreamError handlers.
+    pub(super) fn drain_next_queued_message(&mut self) {
+        if self.queued_messages.is_empty() {
+            return;
+        }
+        if let Some(next) = self.queued_messages.first().cloned() {
+            tracing::info!(
+                "[QUEUE] Starting next queued message ({} remaining): {}",
+                self.queued_messages.len(),
+                next.text
+            );
+            // The message is already displayed in the chat (pushed at queue
+            // time); start_pipeline won't push it again.
+            let image = next.image;
+            let agent_prompt = next.agent_prompt;
+            // Remove the message we are about to run, keep the rest queued.
+            self.queued_messages.remove(0);
+            self.start_pipeline(&next.text, image, agent_prompt, true);
+        }
     }
 
     /// Load the system prompt of the first matching agent profile.
@@ -324,11 +372,13 @@ impl ChatApp {
                         }
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             if let Ok(cfg) = serde_json::from_str::<crate::agents::config::AgentConfig>(&content) {
-                                let _ = seen.insert(cfg.name.clone());
-                                names.push(cfg.name);
+                                if seen.insert(cfg.name.clone()) {
+                                    names.push(cfg.name);
+                                }
                             } else if let Ok(cfg) = serde_json::from_str::<crate::agents::config::WorkerConfig>(&content) {
-                                let _ = seen.insert(cfg.name.clone());
-                                names.push(cfg.name);
+                                if seen.insert(cfg.name.clone()) {
+                                    names.push(cfg.name);
+                                }
                             }
                         }
                     }

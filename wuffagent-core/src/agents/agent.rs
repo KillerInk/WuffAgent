@@ -107,52 +107,45 @@ impl Agent {
         }
     }
 
-    /// Build the initial message list for a task (system prompt + existing history + user task).
+    /// Build the throwaway request list for the current turn: the fresh system
+    /// prompt followed by a snapshot of the shared store.
     ///
-    /// The system prompt is always fresh (rebuilt with current memory context).
-    /// Previous conversation history is taken from the shared client conversation
-    /// so that subsequent turns within the same session retain full context.
-    pub fn build_initial_messages(&self, task: &str) -> Vec<Message> {
+    /// The system prompt is rebuilt each run (current memory context) and lives
+    /// ONLY in outgoing requests — it is never written to the store. The user
+    /// message for this turn is already in the shared store (appended at turn
+    /// start in `execute`), so it is included here via the store snapshot.
+    ///
+    /// This list is a request body, not history: it may contain the system
+    /// message and verification nudge, neither of which is persisted.
+    pub fn build_initial_messages(&self, _task: &str) -> Vec<Message> {
         let now = crate::types::format_timestamp();
         let mut messages: Vec<Message> = Vec::new();
 
-        // Load agent session if it has one (ensures context is current)
-        if self.agent_session_id.is_some() {
-            // We can't load mutably here since self is &self, so this is done
-            // in execute() before calling build_initial_messages.
-        }
-
-        // Start with the fresh system prompt
+        // Start with the fresh system prompt (request-only, never stored).
         messages.push(Message {
             role: "system".to_string(),
             content: self.build_system_prompt(),
-            timestamp: now.clone(),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        });
-
-        // Append existing conversation history from the shared client conversation,
-        // skipping any system message already present there to avoid duplication.
-        {
-            let conv = self.client.conversation();
-            let guard = conv.lock().unwrap();
-            let skip_system = !guard.is_empty() && guard[0].role == "system";
-            let start_idx = if skip_system { 1 } else { 0 };
-            for msg in guard.iter().skip(start_idx) {
-                messages.push(msg.clone());
-            }
-        }
-
-        // Add the new user request
-        messages.push(Message {
-            role: "user".to_string(),
-            content: task.to_string(),
             timestamp: now,
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
         });
+
+        // Snapshot the shared store, skipping anything that must never appear in a
+        // request body (stray system messages, empty assistant placeholders).
+        {
+            let conv = self.client.conversation();
+            let guard = conv.lock().unwrap();
+            for msg in guard.iter() {
+                if msg.role == "system" {
+                    continue;
+                }
+                if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
+                    continue;
+                }
+                messages.push(msg.clone());
+            }
+        }
 
         messages
     }
@@ -206,17 +199,24 @@ impl Agent {
             return Err("Cancelled".to_string());
         }
 
-        // Load agent session before starting if we have one
-        if self.agent_session_id.is_some() && !self.agent_session_dir.as_os_str().is_empty() {
-            let mut c = (*self.client).clone();
-            c.set_session(self.agent_session_id.clone(), self.agent_session_dir.clone());
-            c.load_session();
-            // Update self.client with the loaded conversation
-            let loaded_conv = c.conversation().lock().unwrap().clone();
-            let mut my_conv = self.client.conversation().lock().unwrap();
-            *my_conv = loaded_conv;
+        // Turn start: record the user message in the shared store exactly once.
+        // The store (`client.conversation`) is the single source of truth for
+        // history; the system prompt is kept out of it and rebuilt per request,
+        // exactly like the client's non-agent streaming path.
+        {
+            let mut conv = self.client.conversation().lock().unwrap();
+            conv.push(Message {
+                role: "user".to_string(),
+                content: request.to_string(),
+                timestamp: crate::types::format_timestamp(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
         }
 
+        // Throwaway request list: fresh system prompt + a snapshot of the store
+        // (which already contains the user message from the step above).
         let mut messages = self.build_initial_messages(request);
 
         self.send_event(crate::types::AppEvent::AgentChainStarted {
@@ -226,34 +226,14 @@ impl Agent {
 
         let result = self.run_llm_loop(&mut messages, cancel_token).await;
 
-        // Store the final message history for memory extraction
-        self.messages = messages.clone();
+        // Keep a clean copy (store snapshot, no system prompts) for memory
+        // extraction. Assistant/tool messages were already recorded to the store
+        // as they were generated inside run_llm_loop, so there is no sync-back.
+        self.messages = self.client.conversation().lock().unwrap().clone();
 
-        // Sync self.messages into client.conversation (do this before any early return)
-        // so that the session save below captures the full history including cancelled runs.
-        {
-            let conv = self.client.conversation();
-            let mut guard = conv.lock().unwrap();
-            let has_system = !guard.is_empty() && guard[0].role == "system";
-            if has_system {
-                if messages.first().map(|m| m.role.as_str()) == Some("system") {
-                    guard.extend(messages[1..].iter().cloned());
-                } else {
-                    guard.extend(messages.iter().cloned());
-                }
-            } else {
-                guard.extend(messages.iter().cloned());
-            }
-        }
-
-        // Save agent session after completion (or cancellation) so that the full
-        // conversation history — including the interrupted run — is persisted.
-        if self.agent_session_id.is_some() && !self.agent_session_dir.as_path().as_os_str().is_empty() {
-            let c = self.client.clone();
-            if let Err(e) = c.save_session() {
-                tracing::warn!("Failed to save agent session: {}", e);
-            }
-        }
+        // Persistence is owned by the UI (it saves on StreamComplete, for both the
+        // agent and non-agent paths), so the agent does not write the session file
+        // itself. This keeps a single writer per store and avoids a redundant save.
 
         match &result {
             Ok(response) => {
@@ -351,6 +331,27 @@ impl Agent {
         // Note: system prompt caching would require &'mut self, which conflicts
         // with the LLM loop. The prompt is cheap to rebuild (~100ns).
         prompt
+    }
+
+    /// Record a generated message in the shared store, exactly once.
+    ///
+    /// System messages (the per-run system prompt and the verification retry
+    /// nudge) belong only in outgoing requests and are never persisted, so they
+    /// are skipped here. This mirrors the client's non-agent path, where the
+    /// user and assistant messages are written to the shared conversation as
+    /// they happen and the system prompt is never stored.
+    fn record_in_store(&self, msg: &Message) {
+        // System messages are request-only and never persisted.
+        if msg.role == "system" {
+            return;
+        }
+        // Empty assistant placeholders (no content, no tool calls) are a
+        // streaming artifact and are never persisted.
+        if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
+            return;
+        }
+        let conv = self.client.conversation();
+        conv.lock().unwrap().push(msg.clone());
     }
 
     /// Run the LLM loop with NATIVE tool calling via the chat client (SSE).
@@ -487,15 +488,18 @@ impl Agent {
             let tool_calls = assistant_msg.tool_calls.clone();
             let reasoning = assistant_msg.reasoning_content.clone();
 
-            // Record the assistant turn (content + native calls + reasoning)
-            messages.push(Message {
+            // Record the assistant turn (content + native calls + reasoning).
+            // Kept in the throwaway request list AND recorded in the store once.
+            let assistant_msg_rec = Message {
                 role: "assistant".to_string(),
                 content: content.clone(),
                 timestamp: crate::types::format_timestamp(),
                 tool_calls: tool_calls.clone(),
                 tool_call_id: None,
                 reasoning_content: reasoning.clone(),
-            });
+            };
+            messages.push(assistant_msg_rec.clone());
+            self.record_in_store(&assistant_msg_rec);
 
             // Display-friendly content (think tags stripped if embedded)
             let display_content = crate::client::strip_think_tags(&content);
@@ -533,14 +537,16 @@ impl Agent {
                                     call_id: call.id.clone(),
                                     error: e.clone(),
                                 });
-                                messages.push(Message {
+                                let bad_args_msg = Message {
                                     role: "tool".to_string(),
                                     content: format!("Error: {}", e),
                                     timestamp: crate::types::format_timestamp(),
                                     tool_calls: None,
                                     tool_call_id: Some(call.id.clone()),
                                     reasoning_content: None,
-                                });
+                                };
+                                messages.push(bad_args_msg.clone());
+                                self.record_in_store(&bad_args_msg);
                                 continue;
                             }
                         };
@@ -558,14 +564,16 @@ impl Agent {
                             call_id: call.id.clone(),
                             result: result_str.clone(),
                         });
-                        messages.push(Message {
+                        let tool_msg = Message {
                             role: "tool".to_string(),
                             content: result_str,
                             timestamp: crate::types::format_timestamp(),
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
                             reasoning_content: None,
-                        });
+                        };
+                        messages.push(tool_msg.clone());
+                        self.record_in_store(&tool_msg);
                     }
                     continue;
                 }
@@ -616,7 +624,7 @@ impl Agent {
                             result: result_str.clone(),
                         });
                         // History entry in API-native shape (id links the result).
-                        messages.push(Message {
+                        let fb_assistant = Message {
                             role: "assistant".to_string(),
                             content: String::new(),
                             timestamp: crate::types::format_timestamp(),
@@ -630,15 +638,19 @@ impl Agent {
                             }]),
                             tool_call_id: None,
                             reasoning_content: None,
-                        });
-                        messages.push(Message {
+                        };
+                        messages.push(fb_assistant.clone());
+                        self.record_in_store(&fb_assistant);
+                        let fb_tool = Message {
                             role: "tool".to_string(),
                             content: result_str,
                             timestamp: crate::types::format_timestamp(),
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
                             reasoning_content: None,
-                        });
+                        };
+                        messages.push(fb_tool.clone());
+                        self.record_in_store(&fb_tool);
                     }
                     continue;
                 }

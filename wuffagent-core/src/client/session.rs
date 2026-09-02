@@ -7,10 +7,15 @@ use crate::types::Message;
 /// Session save/load/encrypt/decrypt orchestration for ChatClient.
 ///
 /// Save the current conversation to the active session.
+///
+/// `system_prompt` is persisted in the session's dedicated field — never in
+/// `messages`. The stored history is sanitized before writing so legacy files
+/// that accumulated stray system messages or duplicate blocks heal in place.
 pub fn save_session(
     session_id: Option<&str>,
     session_dir: &std::path::Path,
     conversation: &Arc<Mutex<Vec<Message>>>,
+    system_prompt: &str,
     encryption_key: Option<&[u8; 32]>,
     save_queue: &Arc<Mutex<VecDeque<()>>>,
     save_failed: &Arc<Mutex<bool>>,
@@ -45,6 +50,13 @@ pub fn save_session(
         }
     };
     session.messages = conv.clone();
+    session.sanitize();
+    // Keep the persisted system prompt in sync with the in-memory one, but
+    // prefer a prompt recovered from a legacy file (sanitize) when the
+    // in-memory one is empty.
+    if !system_prompt.is_empty() || session.system_prompt.is_empty() {
+        session.system_prompt = system_prompt.to_string();
+    }
     session.id = id.to_string();
     // Truncate agent_chain to prevent unbounded growth on save
     session.truncate_agent_chain(crate::trimming::TrimConfig::default().max_chain_entries);
@@ -94,6 +106,9 @@ pub fn load_session(
         sessions::load_session(session_dir, id)
     };
     let mut session = session?;
+    // Repair legacy files in place (extract stray system messages into the
+    // session's prompt field, drop duplicates and empty placeholders).
+    session.sanitize();
     let mut conv = conversation
         .lock()
         .ok()?;
@@ -281,6 +296,7 @@ mod tests {
             Some(session_id),
             &session_dir,
             &conv,
+            &String::new(),
             Some(&key),
             &save_queue,
             &save_failed,
@@ -300,14 +316,14 @@ mod tests {
         .expect("should load encrypted session");
 
         let messages = loaded_conv.lock().unwrap();
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, "system");
-        assert_eq!(messages[1].role, "user");
-        assert_eq!(messages[2].role, "assistant");
-        assert_eq!(messages[1].content, "Hello");
+        // System messages are never stored in the message history; the prompt
+        // is recovered into the session's dedicated field on load.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[0].content, "Hello");
         assert_eq!(loaded.name, "Untitled");
-        // system_prompt is stored separately in Session, not derived from messages
-        assert!(system_prompt.is_empty());
+        assert_eq!(system_prompt, "You are helpful");
         assert!(!*save_failed.lock().unwrap());
     }
 
@@ -347,6 +363,7 @@ mod tests {
             Some(session_id),
             &session_dir,
             &conv,
+            &String::new(),
             None,
             &save_queue,
             &save_failed,
@@ -404,6 +421,7 @@ mod tests {
             Some(session_id),
             &session_dir,
             &conv,
+            &String::new(),
             None,
             &save_queue,
             &save_failed,
@@ -445,6 +463,7 @@ mod tests {
                 Some(session_id),
                 &session_dir_clone,
                 &conv_clone,
+                &String::new(),
                 None,
                 &save_queue_clone,
                 &save_failed_clone,
@@ -578,5 +597,75 @@ mod tests {
         let messages = conv.lock().unwrap();
         assert_eq!(messages[0].role, "system", "system prompt must be kept");
         assert!(message_char_count(&messages) <= 100);
+    }
+
+    /// Save→load roundtrip must keep the system prompt in its dedicated field,
+    /// store the history with no system message, and preserve order/content
+    /// without duplication.
+    #[tokio::test]
+    async fn test_save_load_roundtrip_preserves_prompt_and_order() {
+        let dir = tempdir().unwrap();
+        let session_dir = PathBuf::from(dir.path());
+        let session_id = "roundtrip_session";
+
+        // The in-memory conversation carries a leading system prompt (as the
+        // request list does). It must NOT leak into the stored history.
+        let conv = make_conversation(vec![
+            make_message("system", "You are helpful"),
+            make_message("user", "turn 1 user"),
+            make_message("assistant", "turn 1 assistant"),
+            make_message("user", "turn 2 user"),
+            make_message("assistant", "turn 2 assistant"),
+        ]);
+        let save_queue = make_save_queue();
+        let save_failed = make_save_failed();
+
+        save_session(
+            Some(session_id),
+            &session_dir,
+            &conv,
+            &"You are helpful".to_string(),
+            None,
+            &save_queue,
+            &save_failed,
+        )
+        .unwrap();
+
+        // Load into a fresh conversation.
+        let loaded_conv = make_conversation(vec![]);
+        let mut system_prompt = String::new();
+        load_session(
+            Some(session_id),
+            &session_dir,
+            &loaded_conv,
+            &mut system_prompt,
+            None,
+        )
+        .expect("should load the session");
+
+        let messages = loaded_conv.lock().unwrap();
+        // System prompt restored into the dedicated field...
+        assert_eq!(system_prompt, "You are helpful");
+        // ...and never present as a stored message.
+        assert!(
+            messages.iter().all(|m| m.role != "system"),
+            "system prompt must not be stored in the history"
+        );
+        // Order and content preserved, no duplication (exactly the 4 turns).
+        assert_eq!(messages.len(), 4);
+        let got: Vec<(&str, &str)> = messages
+            .iter()
+            .map(|m| (m.role.as_str(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("user", "turn 1 user"),
+                ("assistant", "turn 1 assistant"),
+                ("user", "turn 2 user"),
+                ("assistant", "turn 2 assistant"),
+            ]
+        );
+        assert!(!*save_failed.lock().unwrap());
     }
 }

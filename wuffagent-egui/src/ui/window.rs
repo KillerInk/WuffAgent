@@ -132,32 +132,43 @@ impl ChatApp {
         if let Some(ref mut panel) = self.sessions.sessions_panel {
             panel.select_session(id);
         }
-        // Reload the selected session
+        // Point the client at the target session and load it. `load_session`
+        // sanitizes the history (drops stray system messages, duplicates and
+        // empty placeholders), restores the stored system prompt, and fills the
+        // shared conversation store — so we never touch the raw storage loader
+        // directly here.
         let session_dir = self.config.sessions_dir.clone();
-        if let Some(session) = crate::sessions::load_session(&session_dir, id) {
-            let mut conv = self.client.conversation().lock().unwrap();
-            *conv = session.messages.clone();
-            drop(conv);
-            self.client.set_session(Some(id.to_string()), session_dir.clone());
-            self.client.load_session();
-            // Populate the UI display with the loaded session messages.
-            // Derive message kind from legacy conventions (tool role, ðŸ'­ prefix).
-            self.chat.messages = session.messages.iter().map(|m| {
-                let (content, kind) = if m.role == "tool" {
-                    (m.content.clone(), crate::types::MessageKind::Tool)
-                } else if let Some(t) = m.content.strip_prefix("ðŸ'­ ") {
-                    (t.to_string(), crate::types::MessageKind::Thinking)
-                } else {
-                    (m.content.clone(), crate::types::MessageKind::Normal)
-                };
-                crate::types::ChatMessage {
-                    kind,
-                    role: m.role.clone(),
-                    content,
-                    timestamp: m.timestamp.clone(),
-                    image: None,
-                }
-            }).collect();
+        self.client.set_session(Some(id.to_string()), session_dir.clone());
+        if self.client.load_session().is_some() {
+            // Display the sanitized conversation (the source of truth), skipping
+            // system messages and empty assistant placeholders that must not be
+            // rendered.
+            let conv = self.client.conversation().lock().unwrap().clone();
+            self.chat.messages = conv
+                .iter()
+                .filter(|m| {
+                    m.role != "system"
+                        && !(m.role == "assistant"
+                            && m.content.is_empty()
+                            && m.tool_calls.is_none())
+                })
+                .map(|m| {
+                    let (content, kind) = if m.role == "tool" {
+                        (m.content.clone(), crate::types::MessageKind::Tool)
+                    } else if let Some(t) = m.content.strip_prefix("\u{1F4AD} ") {
+                        (t.to_string(), crate::types::MessageKind::Thinking)
+                    } else {
+                        (m.content.clone(), crate::types::MessageKind::Normal)
+                    };
+                    crate::types::ChatMessage {
+                        kind,
+                        role: m.role.clone(),
+                        content,
+                        timestamp: m.timestamp.clone(),
+                        image: None,
+                    }
+                })
+                .collect();
             // Refresh the token gauge from the loaded conversation (exact char
             // counter, same units the trimmer uses).
             self.refresh_token_gauge();

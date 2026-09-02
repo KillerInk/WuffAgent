@@ -28,6 +28,8 @@ pub struct AgentConfigDialog {
     allowed_tools: Vec<String>,
     /// Error/success messages.
     message: Option<String>,
+    /// Whether the window is open (drives the title-bar close button).
+    open: bool,
 }
 
 impl AgentConfigDialog {
@@ -56,18 +58,21 @@ impl AgentConfigDialog {
             available_tools,
             allowed_tools: Vec::new(),
             message: None,
+            open: true,
         }
     }
 
     pub fn show(&mut self, ctx: &egui::Context, agent_manager: &Arc<Mutex<AgentManager>>) -> bool {
         let theme = Theme::from_name("dark");
-        let mut closed = false;
+        // Copy the flag out so the title-bar close button can toggle it
+        // without clashing with the closure's `&mut self` borrow below.
+        let mut open = self.open;
 
         egui::Window::new("Agent Configuration")
             .collapsible(false)
             .resizable(true)
             .default_size([780.0, 540.0])
-            .open(&mut true)
+            .open(&mut open)
             .show(ctx, |ui| {
                 ui.style_mut().spacing.item_spacing.y = 6.0;
 
@@ -80,9 +85,6 @@ impl AgentConfigDialog {
                                 self.agents = m.reload().unwrap_or_default();
                             }
                             self.clear_form();
-                        }
-                        if ui.button("X").clicked() {
-                            closed = true;
                         }
                     });
                 });
@@ -179,7 +181,7 @@ impl AgentConfigDialog {
                                     ui.heading("Agent Editor");
                                     ui.separator();
 
-                                    if self.selected_index >= 0 {
+                                    if self.is_new || self.selected_index >= 0 {
                                         // Agent fields
                                         ui.vertical(|ui| {
                                             ui.label("Name:");
@@ -242,7 +244,8 @@ impl AgentConfigDialog {
                         });
                     });
             });
-        closed
+        self.open = open;
+        !open
     }
 
     fn save(&mut self, agent_manager: &Arc<Mutex<AgentManager>>) -> bool {
@@ -353,9 +356,10 @@ impl AgentConfigDialog {
     }
 
     fn start_new(&mut self) {
-        self.is_new = true;
-        self.selected_index = -1;
+        // Clear first: clear_form() resets is_new to false, so it must be
+        // set afterwards or the editor panel never appears.
         self.clear_form();
+        self.is_new = true;
     }
 
     fn start_edit(&mut self, agent: AgentConfig) {

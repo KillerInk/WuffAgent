@@ -43,6 +43,17 @@ pub struct PresetsDialogState {
     pub show_presets: Arc<Mutex<bool>>,
 }
 
+/// A message sent while the AI is still working. Displayed in the chat
+/// immediately and processed as the next turn once the current run (and any
+/// earlier queued messages) finishes.
+#[derive(Clone)]
+pub struct QueuedMessage {
+    pub text: String,
+    pub image: Option<egui::ImageSource<'static>>,
+    /// System prompt resolved from the selected agent at send time.
+    pub agent_prompt: String,
+}
+
 /// Main application state for the egui UI.
 pub struct ChatApp {
     pub config: Config,
@@ -69,6 +80,9 @@ pub struct ChatApp {
     pub agent_cancel_token: CancellationToken,
     /// Persistent chat pipeline — created once in `new()` and reused across sends.
     pub chat_pipeline: Option<crate::client::ChatPipeline>,
+    /// Messages sent while the AI was still working, processed in FIFO order
+    /// once the current run finishes.
+    pub queued_messages: Vec<QueuedMessage>,
     /// Index of the currently selected agent for chat (None = auto-select).
     pub selected_agent_index: Option<usize>,
     /// Reasoning effort for reasoning models (Off = omitted from requests).
@@ -125,6 +139,7 @@ impl ChatApp {
             pending_rx: Some(rx),
             agent_cancel_token: CancellationToken::new(),
             chat_pipeline: None,
+            queued_messages: Vec::new(),
             selected_agent_index: None,
             improvements_panel: super::improvements::ImprovementsPanel::new(),
             remote_n_ctx: 0,

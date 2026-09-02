@@ -53,13 +53,23 @@ impl ChatApp {
                 if let Err(e) = self.save_session() {
                     tracing::warn!("Failed to save session: {}", e);
                 }
+                // Start the next queued message (sent while this run was active).
+                self.drain_next_queued_message();
             }
             AppEvent::StreamError { error } => {
+                let cancelled = error == "Cancelled";
                 self.chat.stream_chunk(&format!("\n\nStream error: {}", error));
                 self.chat.commit_stream();
                 self.chat.is_generating = false;
                 self.status = AppStatus::Error(error.clone());
                 self.chat.status = AppStatus::Error(error);
+                // Keep the queue alive: the failed turn is retried as the next
+                // turn after an earlier queued message, if any remain. An
+                // explicit Stop surfaces as error "Cancelled" — don't resume
+                // in that case.
+                if !cancelled {
+                    self.drain_next_queued_message();
+                }
             }
             AppEvent::ToolCallWarning { tool_name, message } => {
                 tracing::warn!(tool_name, message, "Tool call warning");
