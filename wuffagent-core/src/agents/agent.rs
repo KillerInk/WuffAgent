@@ -702,8 +702,8 @@ impl Agent {
                         MAX_VERIFICATION_ATTEMPTS
                     );
                     messages.push(Message {
-                        role: "system".to_string(),
-                        content: "The previous tool outputs did not fully satisfy the user's request. Please try again with corrected tool calls.".to_string(),
+                        role: "user".to_string(),
+                        content: "Your previous tool outputs did not fully satisfy the request. Please try again with corrected tool calls.".to_string(),
                         timestamp: String::new(),
                         tool_calls: None,
                         tool_call_id: None,
