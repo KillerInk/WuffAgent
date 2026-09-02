@@ -16,15 +16,31 @@ pub async fn process_sse_line(
     callback: &mut impl FnMut(String, bool) -> Result<(), Error>,
     conversation: &Arc<Mutex<Vec<Message>>>,
 ) -> Result<Option<Usage>, Error> {
-    if line.is_empty() || line == "data: [DONE]" {
+    // Callers pass lines including the trailing newline (stream_message slices
+    // up to and including '\n'); strip line endings so the comparisons below
+    // still match — the usual stream-end frame arrives as "data: [DONE]\n".
+    let line = line.trim_end_matches(|c| c == '\n' || c == '\r');
+    if line.is_empty() {
         return Ok(None);
     }
 
-    if !line.starts_with("data: ") {
+    // Extract the payload after the SSE "data:" prefix. The standard
+    // OpenAI-compatible format uses "data: " (with a space); some servers
+    // omit the space, so accept both.
+    let data = if let Some(d) = line.strip_prefix("data: ") {
+        d
+    } else if let Some(d) = line.strip_prefix("data:") {
+        d
+    } else {
+        // SSE event headers (event:/id:/retry:), comments (:) — ignore.
+        return Ok(None);
+    };
+
+    // Standard stream-end sentinel (OpenAI-compatible servers).
+    if data.trim() == "[DONE]" {
         return Ok(None);
     }
 
-    let data = &line["data: ".len()..];
     // Some servers emit non-JSON data lines (keep-alives, partial frames).
     // Skip them instead of failing the whole stream.
     let chunk = match serde_json::from_str::<Value>(data) {

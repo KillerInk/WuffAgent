@@ -63,6 +63,14 @@ impl ChatApp {
                 self.chat.is_generating = false;
                 self.status = AppStatus::Error(error.clone());
                 self.chat.status = AppStatus::Error(error);
+                // A failed run (including a user stop surfacing as "Cancelled")
+                // never emits StreamComplete, so persist the session here. The
+                // agent writes the user turn and each assistant/tool round into
+                // the shared conversation store as it runs; saving captures
+                // whatever completed so the turn is not lost on reload.
+                if let Err(e) = self.save_session() {
+                    tracing::warn!("Failed to save session after error: {}", e);
+                }
                 // Keep the queue alive: the failed turn is retried as the next
                 // turn after an earlier queued message, if any remain. An
                 // explicit Stop surfaces as error "Cancelled" — don't resume

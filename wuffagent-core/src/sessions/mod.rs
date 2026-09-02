@@ -776,7 +776,7 @@ mod tests {
         save_session_encrypted(&dir, &enc_session, &key).unwrap();
 
         // Also save a plain session
-        let plain_session = create_session(&dir, "Plain One");
+        let _plain_session = create_session(&dir, "Plain One");
 
         // list_sessions only reads plain JSON; encrypted files are skipped
         let sessions = list_sessions(&dir);

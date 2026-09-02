@@ -492,5 +492,16 @@ impl ChatApp {
         self.chat.is_generating = false;
         self.chat.status = AppStatus::Ready;
         self.chat.pending_error = None;
+
+        // Flush any in-progress streamed text into the display, then persist the
+        // session. A stopped run never emits StreamComplete, so without this the
+        // interrupted turn would be lost on reload: the agent writes the user turn
+        // and each assistant/tool round into the shared conversation store as it
+        // runs, and save_session() persists that store. Saving here guarantees a
+        // stop (and the app-close path, which also calls save) never discards work.
+        self.chat.commit_stream();
+        if let Err(e) = self.save_session() {
+            tracing::warn!("Failed to save session after stop: {}", e);
+        }
     }
 }

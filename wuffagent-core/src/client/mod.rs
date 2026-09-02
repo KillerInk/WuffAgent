@@ -1228,6 +1228,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_process_sse_line_done_trailing_newline() {
+        // stream_message slices lines up to and including '\n', so the
+        // stream-end frame arrives as "data: [DONE]\n". Regression test:
+        // before the fix this fell through to JSON parsing and logged
+        // "SSE: skipping unparseable data line".
+        let client = ChatClient::new("http://localhost:8080");
+        let mut captured = Vec::new();
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
+            captured.push(s);
+            Ok(())
+        };
+        let result = process_sse_line("data: [DONE]\n", &mut cb, &client.conversation()).await;
+        assert!(result.is_ok());
+        assert!(captured.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_line_done_crlf() {
+        let client = ChatClient::new("http://localhost:8080");
+        let mut captured = Vec::new();
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
+            captured.push(s);
+            Ok(())
+        };
+        let result = process_sse_line("data: [DONE]\r\n", &mut cb, &client.conversation()).await;
+        assert!(result.is_ok());
+        assert!(captured.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_sse_line_data_prefix_without_space() {
+        // Some servers emit "data:{...}" without the space after the colon.
+        let client = ChatClient::new("http://localhost:8080");
+        let mut conv = client.conversation().lock().unwrap();
+        conv.push(Message {
+            role: "assistant".to_string(),
+            content: String::new(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+        drop(conv);
+
+        let sse_data = r#"data:{"choices":[{"delta":{"content":"Hi"}}]}"#;
+        let mut captured = Vec::new();
+        let mut cb = |s: String, _is_thinking: bool| -> Result<(), Error> {
+            captured.push(s);
+            Ok(())
+        };
+        let result = process_sse_line(sse_data, &mut cb, &client.conversation()).await;
+        assert!(result.is_ok());
+        assert_eq!(captured, vec!["Hi"]);
+        let c = client.conversation().lock().unwrap();
+        assert_eq!(c[0].content, "Hi");
+    }
+
+    #[tokio::test]
     async fn test_process_sse_line_non_data() {
         let client = ChatClient::new("http://localhost:8080");
         let mut captured = Vec::new();
