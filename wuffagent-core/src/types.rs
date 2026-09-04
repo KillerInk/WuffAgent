@@ -134,109 +134,47 @@ pub enum MessageKind {
 }
 
 /// Events that flow from the client engine to the UI.
+///
+/// Each event carries a `session_id` so the UI can route it to the correct
+/// session's chat area. When multiple sessions run in parallel, events must
+/// not be mixed between sessions.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
-    StreamChunk { content: String },
+    StreamChunk { content: String, session_id: String },
     /// An intermediate tool round finished (text committed, generation continues).
-    StreamRoundComplete { content: String, usage: Option<Usage> },
-    StreamComplete { content: String, usage: Option<Usage> },
-    StreamError { error: String },
-    ToolCallWarning { tool_name: String, message: String },
-    ToolCallStart { tool_name: String, call_id: String },
-    ToolCallComplete { tool_name: String, call_id: String, result: String },
-    ToolCallError { tool_name: String, call_id: String, error: String },
+    StreamRoundComplete { content: String, usage: Option<Usage>, session_id: String },
+    StreamComplete { content: String, usage: Option<Usage>, session_id: String },
+    StreamError { error: String, session_id: String },
+    ToolCallWarning { tool_name: String, message: String, session_id: String },
+    ToolCallStart { tool_name: String, call_id: String, session_id: String },
+    ToolCallComplete { tool_name: String, call_id: String, result: String, session_id: String },
+    ToolCallError { tool_name: String, call_id: String, error: String, session_id: String },
     // Thinking output events (e.g. Claude-style reasoning)
-    StreamThinkingChunk { content: String },
-    StreamThinkingComplete { content: String },
+    StreamThinkingChunk { content: String, session_id: String },
+    StreamThinkingComplete { content: String, session_id: String },
     // Agent chain events
-    AgentChainStarted { agent_name: String, depth: u32 },
-    AgentChainCompleted { agent_name: String, result: String, depth: u32 },
-    AgentChainError { agent_name: String, error: String, depth: u32 },
-    AgentChainCancelled { agent_name: String },
-    AgentChainComplete { response: String, entries: Vec<crate::sessions::model::AgentChainEntry> },
-    AgentChainStopped,
+    AgentChainStarted { agent_name: String, depth: u32, session_id: String },
+    AgentChainCompleted { agent_name: String, result: String, depth: u32, session_id: String },
+    AgentChainError { agent_name: String, error: String, depth: u32, session_id: String },
+    AgentChainCancelled { agent_name: String, session_id: String },
+    AgentChainComplete { response: String, entries: Vec<crate::sessions::model::AgentChainEntry>, session_id: String },
+    AgentChainStopped { session_id: String },
     /// Remote server n_ctx was updated.
-    NCtxUpdated { n_ctx: u32 },
+    NCtxUpdated { n_ctx: u32, session_id: String },
     /// Agent self-improvement suggestions generated.
     ImprovementSuggested {
         agent_name: String,
         suggestions: Vec<crate::memory::ImprovementSuggestion>,
+        session_id: String,
     },
-    /// Session paused with checkpoint available.
-    SessionPaused { session_id: String, message_count: usize },
-    /// Session resumed from checkpoint.
-    SessionResumed { session_id: String, message_count: usize },
 }
 
-
-/// Produce a human-readable label for a tool call from its result.
-/// Returns e.g. "read: Read `path/to/file`" or "write: Write `path/to/file`"
-pub fn tool_call_header(tool_name: &str, result: &str) -> String {
-    let actual_result = if result.starts_with('{') && result.contains("\"result\"") {
-        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(result) {
-            wrapper.get("result").map(|v| v.to_string()).unwrap_or(result.to_string())
-        } else {
-            result.to_string()
-        }
-    } else {
-        result.to_string()
-    };
-
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&actual_result) {
-        if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
-            if json.get("content").is_some() {
-                return format!("{}: Read {}", tool_name, path);
-            }
-            if json.get("bytes_written").is_some() {
-                return format!("{}: Write {}", tool_name, path);
-            }
-            if json.get("entries").is_some() {
-                return format!("{}: List {}", tool_name, path);
-            }
-            if json.get("deleted").is_some() {
-                return format!("{}: Delete {}", tool_name, path);
-            }
-            if json.get("created").is_some() {
-                return format!("{}: Mkdir {}", tool_name, path);
-            }
-            if json.get("bytes_appended").is_some() {
-                return format!("{}: Append {}", tool_name, path);
-            }
-            if json.get("lines_changed").is_some() {
-                return format!("{}: Edit {}", tool_name, path);
-            }
-            if json.get("size").is_some() || json.get("is_file").is_some() || json.get("is_dir").is_some() {
-                return format!("{}: Stat {}", tool_name, path);
-            }
-        }
-        if let (Some(expr), Some(_result)) = (
-            json.get("expression").and_then(|v| v.as_str()),
-            json.get("result"),
-        ) {
-            return format!("{}: Calc {}", tool_name, expr);
-        }
-        if let Some(query) = json.get("query").and_then(|v| v.as_str()) {
-            return format!("{}: Search {}", tool_name, query);
-        }
-        if let Some(results) = json.get("results").and_then(|v| v.as_array()) {
-            return format!("{}: Search results ({} found)", tool_name, results.len());
-        }
-        if let (Some(target), Some(task)) = (
-            json.get("target").and_then(|v| v.as_str()),
-            json.get("task").and_then(|v| v.as_str()),
-        ) {
-            let short_task = if task.len() > 40 { &task[..40] } else { task };
-            return format!("{}: Agent {} -> {}", tool_name, target, short_task);
-        }
-    }
-    if actual_result.starts_with("Error:") || actual_result.starts_with("error:") {
-        let truncated = if actual_result.len() > 50 { &actual_result[..50] } else { &actual_result };
-        return format!("{}: {}", tool_name, truncated);
-    }
-    tool_name.to_string()
-}
-
-/// Format the current local time as HH:MM:SS.
+/// Format the current time as a human-readable timestamp string.
 pub fn format_timestamp() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+/// Format a tool call header for display.
+pub fn tool_call_header(name: &str, result: &str) -> String {
+    format!("🔧 {}: {}", name, result.chars().take(80).collect::<String>())
 }

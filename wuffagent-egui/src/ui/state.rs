@@ -1,33 +1,16 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::ChatClient;
 use crate::config::Config;
 use crate::server::ServerManager;
 use crate::tools::ToolManager;
 
-use crate::types::{AppEvent, AppStatus, ChatMessage, MessageKind};
+use crate::types::{AppEvent, AppStatus};
 
 /// A single task progress entry in the pipeline panel.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum PipelineTaskStatus {
-    #[default]
-    Pending,
-    Running,
-    Completed,
-    Failed,
-}
-
-#[derive(Clone, Debug)]
-pub struct PipelineTaskEntry {
-    pub id: String,
-    pub description: String,
-    pub status: PipelineTaskStatus,
-    pub agent_type: String,
-}
-
 /// State for the agent chain panel.
 #[derive(Clone, Debug, Default)]
 pub struct AgentChainState {
@@ -37,35 +20,21 @@ pub struct AgentChainState {
     pub cancelled: bool,
 }
 
-/// State for the presets dialog.
-#[derive(Clone, Debug)]
-pub struct PresetsDialogState {
-    pub show_presets: Arc<Mutex<bool>>,
-}
-
-/// A message sent while the AI is still working. Displayed in the chat
-/// immediately and processed as the next turn once the current run (and any
-/// earlier queued messages) finishes.
-#[derive(Clone)]
-pub struct QueuedMessage {
-    pub text: String,
-    pub image: Option<egui::ImageSource<'static>>,
-    /// System prompt resolved from the selected agent at send time.
-    pub agent_prompt: String,
-    /// Tool policy (allowed_tools + shell config) resolved from the selected agent.
-    pub tool_policy: crate::client::pipeline::ChatToolPolicy,
-}
+/// A message sent while the AI is still working (now stored per-session in core).
+pub use crate::sessions::QueuedMessage;
 
 /// Main application state for the egui UI.
 pub struct ChatApp {
     pub config: Config,
-    pub client: ChatClient,
     pub server: ServerManager,
     pub tool_manager: Arc<ToolManager>,
     pub agent_engine: Arc<crate::agents::AgentEngine>,
-    pub cancellation_token: CancellationToken,
-    pub chat: ChatAreaState,
-    pub sessions: SessionsPanelState,
+    /// Per-session runtime state keyed by session ID.
+    pub session_store: HashMap<String, crate::sessions::SessionRuntime>,
+    /// ID of the currently selected session (None = no session selected).
+    pub selected_session_id: Option<String>,
+    /// The sessions sidebar widget (manages its own list + selection).
+    pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
     pub status: AppStatus,
     pub show_settings: bool,
     pub settings_dialog: Option<super::settings::SettingsDialog>,
@@ -80,11 +49,6 @@ pub struct ChatApp {
     pub pending_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     pub pending_rx: Option<mpsc::Receiver<AppEvent>>,
     pub agent_cancel_token: CancellationToken,
-    /// Persistent chat pipeline — created once in `new()` and reused across sends.
-    pub chat_pipeline: Option<crate::client::ChatPipeline>,
-    /// Messages sent while the AI was still working, processed in FIFO order
-    /// once the current run finishes.
-    pub queued_messages: Vec<QueuedMessage>,
     /// Index of the currently selected agent for chat (None = auto-select).
     pub selected_agent_index: Option<usize>,
     /// Reasoning effort for reasoning models (Off = omitted from requests).
@@ -102,32 +66,29 @@ pub struct ChatApp {
 impl ChatApp {
     pub fn new(
         config: Config,
-        client: ChatClient,
         server: ServerManager,
         tool_manager: Arc<ToolManager>,
         agent_engine: Arc<crate::agents::AgentEngine>,
+        session_store: HashMap<String, crate::sessions::SessionRuntime>,
+        selected_session_id: Option<String>,
+        event_tx: mpsc::Sender<AppEvent>,
+        event_rx: mpsc::Receiver<AppEvent>,
     ) -> Self {
-        // Create the event channel pair: UI polls the receiver each frame,
-        // the merge task (started in send_message) writes into the sender.
-        let (tx, rx) = mpsc::channel::<AppEvent>();
-        // Initialize the sessions panel with a clone of the config.
-        let sessions_panel =
-            super::sessions_panel::SessionsPanel::new(&Arc::new(Mutex::new(config.clone())));
         let reasoning_effort = config.reasoning_effort;
+        // Build the sessions sidebar widget, pre-selecting the active session.
+        let mut panel = super::sessions_panel::SessionsPanel::new(&Arc::new(Mutex::new(config.clone())));
+        if let Some(id) = &selected_session_id {
+            panel.select_session(id);
+        }
+        let sessions_panel = Some(panel);
         Self {
             config,
-            client,
             server,
             tool_manager,
             agent_engine,
-            cancellation_token: CancellationToken::new(),
-            chat: ChatAreaState::new(),
-            reasoning_effort,
-            sessions: SessionsPanelState {
-                sessions: Vec::new(),
-                selected_session: None,
-                sessions_panel: Some(sessions_panel),
-            },
+            session_store,
+            selected_session_id,
+            sessions_panel,
             status: AppStatus::Stopped,
             show_settings: false,
             settings_dialog: None,
@@ -137,12 +98,11 @@ impl ChatApp {
             agent_chain_state: AgentChainState::default(),
             agent_chain_expanded: Vec::new(),
             show_agent_chain: false,
-            pending_tx: Some(Arc::new(Mutex::new(tx))),
-            pending_rx: Some(rx),
+            pending_tx: Some(Arc::new(Mutex::new(event_tx))),
+            pending_rx: Some(event_rx),
             agent_cancel_token: CancellationToken::new(),
-            chat_pipeline: None,
-            queued_messages: Vec::new(),
             selected_agent_index: None,
+            reasoning_effort,
             improvements_panel: super::improvements::ImprovementsPanel::new(),
             remote_n_ctx: 0,
             remote_n_ctx_handle: None,
@@ -153,155 +113,182 @@ impl ChatApp {
     /// Centralized config save — all callers should use this.
     pub fn save_config(&mut self) -> Result<(), crate::config::Error> {
         self.config.reasoning_effort = self.reasoning_effort;
-        self.client.set_reasoning_effort(self.reasoning_effort);
-        self.config.chat_history = self.chat.messages.iter().map(|m| crate::config::ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            timestamp: if m.timestamp.is_empty() {
-                crate::types::format_timestamp()
-            } else {
-                m.timestamp.clone()
-            },
-        }).collect();
         self.config.save()
     }
 
-    /// Centralized session save — delegates to client.
+    /// Save the selected session's conversation.
     pub fn save_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.client.clone().save_session().map_err(|e| e.into())
-    }
-
-}
-
-/// State for the chat area.
-#[derive(Clone)]
-pub struct ChatAreaState {
-    pub messages: Vec<ChatMessage>,
-    pub input_text: String,
-    pub stream_buffer: String,
-    pub pending_error: Option<String>,
-    pub is_generating: bool,
-    pub scroll_to_bottom_requested: bool,
-    pub current_thinking: String,
-    pub at_bottom: bool,
-    pub button_opacity: f32,
-    pub button_visible: bool,
-    pub editing_message_index: Option<usize>,
-    pub editing_message_content: String,
-    pub expanded_messages: Vec<usize>,
-    pub context_used: f32,
-    pub pipeline: Option<PipelineState>,
-    pub pending_image: Option<egui::ImageSource<'static>>,
-    pub status: crate::types::AppStatus,
-    pub token_count: usize,
-    pub engine: Option<Arc<crate::agents::AgentEngine>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PipelineState {
-    pub plan_id: String,
-    pub iteration: usize,
-    pub cancelled: bool,
-    pub tasks: Vec<PipelineTaskEntry>,
-    pub feedback_state: Option<String>,
-}
-
-impl ChatAreaState {
-    pub fn new() -> Self {
-        Self {
-            messages: Vec::new(),
-            input_text: String::new(),
-            stream_buffer: String::new(),
-            pending_error: None,
-            is_generating: false,
-            scroll_to_bottom_requested: false,
-            current_thinking: String::new(),
-            at_bottom: true,
-            button_opacity: 1.0,
-            button_visible: true,
-            editing_message_index: None,
-            editing_message_content: String::new(),
-            expanded_messages: Vec::new(),
-            context_used: 0.0,
-            pipeline: None,
-            pending_image: None,
-            status: crate::types::AppStatus::Stopped,
-            token_count: 0,
-            engine: None,
+        // Clone the id so the immutable borrow of `self.selected_session_id`
+        // ends before we call `save_session_for` (which mutably borrows `self`).
+        let id = self.selected_session_id.clone();
+        match id {
+            Some(id) => self.save_session_for(&id),
+            None => Ok(()),
         }
     }
 
-    pub fn push_message(&mut self, kind: MessageKind, role: &str, content: &str) {
-        self.messages.push(ChatMessage {
-            kind,
-            role: role.to_string(),
-            content: content.to_string(),
-            timestamp: crate::types::format_timestamp(),
-            image: None,
-        });
-    }
-
-    pub fn append_message(&mut self, role: &str, content: &str) {
-        self.push_message(MessageKind::Normal, role, content);
-    }
-
-    pub fn stream_chunk(&mut self, chunk: &str) {
-        self.stream_buffer.push_str(chunk);
-    }
-
-    pub fn commit_stream(&mut self) {
-        let buffer = std::mem::take(&mut self.stream_buffer);
-        if !buffer.is_empty() {
-            self.append_message("assistant", &buffer);
+    /// Save a specific session's conversation by id.
+    pub fn save_session_for(&mut self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(runtime) = self.session_store.get(id) {
+            runtime.client.save_session().map_err(|e| e.into())
+        } else {
+            Ok(())
         }
     }
 
-    /// Show a brief notification message (stored in pending_error for display).
-    pub fn show_notification(&mut self, msg: &str, _success: bool) {
-        // Store as a temporary notification message
-        self.messages.push(ChatMessage {
-            kind: MessageKind::Normal,
-            role: "system".to_string(),
-            content: format!("⚡ {}", msg),
-            timestamp: crate::types::format_timestamp(),
-            image: None,
-        });
-    }
+    /// Apply a pending sessions-panel action (create/delete/rename/export/import).
+    ///
+    /// This inlines the per-action logic (previously in `apply_actions`) so we
+    /// only ever hold a single mutable borrow of `self.sessions_panel` at a
+    /// time — calling a free function with both `&mut self` and a `&mut` field
+    /// of `self` would be a conflicting double-borrow.
+    pub fn apply_sessions_action(
+        &mut self,
+        action: super::sessions_actions::PanelAction,
+    ) {
+        use super::sessions_actions::PanelAction;
+        use std::path::PathBuf;
 
-    /// Reload the chat display from the client's current conversation.
-    pub fn reload_messages_from_client(&mut self) {
-        // This will be called after a session resume to refresh the display
-        // The actual message reload happens via the session loading mechanism
-        self.messages.clear();
-    }
-}
+        let Some(panel) = self.sessions_panel.as_mut() else {
+            return;
+        };
+        let sessions_dir = panel.sessions_dir().clone();
 
-impl Default for ChatAreaState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+        match action {
+            PanelAction::Rename { id, new_name } => {
+                if let Some(mut s) = crate::sessions::load_session(&sessions_dir, &id) {
+                    s.name = new_name.clone();
+                    let _ = crate::sessions::save_session(&sessions_dir, &s);
+                }
+                if let Some(runtime) = self.session_store.get_mut(&id) {
+                    runtime.name = new_name;
+                }
+                panel.refresh();
+            }
+            PanelAction::Create(name) => {
+                let session = crate::sessions::create_session(&sessions_dir, &name);
 
-/// State for the sessions panel.
-#[derive(Clone, Debug)]
-pub struct SessionsPanelState {
-    pub sessions: Vec<crate::sessions::model::Session>,
-    pub selected_session: Option<String>,
-    pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
-}
+                let base_url = self.config.base_url();
+                let mut session_client = crate::client::ChatClient::new(&base_url);
+                session_client.set_api_key(self.config.remote_api_key.as_deref());
+                session_client.set_session(Some(session.id.clone()), sessions_dir.clone());
+                session_client.set_reasoning_effort(self.config.reasoning_effort);
+                session_client.set_max_messages(self.config.max_messages);
+                session_client.set_n_ctx(self.config.n_ctx);
+                if self.config.encryption_enabled {
+                    if let Some(key) = self.config.encryption_key() {
+                        session_client.set_encryption_key(Some(key));
+                    }
+                }
+                let _ = session_client.load_session();
 
-impl SessionsPanelState {
-    pub fn new() -> Self {
-        Self {
-            sessions: Vec::new(),
-            selected_session: None,
-            sessions_panel: None,
+                session_client.set_tool_event_sender(
+                    self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
+                );
+
+                // Per-session engine: derived from the shared bootstrap engine
+                // but bound to THIS session's client so the agent chat loop
+                // reads/writes an isolated conversation store (the shared
+                // bootstrap engine's client would otherwise be mutated by every
+                // session in parallel — a cross-session data race).
+                let session_engine = (*self.agent_engine).clone().with_client(session_client.clone());
+                let pipeline = crate::client::ChatPipeline::new(
+                    Arc::new(session_engine.clone()),
+                    self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
+                    self.config.reasoning_effort,
+                    session.id.clone(),
+                );
+                let cancel_token = tokio_util::sync::CancellationToken::new();
+
+                let runtime = crate::sessions::SessionRuntime::new(
+                    session.id.clone(),
+                    session.name.clone(),
+                    session_client,
+                    pipeline,
+                    session_engine,
+                    cancel_token,
+                );
+
+                self.session_store.insert(session.id.clone(), runtime);
+                *panel.selected_id_mut() = Some(session.id.clone());
+
+                {
+                    let mut cfg = panel.config().clone();
+                    cfg.session_id = Some(session.id.clone());
+                    if let Err(e) = cfg.save() {
+                        eprintln!("Failed to save config after creating session: {}", e);
+                    }
+                }
+                panel.refresh();
+            }
+            PanelAction::Delete(id) => {
+                match crate::sessions::delete_session(&sessions_dir, &id) {
+                    Ok(()) => {
+                        self.session_store.remove(&id);
+                        if self.selected_session_id.as_deref() == Some(&*id) {
+                            self.selected_session_id = None;
+                        }
+                        panel.show_notification(&format!("Session '{}' deleted", id), true);
+                        panel.clear_session();
+                        panel.refresh();
+                        let mut cfg = panel.config().clone();
+                        cfg.session_id = None;
+                        if let Err(e) = cfg.save() {
+                            eprintln!("Failed to save config after deleting session: {}", e);
+                        }
+                        panel.show_notification("Session deleted", true);
+                    }
+                    Err(e) => {
+                        panel.show_notification(&format!("Failed to delete session: {}", e), false);
+                        if panel.selected_id().as_deref() == Some(&*id) {
+                            *panel.selected_id_mut() = None;
+                        }
+                        panel.refresh();
+                    }
+                }
+            }
+            PanelAction::Export { session_id } => {
+                let output_path = if panel.export_path().is_empty() {
+                    PathBuf::from(format!("{}.json", session_id))
+                } else {
+                    PathBuf::from(panel.export_path())
+                };
+                match crate::sessions::export_session(&sessions_dir, &session_id, &output_path) {
+                    Ok(()) => panel.show_notification(&format!("Exported to {}", output_path.display()), true),
+                    Err(e) => panel.show_notification(&format!("Export failed: {}", e), false),
+                }
+            }
+            PanelAction::Import => {
+                let input_path = if panel.import_path().is_empty() {
+                    PathBuf::from("session.json")
+                } else {
+                    PathBuf::from(panel.import_path())
+                };
+                match crate::sessions::import_session(&sessions_dir, &input_path) {
+                    Ok(new_id) => {
+                        panel.show_notification(&format!("Imported session: {}", new_id), true);
+                        panel.refresh();
+                    }
+                    Err(e) => panel.show_notification(&format!("Import failed: {}", e), false),
+                }
+            }
         }
     }
-}
 
-impl Default for SessionsPanelState {
-    fn default() -> Self {
-        Self::new()
+    /// Get the selected session's chat area state (immutable view).
+    pub fn selected_chat_state(&self) -> Option<&crate::sessions::ChatAreaState> {
+        self.selected_session_id
+            .as_ref()
+            .and_then(|id| self.session_store.get(id))
+            .map(|r| &r.chat_state)
+    }
+
+    /// Get the client for the selected session (if any).
+    pub fn active_client(&self) -> Option<&crate::client::ChatClient> {
+        self.selected_session_id
+            .as_ref()
+            .and_then(|id| self.session_store.get(id))
+            .map(|r| &r.client)
     }
 }
+

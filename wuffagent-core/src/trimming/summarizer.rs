@@ -42,6 +42,15 @@ const OMIT_TEXT_RESERVED_CHARS: usize = 50;
 /// Minimum items to keep from lists when summarizing.
 const LIST_MIN_KEEP: usize = 2;
 
+/// Floor for in-place truncation: a message's content is never shrunk below
+/// this many chars (it is set to the placeholder at exactly this length) so
+/// that no message — especially a `role: "tool"` result — ever ends up with
+/// empty content that the LLM/server rejects.
+const MIN_TRUNCATED_CONTENT_CHARS: usize = 80;
+
+/// Placeholder written when a message's content is shrunk to the truncation floor.
+const TRUNCATED_PLACEHOLDER: &str = "[content trimmed to fit context window]";
+
 /// A trait for content-specific summarizers.
 pub trait ContentSummarizer: Send + Sync {
     /// Summarize the given content, respecting the budget.
@@ -354,38 +363,68 @@ impl ContextTrimming {
         messages.iter().map(Self::message_tokens).sum()
     }
 
-    /// Truncate the largest non-leading-system message so the total token count
-    /// drops below `target_tokens` (chars). Truncating in place preserves the
-    /// tool_call/tool_call_id pairing that removing whole messages would break.
-    fn truncate_largest_message(messages: &mut [Message], target_tokens: usize) -> bool {
-        let mut best_idx: Option<usize> = None;
-        let mut best_len: usize = 0;
-        let leading_system = messages.first().map(|m| m.role.as_str()) == Some("system");
-        for (i, m) in messages.iter().enumerate() {
-            if i == 0 && leading_system {
-                continue;
-            }
-            let len = m.content.len();
-            if len > best_len {
-                best_len = len;
-                best_idx = Some(i);
-            }
+    /// Index of the start of the "protected tail": the current round the model
+    /// has produced but not yet read. That is the LATER of (a) the last user
+    /// message and (b) the last assistant message carrying tool calls, so the
+    /// fresh assistant tool-call + its tool results are always included.
+    /// Everything from this index to the end must be shown to the model in full
+    /// — trimming must never remove or shrink it, so a fresh tool result is
+    /// always read by the AI before it can be trimmed. Older rounds (before this
+    /// index) are free to be removed or summarized.
+    fn protected_tail_start(messages: &[Message]) -> usize {
+        let last_user = messages.iter().rposition(|m| m.role == "user");
+        let last_toolcall = messages
+            .iter()
+            .rposition(|m| m.role == "assistant" && m.tool_calls.is_some());
+        match (last_user, last_toolcall) {
+            (Some(u), Some(t)) => u.max(t),
+            (Some(u), None) => u,
+            (None, Some(t)) => t,
+            (None, None) => messages.len(),
         }
-        let idx = match best_idx {
-            Some(i) => i,
-            None => return false,
-        };
+    }
 
+    /// Last-resort shrink: halve the largest messages (measured by
+    /// `message_tokens`, i.e. content + reasoning + tool-call args — the same
+    /// metric the budget uses) until the total fits `target_tokens` or no
+    /// candidate has content left. Messages whose content reaches the floor are
+    /// set to a placeholder and skipped, so no message — in particular no
+    /// `role: "tool"` result — ever ends up with empty content.
+    fn truncate_largest_message(
+        messages: &mut [Message],
+        target_tokens: usize,
+        protect_from: usize,
+    ) -> bool {
+        let leading_system = messages.first().map(|m| m.role.as_str()) == Some("system");
         let mut truncated = false;
         loop {
             if Self::message_char_count(messages) <= target_tokens {
-                return truncated;
+                break;
             }
+            // Pick the largest shrinkable candidate: real content, not already
+            // reduced to the placeholder, never the leading system prompt, and
+            // never inside the protected tail.
+            let best = (0..messages.len())
+                .filter(|&i| !(i == 0 && leading_system))
+                .filter(|&i| i < protect_from)
+                .filter(|&i| !messages[i].content.is_empty())
+                .filter(|&i| messages[i].content != TRUNCATED_PLACEHOLDER)
+                .max_by_key(|&i| Self::message_tokens(&messages[i]));
+            let Some(idx) = best else { break };
             let current_chars = messages[idx].content.chars().count();
-            if current_chars == 0 {
-                return truncated;
+            if current_chars <= MIN_TRUNCATED_CONTENT_CHARS {
+                // At the floor: collapse to the placeholder and move on.
+                messages[idx].content = TRUNCATED_PLACEHOLDER.to_string();
+                truncated = true;
+                continue;
             }
-            let target_chars = current_chars / 2;
+            // Halve (snap to a char boundary); stop at the floor.
+            let target_chars = (current_chars / 2).max(MIN_TRUNCATED_CONTENT_CHARS);
+            if target_chars >= current_chars {
+                messages[idx].content = TRUNCATED_PLACEHOLDER.to_string();
+                truncated = true;
+                continue;
+            }
             let byte_pos = messages[idx]
                 .content
                 .char_indices()
@@ -395,6 +434,50 @@ impl ContextTrimming {
                 .unwrap_or(0);
             messages[idx].content.truncate(byte_pos);
             truncated = true;
+        }
+        truncated
+    }
+
+    /// Shrink oversized `role: "tool"` messages that sit BEFORE the protected
+    /// tail (i.e. rounds the model has already consumed) by summarizing them in
+    /// place via the type-aware summarizers. This preserves tool_call/tool_call_id
+    /// pairing (no message is removed) and never yields empty content: the
+    /// summarizers always return non-empty text for non-empty input, and the
+    /// final generic hard cap keeps the result within `budget_chars`.
+    /// The fresh round (protected tail) is left untouched so the AI always
+    /// reads the latest tool output in full.
+    fn summarize_old_tool_messages(
+        &self,
+        messages: &mut [Message],
+        protect_from: usize,
+        budget_chars: usize,
+        config: &TrimConfig,
+    ) {
+        let budget = budget_chars.max(MIN_TRUNCATED_CONTENT_CHARS * 4);
+        // Single pass over the pre-tail messages, largest first: each tool
+        // result is summarized at most once (bounded, no re-selection of a
+        // message that could not be shrunk), so this always terminates.
+        let mut candidates: Vec<usize> = (0..protect_from)
+            .filter(|&i| {
+                messages[i].role == "tool" && messages[i].content.len() > budget
+            })
+            .collect();
+        candidates.sort_by_key(|&i| std::cmp::Reverse(Self::message_tokens(&messages[i])));
+        for idx in candidates {
+            if Self::message_char_count(messages) <= budget_chars {
+                break;
+            }
+            let original = messages[idx].content.clone();
+            let summarized = self.summarize_to_budget(&original, budget, config);
+            if summarized.len() >= original.len() {
+                continue; // could not shrink this one; move on
+            }
+            tracing::info!(
+                "trimming: summarized old tool result in place (len: {} -> {})",
+                original.len(),
+                summarized.len()
+            );
+            messages[idx].content = summarized;
         }
     }
 
@@ -420,20 +503,41 @@ impl ContextTrimming {
             return 0;
         }
 
-        // Never remove the last user message — the server requires at least one
-        // user message and raises a 500 if the last message is not from a user.
-        let last_user_idx = messages.iter().rev().position(|m| m.role == "user")
-            .map(|r| messages.len().saturating_sub(r) - 1);
-
         let initial_count = messages.len();
         let initial_chars = Self::message_char_count(messages);
+        // The current round (last user message / last assistant tool-call and
+        // the tool results after it) is never removed or shrunk: the AI must
+        // read fresh tool output before it can be trimmed.
+        let protect_from = Self::protected_tail_start(messages);
         tracing::info!(
-            "trimming: trim_messages called (messages={}, chars={}, target={}, keep_from={})",
+            "trimming: trim_messages called (messages={}, chars={}, target={}, keep_from={}, protect_from={})",
             initial_count,
             initial_chars,
             target_chars,
-            keep_from
+            keep_from,
+            protect_from
         );
+
+        // `is_paired` marks tool-call participants at index `i` (an assistant
+        // message carrying tool_calls, or a tool result whose tool_call_id
+        // matches one). Recomputed each removal because indices shift.
+        fn is_paired_at(messages: &[Message], i: usize) -> bool {
+            let m = &messages[i];
+            if m.role == "assistant" {
+                return m.tool_calls.is_some();
+            }
+            if m.role == "tool" {
+                if let Some(id) = m.tool_call_id.as_deref() {
+                    return messages
+                        .iter()
+                        .filter(|a| a.role == "assistant")
+                        .filter_map(|a| a.tool_calls.as_ref())
+                        .flatten()
+                        .any(|tc| tc.id == id);
+                }
+            }
+            false
+        }
 
         let mut removed = 0;
         loop {
@@ -444,18 +548,46 @@ impl ContextTrimming {
             if keep_from >= messages.len() {
                 break;
             }
-            if let Some(lui) = last_user_idx {
+            // Recompute the protected tail each iteration: removing a message
+            // before it shifts the tail index down, so a stale value would let
+            // the pointer run past it and orphan the fresh tool results.
+            let protect_from = Self::protected_tail_start(messages);
+            // Stop before the protected tail: everything from the last user
+            // message / last assistant tool-call onward is the current round the
+            // AI has not read yet.
+            if keep_from >= protect_from {
+                break;
+            }
+            // Never remove the last user message — in agent mode it is the
+            // task the whole conversation is about, and the server requires at
+            // least one user message (a 500 if the last message is not a user).
+            // In that case the summarization/truncation passes handle the budget.
+            if let Some(lui) = messages.iter().rposition(|m| m.role == "user") {
                 if keep_from >= lui {
                     break;
                 }
             }
+            // Tool rounds are NEVER removed: an assistant message carrying
+            // tool_calls and its `role: "tool"` results stay in place so the
+            // call/result pairing is intact and no empty tool message is ever
+            // produced. They are instead compressed in place by the summarization
+            // pass below (and the truncation fallback as a last resort).
+            if is_paired_at(messages, keep_from) {
+                break;
+            }
+            // Only plain user/assistant turns are removed.
             messages.remove(keep_from);
             removed += 1;
         }
 
-        // Fallback: if still over budget after removing all removable messages,
-        // truncate the largest shrinkable message to force it under.
-        Self::truncate_largest_message(messages, target_chars);
+        // Second pass: compress already-consumed tool rounds in place
+        // (summarization keeps paths/errors/line counts and never empties).
+        let protect_from = Self::protected_tail_start(messages);
+        self.summarize_old_tool_messages(messages, protect_from, target_chars, config);
+
+        // Fallback: if still over budget, truncate the largest shrinkable
+        // message (protected tail excluded) to force it under.
+        Self::truncate_largest_message(messages, target_chars, protect_from);
 
         let final_count = messages.len();
         let final_chars = Self::message_char_count(messages);
@@ -574,5 +706,268 @@ mod tests {
 
         assert!(result.contains("items omitted"));
         assert!(result.len() <= 200);
+    }
+
+    fn user_msg(text: &str) -> Message {
+        Message {
+            role: "user".into(),
+            content: text.into(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn assistant_msg(text: &str) -> Message {
+        Message {
+            role: "assistant".into(),
+            content: text.into(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn assistant_tool_call(call_id: &str, args: &str) -> Message {
+        Message {
+            role: "assistant".into(),
+            content: String::new(),
+            timestamp: String::new(),
+            tool_calls: Some(vec![crate::types::ToolCall {
+                id: call_id.into(),
+                call_type: "function".into(),
+                function: crate::types::ToolFunction {
+                    name: "echo".into(),
+                    arguments: args.into(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn tool_result(call_id: &str, text: &str) -> Message {
+        Message {
+            role: "tool".into(),
+            content: text.into(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: Some(call_id.into()),
+            reasoning_content: None,
+        }
+    }
+
+    /// Every assistant tool-call id must have a matching tool result present in
+    /// the trimmed list, and every tool result's id must match a present call.
+    fn assert_pairs_intact(messages: &[Message]) {
+        let call_ids: std::collections::HashSet<&str> = messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .map(|tc| tc.id.as_str())
+            .collect();
+        for m in messages.iter().filter(|m| m.role == "tool") {
+            let id = m.tool_call_id.as_deref().unwrap_or("");
+            assert!(
+                call_ids.contains(id),
+                "tool result {} present without its paired tool call",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_trim_keeps_tool_pair_straddling_boundary_intact() {
+        // system, then an early user/assistant pair, then an assistant tool
+        // call whose result immediately follows the last user message. The
+        // trim target forces removals that land right on the call/result
+        // boundary — the pair must survive together.
+        let mut messages = vec![
+            Message {
+                role: "system".into(),
+                content: "sys".into(),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            user_msg("first question"),
+            assistant_msg("first answer"),
+            user_msg("second question"),
+            assistant_tool_call("call_1", "{\"n\":42}"),
+            tool_result("call_1", "42"),
+            user_msg("third question"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        // Target just above the system+last-user cost so the removal loop runs
+        // and its pointer reaches the tool cluster.
+        let target = 60;
+        trimming.trim_messages(&mut messages, target, &make_config());
+
+        assert_pairs_intact(&messages);
+        // The last user message must always survive.
+        assert!(messages.iter().any(|m| m.content == "third question"));
+    }
+
+    #[test]
+    fn test_trim_multiple_user_messages_keeps_last_user_intact() {
+        // Several user messages separated by assistant replies plus a tool
+        // cluster near the end. Aggressive trimming must keep removing
+        // messages (recomputing the last-user bound each iteration) and must
+        // never drop the final user message.
+        let mut messages = vec![
+            Message {
+                role: "system".into(),
+                content: "sys".into(),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            user_msg("q1"),
+            assistant_msg("a1"),
+            user_msg("q2"),
+            assistant_msg("a2"),
+            user_msg("q3"),
+            assistant_tool_call("c1", "{}"),
+            tool_result("c1", "ok"),
+            user_msg("q4-final"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        // Target just below the total content but above the system + final
+        // user floor: the removal loop must keep removing across multiple
+        // user messages, recomputing the last-user bound each iteration, and
+        // stop only once it would reach q4-final.
+        let removed = trimming.trim_messages(&mut messages, 15, &make_config());
+
+        assert!(removed > 0, "expected some messages to be removed");
+        assert_pairs_intact(&messages);
+        let last = messages.last().unwrap();
+        assert_eq!(last.role, "user", "final message must stay a user message");
+        assert_eq!(last.content, "q4-final");
+    }
+
+    #[test]
+    fn test_protected_tail_start_prefers_latest_round() {
+        // Agent loop shape: one user turn, then several tool rounds. The
+        // protected tail must start at the LAST assistant tool call, not at the
+        // (much earlier) user message — otherwise every old tool result would
+        // be protected and never summarized.
+        let messages = vec![
+            user_msg("q"),
+            assistant_tool_call("c1", "{}"),
+            tool_result("c1", "old-1"),
+            assistant_tool_call("c2", "{}"),
+            tool_result("c2", "old-2"),
+            assistant_tool_call("c3", "{}"),
+            tool_result("c3", "fresh"),
+        ];
+        // index 5 = the last assistant tool call
+        assert_eq!(ContextTrimming::protected_tail_start(&messages), 5);
+    }
+
+    #[test]
+    fn test_protected_tail_start_plain_chat_uses_last_user() {
+        let messages = vec![user_msg("q1"), assistant_msg("a1"), user_msg("q2")];
+        assert_eq!(ContextTrimming::protected_tail_start(&messages), 2);
+    }
+
+    #[test]
+    fn test_fresh_tool_result_untouched_by_trim() {
+        // The tool result of the current round (after the last assistant
+        // tool call) must come back byte-identical, even when the older part
+        // of the conversation is far over budget.
+        let big = (0..500).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
+        let fresh = "FRESH-RESULT-EXACTLY-AS-IS";
+        let mut messages = vec![
+            user_msg("q"),
+            assistant_tool_call("c1", "{}"),
+            tool_result("c1", &big),
+            assistant_tool_call("c2", "{}"),
+            tool_result("c2", fresh),
+        ];
+
+        let trimming = ContextTrimming::new();
+        // target tiny: forces removal/summarization of everything before the tail.
+        trimming.trim_messages(&mut messages, 64, &make_config());
+
+        let last = messages.last().unwrap();
+        assert_eq!(last.role, "tool");
+        assert_eq!(last.content, fresh, "fresh tool result must be untouched");
+    }
+
+    #[test]
+    fn test_old_tool_result_summarized_in_place_non_empty() {
+        // An over-budget tool result from an EARLIER round must be compressed
+        // in place (pairing preserved, no message removed, content never empty).
+        let big = (0..500).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
+        let fresh = "fresh";
+        let mut messages = vec![
+            user_msg("q"),
+            assistant_tool_call("c1", "{}"),
+            tool_result("c1", &big),
+            assistant_tool_call("c2", "{}"),
+            tool_result("c2", fresh),
+        ];
+        let before_len = messages.len();
+
+        let trimming = ContextTrimming::new();
+        trimming.trim_messages(&mut messages, 256, &make_config());
+
+        // No message dropped: pairing intact.
+        assert_eq!(messages.len(), before_len);
+        let old = &messages[2];
+        assert_eq!(old.role, "tool");
+        assert!(!old.content.is_empty(), "summarized tool result must not be empty");
+        assert!(old.content.len() < big.len(), "old tool result should have been shrunk");
+        // Fresh result still intact.
+        assert_eq!(messages.last().unwrap().content, fresh);
+    }
+
+    #[test]
+    fn test_no_empty_content_under_extreme_overage() {
+        // With a target smaller than the system+tail floor, the fallback
+        // truncation must run down to the placeholder floor — never to empty —
+        // on the oversized non-tail messages.
+        let big = "x".repeat(20_000);
+        let mut messages = vec![
+            Message {
+                role: "system".into(),
+                content: "sys".into(),
+                timestamp: String::new(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            user_msg("q"),
+            assistant_tool_call("c1", "{}"),
+            tool_result("c1", &big),
+            assistant_tool_call("c2", "{}"),
+            tool_result("c2", "fresh"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        trimming.trim_messages(&mut messages, 100, &make_config());
+
+        // No tool message may end up empty (that is what the agent/server
+        // rejects). Assistant tool-call messages legitimately carry empty
+        // content by design, so they are excluded from this check.
+        for m in &messages {
+            if m.role == "tool" {
+                assert!(
+                    !m.content.is_empty(),
+                    "tool message ended up with empty content"
+                );
+            }
+        }
+        // The oversized old tool result must have been shrunk (it cannot fit).
+        assert!(messages[3].content.len() < big.len());
+        // Fresh result untouched.
+        assert_eq!(messages.last().unwrap().content, "fresh");
     }
 }

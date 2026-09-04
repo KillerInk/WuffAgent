@@ -55,6 +55,8 @@ pub struct ChatPipeline {
     event_tx: mpsc::Sender<AppEvent>,
     /// Reasoning effort level.
     reasoning_effort: ReasoningEffort,
+    /// Session ID for routing events.
+    session_id: String,
 }
 
 // Safe: only AtomicPtr+CancellationToken is used, no actual concurrency.
@@ -66,6 +68,7 @@ impl ChatPipeline {
         agent_engine: Arc<AgentEngine>,
         event_tx: mpsc::Sender<AppEvent>,
         reasoning_effort: ReasoningEffort,
+        session_id: String,
     ) -> Self {
         Self {
             agent_engine,
@@ -73,6 +76,7 @@ impl ChatPipeline {
             task_handle: Mutex::new(None),
             event_tx,
             reasoning_effort,
+            session_id,
         }
     }
 
@@ -97,6 +101,7 @@ impl ChatPipeline {
         let cancel_token = unsafe { &*new_ptr };
         let event_tx = self.event_tx.clone();
         let reasoning_effort = self.reasoning_effort;
+        let session_id = self.session_id.clone();
         let prompt = prompt.to_string();
         let system_prompt = system_prompt.to_string();
         let tool_policy = tool_policy.clone();
@@ -107,7 +112,8 @@ impl ChatPipeline {
             let engine = Arc::new(
                 inner_engine
                     .with_event_tx(Arc::new(Mutex::new(event_tx.clone())))
-                    .with_reasoning_effort(reasoning_effort),
+                    .with_reasoning_effort(reasoning_effort)
+                    .with_session_id(session_id.clone()),
             );
 
             tracing::info!("[CHAT PIPELINE] Starting chat with prompt: {}", prompt);
@@ -124,7 +130,7 @@ impl ChatPipeline {
             // StreamComplete makes the UI append the response a second time.
             if let Err(e) = result {
                 tracing::error!("[CHAT PIPELINE] Failed: {}", e);
-                let _ = event_tx.send(AppEvent::StreamError { error: e });
+                let _ = event_tx.send(AppEvent::StreamError { error: e.to_string(), session_id });
             }
         });
 

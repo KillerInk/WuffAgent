@@ -1,10 +1,11 @@
-﻿use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
 use wuffagent_core::{
     agents::{AgentEngine, AgentRegistry},
     client::ChatClient,
     config::Config,
     server::ServerManager,
+    sessions::{SessionRuntime, sessions_dir},
     tools::{builtin, registry::ToolRegistry, ToolManager, TracingToolLogger},
 };
 
@@ -55,7 +56,6 @@ fn emoji_fonts() -> egui::FontDefinitions {
 fn bootstrap() -> (
     Config,
     ServerManager,
-    ChatClient,
     Arc<ToolManager>,
     Arc<AgentEngine>,
 ) {
@@ -78,7 +78,7 @@ fn bootstrap() -> (
         }
     };
 
-    let sessions_dir = wuffagent_core::sessions::sessions_dir(&config_path);
+    let sessions_dir = sessions_dir(&config_path);
     {
         config.sessions_dir = sessions_dir.clone();
         if config.session_id.is_none() {
@@ -93,21 +93,6 @@ fn bootstrap() -> (
             config.session_id = Some(session.id.clone());
         }
     }
-
-    let is_remote = config.is_remote();
-
-    let _server = if is_remote {
-        ServerManager::noop()
-    } else {
-        ServerManager::new(
-            &config.server_path,
-            &config.model_path,
-            config.port,
-            config.n_gpu_layers,
-            config.n_ctx,
-            config.threads,
-        )
-    };
 
     let logger = Arc::new(TracingToolLogger);
     let discovery_paths: Vec<std::path::PathBuf> = vec![
@@ -135,10 +120,14 @@ fn bootstrap() -> (
     }
     let _ = client.load_session();
 
+    // Non-streaming LlmClient for agents: configure auth + request options
+    // BEFORE wrapping in the adapter (the adapter only holds the client handle).
     let base_url_clone = base_url.clone();
-    let llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(
-        ChatClient::new(&base_url_clone),
-    ));
+    let mut non_streaming = ChatClient::new(&base_url_clone);
+    non_streaming.set_api_key(api_key.as_deref());
+    non_streaming.set_reasoning_effort(config.reasoning_effort);
+    non_streaming.set_n_ctx(config.n_ctx);
+    let llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(non_streaming));
     let client_for_engine = Arc::new(client.clone());
 
     let config_path_clone = config_path.clone();
@@ -184,7 +173,7 @@ fn bootstrap() -> (
         client_for_engine.clone(),
     );
 
-    // Register builtins â€” agent_call will use the populated registry
+    // Register builtins — agent_call will use the populated registry
     builtin::register_builtins(&registry, &invocation_registry).expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
         eprintln!("Warning: failed to discover plugins: {}", e);
@@ -224,7 +213,7 @@ fn bootstrap() -> (
     // Load the most recent agent session for the selected agent so the engine
     // starts with conversation context from a previous session.
     if let Some(agent_name) = agent_registry.agent_names().first() {
-        let agent_dir = wuffagent_core::sessions::sessions_dir(&config_path)
+        let agent_dir = sessions_dir
             .join("agents")
             .join(agent_name);
         if agent_dir.exists() {
@@ -244,12 +233,70 @@ fn bootstrap() -> (
 
     let agent_engine = Arc::new(agent_engine);
 
-    (config, server, client, tool_manager, agent_engine)
+    (config, server, tool_manager, agent_engine)
 }
 
 #[tokio::main]
 async fn main() -> eframe::Result {
-    let (config, server, client, tool_manager, agent_engine) = bootstrap();
+    let (config, server, tool_manager, agent_engine) = bootstrap();
+    
+    // Initialize session store with the configured session
+    // Shared event channel: the UI polls the receiver each frame; the pipeline
+    // (and client tool events) write into the sender. Created before the
+    // initial runtime so it can be shared with the first session.
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<wuffagent_core::types::AppEvent>();
+
+    let mut session_store = std::collections::HashMap::new();
+    let mut selected_session_id = None;
+
+    if let Some(session_id) = &config.session_id {
+        if let Some(session) = wuffagent_core::sessions::load_session(&config.sessions_dir, session_id) {
+            // Create a fresh client for this session
+            let base_url = config.base_url();
+            let mut session_client = ChatClient::new(&base_url);
+            session_client.set_api_key(config.remote_api_key.as_deref());
+            session_client.set_session(Some(session_id.clone()), config.sessions_dir.clone());
+            session_client.set_reasoning_effort(config.reasoning_effort);
+            session_client.set_max_messages(config.max_messages);
+            session_client.set_n_ctx(config.n_ctx);
+            if config.encryption_enabled {
+                if let Some(key) = config.encryption_key() {
+                    session_client.set_encryption_key(Some(key));
+                }
+            }
+            let _ = session_client.load_session();
+
+            // Route tool-call events into the shared channel.
+            session_client.set_tool_event_sender(event_tx.clone());
+
+            // Per-session engine: bound to this session's client so the agent
+            // chat loop reads/writes an isolated conversation store (the shared
+            // bootstrap engine's client would otherwise be mutated by every
+            // session in parallel — a cross-session data race).
+            let session_engine = (*agent_engine).clone().with_client(session_client.clone());
+            // Create pipeline (carries the session_id for event routing) and runtime.
+            let pipeline = wuffagent_core::client::ChatPipeline::new(
+                Arc::new(session_engine.clone()),
+                event_tx.clone(),
+                config.reasoning_effort,
+                session_id.clone(),
+            );
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+
+            let runtime = SessionRuntime::new(
+                session_id.clone(),
+                session.name.clone(),
+                session_client,
+                pipeline,
+                session_engine,
+                cancel_token,
+            );
+
+            session_store.insert(session_id.clone(), runtime);
+            selected_session_id = Some(session_id.clone());
+        }
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),
         ..Default::default()
@@ -257,10 +304,11 @@ async fn main() -> eframe::Result {
     eframe::run_native(
         "WuffAgent (egui)",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             cc.egui_ctx.set_fonts(emoji_fonts());
             Ok(Box::new(ui::state::ChatApp::new(
-                config, client, server, tool_manager, agent_engine,
+                config, server, tool_manager, agent_engine, session_store, selected_session_id,
+                event_tx, event_rx,
             )))
         }),
     )

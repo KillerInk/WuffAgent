@@ -22,6 +22,10 @@ pub struct AgentRegistry {
     agents: HashMap<String, AgentConfig>,
     routing_prompt: String,
     prompt_dirty: bool,
+    /// Maximum number of sub-agents that may run in parallel (across all
+    /// sessions). Enforced by a semaphore acquired in
+    /// `RegistryAgentInvocation::invoke`.
+    max_parallel_agents: usize,
 }
 
 impl AgentRegistry {
@@ -31,6 +35,7 @@ impl AgentRegistry {
             agents: HashMap::new(),
             routing_prompt: String::new(),
             prompt_dirty: true,
+            max_parallel_agents: 3,
         }
     }
 
@@ -80,6 +85,7 @@ impl AgentRegistry {
             agents,
             routing_prompt: String::new(),
             prompt_dirty: true,
+            max_parallel_agents: 3,
         };
         registry.build_routing_prompt_internal();
         Ok(registry)
@@ -317,6 +323,10 @@ impl AgentRegistry {
         client: Arc<ChatClient>,
     ) -> Arc<AgentInvocationRegistry> {
         let registry = Arc::new(AgentInvocationRegistry::new());
+        // One semaphore shared by every invocation caps how many sub-agents run
+        // at once (across all sessions).
+        let max_parallel = self.max_parallel_agents.max(1);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_parallel));
         for (name, config) in &self.agents {
             if !config.enabled {
                 continue;
@@ -327,13 +337,15 @@ impl AgentRegistry {
             let tool_manager_clone = tool_manager.clone();
             let client_clone = client.clone();
             let inv_reg = registry.clone();
+            let semaphore_clone = semaphore.clone();
             let agent = Arc::new(RegistryAgentInvocation {
                 name: name_str.clone(),
                 config: config_clone,
                 llm_client: llm_client_clone,
                 tool_manager: tool_manager_clone,
-                client: client_clone,
+                base_client: client_clone,
                 invocation_registry: inv_reg,
+                semaphore: semaphore_clone,
             });
             registry.register(&name_str, agent);
         }
@@ -349,8 +361,11 @@ struct RegistryAgentInvocation {
     config: AgentConfig,
     llm_client: Arc<dyn LlmClient>,
     tool_manager: Arc<Mutex<ToolManager>>,
-    client: Arc<ChatClient>,
+    /// Base client used to derive sub-agent clients (clone config, not conversation).
+    base_client: Arc<ChatClient>,
     invocation_registry: Arc<AgentInvocationRegistry>,
+    /// Shared semaphore capping parallel sub-agents (Phase 3.1).
+    semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 #[async_trait::async_trait]
@@ -359,12 +374,26 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
         &self,
         request: &str,
         _context: &serde_json::Value,
+        cancel_token: &CancellationToken,
     ) -> super::traits::AgentResultType<super::types::AgentResult> {
         let config = self.config.clone();
         let llm_client = self.llm_client.clone();
         let tool_manager = self.tool_manager.clone();
-        let client = self.client.clone();
         let invocation_registry = self.invocation_registry.clone();
+
+        // Phase 3.1: cap how many sub-agents run in parallel. The permit is held
+        // for the duration of this invocation and released when the guard drops
+        // (at the end of `invoke` or on cancellation).
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|e| AgentError::Internal(format!("Semaphore closed: {}", e)))?;
+
+        // Create an isolated client for the sub-agent with its own conversation.
+        // Clone the base client config but start with an empty conversation.
+        let sub_client = (*self.base_client).clone();
+        sub_client.conversation().lock().unwrap().clear();
 
         // Run the sub-agent's LLM loop synchronously within the current runtime
         // (or create a temporary one if outside a runtime).
@@ -385,12 +414,12 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
                 tool_manager,
                 invocation_registry,
                 None, // no event tx — sub-agent output is captured in the tool result
-                client,
+                Arc::new(sub_client),
                 None, // sub-agents don't have memory access
                 None,
                 PathBuf::new(),
             );
-            agent.execute(&request, &CancellationToken::new()).await
+            agent.execute(&request, cancel_token).await
         } else {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -403,12 +432,12 @@ impl super::traits::AgentInvocation for RegistryAgentInvocation {
                     tool_manager,
                     invocation_registry,
                     None,
-                    client,
+                    Arc::new(sub_client),
                     None, // sub-agents don't have memory access
                     None,
                     PathBuf::new(),
                 );
-                agent.execute(&request, &CancellationToken::new()).await
+                agent.execute(&request, cancel_token).await
             })
         };
 

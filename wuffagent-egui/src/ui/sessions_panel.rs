@@ -7,7 +7,6 @@ use crate::sessions;
 use super::theme::Theme;
 use super::sessions_actions::PanelAction;
 use super::sessions_utils::{relative_time, truncate};
-use super::sessions_actions::apply_actions;
 
 #[derive(Clone, Debug)]
 pub struct SessionsPanel {
@@ -111,6 +110,15 @@ impl SessionsPanel {
         }
     }
 
+    /// Check if a session is currently generating (has active task).
+    pub fn is_session_generating(
+        &self,
+        session_store: &std::collections::HashMap<String, crate::sessions::SessionRuntime>,
+        session_id: &str,
+    ) -> bool {
+        session_store.get(session_id).map(|r| r.is_generating()).unwrap_or(false)
+    }
+
     /// Render the session button with metadata: name, message count,
     /// last message preview, and relative timestamp.
     fn draw_session_item(
@@ -118,6 +126,7 @@ impl SessionsPanel {
         session: &crate::sessions::Session,
         is_selected: bool,
         is_renaming: bool,
+        is_generating: bool,
     ) -> egui::Response {
         let count = session.messages.len();
         let count_text = if count == 1 {
@@ -137,13 +146,23 @@ impl SessionsPanel {
 
         let timestamp_text = relative_time(&session.updated_at);
 
-        let label = format!(
-            "{}\n{}  •  {}\n{}",
-            session.name,
-            count_text,
-            preview_truncated,
-            timestamp_text
-        );
+        let label = if is_generating {
+            format!(
+                "▶ {}\n{}  •  {}\n{}",
+                session.name,
+                count_text,
+                preview_truncated,
+                timestamp_text
+            )
+        } else {
+            format!(
+                "{}\n{}  •  {}\n{}",
+                session.name,
+                count_text,
+                preview_truncated,
+                timestamp_text
+            )
+        };
 
         let display_label = if is_renaming {
             format!("{}\n🔄 rename", label)
@@ -163,10 +182,20 @@ impl SessionsPanel {
         response
     }
 
-    pub fn draw(&mut self, ctx: &egui::Context) -> (Option<String>, bool) {
+    /// Draw the sessions sidebar.
+    ///
+    /// `theme` and `session_store` are passed as separate immutable references
+    /// (disjoint from `self`, which is the panel) so the caller can borrow the
+    /// panel mutably while still reading app state. Returns the id of any
+    /// session row that was clicked, plus any pending action to apply.
+    pub fn draw(
+        &mut self,
+        theme: &str,
+        session_store: &std::collections::HashMap<String, crate::sessions::SessionRuntime>,
+        ctx: &egui::Context,
+    ) -> (Option<String>, Option<PanelAction>) {
         let mut selected_id: Option<String> = None;
         let mut action: Option<PanelAction> = None;
-        let mut clear_client_session = false;
         // Show the delete confirmation dialog if pending
         if let Some((id, name, last_message)) = self.pending_delete.clone() {
             egui::Window::new("Delete Session")
@@ -200,7 +229,7 @@ impl SessionsPanel {
             .min_width(150.0)
             .max_width(320.0)
             .show(ctx, |ui| {
-                let theme = Theme::from_name(&self.config.theme);
+                let theme = Theme::from_name(theme);
                 ui.visuals_mut().panel_fill = theme.panel_bg;
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);
                 // Session heading with accent color
@@ -294,6 +323,8 @@ impl SessionsPanel {
                 // Collect actions to avoid borrowing self inside the loop
                 for session in &self.sessions {
                     let is_renaming = Some(&session.id) == self.renaming.as_ref();
+                    let is_generating = self.is_session_generating(session_store, &session.id);
+                    
                     if is_renaming {
                         ui.horizontal(|ui| {
                             ui.text_edit_singleline(&mut self.rename_input).request_focus();
@@ -314,7 +345,7 @@ impl SessionsPanel {
                     }
 
                     let is_selected = Some(&session.id) == self.selected_id.as_ref();
-                    let response = Self::draw_session_item(ui, session, is_selected, is_renaming);
+                    let response = Self::draw_session_item(ui, session, is_selected, is_renaming, is_generating);
 
                     if response.clicked() {
                         selected_id = Some(session.id.clone());
@@ -388,15 +419,9 @@ impl SessionsPanel {
                 }
             });
 
-        // Apply actions after the UI closure to avoid borrow conflicts
-        if let Some(act) = action {
-            let result = apply_actions(self, act);
-            // Return the selected_id for the caller to handle session switching
-            // Also propagate clear_client_session so the caller can clear the client state
-            clear_client_session = result.clear_client_session;
-            return (result.selected_id, clear_client_session);
-        }
-
-        (selected_id, clear_client_session)
+        // Return the clicked session id (if any) and the pending action for the
+        // caller (layout.rs) to apply — applying here would conflict with the
+        // mutable borrow of `self`.
+        (selected_id, action)
     }
 }

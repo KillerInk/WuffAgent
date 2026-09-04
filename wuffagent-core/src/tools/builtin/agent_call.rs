@@ -96,8 +96,9 @@ impl Tool for AgentCallTool {
 
         // Check if we're already in a tokio runtime
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let cancel_token = tokio_util::sync::CancellationToken::new();
             let join_handle = handle.spawn(async move {
-                match registry.invoke(&target, &task_clone, &context_clone).await {
+                match registry.invoke(&target, &task_clone, &context_clone, &cancel_token).await {
                     Ok(result) => Ok(ToolOutput::Success(result.output)),
                     Err(e) => Ok(ToolOutput::Error(e.to_string())),
                 }
@@ -113,7 +114,8 @@ impl Tool for AgentCallTool {
             .build()
             .map_err(|e| ToolError::Execution(format!("Failed to create runtime: {}", e)))?;
         rt.block_on(async move {
-            match registry.invoke(&target, &task_clone, &context_clone).await {
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            match registry.invoke(&target, &task_clone, &context_clone, &cancel_token).await {
                 Ok(result) => Ok(ToolOutput::Success(result.output)),
                 Err(e) => Ok(ToolOutput::Error(e.to_string())),
             }

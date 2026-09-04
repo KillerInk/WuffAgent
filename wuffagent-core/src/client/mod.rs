@@ -1,12 +1,9 @@
 use std::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing;
 
-pub mod engine;
 pub mod http;
 pub mod sse;
 pub mod session;
-pub mod reasoning_state;
 pub mod pipeline;
 
 pub use pipeline::ChatPipeline;
@@ -70,7 +67,11 @@ pub struct ChatClient {
     session_dir: PathBuf,
     max_messages: usize,
     /// Context window size in tokens (0 = use server default).
-    n_ctx: u32,
+    ///
+    /// Shared interior-mutable so the effective n_ctx can be updated in place
+    /// (e.g. from the remote server's /props) without cloning the client:
+    /// every holder of a clone reads/writes the same value.
+    n_ctx: Arc<std::sync::atomic::AtomicU32>,
     /// Queue of pending save operations when a save fails.
     save_queue: Arc<Mutex<VecDeque<()>>>,
     /// Whether a save failure notification should be shown in the UI.
@@ -167,7 +168,7 @@ impl ChatClient {
             session_id: None,
             session_dir: PathBuf::new(),
             max_messages: 100,
-            n_ctx: 4096,
+            n_ctx: Arc::new(std::sync::atomic::AtomicU32::new(4096)),
             save_queue: Arc::new(Mutex::new(VecDeque::new())),
             save_failed: Arc::new(Mutex::new(false)),
             encryption_key: None,
@@ -183,20 +184,15 @@ impl ChatClient {
         self.max_messages = max_messages;
     }
 
-    pub fn set_n_ctx(&mut self, n_ctx: u32) {
-        self.n_ctx = n_ctx;
+    /// Update the effective n_ctx in place. Takes `&self` (interior mutability)
+    /// so callers can sync the server's reported context size on a shared client
+    /// without cloning it — every clone sees the new value immediately.
+    pub fn set_n_ctx(&self, n_ctx: u32) {
+        self.n_ctx.store(n_ctx, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn n_ctx(&self) -> u32 {
-        self.n_ctx
-    }
-
-    /// Clone this client and update its n_ctx value.
-    /// Used to sync the remote server's reported context size before starting a chat loop.
-    pub fn with_n_ctx(&self, n_ctx: u32) -> Self {
-        let mut cloned = self.clone();
-        cloned.n_ctx = n_ctx;
-        cloned
+        self.n_ctx.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn set_url(&mut self, url: &str) {
@@ -404,7 +400,7 @@ impl ChatClient {
             false,
             tools,
             self.reasoning_effort,
-            self.n_ctx,
+            self.n_ctx(),
         );
         let (content, usage) = send_message(
             &self.http_client,
@@ -437,8 +433,9 @@ impl ChatClient {
         // Only trim once the context limit is reached (same policy as the
         // streaming chat loop): while the exact char count stays below 90% of
         // n_ctx (in char units), the full history is kept.
-        if self.n_ctx > 0 {
-            let target_chars = self.n_ctx as usize * session::CHARS_PER_TOKEN * 9 / 10;
+        let n_ctx = self.n_ctx();
+        if n_ctx > 0 {
+            let target_chars = n_ctx as usize * session::CHARS_PER_TOKEN * 9 / 10;
             if estimate_conversation_tokens(&self.conversation) > target_chars {
                 self.trim_conversation(self.max_messages);
                 self.trim_to_token_budget(target_chars);
@@ -448,240 +445,6 @@ impl ChatClient {
         }
 
         Ok((content, usage))
-    }
-
-    pub async fn stream_message_with_usage(
-        &self,
-        prompt: &str,
-        callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
-    ) -> Result<Option<Usage>, Error> {
-        self.stream_message_with_tools_and_usage(prompt, None, callback)
-            .await
-    }
-
-    pub async fn stream_message_with_tools_and_usage(
-        &self,
-        prompt: &str,
-        tools: Option<&[crate::tools::ToolDefinition]>,
-        mut callback: impl FnMut(String) -> Result<(), Error> + Send + Sync + 'static,
-    ) -> Result<Option<Usage>, Error> {
-        let request = build_request(
-            &self.system_prompt,
-            &self.conversation,
-            prompt,
-            true,
-            tools,
-            self.reasoning_effort,
-            self.n_ctx,
-        );
-        let builder = build_stream_request(
-            &self.stream_http_client,
-            &self.base_url,
-            self.api_key.as_deref(),
-            &request,
-        );
-
-        let resp = builder.send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Http(format!(
-                "Server returned {}: {}",
-                status, text
-            )));
-        }
-
-        // Add user message to history
-        add_streaming_messages(&self.conversation, prompt);
-
-        // Box the callback to erase the concrete type and adapt signature
-        let mut boxed_cb = Box::new(move |chunk: String, _is_thinking: bool| -> Result<(), Error> {
-            (callback)(chunk)
-        });
-        sse::stream_message(resp, &self.conversation, &mut boxed_cb, None).await
-    }
-
-    /// Arc-based streaming method that clones necessary data before calling
-    /// the async streaming, avoiding holding a MutexGuard across .await.
-    pub async fn stream_message_with_tools_and_usage_arc(
-        client: &Arc<Mutex<Self>>,
-        prompt: &str,
-        tools: Option<&[crate::tools::ToolDefinition]>,
-        callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
-    ) -> Result<Option<Usage>, Error> {
-        // Clone the data we need before calling the async method
-        let http_client = client.lock().unwrap().stream_http_client.clone();
-        let base_url = client.lock().unwrap().base_url.clone();
-        let api_key = client.lock().unwrap().api_key.clone();
-        let conversation = client.lock().unwrap().conversation.clone();
-        let system_prompt = client.lock().unwrap().system_prompt.clone();
-
-        // Build the request with the cloned data
-        let mut messages = Vec::new();
-        if !system_prompt.is_empty() {
-            messages.push(Message {
-                role: "system".to_string(),
-                content: system_prompt,
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
-        {
-            let c = client.lock().unwrap();
-            let conv = c.conversation.lock().unwrap();
-            for msg in &*conv {
-                if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
-                    continue;
-                }
-                messages.push(msg.clone());
-            }
-        }
-        messages.push(Message {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-            timestamp: String::new(),
-            tool_calls: None,
-            tool_call_id: None,
-        reasoning_content: None,
-        });
-
-        let request = ChatRequest {
-            model: "local".to_string(),
-            messages,
-            stream: true,
-            tools: tools.map(|t| t.to_vec()),
-            reasoning_effort: client.lock().unwrap().reasoning_effort.as_wire_value().map(|s| s.to_string()),
-            stream_options: Some(http::StreamOptions { include_usage: true }),
-        };
-        let body = serde_json::to_string(&request)?;
-
-        let mut builder = http_client
-            .post(format!("{}/v1/chat/completions", base_url))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .body(body);
-        if let Some(ref key) = api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let resp = builder.send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            tracing::debug!("stream_message (arc) response status {}: {}", status, text);
-            return Err(Error::Http(format!(
-                "Server returned {}: {}",
-                status, text
-            )));
-        }
-
-        tracing::debug!("stream_message (arc) streaming started");
-
-        // Add user message to history
-        add_streaming_messages(&conversation, prompt);
-
-        // Box the callback to erase the concrete type
-        let mut boxed_cb = Box::new(callback);
-        sse::stream_message(resp, &conversation, &mut boxed_cb, None).await
-    }
-
-    /// Arc-based streaming that also handles `<think>`-wrapped reasoning content
-    /// (DeepSeek-R1, Qwen3.x style) by tracking tag boundaries and emitting
-    /// separate thinking/non-thinking chunks.
-    pub async fn stream_message_with_reasoning_state_arc(
-        client: &Arc<Mutex<Self>>,
-        prompt: &str,
-        tools: Option<&[crate::tools::ToolDefinition]>,
-        mut callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
-    ) -> Result<Option<Usage>, Error> {
-        // Clone the data we need before calling the async method.
-        // Acquire the lock once to minimize contention.
-        let (http_client, base_url, api_key, conversation, system_prompt) = {
-            let c = client.lock().map_err(|e| Error::Stream(format!("mutex poisoned: {}", e)))?;
-            (
-                c.stream_http_client.clone(),
-                c.base_url.clone(),
-                c.api_key.clone(),
-                c.conversation.clone(),
-                c.system_prompt.clone(),
-            )
-        };
-
-        // Build the request with the cloned data
-        let mut messages = Vec::new();
-        if !system_prompt.is_empty() {
-            messages.push(Message {
-                role: "system".to_string(),
-                content: system_prompt,
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
-        {
-            let c = client.lock().unwrap();
-            let conv = c.conversation.lock().unwrap();
-            for msg in &*conv {
-                if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
-                    continue;
-                }
-                messages.push(msg.clone());
-            }
-        }
-        messages.push(Message {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-            timestamp: String::new(),
-            tool_calls: None,
-            tool_call_id: None,
-        reasoning_content: None,
-        });
-
-        let request = ChatRequest {
-            model: "local".to_string(),
-            messages,
-            stream: true,
-            tools: tools.map(|t| t.to_vec()),
-            reasoning_effort: {
-                let c = client.lock().map_err(|e| Error::Stream(format!("mutex poisoned: {}", e)))?;
-                c.reasoning_effort.as_wire_value().map(|s| s.to_string())
-            },
-            stream_options: Some(http::StreamOptions { include_usage: true }),
-        };
-        let body = serde_json::to_string(&request)?;
-
-        let mut builder = http_client
-            .post(format!("{}/v1/chat/completions", base_url))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .body(body);
-        if let Some(ref key) = api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let resp = builder.send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            tracing::debug!("stream_message_with_reasoning_state_arc response status {}: {}", status, text);
-            return Err(Error::Http(format!(
-                "Server returned {}: {}",
-                status, text
-            )));
-        }
-
-        tracing::debug!("stream_message_with_reasoning_state_arc streaming started");
-
-        // Add user message to history
-        add_streaming_messages(&conversation, prompt);
-
-        sse::stream_message(resp, &conversation, &mut callback, None).await
     }
 
     /// Stream a request built from an EXPLICIT message list, without touching
@@ -795,202 +558,6 @@ impl ChatClient {
         warnings
     }
 
-    /// Check if the last assistant message has pending tool calls.
-    pub fn has_pending_tool_calls(&self) -> bool {
-        let conv = self.conversation.lock().unwrap();
-        match conv.last() {
-            Some(msg) if msg.role == "assistant" && msg.tool_calls.is_some() => {
-                !msg.tool_calls.as_ref().unwrap().is_empty()
-            }
-            _ => false,
-        }
-    }
-
-    /// Get the last assistant message from the conversation.
-    pub fn get_last_assistant_message(&self) -> Option<Message> {
-        let conv = self.conversation.lock().unwrap();
-        conv.iter().rev().find(|m| m.role == "assistant").cloned()
-    }
-
-    /// Execute pending tool calls in the conversation and add results.
-    /// Returns true if there were tool calls to execute, false otherwise.
-    pub async fn execute_pending_tool_calls(
-        &self,
-        tool_manager: &crate::tools::ToolManager,
-    ) -> Result<bool, Error> {
-        Self::execute_pending_tool_calls_arc(
-            &std::sync::Arc::new(std::sync::Mutex::new(self.clone())),
-            tool_manager,
-        )
-        .await
-    }
-
-    /// Internal version that takes an Arc<Mutex<ChatClient>> so the caller
-    /// can drop the lock before the async operation begins.
-    pub async fn execute_pending_tool_calls_arc(
-        client: &std::sync::Arc<std::sync::Mutex<Self>>,
-        tool_manager: &crate::tools::ToolManager,
-    ) -> Result<bool, Error> {
-        // Get tool calls from the last assistant message
-        let tool_calls = {
-            let client = client.lock().unwrap();
-            let conv = client.conversation.lock().unwrap();
-            match conv.last() {
-                Some(msg) if msg.role == "assistant" && msg.tool_calls.is_some() => {
-                    msg.tool_calls.clone()
-                }
-                _ => None,
-            }
-        };
-
-        let tool_calls = match tool_calls {
-            Some(tc) if !tc.is_empty() => tc,
-            _ => return Ok(false),
-        };
-
-        // Execute each tool call and add result messages
-        for tc in tool_calls {
-            tracing::debug!(
-                "execute_pending_tool_calls: tool={} call_id={} args={}",
-                tc.function.name,
-                tc.id,
-                tc.function.arguments
-            );
-
-            // Send start event — acquire once instead of double-locking
-            let event_tx = match client.lock() {
-                Ok(c) => c.tool_event_tx.lock().ok().and_then(|t| t.as_ref().cloned()),
-                Err(_) => None,
-            };
-            if let Some(tx) = event_tx {
-                let _ = tx.send(crate::types::AppEvent::ToolCallStart {
-                    tool_name: tc.function.name.clone(),
-                    call_id: tc.id.clone(),
-                });
-            }
-
-            // Parse arguments
-            tracing::debug!(
-                "execute_pending_tool_calls: tool={} call_id={} raw_args={}",
-                tc.function.name,
-                tc.id,
-                tc.function.arguments
-            );
-            tracing::debug!(
-                "execute_pending_tool_calls: parsing args for tool={} call_id={} args={:?}",
-                tc.function.name,
-                tc.id,
-                &tc.function.arguments[..tc.function.arguments.len().min(200)]
-            );
-            // Try parsing as direct args first, then as wrapped in values
-            let params = if let Ok(p) = serde_json::from_str::<crate::tools::ToolParams>(&tc.function.arguments) {
-                tracing::debug!(
-                    "execute_pending_tool_calls: parsed args as ToolParams for tool={} call_id={}",
-                    tc.function.name,
-                    tc.id
-                );
-                p
-            } else if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
-                // Model sends direct args like {"expression":"2 + 2"}, wrap them
-                tracing::debug!(
-                    "execute_pending_tool_calls: parsed args as direct JSON values for tool={} call_id={}",
-                    tc.function.name,
-                    tc.id
-                );
-                let mut values = std::collections::HashMap::new();
-                if let Some(obj) = args.as_object() {
-                    for (k, v) in obj {
-                        values.insert(k.clone(), v.clone());
-                    }
-                }
-                crate::tools::ToolParams { values }
-            } else {
-                tracing::warn!(
-                    "execute_pending_tool_calls: failed to parse args for tool={} call_id={} args={:?}",
-                    tc.function.name,
-                    tc.id,
-                    &tc.function.arguments[..tc.function.arguments.len().min(100)]
-                );
-                if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
-                    let _ = tx.send(crate::types::AppEvent::ToolCallError {
-                        tool_name: tc.function.name.clone(),
-                        call_id: tc.id.clone(),
-                        error: "Failed to parse arguments".to_string(),
-                    });
-                }
-                continue;
-            };
-
-            // Execute the tool
-            let result = tool_manager.execute(&tc.function.name, params).await;
-            tracing::debug!(
-                "execute_pending_tool_calls: tool={} call_id={} result={:?}",
-                tc.function.name,
-                tc.id,
-                &result
-            );
-            
-            // Send complete or error event
-            match &result {
-                Ok(output) => {
-                    if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
-                        let result_str = match output {
-                            crate::tools::types::ToolOutput::Success(v) => v.to_string(),
-                            crate::tools::types::ToolOutput::Error(e) => e.clone(),
-                        };
-                        let _ = tx.send(crate::types::AppEvent::ToolCallComplete {
-                            tool_name: tc.function.name.clone(),
-                            call_id: tc.id.clone(),
-                            result: result_str,
-                        });
-                    }
-                }
-                Err(e) => {
-                    if let Some(tx) = client.lock().unwrap().tool_event_tx.lock().unwrap().as_ref() {
-                        let _ = tx.send(crate::types::AppEvent::ToolCallError {
-                            tool_name: tc.function.name.clone(),
-                            call_id: tc.id.clone(),
-                            error: e.to_string(),
-                        });
-                    }
-                }
-            }
-
-            // Add result message to conversation in formatted format for UI display
-            {
-                let result_str = result.as_ref().map_or_else(
-                    |e| e.to_string(),
-                    |r| match r {
-                        crate::tools::types::ToolOutput::Success(v) => v.to_string(),
-                        crate::tools::types::ToolOutput::Error(e) => e.clone(),
-                    },
-                );
-                let header = crate::types::tool_call_header(&tc.function.name, &result_str);
-                let content = format!("{}||{}||{}", header, tc.id, result_str);
-
-                let client = client.lock().unwrap();
-                let mut conv = client.conversation.lock().unwrap();
-                if let Some(last) = conv.last_mut() {
-                    if last.role == "assistant" {
-                        // Remove the tool call from the last assistant message
-                        if let Some(tcs) = &mut last.tool_calls {
-                            tcs.retain(|t| t.id != tc.id);
-                        }
-                    }
-                }
-                conv.push(Message {
-                    role: "tool".to_string(),
-                    content,
-                    timestamp: crate::types::format_timestamp(),
-                    tool_calls: None,
-                    tool_call_id: Some(tc.id.clone()),
-                reasoning_content: None,
-                });
-            }
-        }
-
-        Ok(true)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]

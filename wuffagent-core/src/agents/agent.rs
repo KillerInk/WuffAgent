@@ -193,6 +193,11 @@ impl Agent {
         }
     }
 
+    /// The session ID to stamp on events (falls back to empty when unset).
+    fn session_id(&self) -> String {
+        self.agent_session_id.clone().unwrap_or_default()
+    }
+
     /// Get the messages from the last execution for memory extraction.
     pub fn messages(&self) -> &[Message] {
         &self.messages
@@ -231,6 +236,7 @@ impl Agent {
         self.send_event(crate::types::AppEvent::AgentChainStarted {
             agent_name: self.config.name.clone(),
             depth: 0,
+            session_id: self.session_id(),
         });
 
         let result = self.run_llm_loop(&mut messages, cancel_token).await;
@@ -250,6 +256,7 @@ impl Agent {
                     agent_name: self.config.name.clone(),
                     result: response.clone(),
                     depth: 0,
+                    session_id: self.session_id(),
                 });
             }
             Err(e) => {
@@ -257,60 +264,12 @@ impl Agent {
                     agent_name: self.config.name.clone(),
                     error: e.clone(),
                     depth: 0,
+                    session_id: self.session_id(),
                 });
             }
         }
 
         result
-    }
-
-    /// Pause the agent and save a message checkpoint to the agent session.
-    pub fn pause(&mut self) -> Option<Vec<Message>> {
-        if self.agent_session_id.is_none() {
-            return None;
-        }
-        let checkpoint = self.messages.clone();
-        // Save the checkpoint to the agent session
-        if let Some(ref sid) = self.agent_session_id {
-            let mut c = (*self.client).clone();
-            c.set_session(Some(sid.clone()), self.agent_session_dir.clone());
-            // Save the checkpoint by writing it as part of the session
-            if let Err(e) = c.save_session() {
-                tracing::warn!("Failed to save agent session on pause: {}", e);
-            }
-        }
-        self.send_event(crate::types::AppEvent::SessionPaused {
-            session_id: self.agent_session_id.clone().unwrap_or_default(),
-            message_count: checkpoint.len(),
-        });
-        Some(checkpoint)
-    }
-
-    /// Resume the agent from a previously saved checkpoint.
-    pub fn resume(&mut self, checkpoint: Vec<Message>) -> Result<(), String> {
-        if self.agent_session_id.is_none() {
-            return Err("No agent session configured".to_string());
-        }
-        self.messages = checkpoint.clone();
-        // Sync checkpoint into client conversation
-        {
-            let conv = self.client.conversation();
-            let mut guard = conv.lock().unwrap();
-            guard.clear();
-            guard.extend(checkpoint.iter().cloned());
-        }
-        // Save the resumed state
-        if self.agent_session_id.is_some() {
-            let c = self.client.clone();
-            if let Err(e) = c.save_session() {
-                tracing::warn!("Failed to save agent session on resume: {}", e);
-            }
-        }
-        self.send_event(crate::types::AppEvent::SessionResumed {
-            session_id: self.agent_session_id.clone().unwrap_or_default(),
-            message_count: checkpoint.len(),
-        });
-        Ok(())
     }
 
     /// Build the system prompt for this agent.
@@ -452,6 +411,7 @@ impl Agent {
             // The callback must be 'static, so it captures cloned Arcs rather
             // than `self`.
             let tx = self.event_tx.clone();
+            let sid = self.session_id();
             let round_thinking = Arc::new(Mutex::new(String::new()));
             let rt = round_thinking.clone();
 
@@ -466,9 +426,9 @@ impl Agent {
                     if let Some(ref tx) = tx {
                         if let Ok(g) = tx.lock() {
                             let _ = g.send(if is_thinking {
-                                crate::types::AppEvent::StreamThinkingChunk { content: chunk }
+                                crate::types::AppEvent::StreamThinkingChunk { content: chunk, session_id: sid.clone() }
                             } else {
-                                crate::types::AppEvent::StreamChunk { content: chunk }
+                                crate::types::AppEvent::StreamChunk { content: chunk, session_id: sid.clone() }
                             });
                         }
                     }
@@ -490,6 +450,7 @@ impl Agent {
             if !round_thinking_str.is_empty() {
                 self.send_event(crate::types::AppEvent::StreamThinkingComplete {
                     content: round_thinking_str,
+                    session_id: self.session_id(),
                 });
             }
 
@@ -523,6 +484,7 @@ impl Agent {
                 self.send_event(crate::types::AppEvent::StreamRoundComplete {
                     content: display_content.clone(),
                     usage: usage.clone(),
+                    session_id: self.session_id(),
                 });
             }
 
@@ -536,6 +498,7 @@ impl Agent {
                         self.send_event(crate::types::AppEvent::ToolCallStart {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
+                            session_id: self.session_id(),
                         });
                         let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
                             Ok(p) => p,
@@ -545,6 +508,7 @@ impl Agent {
                                     tool_name: call.function.name.clone(),
                                     call_id: call.id.clone(),
                                     error: e.clone(),
+                                    session_id: self.session_id(),
                                 });
                                 let bad_args_msg = Message {
                                     role: "tool".to_string(),
@@ -561,8 +525,18 @@ impl Agent {
                         };
                         let manager = self.tool_manager.lock().unwrap().clone();
                         let tool_result = manager.execute(&call.function.name, params).await;
+                        // Tools must always return *something*: an empty result
+                        // string becomes an empty `role: "tool"` message, which
+                        // the model/server rejects.
                         let result_str = match tool_result {
-                            Ok(output) => format!("{}", output),
+                            Ok(output) => {
+                                let s = format!("{}", output);
+                                if s.trim().is_empty() {
+                                    "(no output)".to_string()
+                                } else {
+                                    s
+                                }
+                            }
                             Err(e) => {
                                 tracing::warn!("[AGENT] Tool '{}' failed: {}", call.function.name, e);
                                 format!("Error: {}", e)
@@ -572,6 +546,7 @@ impl Agent {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
                             result: result_str.clone(),
+                            session_id: self.session_id(),
                         });
                         let tool_msg = Message {
                             role: "tool".to_string(),
@@ -609,6 +584,7 @@ impl Agent {
                         self.send_event(crate::types::AppEvent::ToolCallStart {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
+                            session_id: self.session_id(),
                         });
                         let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
                             Ok(p) => p,
@@ -617,6 +593,7 @@ impl Agent {
                                     tool_name: call.function.name.clone(),
                                     call_id: call.id.clone(),
                                     error: e.clone(),
+                                    session_id: self.session_id(),
                                 });
                                 continue;
                             }
@@ -624,13 +601,17 @@ impl Agent {
                         let manager = self.tool_manager.lock().unwrap().clone();
                         let tool_result = manager.execute(&call.function.name, params).await;
                         let result_str = match tool_result {
-                            Ok(output) => format!("{}", output),
+                            Ok(output) => {
+                                let s = format!("{}", output);
+                                if s.trim().is_empty() { "(no output)".to_string() } else { s }
+                            }
                             Err(e) => format!("Error: {}", e),
                         };
                         self.send_event(crate::types::AppEvent::ToolCallComplete {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
                             result: result_str.clone(),
+                            session_id: self.session_id(),
                         });
                         // History entry in API-native shape (id links the result).
                         let fb_assistant = Message {
@@ -675,6 +656,7 @@ impl Agent {
                 self.send_event(crate::types::AppEvent::StreamComplete {
                     content: display_content.clone(),
                     usage: usage.clone(),
+                    session_id: self.session_id(),
                 });
                 return Ok(display_content);
             }
@@ -691,6 +673,7 @@ impl Agent {
                     self.send_event(crate::types::AppEvent::StreamComplete {
                         content: display_content.clone(),
                         usage: usage.clone(),
+                        session_id: self.session_id(),
                     });
                     return Ok(display_content);
                 }
@@ -720,6 +703,7 @@ impl Agent {
                     self.send_event(crate::types::AppEvent::StreamComplete {
                         content: display_content.clone(),
                         usage: usage.clone(),
+                        session_id: self.session_id(),
                     });
                     return Ok(display_content);
                 }
@@ -1225,7 +1209,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl AgentInvocation for MockInvokable {
-        async fn invoke(&self, _request: &str, _context: &serde_json::Value) -> Result<AgentResult, AgentError> {
+        async fn invoke(&self, _request: &str, _context: &serde_json::Value, _cancel_token: &tokio_util::sync::CancellationToken) -> Result<AgentResult, AgentError> {
             Ok(AgentResult {
                 task_id: "test".to_string(),
                 agent_id: self.name.clone(),

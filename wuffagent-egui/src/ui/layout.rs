@@ -5,32 +5,31 @@ use super::theme::Theme;
 
 impl ChatApp {
     pub(super) fn setup_ui(&mut self, ctx: &egui::Context) {
-        // Session sidebar — draw before other panels so it sits on the left
-        let (switched_id, clear_client_session) = {
-            if let Some(ref mut panel) = self.sessions.sessions_panel {
-                panel.draw(ctx)
+        // Session sidebar — draw before other panels so it sits on the left.
+        // Pass disjoint immutable borrows (theme string + session_store) so the
+        // panel (a field of `self`) can be borrowed mutably while we read app state.
+        let theme = self.config.theme.clone();
+        let (switched_id, pending_action) = {
+            if let Some(ref mut panel) = self.sessions_panel {
+                panel.draw(&theme, &self.session_store, ctx)
             } else {
-                (None, false)
+                (None, None)
             }
         };
 
-        if let Some(ref mut panel) = self.sessions.sessions_panel {
+        if let Some(ref mut panel) = self.sessions_panel {
             panel.update_notification(ctx);
+        }
+
+        // Apply any pending panel action (create/delete/rename/export/import).
+        // This mutates session_store via apply_actions.
+        if let Some(action) = pending_action {
+            self.apply_sessions_action(action);
         }
 
         // Switch session if needed (handles New button and history selection)
         if let Some(id) = switched_id {
             self.switch_session(&id);
-        }
-
-        // Clear client session if a session was deleted (explicit flag from panel).
-        // Also clear the chat display so the deleted conversation isn't re-saved.
-        if clear_client_session {
-            // Must call on the real client: `clear_session` sets `session_id`
-            // on the struct itself (not the shared Arc), so calling it on a
-            // clone would leave the stale id and resurrect the session on save.
-            self.client.clear_session();
-            self.chat.messages.clear();
         }
 
         egui::TopBottomPanel::top("menu_bar").resizable(false).show(ctx, |ui| {

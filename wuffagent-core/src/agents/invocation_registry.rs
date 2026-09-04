@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use tokio_util::sync::CancellationToken;
 use tracing;
 
 use super::traits::{AgentError, AgentInvocation};
@@ -71,11 +72,12 @@ impl AgentInvocationRegistry {
         target: &str,
         request: &str,
         context: &serde_json::Value,
+        cancel_token: &CancellationToken,
     ) -> Result<AgentResult, AgentError> {
         let agent = self
             .get(target)
             .ok_or_else(|| AgentError::AgentNotFound(format!("Agent '{}' not found", target)))?;
-        agent.invoke(request, context).await
+        agent.invoke(request, context, cancel_token).await
     }
 }
 
@@ -121,7 +123,8 @@ mod tests {
         let registry = AgentInvocationRegistry::new();
         let mock = Arc::new(MockAgent::new("test-agent"));
         registry.register("test-agent", mock);
-        let result = registry.invoke("test-agent", "test request", &serde_json::json!({})).await;
+        let token = CancellationToken::new();
+        let result = registry.invoke("test-agent", "test request", &serde_json::json!({}), &token).await;
         assert!(result.is_ok());
     }
 
@@ -151,6 +154,7 @@ mod tests {
             &self,
             _request: &str,
             _context: &serde_json::Value,
+            _cancel_token: &CancellationToken,
         ) -> Result<AgentResult, AgentError> {
             Ok(AgentResult {
                 task_id: "test".to_string(),

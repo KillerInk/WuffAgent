@@ -1,4 +1,4 @@
-﻿use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 
 use crate::config::{get_presets_path, PresetStore};
@@ -93,7 +93,7 @@ impl ChatApp {
     pub fn process_pending_events(&mut self) {
         // Drain all buffered events from the channel and handle them.
         // Events are produced by:
-        //  - the merge task (engine_rx â†’ AppEvent + tool_rx â†’ AppEvent)
+        //  - the merge task (engine_rx → AppEvent + tool_rx → AppEvent)
         //  - any direct AppEvent sends from the client (tool calls)
         // Take the receiver out of the Option to avoid borrowing self mutably
         // while also calling self.handle_event().
@@ -111,9 +111,13 @@ impl ChatApp {
     }
 
     pub fn update_save_failure_notification(&mut self) {
-        // Update save failure notification state
-        if self.client.has_save_failure() {
-            // Could show a toast/notification here
+        // Update save failure notification state for the active session
+        if let Some(id) = &self.selected_session_id {
+            if let Some(runtime) = self.session_store.get(id) {
+                if runtime.client.has_save_failure() {
+                    // Could show a toast/notification here
+                }
+            }
         }
     }
 
@@ -122,68 +126,68 @@ impl ChatApp {
         if let Err(e) = self.save_session() {
             eprintln!("Failed to save session before switch: {}", e);
         }
-        // Switch to a different session. Must call on the real client:
-        // `clear_session` sets `session_id` on the struct itself (not the
-        // shared Arc), so calling it on a clone would leave the stale id
-        // and resurrect the previous session on the next save.
-        self.client.clear_session();
-        self.chat.messages.clear();
+
         // Update the panel's selected_id so the UI reflects the switch immediately
-        if let Some(ref mut panel) = self.sessions.sessions_panel {
+        if let Some(ref mut panel) = self.sessions_panel {
             panel.select_session(id);
         }
-        // Point the client at the target session and load it. `load_session`
-        // sanitizes the history (drops stray system messages, duplicates and
-        // empty placeholders), restores the stored system prompt, and fills the
-        // shared conversation store — so we never touch the raw storage loader
-        // directly here.
-        let session_dir = self.config.sessions_dir.clone();
-        self.client.set_session(Some(id.to_string()), session_dir.clone());
-        if self.client.load_session().is_some() {
-            // Display the sanitized conversation (the source of truth), skipping
-            // system messages and empty assistant placeholders that must not be
-            // rendered.
-            let conv = self.client.conversation().lock().unwrap().clone();
-            self.chat.messages = conv
-                .iter()
-                .filter(|m| {
-                    m.role != "system"
-                        && !(m.role == "assistant"
-                            && m.content.is_empty()
-                            && m.tool_calls.is_none())
-                })
-                .map(|m| {
-                    let (content, kind) = if m.role == "tool" {
-                        (m.content.clone(), crate::types::MessageKind::Tool)
-                    } else if let Some(t) = m.content.strip_prefix("\u{1F4AD} ") {
-                        (t.to_string(), crate::types::MessageKind::Thinking)
-                    } else {
-                        (m.content.clone(), crate::types::MessageKind::Normal)
-                    };
-                    crate::types::ChatMessage {
-                        kind,
-                        role: m.role.clone(),
-                        content,
-                        timestamp: m.timestamp.clone(),
-                        image: None,
-                    }
-                })
-                .collect();
-            // Refresh the token gauge from the loaded conversation (exact char
-            // counter, same units the trimmer uses).
-            self.refresh_token_gauge();
+
+        // Check if we already have a runtime for this session
+        if self.session_store.contains_key(id) {
+            // Update selected_session_id to point to the existing runtime
+            self.selected_session_id = Some(id.to_string());
+            return;
         }
 
-        // Also sync the agent engine's session so subsequent agent calls
-        // load/save against the correct agent session directory.
-        let agent_sid = self.agent_engine.agent_session_id().map(|s| s.to_string());
-        if let Some(agent_name) = &agent_sid {
-            let agent_dir = session_dir.join("agents").join(agent_name);
-            if Arc::get_mut(&mut self.agent_engine).is_some() {
-                if let Some(ref mut engine) = Arc::get_mut(&mut self.agent_engine) {
-                    engine.set_agent_session(Some(agent_name.clone()), agent_dir);
-                }
+        // Create a new runtime for this session
+        let base_url = self.config.base_url();
+        let mut session_client = crate::client::ChatClient::new(&base_url);
+        session_client.set_api_key(self.config.remote_api_key.as_deref());
+        let sessions_dir = self.config.sessions_dir.clone();
+        session_client.set_session(Some(id.to_string()), sessions_dir.clone());
+        session_client.set_reasoning_effort(self.config.reasoning_effort);
+        session_client.set_max_messages(self.config.max_messages);
+        session_client.set_n_ctx(self.config.n_ctx);
+        if self.config.encryption_enabled {
+            if let Some(key) = self.config.encryption_key() {
+                session_client.set_encryption_key(Some(key));
             }
+        }
+        let _ = session_client.load_session();
+
+        // Per-session engine: bound to this session's client so the agent chat
+        // loop reads/writes an isolated conversation store (see the same
+        // rationale in `state.rs` / `main.rs`).
+        let session_engine = (*self.agent_engine).clone().with_client(session_client.clone());
+        // Create pipeline (events flow through the shared pending_tx) and runtime
+        let pipeline = crate::client::ChatPipeline::new(
+            Arc::new(session_engine.clone()),
+            self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
+            self.config.reasoning_effort,
+            id.to_string(),
+        );
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+
+        let runtime = crate::sessions::SessionRuntime::new(
+            id.to_string(),
+            // Try to get the session name from disk
+            crate::sessions::load_session(&sessions_dir, id)
+                .map(|s| s.name)
+                .unwrap_or_else(|| format!("Session {}", id)),
+            session_client,
+            pipeline,
+            session_engine,
+            cancel_token,
+        );
+
+        self.session_store.insert(id.to_string(), runtime);
+        self.selected_session_id = Some(id.to_string());
+
+        // Refresh the token gauge from the loaded conversation (exact char
+        // counter, same units the trimmer uses).
+        let n_ctx = self.get_effective_n_ctx();
+        if let Some(runtime) = self.session_store.get_mut(id) {
+            runtime.refresh_token_gauge(n_ctx);
         }
     }
 }
@@ -191,7 +195,7 @@ impl ChatApp {
 impl eframe::App for ChatApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Request repaint during streaming for real-time updates
-        if self.chat.is_generating {
+        if self.selected_chat_state().map(|c| c.is_generating).unwrap_or(false) {
             ctx.request_repaint();
         }
 
@@ -240,8 +244,10 @@ impl eframe::App for ChatApp {
 
         // Process any pending async results first
         self.process_pending_events();
-        // Retry any pending session saves
-        self.client.clone().retry_pending_saves();
+        // Retry any pending session saves for the selected session
+        if let Some(client) = self.active_client() {
+            client.retry_pending_saves();
+        }
         // Update save-failure notification state
         self.update_save_failure_notification();
         // Show settings dialog

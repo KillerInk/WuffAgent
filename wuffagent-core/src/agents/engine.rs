@@ -70,17 +70,27 @@ impl AgentEngine {
         self
     }
 
-    /// Return a clone of the engine with the LLM client's reasoning effort
-    /// updated (used so the agent tool loop honors the current UI setting).
-    pub fn with_reasoning_effort(mut self, effort: crate::types::ReasoningEffort) -> Self {
-        Arc::make_mut(&mut self.client).set_reasoning_effort(effort);
+    /// Return a clone of the engine with a new LLM client.
+    /// Used to create per-session engines with isolated conversation state.
+    pub fn with_client(mut self, client: crate::client::ChatClient) -> Self {
+        self.client = Arc::new(client);
         self
     }
 
-    /// Return a clone of the engine with the LLM client's n_ctx updated.
-    /// Used to sync the remote server's reported context size before starting a chat loop.
-    pub fn with_n_ctx(mut self, n_ctx: u32) -> Self {
-        Arc::make_mut(&mut self.client).set_n_ctx(n_ctx);
+    /// Return a clone of the engine with the LLM client's reasoning effort
+    /// updated (used so the agent tool loop honors the current UI setting).
+    pub fn with_reasoning_effort(self, effort: crate::types::ReasoningEffort) -> Self {
+        let mut client = (*self.client).clone();
+        client.set_reasoning_effort(effort);
+        Self {
+            client: Arc::new(client),
+            ..self
+        }
+    }
+
+    /// Set the session ID for this engine.
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.agent_session_id = Some(session_id);
         self
     }
 
@@ -116,6 +126,11 @@ impl AgentEngine {
                 let _ = tx.send(event);
             }
         }
+    }
+
+    /// The session ID to stamp on chain events (empty when unset).
+    fn session_id(&self) -> String {
+        self.agent_session_id.clone().unwrap_or_default()
     }
 
     /// Main entry point: execute a user request through the agent system.
@@ -195,6 +210,7 @@ impl AgentEngine {
         if cancel_token.is_cancelled() {
             self.send_chain_event(AppEvent::AgentChainCancelled {
                 agent_name: agent_name.to_string(),
+                session_id: self.session_id(),
             });
             return Err("Cancelled".to_string());
         }
@@ -253,6 +269,7 @@ impl AgentEngine {
                         self.send_chain_event(crate::types::AppEvent::ImprovementSuggested {
                             agent_name: agent_name.to_string(),
                             suggestions,
+                            session_id: self.session_id(),
                         });
                     }
                 }
@@ -276,6 +293,7 @@ impl AgentEngine {
         if cancel_token.is_cancelled() {
             self.send_chain_event(AppEvent::AgentChainCancelled {
                 agent_name: "chat".to_string(),
+                session_id: self.session_id(),
             });
             return Err("Cancelled".to_string());
         }
@@ -307,6 +325,7 @@ impl AgentEngine {
         self.send_chain_event(AppEvent::AgentChainStarted {
             agent_name: "chat".to_string(),
             depth: 0,
+            session_id: self.session_id(),
         });
 
         let result = agent.execute(request, cancel_token).await;
@@ -317,6 +336,7 @@ impl AgentEngine {
                     agent_name: "chat".to_string(),
                     result: response.clone(),
                     depth: 0,
+                    session_id: self.session_id(),
                 });
             }
             Err(e) => {
@@ -324,6 +344,7 @@ impl AgentEngine {
                     agent_name: "chat".to_string(),
                     error: e.clone(),
                     depth: 0,
+                    session_id: self.session_id(),
                 });
             }
         }
@@ -347,6 +368,7 @@ impl AgentEngine {
                         self.send_chain_event(crate::types::AppEvent::ImprovementSuggested {
                             agent_name: "chat".to_string(),
                             suggestions,
+                            session_id: self.session_id(),
                         });
                     }
                 }
@@ -392,6 +414,7 @@ impl AgentEngine {
         if cancel_token.is_cancelled() {
             self.send_chain_event(AppEvent::AgentChainCancelled {
                 agent_name: "general".to_string(),
+                session_id: self.session_id(),
             });
             return Err("Cancelled".to_string());
         }
@@ -432,6 +455,7 @@ impl AgentEngine {
                     agent_name: "general".to_string(),
                     result: response.clone(),
                     depth: 0,
+                    session_id: self.session_id(),
                 });
             }
             Err(e) => {
@@ -439,6 +463,7 @@ impl AgentEngine {
                     agent_name: "general".to_string(),
                     error: e.clone(),
                     depth: 0,
+                    session_id: self.session_id(),
                 });
             }
         }

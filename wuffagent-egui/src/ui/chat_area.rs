@@ -11,63 +11,98 @@ impl ChatApp {
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
         let theme = Theme::from_name(&self.config.theme);
 
-        // Show pending error as inline warning
-        if let Some(err) = self.chat.pending_error.take() {
-            ui.horizontal(|ui| {
-                ui.colored_label(theme.error, format!("⚠ Error: {}", err));
-            });
-            ui.separator();
+        // Get the current session's chat state, or show empty state
+        let messages = match &self.selected_session_id {
+            Some(sid) => {
+                if let Some(runtime) = self.session_store.get(sid) {
+                    runtime.chat_state.messages.clone()
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        };
+
+        // Show pending error as inline warning (from the current session)
+        if let Some(sid) = &self.selected_session_id {
+            if let Some(runtime) = self.session_store.get(sid) {
+                if let Some(err) = &runtime.chat_state.pending_error {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(theme.error, format!("⚠ Error: {}", err));
+                    });
+                    ui.separator();
+                }
+            }
         }
 
-        // Move messages out so the scroll closure borrows only the local,
-        // not `self.chat`. This avoids the per-frame deep clone of every message.
-        // Note: ChatMessage fields are Arc-based (role, content, tool_calls), so
-        // iter() does not clone the underlying strings — only the small wrapper.
-        let messages = std::mem::take(&mut self.chat.messages);
+        // Snapshot streaming state up front so the scroll closure can call
+        // `&mut self` helpers without holding an immutable borrow of the store.
+        let streaming = self
+            .selected_session_id
+            .as_ref()
+            .and_then(|sid| self.session_store.get(sid))
+            .filter(|r| r.chat_state.is_generating)
+            .map(|r| (r.chat_state.current_thinking.clone(), r.chat_state.stream_buffer.clone()))
+            .unwrap_or_default();
 
         // Stick to bottom when the user is already there or forced the button.
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("chat_scroll")
             .auto_shrink([false, true])
-            .stick_to_bottom(self.chat.scroll_to_bottom_requested || self.chat.at_bottom)
+            .stick_to_bottom(
+                self.selected_session_id.as_ref().map(|sid| {
+                    self.session_store.get(sid).map(|r| r.chat_state.scroll_to_bottom_requested).unwrap_or(false)
+                }).unwrap_or(false) ||
+                self.selected_session_id.as_ref().map(|sid| {
+                    self.session_store.get(sid).map(|r| r.chat_state.at_bottom).unwrap_or(false)
+                }).unwrap_or(false)
+            )
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     for (i, msg) in messages.iter().enumerate() {
                         self.draw_message(ui, msg, i, &theme);
                     }
-                    self.draw_streaming_line(ui, &theme);
+                    // Draw streaming line (values snapshotted before the scroll area).
+                    self.draw_streaming_line(ui, &theme, &streaming);
                 });
             });
 
-        self.chat.messages = messages;
-
-        // Reset the scroll-to-bottom flag after this frame
-        self.chat.scroll_to_bottom_requested = false;
-
-        // Update at_bottom from the output - use content_size vs offset from the rendered output
-        self.chat.at_bottom = self.is_at_bottom_from_output(&scroll_output);
-
-        // Update button visibility and opacity
-        if self.chat.at_bottom {
-            // Fade out button
-            self.chat.button_opacity = (self.chat.button_opacity * 0.85).max(0.0);
-            if self.chat.button_opacity < 0.01 {
-                self.chat.button_visible = false;
+        // Update scroll state for the current session.
+        // Compute `at_bottom` (immutable self borrow) before mutating the store.
+        let at_bottom = self.is_at_bottom_from_output(&scroll_output);
+        if let Some(sid) = &self.selected_session_id {
+            if let Some(runtime) = self.session_store.get_mut(sid) {
+                runtime.chat_state.scroll_to_bottom_requested = false;
+                runtime.chat_state.at_bottom = at_bottom;
+                
+                // Update button visibility and opacity
+                if runtime.chat_state.at_bottom {
+                    runtime.chat_state.button_opacity = (runtime.chat_state.button_opacity * 0.85).max(0.0);
+                    if runtime.chat_state.button_opacity < 0.01 {
+                        runtime.chat_state.button_visible = false;
+                    }
+                } else {
+                    runtime.chat_state.button_visible = true;
+                    runtime.chat_state.button_opacity = (runtime.chat_state.button_opacity + 0.12).min(1.0);
+                }
             }
-        } else {
-            // Show button and fade in
-            self.chat.button_visible = true;
-            self.chat.button_opacity = (self.chat.button_opacity + 0.12).min(1.0);
         }
 
-        // Show scroll-to-bottom button when not at bottom and opacity > 0
-        if self.chat.button_visible && self.chat.button_opacity > 0.01 {
-            self.draw_scroll_to_bottom_button(ui, &theme);
+        // Show scroll-to-bottom button when not at bottom and opacity > 0.
+        // Snapshot the opacity first so we can call an `&mut self` helper.
+        let (button_visible, button_opacity) = self
+            .selected_session_id
+            .as_ref()
+            .and_then(|sid| self.session_store.get(sid))
+            .map(|r| (r.chat_state.button_visible, r.chat_state.button_opacity))
+            .unwrap_or((false, 0.0));
+        if button_visible && button_opacity > 0.01 {
+            self.draw_scroll_to_bottom_button(ui, &theme, button_opacity);
         }
     }
 
-    fn draw_scroll_to_bottom_button(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+    fn draw_scroll_to_bottom_button(&mut self, ui: &mut egui::Ui, theme: &Theme, button_opacity: f32) {
         let button_size = egui::vec2(36.0, 36.0);
         let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 16.0, 16.0);
         let button_rect = egui::Rect::from_min_size(button_pos, button_size);
@@ -75,7 +110,7 @@ impl ChatApp {
             ui.set_max_size(button_size);
             ui.set_min_size(button_size);
             // Apply opacity via semi-transparent fill color (premultiplied alpha)
-            let alpha = (self.chat.button_opacity * 0.85 * 255.0) as u8;
+            let alpha = (button_opacity * 0.85 * 255.0) as u8;
             let fill_color = egui::Color32::from_rgba_premultiplied(
                 theme.primary.r(),
                 theme.primary.g(),
@@ -87,20 +122,22 @@ impl ChatApp {
                 .rounding(18.0);
             if ui.add(scroll_btn).clicked() {
                 // Trigger auto-scroll on next frame
-                self.chat.scroll_to_bottom_requested = true;
+                if let Some(sid) = &self.selected_session_id {
+                    if let Some(runtime) = self.session_store.get_mut(sid) {
+                        runtime.chat_state.scroll_to_bottom_requested = true;
+                    }
+                }
             }
         });
     }
 
     /// Live streaming line shown while a response is in flight.
     /// Text renders as it arrives via StreamChunk events (no extra buffering).
-    fn draw_streaming_line(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        if !self.chat.is_generating {
-            return;
-        }
+    fn draw_streaming_line(&mut self, ui: &mut egui::Ui, theme: &Theme, streaming: &(String, String)) {
+        let (current_thinking, stream_buffer) = streaming;
         let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
         ui.add_space(10.0);
-        if !self.chat.current_thinking.is_empty() {
+        if !current_thinking.is_empty() {
             // Header row; the thinking text wraps on its own line below.
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -111,13 +148,13 @@ impl ChatApp {
                 ui.spinner();
             });
             ui.add(egui::Label::new(
-                egui::RichText::new(&self.chat.current_thinking)
+                egui::RichText::new(current_thinking)
                     .color(theme.text_dim)
                     .italics()
                     .size(12.0)
             ).wrap());
         }
-        if !self.chat.stream_buffer.is_empty() {
+        if !stream_buffer.is_empty() {
             // Render the streamed text exactly like a completed AI message
             // (width-constrained bubble + wrapping label), so line breaks
             // match what the message looks like once it is committed.
@@ -131,17 +168,12 @@ impl ChatApp {
             });
             // Bubble row: reserve the avatar column exactly like `draw_message`
             // so the bubble's width and right edge match the committed messages.
-            // (Without the reserved column the bubble is ~44px wider and
-            // overflows the right edge of the window.)
             let avatar_size = 28.0;
             let avatar_margin = 16.0;
             let max_content_width = (ui.available_width() - avatar_size - avatar_margin * 2.0).max(120.0);
             ui.horizontal(|ui| {
                 ui.add_space(avatar_size);
                 ui.add_space(8.0); // gap between avatar and bubble
-                // The wrapping label must live in a VERTICAL layout (a
-                // horizontal one has infinite available width, so `Label::wrap`
-                // never breaks the line).
                 ui.scope(|ui| {
                     ui.set_max_width(max_content_width);
                     ui.vertical(|ui| {
@@ -151,14 +183,14 @@ impl ChatApp {
                             .inner_margin(egui::Margin::same(6.0));
                         bubble_frame.show(ui, |ui| {
                             ui.add(egui::Label::new(
-                                egui::RichText::new(&self.chat.stream_buffer)
+                                egui::RichText::new(stream_buffer)
                                     .color(theme.text_primary)
                             ).wrap());
                         });
                     });
                 });
             });
-        } else if self.chat.current_thinking.is_empty() {
+        } else if current_thinking.is_empty() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.label(egui::RichText::new(&streaming_ts)
@@ -200,7 +232,9 @@ impl ChatApp {
         theme: &Theme,
     ) {
         let is_user = message.role == "user";
-        let is_editing = self.chat.editing_message_index == Some(index);
+        let is_editing = self.selected_session_id.as_ref().map(|sid| {
+            self.session_store.get(sid).map(|r| r.chat_state.editing_message_index == Some(index)).unwrap_or(false)
+        }).unwrap_or(false);
 
         // Constrain content width (leaves room for avatar + margins)
         let avatar_size = 28.0;
@@ -256,8 +290,12 @@ impl ChatApp {
                     response.context_menu(|menu_ui| {
                         menu_ui.set_min_width(120.0);
                         if menu_ui.button("Edit").clicked() {
-                            self.chat.editing_message_index = Some(index);
-                            self.chat.editing_message_content = message.content.clone();
+                            if let Some(sid) = &self.selected_session_id {
+                                if let Some(runtime) = self.session_store.get_mut(sid) {
+                                    runtime.chat_state.editing_message_index = Some(index);
+                                    runtime.chat_state.editing_message_content = message.content.clone();
+                                }
+                            }
                         }
                         if menu_ui.button("Delete").clicked() {
                             self.delete_message(index);
@@ -282,7 +320,11 @@ impl ChatApp {
                         
                         bubble_frame.show(ui, |ui| {
                             if is_editing {
-                                ui.text_edit_multiline(&mut self.chat.editing_message_content);
+                                if let Some(sid) = &self.selected_session_id {
+                                    if let Some(runtime) = self.session_store.get_mut(sid) {
+                                        ui.text_edit_multiline(&mut runtime.chat_state.editing_message_content);
+                                    }
+                                }
                             } else {
                                 // Display image if present
                                 if let Some(ref img_data) = message.image {
@@ -351,35 +393,60 @@ impl ChatApp {
                     self.commit_message_edit(index);
                 }
                 if i.key_pressed(egui::Key::Escape) {
-                    self.chat.editing_message_index = None;
-                    self.chat.editing_message_content.clear();
+                    if let Some(sid) = &self.selected_session_id {
+                        if let Some(runtime) = self.session_store.get_mut(sid) {
+                            runtime.chat_state.editing_message_index = None;
+                            runtime.chat_state.editing_message_content.clear();
+                        }
+                    }
                 }
             });
         }
     }
 
-
     pub(super) fn commit_message_edit(&mut self, index: usize) {
-        let new_content = self.chat.editing_message_content.clone();
+        let new_content = match &self.selected_session_id {
+            Some(sid) => {
+                self.session_store.get(sid).map(|r| r.chat_state.editing_message_content.clone())
+            }
+            None => return,
+        };
+        let new_content = match new_content {
+            Some(c) => c,
+            None => return,
+        };
+        
         // Update chat_display
-        if index < self.chat.messages.len() {
-            self.chat.messages[index].content = new_content.clone();
+        if let Some(sid) = &self.selected_session_id {
+            if let Some(runtime) = self.session_store.get_mut(sid) {
+                if index < runtime.chat_state.messages.len() {
+                    runtime.chat_state.messages[index].content = new_content.clone();
+                }
+            }
         }
+        
         // Update session
-        {
-            let cl = self.client.clone();
-            let mut conv = cl.conversation().lock().unwrap();
-            if index < conv.len() {
-                conv[index].content = new_content;
-            }
-            drop(conv);
-            if let Err(e) = cl.save_session() {
-                eprintln!("Failed to save session after edit: {}", e);
+        if let Some(sid) = &self.selected_session_id {
+            if let Some(runtime) = self.session_store.get(sid) {
+                let cl = runtime.client.clone();
+                let mut conv = cl.conversation().lock().unwrap();
+                if index < conv.len() {
+                    conv[index].content = new_content;
+                }
+                drop(conv);
+                if let Err(e) = cl.save_session() {
+                    eprintln!("Failed to save session after edit: {}", e);
+                }
             }
         }
+        
         // Clear edit state
-        self.chat.editing_message_index = None;
-        self.chat.editing_message_content.clear();
+        if let Some(sid) = &self.selected_session_id {
+            if let Some(runtime) = self.session_store.get_mut(sid) {
+                runtime.chat_state.editing_message_index = None;
+                runtime.chat_state.editing_message_content.clear();
+            }
+        }
     }
 
     /// Parse a tool message and render it with smart formatting.
@@ -450,7 +517,9 @@ impl ChatApp {
                 ui.add_space(4.0);
                 if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
                     let char_count = content.len();
-                    let is_expanded = self.chat.expanded_messages.contains(&msg_index);
+                    let is_expanded = self.selected_session_id.as_ref().map(|sid| {
+                        self.session_store.get(sid).map(|r| r.chat_state.expanded_messages.contains(&msg_index)).unwrap_or(false)
+                    }).unwrap_or(false);
                     let btn_text = if is_expanded {
                         format!("Hide content ({} chars)", char_count)
                     } else {
@@ -458,10 +527,14 @@ impl ChatApp {
                     };
                     let btn = egui::Button::new(btn_text).rounding(4.0);
                     if ui.add(btn).clicked() {
-                        if is_expanded {
-                            self.chat.expanded_messages.retain(|&i| i != msg_index);
-                        } else {
-                            self.chat.expanded_messages.push(msg_index);
+                        if let Some(sid) = &self.selected_session_id {
+                            if let Some(runtime) = self.session_store.get_mut(sid) {
+                                if is_expanded {
+                                    runtime.chat_state.expanded_messages.retain(|&i| i != msg_index);
+                                } else {
+                                    runtime.chat_state.expanded_messages.push(msg_index);
+                                }
+                            }
                         }
                     }
                     if is_expanded {
@@ -659,152 +732,24 @@ impl ChatApp {
         }
     }
 
-    /// Draw the agent pipeline panel with plan status, task progress, and feedback loop info.
-    #[allow(dead_code)]
-    pub(super) fn draw_pipeline_panel(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        // Snapshot pipeline state before the closure
-        let (plan_id, iteration, cancelled, tasks, feedback_state) = match &self.chat.pipeline {
-            Some(p) => (p.plan_id.clone(), p.iteration, p.cancelled, p.tasks.iter().cloned().collect::<Vec<_>>(), p.feedback_state.clone()),
-            None => (String::new(), 0usize, false, Vec::new(), None),
-        };
-        // Shorten plan ID for display (first 8 chars)
-        let plan_short = plan_id.chars().take(8).collect::<String>();
-
-        // Panel header with cancel button
-        egui::Frame::none()
-            .fill(theme.surface_light)
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::Margin::same(8.0))
-            .stroke(egui::Stroke::new(1.0, theme.border))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                    // Title with shortened plan ID
-                    let title = format!(
-                        "🤖 Agent Pipeline — Plan: {} | Iteration: {}",
-                        plan_short, iteration
-                    );
-                    ui.label(egui::RichText::new(title)
-                        .color(theme.text_primary)
-                        .size(12.0)
-                        .strong());
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Cancel button
-                        if !cancelled {
-                            let cancel_btn = egui::Button::new("✕ Cancel")
-                                .fill(theme.error)
-                                .rounding(4.0);
-                            if ui.add(cancel_btn).clicked() {
-                                self.agent_cancel_token.cancel();
-                                self.agent_chain_state.cancelled = true;
-                            }
-                        } else {
-                            ui.label(egui::RichText::new("⏹ Cancelled")
-                                .color(theme.error)
-                                .size(11.0));
-                        }
-                    });
-                });
-
-                ui.add_space(6.0);
-
-                // Task progress list
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-                    for task in &tasks {
-                        let status_icon = match task.status {
-                            crate::ui::state::PipelineTaskStatus::Pending => "⬜",
-                            crate::ui::state::PipelineTaskStatus::Running => "🔄",
-                            crate::ui::state::PipelineTaskStatus::Completed => "✅",
-                            crate::ui::state::PipelineTaskStatus::Failed => "❌",
-                        };
-                        ui.label(egui::RichText::new(format!(
-                            "{} [{}] {}", status_icon, task.id, task.description
-                        )).size(11.0));
-                        if task.status == crate::ui::state::PipelineTaskStatus::Running {
-                            ui.spinner();
-                        }
-                    }
-                });
-
-                ui.add_space(4.0);
-
-                // Feedback loop status
-                if feedback_state.as_ref().map_or(false, |s| !s.is_empty()) || iteration > 0 {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-                        ui.label(egui::RichText::new("🔄 Feedback:")
-                            .color(theme.text_secondary)
-                            .size(10.0));
-                        ui.label(egui::RichText::new(feedback_state.as_deref().unwrap_or(""))
-                            .color(theme.accent)
-                            .size(10.0));
-                    });
-                }
-            });
-    }
-
-    /// Draw a compact pipeline progress bar below the chat.
-    #[allow(dead_code)]
-    pub(super) fn draw_pipeline_progress(&self, ui: &mut egui::Ui, theme: &Theme) {
-        let pipeline = match &self.chat.pipeline {
-            Some(p) => p,
-            None => return,
-        };
-        if pipeline.tasks.is_empty() {
-            return;
-        }
-        let total = pipeline.tasks.len();
-        let completed = pipeline.tasks.iter()
-            .filter(|t| t.status == crate::ui::state::PipelineTaskStatus::Completed)
-            .count();
-        let failed = pipeline.tasks.iter()
-            .filter(|t| t.status == crate::ui::state::PipelineTaskStatus::Failed)
-            .count();
-        let running = pipeline.tasks.iter()
-            .filter(|t| t.status == crate::ui::state::PipelineTaskStatus::Running)
-            .count();
-        let _pending = total - completed - failed - running;
-
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-            ui.label(egui::RichText::new("Progress:")
-                .color(theme.text_secondary)
-                .size(10.0));
-            ui.add(egui::ProgressBar::new(completed as f32 / total.max(1) as f32));
-            ui.label(egui::RichText::new(format!(
-                "{}/{} tasks", completed, total
-            )).color(theme.text_secondary).size(10.0));
-            if running > 0 {
-                ui.spinner();
-            }
-            if failed > 0 {
-                ui.label(egui::RichText::new(format!("❌{}", failed))
-                    .color(theme.error).size(10.0));
-            }
-            if pipeline.cancelled {
-                ui.label(egui::RichText::new(" ⏹ Cancelled")
-                    .color(theme.error).size(10.0));
-            }
-        });
-    }
-
     pub(super) fn delete_message(&mut self, index: usize) {
-        // Remove from chat_display
-        if index < self.chat.messages.len() {
-            self.chat.messages.remove(index);
-        }
-        // Remove from session
-        {
-            let cl = self.client.clone();
-            let mut conv = cl.conversation().lock().unwrap();
-            if index < conv.len() {
-                conv.remove(index);
-            }
-            drop(conv);
-            if let Err(e) = cl.save_session() {
-                eprintln!("Failed to save session after delete: {}", e);
+        if let Some(sid) = &self.selected_session_id {
+            if let Some(runtime) = self.session_store.get_mut(sid) {
+                if index < runtime.chat_state.messages.len() {
+                    runtime.chat_state.messages.remove(index);
+                }
+                // Also remove from the underlying client conversation
+                {
+                    let cl = runtime.client.clone();
+                    let mut conv = cl.conversation().lock().unwrap();
+                    if index < conv.len() {
+                        conv.remove(index);
+                    }
+                    drop(conv);
+                    if let Err(e) = cl.save_session() {
+                        eprintln!("Failed to save session after delete: {}", e);
+                    }
+                }
             }
         }
     }
