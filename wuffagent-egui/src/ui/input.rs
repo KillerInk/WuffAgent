@@ -281,20 +281,11 @@ impl ChatApp {
     /// Load the first matching agent profile (by `name`) from the known agents
     /// directories, handling both current `AgentConfig` and legacy `WorkerConfig`.
     fn load_agent_config(&self, names: &[&str]) -> Option<crate::agents::config::AgentConfig> {
-        let mut dirs = Vec::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            dirs.push(cwd.join("agents"));
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                dirs.push(exe_dir.join("agents"));
-            }
-        }
         let agents_dir = self.config.file_path
             .parent()
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| self.config.file_path.clone());
-        dirs.push(agents_dir.join("agents"));
+        let dirs = vec![agents_dir];
 
         for dir in dirs {
             if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -487,23 +478,14 @@ impl ChatApp {
     /// matches the profile's `name` field (not the file name).
     /// Returns an empty string when no candidate profile exists.
     fn load_agent_system_prompt(&self, names: &[&str]) -> String {
-        let mut dirs = Vec::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            dirs.push(cwd.join("agents"));
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                dirs.push(exe_dir.join("agents"));
-            }
-        }
         let agents_dir = self.config.file_path
             .parent()
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| self.config.file_path.clone());
-        dirs.push(agents_dir.join("agents"));
+        let dirs = vec![agents_dir];
 
         let mut prompt = String::new();
-        for dir in dirs {
+        for dir in &dirs {
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -578,22 +560,12 @@ impl ChatApp {
             }
         };
 
-        // Scan project-level agents/ directory (relative to cwd or exe)
-        if let Ok(cwd) = std::env::current_dir() {
-            scan_dir(cwd.join("agents"));
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                scan_dir(exe_dir.join("agents"));
-            }
-        }
-
-        // Also scan the config-directory workers subdirectory
+        // Scan only the config-directory agents subdirectory
         let agents_dir = config_path
             .parent()
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| config_path.clone());
-        scan_dir(agents_dir.join("agents"));
+        scan_dir(agents_dir);
 
         names
     }

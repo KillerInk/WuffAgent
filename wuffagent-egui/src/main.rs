@@ -136,27 +136,11 @@ fn bootstrap() -> (
         .map(|p| p.join("agents"))
         .unwrap_or_else(|| config_path_clone.clone());
 
-    let mut search_dirs = vec![config_agents_dir.clone()];
-    let mut add_agents_dir = |path: std::path::PathBuf| {
-        if path.exists() {
-            search_dirs.push(path);
-        }
-    };
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            add_agents_dir(exe_dir.parent().map(|p| p.join("agents")).unwrap_or_default());
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        add_agents_dir(cwd.join("agents"));
-    }
-
     // Load agents FIRST, then build the invocation registry, then register builtins
     // so that agent_call resolves against a populated registry.
-    let agent_registry = match AgentRegistry::load(search_dirs.clone(), &registry) {
+    let agent_registry = match AgentRegistry::load(vec![config_agents_dir.clone()], &registry) {
         Ok(reg) => {
-            tracing::info!("Loaded {} agents from {:?}", reg.agent_count(), search_dirs);
+            tracing::info!("Loaded {} agents from {:?}", reg.agent_count(), config_agents_dir);
             reg
         }
         Err(e) => {
