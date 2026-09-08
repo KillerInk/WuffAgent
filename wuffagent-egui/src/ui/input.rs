@@ -564,11 +564,11 @@ impl ChatApp {
                         }
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             if let Ok(cfg) = serde_json::from_str::<crate::agents::config::AgentConfig>(&content) {
-                                if seen.insert(cfg.name.clone()) {
+                                if cfg.enabled && seen.insert(cfg.name.clone()) {
                                     names.push(cfg.name);
                                 }
                             } else if let Ok(cfg) = serde_json::from_str::<crate::agents::config::WorkerConfig>(&content) {
-                                if seen.insert(cfg.name.clone()) {
+                                if cfg.enabled && seen.insert(cfg.name.clone()) {
                                     names.push(cfg.name);
                                 }
                             }

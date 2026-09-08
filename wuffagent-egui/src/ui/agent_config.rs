@@ -1,4 +1,4 @@
-﻿use eframe::egui;
+use eframe::egui;
 use std::sync::{Arc, Mutex};
 
 use crate::agents::config::{AgentConfig, AgentManager};
@@ -127,7 +127,7 @@ impl AgentConfigDialog {
                                         let button_data: Vec<AgentButtonData> = self.agents.iter().enumerate().map(|(i, agent)| {
                                             let selected = i as isize == self.selected_index;
                                             AgentButtonData {
-                                                label: format!("{} {}", if agent.enabled { "âœ“" } else { "â—‹" }, agent.name),
+                                                label: format!("[{}] {}", if agent.enabled { "x" } else { " " }, agent.name),
                                                 bg: if selected { egui::Color32::from_rgb(0x33, 0x66, 0xCC) } else { egui::Color32::from_rgb(0x33, 0x33, 0x33) },
                                                 idx: i,
                                                 name: agent.name.clone(),
