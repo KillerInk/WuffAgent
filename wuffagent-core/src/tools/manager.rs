@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::tools::types::{ToolError, ToolLogger, ToolOutput, ToolParams, ToolResult, TracingToolLogger};
+use crate::tools::types::{
+    ToolError, ToolLogger, ToolMetadata, ToolOutput, ToolParams, ToolResult, TracingToolLogger,
+};
 use crate::tools::registry::ToolRegistry;
 
 /// Parse raw tool-call argument JSON into `ToolParams`.
@@ -103,6 +105,56 @@ impl ToolManager {
         Arc::new(registry)
     }
 
+    /// Create a new ToolManager where the `agent_call` tool is restricted to
+    /// the given agent allowlist. `Some(names)` rebuilds the `agent_call`
+    /// entry with a tool bound to the allowlist; `None` removes the
+    /// `agent_call` entry from the schema entirely so the agent cannot
+    /// delegate at all. All other tools and the allowlist are preserved.
+    pub fn with_agent_call_allowlist(
+        &self,
+        invocation_registry: &crate::agents::invocation_registry::AgentInvocationRegistry,
+        names: Option<&[String]>,
+    ) -> Self {
+        let mut entries = self.registry.list();
+        match names {
+            Some(names) => {
+                let meta = entries
+                    .iter()
+                    .find(|e| e.metadata.name == "agent_call")
+                    .map(|e| e.metadata.clone())
+                    .unwrap_or_else(|| ToolMetadata {
+                        name: "agent_call".to_string(),
+                        version: "1.0.0".to_string(),
+                        description: "Invoke another agent to execute a sub-task".to_string(),
+                        dependencies: vec![],
+                    });
+                let tool: std::sync::Arc<dyn crate::tools::types::Tool> =
+                    std::sync::Arc::new(crate::tools::builtin::agent_call::AgentCallTool::with_allowlist(
+                        std::sync::Arc::new(invocation_registry.clone()),
+                        names.to_vec(),
+                    ));
+                entries.retain(|e| e.metadata.name != "agent_call");
+                entries.push(crate::tools::registry::ToolEntry {
+                    tool,
+                    metadata: meta,
+                    loaded_at: std::time::Instant::now(),
+                });
+            }
+            None => {
+                entries.retain(|e| e.metadata.name != "agent_call");
+            }
+        }
+        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+        }
+    }
+
     /// Create a new ToolManager whose `shell` tool honors the given per-agent
     /// shell config (allowlist/enabled/timeout), while all other tools and the
     /// allowlist are preserved. This is how an agent gets a shell restricted to
@@ -191,5 +243,63 @@ impl ToolManager {
     pub fn remove_tool(&self, name: &str) -> ToolResult<()> {
         self.registry.unregister(name)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::invocation_registry::AgentInvocationRegistry;
+    use crate::tools::builtin::agent_call::AgentCallTool;
+    use crate::tools::types::ToolMetadata;
+    use crate::tools::registry::ToolEntry;
+
+    /// Build a ToolManager whose registry contains a single `agent_call` entry,
+    /// mirroring the global registration in `register_builtins`.
+    fn manager_with_agent_call() -> ToolManager {
+        let registry = ToolRegistry::new(vec![], Arc::new(TracingToolLogger));
+        registry
+            .register(ToolEntry {
+                tool: Arc::new(AgentCallTool::new(Arc::new(AgentInvocationRegistry::new()))),
+                metadata: ToolMetadata {
+                    name: "agent_call".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Invoke another agent to execute a sub-task".to_string(),
+                    dependencies: vec![],
+                },
+                loaded_at: std::time::Instant::now(),
+            })
+            .unwrap();
+        ToolManager::new(Arc::new(registry))
+    }
+
+    #[test]
+    fn test_allowlist_none_removes_agent_call() {
+        let tm = manager_with_agent_call();
+        let names = tm.get_allowed_tools();
+        assert!(names.contains(&"agent_call".to_string()));
+
+        let restricted = tm.with_agent_call_allowlist(&AgentInvocationRegistry::new(), None);
+        let names = restricted.get_allowed_tools();
+        assert!(
+            !names.contains(&"agent_call".to_string()),
+            "agent_call should be removed from the schema: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_allowlist_some_keeps_agent_call() {
+        let tm = manager_with_agent_call();
+        let restricted = tm.with_agent_call_allowlist(
+            &AgentInvocationRegistry::new(),
+            Some(&["researcher".to_string()]),
+        );
+        let names = restricted.get_allowed_tools();
+        assert!(
+            names.contains(&"agent_call".to_string()),
+            "agent_call should remain in the schema: {:?}",
+            names
+        );
     }
 }

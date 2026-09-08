@@ -61,6 +61,17 @@ pub struct ChatApp {
     pub remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
     /// Pending agent improvement suggestions.
     pub improvements_panel: super::improvements::ImprovementsPanel,
+    /// Shared display snapshot of the selected session's messages. Rebuilt only
+    /// when the session or its message set changes, so a per-frame redraw is an
+    /// O(1) `Arc::clone` instead of a full deep clone of every message (which
+    /// copies large tool outputs + base64 images and is the main lag).
+    pub display_snapshot: std::sync::Arc<Vec<crate::types::ChatMessage>>,
+    /// Session id the snapshot belongs to (None = empty).
+    pub snapshot_session: Option<String>,
+    /// Message count the snapshot was built from.
+    pub snapshot_len: usize,
+    /// Set on in-place message edits (which keep the count unchanged) to force a rebuild.
+    pub display_dirty: bool,
 }
 
 impl ChatApp {
@@ -104,6 +115,10 @@ impl ChatApp {
             selected_agent_index: None,
             reasoning_effort,
             improvements_panel: super::improvements::ImprovementsPanel::new(),
+            display_snapshot: std::sync::Arc::new(Vec::new()),
+            snapshot_session: None,
+            snapshot_len: 0,
+            display_dirty: true,
             remote_n_ctx: 0,
             remote_n_ctx_handle: None,
             remote_n_ctx_arc: None,

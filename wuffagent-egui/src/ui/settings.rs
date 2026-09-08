@@ -22,6 +22,8 @@ pub struct SettingsDialog {
     pub max_messages: usize,
     /// Shared flag to signal the app to open the presets dialog.
     pub show_presets: Arc<Mutex<bool>>,
+    /// Shared config handle (written back on Save/Reset).
+    config: Arc<Mutex<Config>>,
 }
 
 impl SettingsDialog {
@@ -53,10 +55,11 @@ impl SettingsDialog {
             encryption_password: cfg.encryption_password.clone().unwrap_or_default(),
             max_messages: cfg.max_messages,
             show_presets,
+            config: config.clone(),
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, config: &Arc<Mutex<Config>>) -> bool {
+    pub fn show(&mut self, ctx: &egui::Context) -> bool {
         let theme = Theme::from_name(&self.theme);
         let mut closed = false;
         egui::Window::new("Settings")
@@ -186,14 +189,14 @@ impl SettingsDialog {
                         .fill(theme.primary)
                         .rounding(6.0)
                     ).clicked() {
-                        self.save(config);
+                        self.save(self.config.clone());
                         closed = true;
                     }
                     if ui.add(egui::Button::new("Reset")
                         .fill(theme.surface_light)
                         .rounding(6.0)
                     ).clicked() {
-                        *self = SettingsDialog::new(config);
+                        *self = SettingsDialog::new(&self.config);
                     }
                     if ui.add(egui::Button::new("Close")
                         .fill(theme.surface_light)
@@ -206,7 +209,7 @@ impl SettingsDialog {
         closed
     }
 
-    pub fn save(&mut self, config: &Arc<Mutex<Config>>) {
+    pub fn save(&mut self, config: Arc<Mutex<Config>>) {
         let mut cfg = config.lock().unwrap();
         cfg.server_path.clone_from(&self.server_path);
         cfg.model_path.clone_from(&self.model_path);

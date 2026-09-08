@@ -12,16 +12,34 @@ impl ChatApp {
         let theme = Theme::from_name(&self.config.theme);
 
         // Get the current session's chat state, or show empty state
-        let messages = match &self.selected_session_id {
-            Some(sid) => {
-                if let Some(runtime) = self.session_store.get(sid) {
-                    runtime.chat_state.messages.clone()
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-        };
+        // Rebuild the shared message snapshot only when it is stale: the selected
+        // session changed, an in-place edit set `display_dirty`, or the message
+        // count changed (append/remove). Otherwise reuse it — a per-frame redraw is
+        // then an O(1) `Arc::clone` rather than a deep clone of every message
+        // (which copies large tool outputs + base64 images and is the main lag).
+        let selected = self.selected_session_id.clone();
+        let current_len = self
+            .selected_session_id
+            .as_ref()
+            .and_then(|sid| self.session_store.get(sid))
+            .map(|r| r.chat_state.messages.len())
+            .unwrap_or(0);
+        if selected != self.snapshot_session
+            || self.display_dirty
+            || current_len != self.snapshot_len
+        {
+            let msgs = self
+                .selected_session_id
+                .as_ref()
+                .and_then(|sid| self.session_store.get(sid))
+                .map(|r| r.chat_state.messages.clone())
+                .unwrap_or_default();
+            self.snapshot_len = msgs.len();
+            self.snapshot_session = selected;
+            self.display_snapshot = std::sync::Arc::new(msgs);
+            self.display_dirty = false;
+        }
+        let messages = self.display_snapshot.clone();
 
         // Show pending error as inline warning (from the current session)
         if let Some(sid) = &self.selected_session_id {
@@ -37,12 +55,17 @@ impl ChatApp {
 
         // Snapshot streaming state up front so the scroll closure can call
         // `&mut self` helpers without holding an immutable borrow of the store.
-        let streaming = self
+        let (streaming, is_streaming) = self
             .selected_session_id
             .as_ref()
             .and_then(|sid| self.session_store.get(sid))
             .filter(|r| r.chat_state.is_generating)
-            .map(|r| (r.chat_state.current_thinking.clone(), r.chat_state.stream_buffer.clone()))
+            .map(|r| {
+                (
+                    (r.chat_state.current_thinking.clone(), r.chat_state.stream_buffer.clone()),
+                    true,
+                )
+            })
             .unwrap_or_default();
 
         // Stick to bottom when the user is already there or forced the button.
@@ -64,7 +87,11 @@ impl ChatApp {
                         self.draw_message(ui, msg, i, &theme);
                     }
                     // Draw streaming line (values snapshotted before the scroll area).
-                    self.draw_streaming_line(ui, &theme, &streaming);
+                    // Only while a response is actually in flight — otherwise the
+                    // empty-buffer branch would draw a stray "AI:" + spinner.
+                    if is_streaming {
+                        self.draw_streaming_line(ui, &theme, &streaming);
+                    }
                 });
             });
 
@@ -447,6 +474,9 @@ impl ChatApp {
                 runtime.chat_state.editing_message_content.clear();
             }
         }
+        // In-place edit keeps the message count unchanged, so force the display
+        // snapshot to rebuild next frame (the len-based check would miss it).
+        self.display_dirty = true;
     }
 
     /// Parse a tool message and render it with smart formatting.

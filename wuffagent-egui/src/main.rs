@@ -283,7 +283,7 @@ async fn main() -> eframe::Result {
             );
             let cancel_token = tokio_util::sync::CancellationToken::new();
 
-            let runtime = SessionRuntime::new(
+            let mut runtime = SessionRuntime::new(
                 session_id.clone(),
                 session.name.clone(),
                 session_client,
@@ -291,6 +291,13 @@ async fn main() -> eframe::Result {
                 session_engine,
                 cancel_token,
             );
+
+            // Populate the chat display from the loaded conversation so the
+            // restored session's history is visible on startup.
+            {
+                let conv = runtime.client.conversation().clone();
+                runtime.chat_state.reload_messages_from_client(&conv);
+            }
 
             session_store.insert(session_id.clone(), runtime);
             selected_session_id = Some(session_id.clone());

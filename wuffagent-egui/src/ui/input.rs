@@ -435,6 +435,53 @@ impl ChatApp {
         self.start_pipeline_for_session(sid, &next.text, next.image, next.agent_prompt, next.tool_policy, true);
     }
 
+    /// Defensive sweep (called each frame after event processing): for any
+    /// session that is still flagged `is_generating` while its pipeline task is
+    /// already finished, clear the generating state and commit any partial
+    /// stream.
+    ///
+    /// This catches the cases where a terminal event never arrives — most
+    /// commonly when a new `start_pipeline_for_session` call aborts a task that
+    /// was in the middle of emitting its final event, or when the task panics
+    /// — so the chat-area spinner can no longer spin forever.
+    pub(super) fn sweep_finished_pipelines(&mut self) {
+        // Collect the ids that need finalizing (we can't mutate the store while
+        // iterating it).
+        let stuck: Vec<String> = self
+            .session_store
+            .iter()
+            .filter(|(_, rt)| rt.chat_state.is_generating && rt.pipeline.task_done())
+            .map(|(id, _)| id.clone())
+            .collect();
+        if stuck.is_empty() {
+            return;
+        }
+        for sid in stuck {
+            tracing::warn!(
+                "[CHAT PATH] pipeline finished without a terminal event for session {} - clearing generating state",
+                sid
+            );
+            let n_ctx = self.get_effective_n_ctx();
+            let is_selected = self.selected_session_id.as_deref() == Some(sid.as_str());
+            if let Some(runtime) = self.session_store.get_mut(&sid) {
+                runtime.chat_state.commit_stream();
+                runtime.chat_state.is_generating = false;
+                runtime.chat_state.current_thinking.clear();
+                runtime.chat_state.status = AppStatus::Ready;
+                runtime.refresh_token_gauge(n_ctx);
+            }
+            if is_selected {
+                self.status = AppStatus::Ready;
+            }
+            // Persist whatever completed so the turn is not lost on reload.
+            if let Err(e) = self.save_session_for(&sid) {
+                tracing::warn!("Failed to save session after sweep: {}", e);
+            }
+            // A run that ended without an error should still let the queue flow.
+            self.drain_next_queued_message(&sid);
+        }
+    }
+
     /// Load the system prompt of the first matching agent profile.
     /// Searches the same agents directories as `get_agent_names` and
     /// matches the profile's `name` field (not the file name).
@@ -487,7 +534,11 @@ impl ChatApp {
         if let Some(names) = self.agent_engine.available_agent_names() {
             if !names.is_empty() {
                 prompt.push_str(&format!(
-                    "\n\nYou can delegate tasks to other agents using the agent_call tool. Available agents: {}.",
+                    "\n\nYou can delegate tasks to other agents using the agent_call tool. Available agents: {}. \
+                     Prefer your own tools when a task can be done in a single step — \
+                     delegate only when the sub-task needs another agent's specialization, \
+                     since each delegation spawns a full sub-conversation and is more \
+                     expensive than a direct tool call.",
                     names
                 ));
             }

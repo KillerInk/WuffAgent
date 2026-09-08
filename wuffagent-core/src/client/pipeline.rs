@@ -128,6 +128,12 @@ impl ChatPipeline {
             // On success the agent loop already emitted StreamComplete (with
             // usage), so we only surface failures here — re-sending
             // StreamComplete makes the UI append the response a second time.
+            //
+            // A cancel/abort of this task (new `start()`, session drop, stop
+            // button) is handled by the UI's `task_done()` sweep, which clears
+            // the generating state when the task is finished — so we do NOT
+            // emit a terminal event from the cancel branch (that would race
+            // with the sweep and could double-fire).
             if let Err(e) = result {
                 tracing::error!("[CHAT PIPELINE] Failed: {}", e);
                 let _ = event_tx.send(AppEvent::StreamError { error: e.to_string(), session_id });
@@ -135,6 +141,21 @@ impl ChatPipeline {
         });
 
         *self.task_handle.lock().unwrap() = Some(handle);
+    }
+
+    /// Returns true when the pipeline has no task, or the current task has
+    /// finished (completed, failed, or was aborted).
+    ///
+    /// The UI polls this on every frame as a defensive sweep: if
+    /// `is_generating` is still set while the task is done, a terminal event
+    /// was lost (e.g. the task was aborted by a new `start()` before it could
+    /// emit `StreamComplete`/`StreamError`), and the UI clears its generating
+    /// state itself so the spinner cannot get stuck.
+    pub fn task_done(&self) -> bool {
+        match self.task_handle.lock().unwrap().as_ref() {
+            Some(handle) => handle.is_finished(),
+            None => true,
+        }
     }
 
     /// Stop the current chat session.

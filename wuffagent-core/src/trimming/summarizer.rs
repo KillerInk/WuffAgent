@@ -384,6 +384,26 @@ impl ContextTrimming {
         }
     }
 
+    /// Exclusive end index of the tool pair starting at `i`.
+    ///
+    /// A "tool pair" is an assistant message carrying `tool_calls` together
+    /// with the contiguous run of `role: "tool"` results that immediately
+    /// follow it. Removing that whole span keeps call/result pairing intact
+    /// (no orphaned `tool_call_id`, no dangling call). For a lone
+    /// `role: "tool"` message with no preceding assistant in the span
+    /// (defensive; not produced by well-formed history) the pair is just that
+    /// single message.
+    fn tool_pair_end(messages: &[Message], i: usize) -> usize {
+        let is_assistant_call = messages[i].role == "assistant" && messages[i].tool_calls.is_some();
+        let mut j = i + 1;
+        if is_assistant_call {
+            while j < messages.len() && messages[j].role == "tool" {
+                j += 1;
+            }
+        }
+        j.max(i + 1)
+    }
+
     /// Last-resort shrink: halve the largest messages (measured by
     /// `message_tokens`, i.e. content + reasoning + tool-call args — the same
     /// metric the budget uses) until the total fits `target_tokens` or no
@@ -497,7 +517,7 @@ impl ContextTrimming {
             return 0;
         }
 
-        let keep_from = if messages.first().map(|m| m.role.as_str()) == Some("system") { 1 } else { 0 };
+        let mut keep_from = if messages.first().map(|m| m.role.as_str()) == Some("system") { 1 } else { 0 };
 
         if keep_from >= messages.len() {
             return 0;
@@ -561,21 +581,24 @@ impl ContextTrimming {
             // Never remove the last user message — in agent mode it is the
             // task the whole conversation is about, and the server requires at
             // least one user message (a 500 if the last message is not a user).
-            // In that case the summarization/truncation passes handle the budget.
+            // Skip it (advance keep_from) so we can still trim messages AFTER it.
             if let Some(lui) = messages.iter().rposition(|m| m.role == "user") {
-                if keep_from >= lui {
-                    break;
+                if keep_from == lui {
+                    keep_from += 1;
+                    continue;
                 }
             }
-            // Tool rounds are NEVER removed: an assistant message carrying
-            // tool_calls and its `role: "tool"` results stay in place so the
-            // call/result pairing is intact and no empty tool message is ever
-            // produced. They are instead compressed in place by the summarization
-            // pass below (and the truncation fallback as a last resort).
+            // Tool pairs (assistant with tool_calls + its tool results): remove
+            // the entire pair as a unit. The model has already consumed these
+            // results in an older round, so they are safe to drop. Removing the
+            // assistant AND all its tool results together keeps pairing intact.
             if is_paired_at(messages, keep_from) {
-                break;
+                let pair_end = Self::tool_pair_end(messages, keep_from);
+                messages.drain(keep_from..pair_end);
+                removed += pair_end - keep_from;
+                continue;
             }
-            // Only plain user/assistant turns are removed.
+            // Plain user/assistant turn: remove it.
             messages.remove(keep_from);
             removed += 1;
         }
@@ -902,9 +925,11 @@ mod tests {
     }
 
     #[test]
-    fn test_old_tool_result_summarized_in_place_non_empty() {
-        // An over-budget tool result from an EARLIER round must be compressed
-        // in place (pairing preserved, no message removed, content never empty).
+    fn test_old_tool_pair_removed_as_unit_when_over_budget() {
+        // An over-budget tool round from an EARLIER turn is removed as a unit
+        // (assistant-with-tool-calls + its tool results together), so pairing
+        // stays intact and no orphaned tool result / dangling call remains.
+        // The current round (last tool call + its fresh result) is protected.
         let big = (0..500).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
         let fresh = "fresh";
         let mut messages = vec![
@@ -914,19 +939,55 @@ mod tests {
             assistant_tool_call("c2", "{}"),
             tool_result("c2", fresh),
         ];
-        let before_len = messages.len();
 
         let trimming = ContextTrimming::new();
-        trimming.trim_messages(&mut messages, 256, &make_config());
+        let removed = trimming.trim_messages(&mut messages, 256, &make_config());
 
-        // No message dropped: pairing intact.
-        assert_eq!(messages.len(), before_len);
-        let old = &messages[2];
-        assert_eq!(old.role, "tool");
-        assert!(!old.content.is_empty(), "summarized tool result must not be empty");
-        assert!(old.content.len() < big.len(), "old tool result should have been shrunk");
-        // Fresh result still intact.
+        assert!(removed > 0, "an over-budget old round must be removed");
+        assert!(ContextTrimming::message_char_count(&messages) <= 256);
+        // Pairing intact: no tool result without its call, no call without its result.
+        assert_pairs_intact(&messages);
+        // The old pair is gone; the current round's fresh result is intact.
+        assert!(!messages.iter().any(|m| m.tool_call_id.as_deref() == Some("c1")));
+        assert!(messages.iter().any(|m| m.role == "assistant" && m.tool_calls.as_ref().map(|t| t.iter().any(|tc| tc.id == "c2")).unwrap_or(false)));
         assert_eq!(messages.last().unwrap().content, fresh);
+    }
+
+    #[test]
+    fn test_tool_heavy_history_is_trimmed_under_budget() {
+        // Regression: the real-world agent shape — a single leading user task
+        // followed by a long run of tool pairs. The removal loop must NOT stop
+        // at the first tool pair; it must drop consumed rounds until the budget
+        // fits, keeping the protected tail (last tool call + fresh result) intact.
+        let mut messages = vec![user_msg("do the thing")];
+        for i in 0..40 {
+            let cid = format!("call_{i}");
+            let body = (0..200).map(|l| format!("tool output line {l} for {i}")).collect::<Vec<_>>().join("\n");
+            messages.push(assistant_tool_call(&cid, "{\"k\":\"v\"}"));
+            messages.push(tool_result(&cid, &body));
+        }
+        // The current round: a fresh tool call + its result.
+        messages.push(assistant_tool_call("call_fresh", "{\"k\":\"v\"}"));
+        messages.push(tool_result("call_fresh", "FRESH"));
+
+        let initial = ContextTrimming::message_char_count(&messages);
+        let target = 5000usize;
+        assert!(initial > target, "precondition: must start over budget (got {initial})");
+
+        let trimming = ContextTrimming::new();
+        let removed = trimming.trim_messages(&mut messages, target, &make_config());
+
+        assert!(removed > 0, "tool-heavy history must have rounds removed");
+        let final_chars = ContextTrimming::message_char_count(&messages);
+        assert!(
+            final_chars <= target,
+            "after trim must be under budget (final={final_chars} target={target})"
+        );
+        assert_pairs_intact(&messages);
+        // The fresh tail is preserved verbatim.
+        assert_eq!(messages.last().unwrap().content, "FRESH");
+        // The leading task is preserved.
+        assert_eq!(messages.first().unwrap().content, "do the thing");
     }
 
     #[test]

@@ -103,9 +103,54 @@ impl ChatAreaState {
         });
     }
 
-    /// Reload the chat display from the client's current conversation.
-    pub fn reload_messages_from_client(&mut self) {
+    /// Populate the chat display from the client's current conversation
+    /// (e.g. after loading a persisted session from disk). Preserves each
+    /// message's stored timestamp and renders tool results / reasoning
+    /// content with their proper display kinds.
+    pub fn reload_messages_from_client(
+        &mut self,
+        conversation: &std::sync::Arc<std::sync::Mutex<Vec<crate::types::Message>>>,
+    ) {
         self.messages.clear();
+        let conv = conversation.lock().unwrap();
+        for msg in conv.iter() {
+            let ts = if msg.timestamp.is_empty() {
+                crate::types::format_timestamp()
+            } else {
+                msg.timestamp.clone()
+            };
+            if msg.role == "system" {
+                continue; // system prompt is not a chat display message
+            }
+            let kind = if msg.role == "tool" {
+                crate::types::MessageKind::Tool
+            } else {
+                crate::types::MessageKind::Normal
+            };
+            // Surface stored reasoning as its own dim/italic message,
+            // ordered before the assistant text it belongs to.
+            if let Some(ref thinking) = msg.reasoning_content {
+                if !thinking.is_empty() {
+                    self.messages.push(crate::types::ChatMessage {
+                        kind: crate::types::MessageKind::Thinking,
+                        role: msg.role.clone(),
+                        content: thinking.clone(),
+                        timestamp: ts.clone(),
+                        image: None,
+                    });
+                }
+            }
+            self.messages.push(crate::types::ChatMessage {
+                kind,
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                timestamp: ts,
+                image: None,
+            });
+        }
+        drop(conv);
+        // Jump the view to the bottom of the loaded history on next frame.
+        self.scroll_to_bottom_requested = true;
     }
 }
 
@@ -172,17 +217,16 @@ impl SessionRuntime {
 
     /// Refresh this session's token gauge using the exact char counter shared
     /// with the trim logic — the gauge always reflects what the trimmer sees.
-    /// Sets `token_count` (approximate tokens) and `context_used` (percent of
-    /// the effective n_ctx budget). Used as a fallback for backends that omit
-    /// per-round usage stats.
+    /// Sets `token_count` (approximate tokens via the client's calibrated
+    /// chars-per-token ratio) and `context_used` (percent of the effective
+    /// n_ctx budget). Used as a fallback for backends that omit per-round
+    /// usage stats.
     pub fn refresh_token_gauge(&mut self, n_ctx: u32) {
         let chars = crate::client::estimate_conversation_tokens(self.client.conversation());
-        self.chat_state.token_count = chars / crate::client::CHARS_PER_TOKEN;
+        self.chat_state.token_count = self.client.estimate_tokens_from_chars(chars);
         if n_ctx > 0 {
-            // Both numerator and denominator are in char units, so the ratio
-            // is a true percentage of the context window.
             self.chat_state.context_used =
-                chars as f32 / (n_ctx as f32 * crate::client::CHARS_PER_TOKEN as f32) * 100.0;
+                self.chat_state.token_count as f32 / n_ctx as f32 * 100.0;
         }
     }
 }

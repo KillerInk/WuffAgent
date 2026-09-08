@@ -41,20 +41,25 @@ impl ChatApp {
         });
     }
 
-    /// Returns true when in remote connection mode.
-    pub(super) fn is_remote_mode(&self) -> bool {
-        self.config.connection_type == crate::config::ConnectionType::Remote
+    /// Returns the effective n_ctx for trim/gauge budgeting.
+    ///
+    /// Prefers the value the connected server reports via `/props` (fetched in
+    /// BOTH local and remote mode — the server is the source of truth). While
+    /// that value has not been fetched yet (0), we return 0 — NOT a fallback to
+    /// the local config. Substituting the config value here was the bug that
+    /// made the server's real limit invisible: the trimmer ran on the wrong
+    /// (4096) budget even though the server allowed more. A 0 return safely
+    /// disables trimming (`n_ctx() > 0` guards in the agent/client loop) until
+    /// the real value arrives.
+    pub(super) fn get_effective_n_ctx(&self) -> u32 {
+        self.remote_n_ctx
     }
 
-    /// Returns the effective n_ctx for display and percentage calculations.
-    /// Local mode: uses the configured n_ctx (we control the server process).
-    /// Remote mode: uses the n_ctx fetched from the remote server's /props endpoint.
-    pub(super) fn get_effective_n_ctx(&self) -> u32 {
-        if self.is_remote_mode() && self.remote_n_ctx > 0 {
-            self.remote_n_ctx
-        } else {
-            self.server.get_n_ctx()
-        }
+    /// Returns true when the connected server's /props n_ctx has not been
+    /// fetched yet. Used to show "…" in the bottom bar instead of a misleading
+    /// value.
+    pub(super) fn remote_props_unknown(&self) -> bool {
+        self.remote_n_ctx == 0
     }
 
     pub(super) fn draw_bottom_bar(&self, ui: &mut egui::Ui) {
@@ -93,9 +98,16 @@ impl ChatApp {
             
             ui.separator();
             
-            // Server specs
+            // Server specs. In remote mode before /props has been fetched,
+            // show "…" rather than the local config's n_ctx (which is not the
+            // remote server's limit and would be misleading).
+            let ctx_label = if self.remote_props_unknown() {
+                "…".to_string()
+            } else {
+                n_ctx.to_string()
+            };
             ui.add(egui::Label::new(
-                egui::RichText::new(format!("Ctx: {} | GPU: {} | Threads: {}", n_ctx, n_gpu_layers, threads))
+                egui::RichText::new(format!("Ctx: {} | GPU: {} | Threads: {}", ctx_label, n_gpu_layers, threads))
                     .color(theme.text_dim)
                     .size(11.0)
             ).wrap());

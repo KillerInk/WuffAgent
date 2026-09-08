@@ -21,7 +21,7 @@ pub use session::{
     save_session, load_session,
     enqueue_save_failure, retry_pending_saves, has_save_failure,
     clear_save_failure,
-    CHARS_PER_TOKEN, trim_conversation, clear_history, clear_session_messages,
+    trim_conversation, clear_history, clear_session_messages,
 };
 // Re-export trimming helpers for backward compatibility
 pub use crate::trimming::{estimate_tokens, message_char_count, ContextTrimming};
@@ -45,6 +45,56 @@ pub fn estimate_conversation_tokens(conversation: &std::sync::Arc<std::sync::Mut
     message_char_count(&conversation.lock().unwrap())
 }
 
+/// Details from a server `exceed_context_size_error` (HTTP 400): the prompt
+/// size that was sent and the server's actual context window. Lets the caller
+/// derive the true chars/token ratio from the failing request and force-trim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextOverflow {
+    pub n_prompt: u32,
+    pub n_ctx: u32,
+}
+
+/// Parse a server `exceed_context_size_error` (HTTP 400) into the reported
+/// prompt size and context window, so the caller can force-trim to fit and
+/// retry. Returns `None` for any other error.
+pub fn parse_context_overflow(err: &Error) -> Option<ContextOverflow> {
+    let Error::Http(msg) = err else {
+        return None;
+    };
+    // Error format: "Server returned 400 Bad Request: {json body}[trailing text]"
+    let body_start = msg.find('{')?;
+    let body_end = msg.rfind('}')?;
+    if body_end <= body_start {
+        return None;
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&msg[body_start..=body_end]).ok()?;
+    let e = v.get("error")?;
+    if e.get("type").and_then(|t| t.as_str()) != Some("exceed_context_size_error") {
+        return None;
+    }
+    let n_prompt = e.get("n_prompt_tokens")?.as_u64()? as u32;
+    let n_ctx = e.get("n_ctx").and_then(|t| t.as_u64()).unwrap_or(n_prompt as u64) as u32;
+    Some(ContextOverflow { n_prompt, n_ctx })
+}
+
+/// Extract the server's `n_ctx` from a llama.cpp `/props` response body.
+///
+/// Servers report it under `default_generation_settings.n_ctx`; some builds or
+/// proxies also expose it at the top level. The nested path wins, then
+/// top-level. Returns `None` when the body is not JSON or neither field is a
+/// number — callers treat that as "limit unknown" (trimming disabled) rather
+/// than guessing a fallback.
+pub fn parse_props_n_ctx(body: &str) -> Option<u32> {
+    let props: serde_json::Value = serde_json::from_str(body).ok()?;
+    props
+        .get("default_generation_settings")
+        .and_then(|s| s.get("n_ctx"))
+        .or_else(|| props.get("n_ctx"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+}
+
 #[derive(Clone)]
 pub struct ChatClient {
     base_url: String,
@@ -52,7 +102,9 @@ pub struct ChatClient {
     /// Reasoning effort level for reasoning models (Off = omitted from requests).
     reasoning_effort: crate::types::ReasoningEffort,
     conversation: Arc<Mutex<Vec<Message>>>,
-    http_client: reqwest::Client,
+    /// Shared so `ChatClient::clone` is a cheap pointer bump instead of
+    /// deep-copying the reqwest connection pool + TLS state.
+    http_client: Arc<reqwest::Client>,
     /// Dedicated client for SSE streaming requests.
     ///
     /// Uses connect + read (idle) timeouts instead of a *total* request
@@ -61,7 +113,7 @@ pub struct ChatClient {
     /// "error decoding response body"). The read timeout only fires when
     /// the connection stays silent for the given duration, so streams of
     /// arbitrary length survive as long as tokens keep flowing.
-    stream_http_client: reqwest::Client,
+    stream_http_client: Arc<reqwest::Client>,
     api_key: Option<String>,
     session_id: Option<String>,
     session_dir: PathBuf,
@@ -72,6 +124,17 @@ pub struct ChatClient {
     /// (e.g. from the remote server's /props) without cloning the client:
     /// every holder of a clone reads/writes the same value.
     n_ctx: Arc<std::sync::atomic::AtomicU32>,
+    /// Calibrated chars-per-token ratio × 100 (350 = 3.5 chars/token).
+    ///
+    /// Updated after every successful round from the server-reported
+    /// `usage.prompt_tokens`, so the estimate converges on the actual
+    /// tokenizer / content mix instead of a static constant — which was
+    /// either too low (trim destroyed most of the window on English prose)
+    /// or too high (the server rejected the request first).
+    chars_per_token_x100: Arc<std::sync::atomic::AtomicU32>,
+    /// Estimator char count of the last request's prompt, paired with
+    /// `usage.prompt_tokens` by [`ChatClient::calibrate_from_usage`].
+    last_prompt_chars: Arc<Mutex<usize>>,
     /// Queue of pending save operations when a save fails.
     save_queue: Arc<Mutex<VecDeque<()>>>,
     /// Whether a save failure notification should be shown in the UI.
@@ -130,6 +193,11 @@ impl ChatClient {
     /// Default HTTP timeout of 5 minutes.
     const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
+    /// Default chars-per-token ratio (×100) before the server has reported
+    /// any usage: 3.5 chars/token, typical for BPE tokenizers on
+    /// English/code content.
+    const DEFAULT_CHARS_PER_TOKEN_X100: u32 = 350;
+
     pub fn new(base_url: &str) -> Self {
         Self::new_with_timeout(base_url, Self::DEFAULT_TIMEOUT_SECS)
     }
@@ -142,7 +210,7 @@ impl ChatClient {
             system_prompt: String::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
             conversation: Arc::new(Mutex::new(Vec::new())),
-            http_client: {
+            http_client: Arc::new({
                 // Non-streaming calls: total request timeout is fine
                 // (short round-trips).
                 reqwest::Client::builder()
@@ -151,8 +219,8 @@ impl ChatClient {
                     .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
                     .build()
                     .unwrap()
-            },
-            stream_http_client: {
+            }),
+            stream_http_client: Arc::new({
                 // Streaming calls: NO total timeout — generation can
                 // legitimately run for many minutes. The read timeout
                 // acts as an idle/dead-connection guard instead.
@@ -163,12 +231,16 @@ impl ChatClient {
                     .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
                     .build()
                     .unwrap()
-            },
+            }),
             api_key: None,
             session_id: None,
             session_dir: PathBuf::new(),
             max_messages: 100,
             n_ctx: Arc::new(std::sync::atomic::AtomicU32::new(4096)),
+            chars_per_token_x100: Arc::new(std::sync::atomic::AtomicU32::new(
+                Self::DEFAULT_CHARS_PER_TOKEN_X100,
+            )),
+            last_prompt_chars: Arc::new(Mutex::new(0)),
             save_queue: Arc::new(Mutex::new(VecDeque::new())),
             save_failed: Arc::new(Mutex::new(false)),
             encryption_key: None,
@@ -193,6 +265,100 @@ impl ChatClient {
 
     pub fn n_ctx(&self) -> u32 {
         self.n_ctx.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Calibrated chars-per-token ratio (×100). Falls back to the static
+    /// default until the server has reported real usage.
+    pub fn chars_per_token_x100(&self) -> u32 {
+        self.chars_per_token_x100.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Estimate the token count of `chars` of content using the calibrated
+    /// ratio. Clamped to `chars` (a token is never shorter than 1 char, so
+    /// this is a guaranteed over-estimate and never an under-estimate).
+    pub fn estimate_tokens_from_chars(&self, chars: usize) -> usize {
+        let c = self
+            .chars_per_token_x100
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(100) as usize;
+        chars.saturating_mul(100) / c
+    }
+
+    /// Trim budget in char units for the current n_ctx: 90% of the window,
+    /// converted from tokens to chars via the calibrated ratio.
+    pub fn trim_budget_chars(&self) -> usize {
+        let n_ctx = self.n_ctx();
+        if n_ctx == 0 {
+            return 0;
+        }
+        // n_ctx tokens × 0.9 × (c / 100) chars/token
+        let c = self
+            .chars_per_token_x100
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(100) as u64;
+        ((n_ctx as u64) * 90 * c / 10_000) as usize
+    }
+
+    /// Record the estimator char count of a prompt about to be sent, so the
+    /// next [`Self::calibrate_from_usage`] can compare it against the
+    /// server-reported `prompt_tokens`.
+    pub fn note_prompt_chars(&self, chars: usize) {
+        *self.last_prompt_chars.lock().unwrap() = chars;
+    }
+
+    /// Update the chars-per-token calibration from a server-reported
+    /// `usage.prompt_tokens`. Clamped to [1.0, 10.0] chars/token — anything
+    /// outside that range indicates a measurement glitch (e.g. a server that
+    /// counts only a subset of messages) and is ignored.
+    pub fn calibrate_from_usage(&self, usage: Option<&Usage>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        let prompt_tokens = usage.prompt_tokens;
+        if prompt_tokens == 0 {
+            return;
+        }
+        let chars = *self.last_prompt_chars.lock().unwrap();
+        if chars == 0 {
+            return;
+        }
+        // ratio × 100 = chars / prompt_tokens × 100
+        let ratio_x100 = (chars as u64) * 100 / prompt_tokens as u64;
+        let clamped = ratio_x100.clamp(100, 1000);
+        self.chars_per_token_x100
+            .store(clamped as u32, std::sync::atomic::Ordering::Relaxed);
+        tracing::debug!(
+            "calibrated chars/token to {:.2} (chars={}, prompt_tokens={})",
+            clamped as f32 / 100.0,
+            chars,
+            prompt_tokens
+        );
+    }
+
+    /// Measure the true chars/token ratio from a just-failed overflow request
+    /// (the prompt we noted via [`Self::note_prompt_chars`] vs. the server's
+    /// reported `n_prompt_tokens`), update the calibration, and return the
+    /// **char** budget to trim the retry down to: 85% of the reported window.
+    /// Falls back to the current calibration when the measurement is unusable.
+    pub fn overflow_retry_char_budget(&self, ov: &ContextOverflow) -> usize {
+        let chars = *self.last_prompt_chars.lock().unwrap();
+        if ov.n_prompt > 0 && chars > 0 {
+            let ratio_x100 =
+                ((chars as u64) * 100 / ov.n_prompt as u64).clamp(100, 1000);
+            self.chars_per_token_x100
+                .store(ratio_x100 as u32, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!(
+                "overflow measured chars/token = {:.2} (chars={}, n_prompt={})",
+                ratio_x100 as f32 / 100.0,
+                chars,
+                ov.n_prompt
+            );
+        }
+        let ratio_x100 = self
+            .chars_per_token_x100
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(100) as u64;
+        ((ov.n_ctx as u64) * 85 * ratio_x100) as usize / 10_000
     }
 
     pub fn set_url(&mut self, url: &str) {
@@ -371,21 +537,69 @@ impl ChatClient {
         messages: &[Message],
         tools: Option<&[crate::tools::ToolDefinition]>,
     ) -> Result<(String, Option<Usage>), Error> {
+        let mut msgs = messages.to_vec();
         let request = ChatRequest {
             model: "local".to_string(),
-            messages: messages.to_vec(),
+            messages: msgs.clone(),
             stream: false,
             tools: tools.map(|t| t.to_vec()),
             reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
             stream_options: Some(http::StreamOptions { include_usage: true }),
         };
-        send_message(
+        self.note_prompt_chars(message_char_count(&msgs));
+        let result = send_message(
             &self.http_client,
             &self.base_url,
             self.api_key.as_deref(),
             &request,
         )
-        .await
+        .await;
+
+        // Backstop: the estimator is a heuristic — if the server still
+        // rejects the request as over-context, force-trim the message list
+        // to 80% of the reported prompt size and retry once.
+        let result = match result {
+            Err(e) if parse_context_overflow(&e).is_some() => {
+                if let Some(ov) = parse_context_overflow(&e) {
+                    tracing::warn!(
+                        "complete_messages exceeded context ({} tokens, n_ctx={}); force-trimming and retrying",
+                        ov.n_prompt, ov.n_ctx
+                    );
+                    let target = self.overflow_retry_char_budget(&ov);
+                    Self::trim_to_token_budget_messages(&mut msgs, target);
+                    let request2 = ChatRequest {
+                        model: "local".to_string(),
+                        messages: msgs.clone(),
+                        stream: false,
+                        tools: tools.map(|t| t.to_vec()),
+                        reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
+                        stream_options: Some(http::StreamOptions { include_usage: true }),
+                    };
+                    self.note_prompt_chars(message_char_count(&msgs));
+                    match send_message(
+                        &self.http_client,
+                        &self.base_url,
+                        self.api_key.as_deref(),
+                        &request2,
+                    )
+                    .await
+                    {
+                        Ok(ok) => {
+                            self.calibrate_from_usage(ok.1.as_ref());
+                            Ok(ok)
+                        }
+                        Err(re) => Err(re),
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
+            other => other,
+        };
+
+        let (content, usage) = result?;
+        self.calibrate_from_usage(usage.as_ref());
+        Ok((content, usage))
     }
 
     pub async fn send_message_with_tools(
@@ -402,13 +616,60 @@ impl ChatClient {
             self.reasoning_effort,
             self.n_ctx(),
         );
-        let (content, usage) = send_message(
+        self.note_prompt_chars(message_char_count(&request.messages));
+        let result = send_message(
             &self.http_client,
             &self.base_url,
             self.api_key.as_deref(),
             &request,
         )
-        .await?;
+        .await;
+
+        // Backstop: the estimator is a heuristic — if the server still
+        // rejects the request as over-context, force-trim to 80% of the
+        // reported prompt size and retry once.
+        let result = match result {
+            Err(e) if parse_context_overflow(&e).is_some() => {
+                if let Some(ov) = parse_context_overflow(&e) {
+                    tracing::warn!(
+                        "request exceeded context ({} tokens, n_ctx={}); force-trimming and retrying",
+                        ov.n_prompt, ov.n_ctx
+                    );
+                    let target = self.overflow_retry_char_budget(&ov);
+                    self.trim_conversation(self.max_messages);
+                    self.trim_to_token_budget(target);
+                    let request2 = build_request(
+                        &self.system_prompt,
+                        &self.conversation,
+                        prompt,
+                        false,
+                        tools,
+                        self.reasoning_effort,
+                        self.n_ctx(),
+                    );
+                    self.note_prompt_chars(message_char_count(&request2.messages));
+                    let retry = send_message(
+                        &self.http_client,
+                        &self.base_url,
+                        self.api_key.as_deref(),
+                        &request2,
+                    )
+                    .await;
+                    match retry {
+                        Ok(ok) => {
+                            self.calibrate_from_usage(ok.1.as_ref());
+                            Ok(ok)
+                        }
+                        Err(re) => Err(re),
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
+            other => other,
+        };
+
+        let (content, usage) = result?;
 
         // Update conversation history
         let mut conv = self.conversation.lock().unwrap();
@@ -430,12 +691,16 @@ impl ChatClient {
         });
         drop(conv);
 
+        // Calibrate the chars/token ratio from the server's real count so
+        // subsequent trim budgets track the actual tokenizer.
+        self.calibrate_from_usage(usage.as_ref());
+
         // Only trim once the context limit is reached (same policy as the
-        // streaming chat loop): while the exact char count stays below 90% of
-        // n_ctx (in char units), the full history is kept.
+        // streaming chat loop): while the estimated token count stays below
+        // 90% of n_ctx, the full history is kept.
         let n_ctx = self.n_ctx();
         if n_ctx > 0 {
-            let target_chars = n_ctx as usize * session::CHARS_PER_TOKEN * 9 / 10;
+            let target_chars = self.trim_budget_chars();
             if estimate_conversation_tokens(&self.conversation) > target_chars {
                 self.trim_conversation(self.max_messages);
                 self.trim_to_token_budget(target_chars);
@@ -636,6 +901,131 @@ mod tests {
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].role, "user");
         assert_eq!(request.messages[0].content, "Hello");
+    }
+
+    #[test]
+    fn test_calibrate_from_usage() {
+        let client = ChatClient::new("http://localhost:8080");
+        assert_eq!(client.chars_per_token_x100(), 350); // default 3.5
+
+        // 10000 chars -> 3000 tokens => ratio 3.333
+        client.note_prompt_chars(10_000);
+        client.calibrate_from_usage(Some(&crate::types::Usage {
+            prompt_tokens: 3000,
+            completion_tokens: 100,
+            total_tokens: 3100,
+        }));
+        assert_eq!(client.chars_per_token_x100(), 333);
+
+        // CJK content: 500 chars -> 500 tokens => ratio 1.0 (clamped lower bound)
+        client.note_prompt_chars(500);
+        client.calibrate_from_usage(Some(&crate::types::Usage {
+            prompt_tokens: 500,
+            completion_tokens: 10,
+            total_tokens: 510,
+        }));
+        assert_eq!(client.chars_per_token_x100(), 100);
+
+        // No usage / zero tokens: ratio unchanged
+        client.note_prompt_chars(1000);
+        client.calibrate_from_usage(None);
+        client.calibrate_from_usage(Some(&crate::types::Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        }));
+        assert_eq!(client.chars_per_token_x100(), 100);
+
+        // Glitched measurement (ratio 100.0) clamps to the 10.0 upper bound
+        client.note_prompt_chars(1000);
+        client.calibrate_from_usage(Some(&crate::types::Usage {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            total_tokens: 1,
+        }));
+        assert_eq!(client.chars_per_token_x100(), 1000);
+    }
+
+    #[test]
+    fn test_trim_budget_chars_uses_calibrated_ratio() {
+        let client = ChatClient::new("http://localhost:8080");
+        client.set_n_ctx(100_096);
+        // Default 3.5 chars/token: 100096 × 0.9 × 3.5 = 315292.8 → 315292
+        assert_eq!(client.trim_budget_chars(), (100_096u64 * 90 * 350 / 10_000) as usize);
+
+        // Calibrate to 3.0 chars/token (English prose): budget shrinks
+        client.note_prompt_chars(30_000);
+        client.calibrate_from_usage(Some(&crate::types::Usage {
+            prompt_tokens: 10_000,
+            completion_tokens: 0,
+            total_tokens: 10_000,
+        }));
+        assert_eq!(client.trim_budget_chars(), (100_096u64 * 90 * 300 / 10_000) as usize);
+
+        // n_ctx = 0 → no budget
+        client.set_n_ctx(0);
+        assert_eq!(client.trim_budget_chars(), 0);
+    }
+
+    #[test]
+    fn test_estimate_tokens_from_chars_over_estimates() {
+        let client = ChatClient::new("http://localhost:8080");
+        // Default 3.5: 7000 chars => 2000 tokens
+        assert_eq!(client.estimate_tokens_from_chars(7000), 2000);
+        // Never an under-estimate: at ratio 1.0 tokens == chars
+        client.note_prompt_chars(500);
+        client.calibrate_from_usage(Some(&crate::types::Usage {
+            prompt_tokens: 500,
+            completion_tokens: 0,
+            total_tokens: 500,
+        }));
+        assert_eq!(client.estimate_tokens_from_chars(1234), 1234);
+    }
+
+    #[test]
+    fn test_parse_context_overflow() {
+        let body = r#"{"error":{"code":400,"message":"request (104102 tokens) exceeds the available context size (100096 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":104102,"n_ctx":100096}}"#;
+        let err = Error::Http(format!("Server returned 400 Bad Request: {}", body));
+        let ov = parse_context_overflow(&err).expect("should parse overflow");
+        assert_eq!(ov.n_prompt, 104_102);
+        assert_eq!(ov.n_ctx, 100_096);
+
+        // Other 400 errors must not trigger a force-trim retry.
+        let err = Error::Http(
+            "Server returned 400 Bad Request: {\"error\":{\"message\":\"bad request\"}}"
+                .to_string(),
+        );
+        assert_eq!(parse_context_overflow(&err), None);
+
+        // Non-HTTP errors never match.
+        assert_eq!(parse_context_overflow(&Error::Cancelled), None);
+        assert_eq!(parse_context_overflow(&Error::Stream("boom".into())), None);
+    }
+
+    #[test]
+    fn test_parse_props_n_ctx_nested() {
+        let body = r#"{"default_generation_settings":{"n_ctx":8192,"temp":0.8}}"#;
+        assert_eq!(parse_props_n_ctx(body), Some(8192));
+    }
+
+    #[test]
+    fn test_parse_props_n_ctx_top_level_fallback() {
+        let body = r#"{"n_ctx":16384,"models":[]}"#;
+        assert_eq!(parse_props_n_ctx(body), Some(16384));
+    }
+
+    #[test]
+    fn test_parse_props_n_ctx_nested_wins() {
+        let body = r#"{"n_ctx":4096,"default_generation_settings":{"n_ctx":32768}}"#;
+        assert_eq!(parse_props_n_ctx(body), Some(32768));
+    }
+
+    #[test]
+    fn test_parse_props_n_ctx_absent_or_invalid() {
+        assert_eq!(parse_props_n_ctx(r#"{"models":[]}"#), None);
+        assert_eq!(parse_props_n_ctx(r#"{"default_generation_settings":{}}"#), None);
+        assert_eq!(parse_props_n_ctx("not json"), None);
+        assert_eq!(parse_props_n_ctx(""), None);
     }
 
     #[test]

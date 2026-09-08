@@ -32,10 +32,12 @@ pub struct PresetsDialog {
     pub message: Option<String>,
     /// The store (loaded from disk on open).
     pub store: PresetStore,
+    /// Shared config handle (written back when a preset is applied).
+    config: Arc<Mutex<Config>>,
 }
 
 impl PresetsDialog {
-    pub fn new(store: PresetStore) -> Self {
+    pub fn new(store: PresetStore, config: &Arc<Mutex<Config>>) -> Self {
         Self {
             selected_index: None,
             show_add_form: false,
@@ -51,10 +53,11 @@ impl PresetsDialog {
             new_remote_api_key: String::new(),
             message: None,
             store,
+            config: config.clone(),
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, config: &Arc<Mutex<Config>>) -> bool {
+    pub fn show(&mut self, ctx: &egui::Context) -> bool {
         let mut closed = false;
         egui::Window::new("Presets")
             .collapsible(false)
@@ -64,7 +67,7 @@ impl PresetsDialog {
 
                 self.draw_list(ui);
                 ui.separator();
-                self.draw_actions(ui, config);
+                self.draw_actions(ui, self.config.clone());
                 if self.show_add_form {
                     ui.separator();
                     self.draw_add_form(ui);
@@ -144,7 +147,7 @@ impl PresetsDialog {
         });
     }
 
-    fn draw_actions(&mut self, ui: &mut egui::Ui, config: &Arc<Mutex<Config>>) {
+    fn draw_actions(&mut self, ui: &mut egui::Ui, config: Arc<Mutex<Config>>) {
         ui.horizontal(|ui| {
             let has_selection = self.selected_index.is_some();
             if ui.add_enabled(has_selection, egui::Button::new("Load")).clicked() {

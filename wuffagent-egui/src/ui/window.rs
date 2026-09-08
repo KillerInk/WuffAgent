@@ -12,7 +12,7 @@ impl ChatApp {
                 Some(super::settings::SettingsDialog::new_with_presets_flag(&Arc::new(Mutex::new(self.config.clone())), show_presets));
         }
         if let Some(dialog) = self.settings_dialog.as_mut() {
-            let closed = dialog.show(ctx, &Arc::new(Mutex::new(self.config.clone())));
+            let closed = dialog.show(ctx);
             if closed {
                 self.show_settings = false;
                 self.settings_dialog = None;
@@ -30,8 +30,10 @@ impl ChatApp {
                     }
                     if self.presets_dialog.is_none() {
                         if let Ok(store) = PresetStore::load(&get_presets_path()) {
-                            self.presets_dialog =
-                                Some(super::presets_dialog::PresetsDialog::new(store));
+                            self.presets_dialog = Some(super::presets_dialog::PresetsDialog::new(
+                                store,
+                                &Arc::new(Mutex::new(self.config.clone())),
+                            ));
                         }
                     }
                 }
@@ -39,7 +41,7 @@ impl ChatApp {
         }
 
         if let Some(dialog) = self.presets_dialog.as_mut() {
-            let closed = dialog.show(ctx, &Arc::new(Mutex::new(self.config.clone())));
+            let closed = dialog.show(ctx);
             if closed {
                 if let Ok(path) = std::env::current_exe() {
                     if let Some(dir) = path.parent() {
@@ -183,6 +185,13 @@ impl ChatApp {
         self.session_store.insert(id.to_string(), runtime);
         self.selected_session_id = Some(id.to_string());
 
+        // Populate the chat display from the conversation we just loaded
+        // from disk so the history is visible immediately.
+        if let Some(runtime) = self.session_store.get_mut(id) {
+            let conv = runtime.client.conversation().clone();
+            runtime.chat_state.reload_messages_from_client(&conv);
+        }
+
         // Refresh the token gauge from the loaded conversation (exact char
         // counter, same units the trimmer uses).
         let n_ctx = self.get_effective_n_ctx();
@@ -199,51 +208,89 @@ impl eframe::App for ChatApp {
             ctx.request_repaint();
         }
 
-        // Fetch remote server props periodically (every ~5s while connected)
-        if self.is_remote_mode() && self.remote_n_ctx == 0 {
+        // Fetch the connected server's /props (n_ctx) in BOTH local and remote
+        // mode. The server is the source of truth for the context limit: in
+        // remote mode it is the only way to learn the limit, and in local mode
+        // it catches a mismatch between the configured n_ctx and what the
+        // server actually reports. The first fetch happens immediately so the
+        // real context limit is available for the first chat turn; it retries
+        // every 5s until the value arrives (e.g. a local server that is still
+        // starting up).
+        if self.remote_n_ctx_handle.is_none() {
             let config = self.config.clone();
-            let remote_n_ctx = Arc::new(std::sync::atomic::AtomicU32::new(0));
-            let remote_n_ctx_clone = remote_n_ctx.clone();
-            if self.remote_n_ctx_handle.is_none() {
-                let handle = tokio::spawn(async move {
-                    loop {
+            let server_n_ctx = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let server_n_ctx_clone = Arc::clone(&server_n_ctx);
+            let handle = tokio::spawn(async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                loop {
+                    let url = config.base_url();
+                    if url.is_empty() {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        let url = config.remote_url.clone();
-                        if url.is_empty() {
-                            continue;
+                        continue;
+                    }
+                    let props_url = format!("{}/props", url.trim_end_matches('/'));
+                    let got_n_ctx = match client.get(&props_url).send().await {
+                        Err(e) => {
+                            tracing::warn!("props fetch failed ({}): {}", props_url, e);
+                            None
                         }
-                        let props_url = format!("{}/props", url.trim_end_matches('/'));
-                        if let Ok(resp) = reqwest::get(&props_url).await {
-                            if resp.status().is_success() {
-                                if let Ok(text) = resp.text().await {
-                                    if let Ok(props) = serde_json::from_str::<serde_json::Value>(&text) {
-                                        if let Some(n_ctx) = props
-                                            .get("default_generation_settings")
-                                            .and_then(|s| s.get("n_ctx"))
-                                            .and_then(|v| v.as_u64())
-                                        {
-                                            remote_n_ctx_clone.store(n_ctx as u32, std::sync::atomic::Ordering::Relaxed);
-                                            tracing::info!("Remote server n_ctx: {}", n_ctx);
+                        Ok(resp) => {
+                            if !resp.status().is_success() {
+                                tracing::warn!(
+                                    "props fetch returned HTTP {} for {}",
+                                    resp.status(),
+                                    props_url
+                                );
+                                None
+                            } else {
+                                match resp.text().await {
+                                    Ok(text) => match crate::client::parse_props_n_ctx(&text) {
+                                        Some(n_ctx) => {
+                                            tracing::info!("Server n_ctx: {}", n_ctx);
+                                            Some(n_ctx)
                                         }
+                                        None => {
+                                            tracing::warn!(
+                                                "props response has no n_ctx (tried default_generation_settings.n_ctx and top-level n_ctx); body (first 500 chars): {}",
+                                                &text.chars().take(500).collect::<String>()
+                                            );
+                                            None
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::warn!("props body read failed: {}", e);
+                                        None
                                     }
                                 }
                             }
                         }
+                    };
+                    if let Some(n_ctx) = got_n_ctx {
+                        server_n_ctx_clone.store(n_ctx, std::sync::atomic::Ordering::Relaxed);
+                        return;
                     }
-                });
-                self.remote_n_ctx_handle = Some(handle);
-                self.remote_n_ctx_arc = Some(remote_n_ctx);
-            }
-            // Read current value each frame
-            if let Some(arc) = &self.remote_n_ctx_arc {
-                self.remote_n_ctx = arc.load(std::sync::atomic::Ordering::Relaxed);
-            }
-        } else if let Some(arc) = &self.remote_n_ctx_arc {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
+            self.remote_n_ctx_handle = Some(handle);
+            self.remote_n_ctx_arc = Some(server_n_ctx);
+        }
+        // Read current value each frame
+        if let Some(arc) = &self.remote_n_ctx_arc {
             self.remote_n_ctx = arc.load(std::sync::atomic::Ordering::Relaxed);
         }
 
         // Process any pending async results first
         self.process_pending_events();
+        // Defensive sweep: if a session is still flagged as generating but its
+        // pipeline task is already done, a terminal event was lost (e.g. the
+        // task was aborted by a new `start()` before it could emit
+        // StreamComplete/StreamError, or it panicked). Clear the generating
+        // state and commit any partial stream so the spinner can't get stuck.
+        self.sweep_finished_pipelines();
         // Retry any pending session saves for the selected session
         if let Some(client) = self.active_client() {
             client.retry_pending_saves();

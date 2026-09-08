@@ -97,7 +97,16 @@ impl Agent {
         // /plan paths.
         let tool_manager = {
             let shared = tool_manager.lock().unwrap();
-            Arc::new(Mutex::new(shared.with_shell_config(config.get_shell_config())))
+            let tm = shared.with_shell_config(config.get_shell_config());
+            // Enforce the agent's `can_invoke` list on `agent_call`: a non-empty
+            // list restricts the tool to those targets, an empty list removes
+            // the tool from the schema entirely so the agent cannot delegate.
+            let tm = if config.can_invoke.is_empty() {
+                tm.with_agent_call_allowlist(&invocation_registry, None)
+            } else {
+                tm.with_agent_call_allowlist(&invocation_registry, Some(&config.can_invoke))
+            };
+            Arc::new(Mutex::new(tm))
         };
         Self {
             id: AgentId::generate(),
@@ -280,11 +289,19 @@ impl Agent {
             self.config.system_prompt.clone()
         };
 
-        // Add available agents for delegation
-        let available_agents = self.invocation_registry.names();
-        if !available_agents.is_empty() {
-            prompt.push_str("\n\nYou can delegate tasks to other agents using the agent_call tool. Available agents: ");
-            prompt.push_str(&available_agents.join(", "));
+        // Add available agents for delegation. Only list the agents this agent
+        // is allowed to invoke (`can_invoke`); when the list is empty the
+        // agent_call tool is removed from its schema entirely, so no
+        // delegation hint is added.
+        if !self.config.can_invoke.is_empty() {
+            prompt.push_str("\n\nYou can delegate tasks to other agents using the agent_call tool. You may only invoke these agents: ");
+            prompt.push_str(&self.config.can_invoke.join(", "));
+            prompt.push_str(
+                "\nPrefer your own tools when a task can be done in a single step. \
+                 Delegate only when the sub-task needs another agent's specialization \
+                 or benefits from an isolated context — each delegation spawns a full \
+                 sub-conversation and is more expensive than a direct tool call.",
+            );
         }
 
         // Inject relevant memories
@@ -378,10 +395,9 @@ impl Agent {
             // tool result (100k+ tokens) can exceed n_ctx and the server
             // rejects the request.
             if self.client.n_ctx() > 0 {
-                // Budget in char units: n_ctx tokens × CHARS_PER_TOKEN, capped at
-                // 90% to leave headroom for the new response.
-                let target_chars =
-                    self.client.n_ctx() as usize * crate::client::CHARS_PER_TOKEN * 9 / 10;
+                // Budget in char units: 90% of n_ctx tokens converted to chars
+                // via the client's calibrated chars-per-token ratio.
+                let target_chars = self.client.trim_budget_chars();
                 let msg_count = messages.len();
                 if msg_count > 4 {
                     // Trim self.messages directly: stream_with_messages_arc writes to a
@@ -410,38 +426,72 @@ impl Agent {
             // ── LLM call (streaming with native tools) ──────────────────
             // The callback must be 'static, so it captures cloned Arcs rather
             // than `self`.
-            let tx = self.event_tx.clone();
-            let sid = self.session_id();
             let round_thinking = Arc::new(Mutex::new(String::new()));
-            let rt = round_thinking.clone();
 
-            let (assistant_msg, usage) = match ChatClient::stream_with_messages_arc(
-                &self.client,
-                messages,
-                tool_defs.as_deref(),
-                move |chunk: String, is_thinking: bool| {
-                    if is_thinking {
-                        rt.lock().unwrap().push_str(&chunk);
-                    }
-                    if let Some(ref tx) = tx {
-                        if let Ok(g) = tx.lock() {
-                            let _ = g.send(if is_thinking {
-                                crate::types::AppEvent::StreamThinkingChunk { content: chunk, session_id: sid.clone() }
-                            } else {
-                                crate::types::AppEvent::StreamChunk { content: chunk, session_id: sid.clone() }
-                            });
+            let (assistant_msg, usage) = {
+                self.client.note_prompt_chars(crate::trimming::message_char_count(messages));
+                let mut attempt = 0usize;
+                loop {
+                    attempt += 1;
+                    // The `move` closure consumes these, so clone per attempt.
+                    let tx = self.event_tx.clone();
+                    let sid = self.session_id();
+                    let rt_attempt = round_thinking.clone();
+                    match ChatClient::stream_with_messages_arc(
+                        &self.client,
+                        messages,
+                        tool_defs.as_deref(),
+                        move |chunk: String, is_thinking: bool| {
+                            if is_thinking {
+                                rt_attempt.lock().unwrap().push_str(&chunk);
+                            }
+                            if let Some(ref tx) = tx {
+                                if let Ok(g) = tx.lock() {
+                                    let _ = g.send(if is_thinking {
+                                        crate::types::AppEvent::StreamThinkingChunk { content: chunk, session_id: sid.clone() }
+                                    } else {
+                                        crate::types::AppEvent::StreamChunk { content: chunk, session_id: sid.clone() }
+                                    });
+                                }
+                            }
+                            Ok(())
+                        },
+                        Some(cancel_token),
+                    )
+                    .await
+                    {
+                        Ok((msg, usage)) => break (msg, usage),
+                        Err(crate::client::Error::Cancelled) => return Err("Cancelled".to_string()),
+                        Err(e) if attempt == 1 => {
+                            // Backstop: the trim estimator is a heuristic — if the
+                            // server still rejects the request as over-context,
+                            // force-trim to 85% of the reported window (in char
+                            // units via the measured ratio) and retry once.
+                            let Some(ov) = crate::client::parse_context_overflow(&e) else {
+                                return Err(format!("LLM call failed: {}", e));
+                            };
+                            tracing::warn!(
+                                "[AGENT] Agent '{}' request exceeded context ({} tokens, n_ctx={}); force-trimming and retrying",
+                                self.config.name, ov.n_prompt, ov.n_ctx
+                            );
+                            let target = self.client.overflow_retry_char_budget(&ov);
+                            let removed = self
+                                .trimming
+                                .trim_messages(messages, target, &self.config.trim_config);
+                            tracing::info!(
+                                "[AGENT] Agent '{}' force-trim removed {} messages (target_chars={})",
+                                self.config.name, removed, target
+                            );
+                            self.client.note_prompt_chars(crate::trimming::message_char_count(messages));
+                            continue;
                         }
+                        Err(e) => return Err(format!("LLM call failed: {}", e)),
                     }
-                    Ok(())
-                },
-                Some(cancel_token),
-            )
-            .await
-            {
-                Ok((msg, usage)) => (msg, usage),
-                Err(crate::client::Error::Cancelled) => return Err("Cancelled".to_string()),
-                Err(e) => return Err(format!("LLM call failed: {}", e)),
+                }
             };
+            // Calibrate the chars/token ratio from the server's real count so
+            // subsequent trim budgets track the actual tokenizer.
+            self.client.calibrate_from_usage(usage.as_ref());
             self.last_llm_call_at = Instant::now();
 
             // Commit this round's thinking block to the UI.
@@ -1128,6 +1178,47 @@ mod tests {
         let agent = make_agent("test");
         assert_eq!(agent.config.name, "test");
         assert!(!agent.id.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_system_prompt_omits_delegation_when_can_invoke_empty() {
+        let agent = make_agent("test");
+        let prompt = agent.build_system_prompt();
+        assert!(
+            !prompt.contains("agent_call"),
+            "prompt should not mention agent_call when can_invoke is empty: {}",
+            prompt
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_lists_only_allowed_agents_and_hint() {
+        let mut config = AgentConfig::default();
+        config.name = "generalist".to_string();
+        config.can_invoke = vec!["researcher".to_string(), "coder".to_string()];
+        let llm_client = Arc::new(NoopLlm);
+        let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
+        let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+        let invocation_registry = Arc::new(AgentInvocationRegistry::new());
+        let client = Arc::new(ChatClient::new("http://localhost:1"));
+        let agent = Agent::new(
+            config,
+            llm_client,
+            tool_manager,
+            invocation_registry,
+            None,
+            client,
+            None,
+            None,
+            PathBuf::new(),
+        );
+        let prompt = agent.build_system_prompt();
+        assert!(prompt.contains("researcher, coder"), "prompt should list allowed agents: {}", prompt);
+        assert!(
+            prompt.contains("Prefer your own tools"),
+            "prompt should include the delegation policy hint: {}",
+            prompt
+        );
     }
 
     #[test]

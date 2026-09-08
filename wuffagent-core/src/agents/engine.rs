@@ -322,32 +322,13 @@ impl AgentEngine {
             self.agent_session_dir.clone(),
         );
 
-        self.send_chain_event(AppEvent::AgentChainStarted {
-            agent_name: "chat".to_string(),
-            depth: 0,
-            session_id: self.session_id(),
-        });
-
+        // The chat agent (name "chat") emits its own AgentChainStarted /
+        // AgentChainCompleted / AgentChainError from `execute`, so we do NOT
+        // send them here — doing both is what produced the duplicated
+        // "Agent chain started agent_name=\"chat\"" log lines. (The
+        // AgentChainCancelled early-return above is kept: the agent never
+        // runs on that path.)
         let result = agent.execute(request, cancel_token).await;
-
-        match &result {
-            Ok(response) => {
-                self.send_chain_event(AppEvent::AgentChainCompleted {
-                    agent_name: "chat".to_string(),
-                    result: response.clone(),
-                    depth: 0,
-                    session_id: self.session_id(),
-                });
-            }
-            Err(e) => {
-                self.send_chain_event(AppEvent::AgentChainError {
-                    agent_name: "chat".to_string(),
-                    error: e.clone(),
-                    depth: 0,
-                    session_id: self.session_id(),
-                });
-            }
-        }
 
         // Post-task: extract memories and suggest improvements (mirrors execute_with_agent)
         if let Some(memory) = &self.memory {

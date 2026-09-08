@@ -8,14 +8,44 @@ use crate::agents::invocation_registry::AgentInvocationRegistry;
 ///
 /// When an agent calls this tool, it invokes the target agent to execute
 /// the specified sub-task and returns the result.
+///
+/// The `allowed_targets` list restricts which agents may be invoked. An
+/// empty list means unrestricted (the default global registration).
 pub struct AgentCallTool {
     registry: Arc<AgentInvocationRegistry>,
+    allowed_targets: Vec<String>,
 }
 
 impl AgentCallTool {
+    /// Create an unrestricted tool (any registered agent may be invoked).
     pub fn new(registry: Arc<AgentInvocationRegistry>) -> Self {
         Self {
             registry,
+            allowed_targets: Vec::new(),
+        }
+    }
+
+    /// Create a tool that may only invoke the given agent names.
+    pub fn with_allowlist(
+        registry: Arc<AgentInvocationRegistry>,
+        allowed_targets: Vec<String>,
+    ) -> Self {
+        Self {
+            registry,
+            allowed_targets,
+        }
+    }
+
+    /// Check whether the target is permitted by this tool's allowlist.
+    fn check_target(&self, target: &str) -> Result<(), ToolError> {
+        if self.allowed_targets.is_empty() || self.allowed_targets.iter().any(|t| t == target) {
+            Ok(())
+        } else {
+            Err(ToolError::InvalidParams(format!(
+                "Agent '{}' is not invokable from this agent. Allowed agents: {}",
+                target,
+                self.allowed_targets.join(", ")
+            )))
         }
     }
 
@@ -51,7 +81,9 @@ impl Tool for AgentCallTool {
     }
 
     fn description(&self) -> &str {
-        "Invoke another agent to execute a sub-task. Returns the agent's result as JSON."
+        "Invoke another agent to execute a sub-task. Returns the agent's result as JSON. \
+         Prefer your own tools when a task is a single step — delegation spawns a full \
+         sub-conversation and is more expensive."
     }
 
     fn parameters_schema(&self) -> ToolSchema {
@@ -87,6 +119,7 @@ impl Tool for AgentCallTool {
 
     fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
         let (target, task) = self.parse_params(&params)?;
+        self.check_target(&target)?;
 
         // Empty context for tool-invoked calls
         let context = serde_json::Value::Object(serde_json::Map::new());
@@ -153,5 +186,33 @@ mod tests {
 
         let result = tool.parse_params(&params);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_allowlist_allows_listed_target() {
+        let registry = AgentInvocationRegistry::new();
+        let tool = AgentCallTool::with_allowlist(
+            Arc::new(registry),
+            vec!["researcher".to_string(), "coder".to_string()],
+        );
+        tool.check_target("researcher").unwrap();
+        tool.check_target("coder").unwrap();
+    }
+
+    #[test]
+    fn test_allowlist_rejects_unlisted_target() {
+        let registry = AgentInvocationRegistry::new();
+        let tool = AgentCallTool::with_allowlist(Arc::new(registry), vec!["coder".to_string()]);
+        let err = tool.check_target("executor").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("executor"), "error should name the rejected target: {}", msg);
+        assert!(msg.contains("coder"), "error should list the allowed agents: {}", msg);
+    }
+
+    #[test]
+    fn test_unrestricted_allows_any_target() {
+        let registry = AgentInvocationRegistry::new();
+        let tool = AgentCallTool::new(Arc::new(registry));
+        tool.check_target("anything").unwrap();
     }
 }

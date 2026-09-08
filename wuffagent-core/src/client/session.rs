@@ -218,11 +218,6 @@ pub fn trim_conversation(
     }
 }
 
-/// Conservative lower bound on chars-per-token for the model's tokenizer:
-/// dense code/JSON packs ~1.5-2 chars/token, English prose ~3.5-4. Only used
-/// to convert the exact char counter into n_ctx token units (budgets, gauge).
-pub const CHARS_PER_TOKEN: usize = 2;
-
 /// Clear all messages from the conversation.
 pub fn clear_history(conversation: &Arc<Mutex<Vec<Message>>>) {
     conversation.lock().unwrap().clear();
