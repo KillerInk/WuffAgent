@@ -93,8 +93,11 @@ struct HunkHeader {
 // ─── Action Implementations ───────────────────────────────────────────────────
 
 impl FileIOTool {
-    /// Read a text file, optionally limited to a line range (0-indexed, inclusive).
-    pub(crate) fn exec_read(&self, path: &str, start_line: Option<usize>, end_line: Option<usize>) -> crate::tools::types::ToolResult<ToolOutput> {
+    /// Read a text file, optionally limited to a line range (1-based, inclusive).
+    ///
+    /// When `line_numbers` is true, each returned line is prefixed with its
+    /// 1-based line number in `cat -n` style (`"    42 | <content>"`).
+    pub(crate) fn exec_read(&self, path: &str, start_line: Option<usize>, end_line: Option<usize>, line_numbers: bool) -> crate::tools::types::ToolResult<ToolOutput> {
         use std::io::BufRead;
 
         // Cap the maximum number of lines returned to prevent excessive memory use.
@@ -105,15 +108,16 @@ impl FileIOTool {
         })?;
         let reader = std::io::BufReader::new(file);
 
-        let start = start_line.unwrap_or(0);
-        let end = end_line; // None means read until EOF
+        // Params are 1-based; convert to 0-based internally.
+        let start = start_line.map(|n| n - 1).unwrap_or(0);
+        let end = end_line.map(|n| n - 1); // None means read until EOF
         let mut result = String::new();
         let mut line_idx = 0usize;
         let mut lines_returned = 0usize;
 
         for line in reader.lines() {
             let line = line.map_err(|e| {
-                crate::tools::types::ToolError::Execution(format!("Failed to read line {}: {}", line_idx, e))
+                crate::tools::types::ToolError::Execution(format!("Failed to read line {}: {}", line_idx + 1, e))
             })?;
             // Skip lines before the start range.
             if line_idx < start {
@@ -126,10 +130,15 @@ impl FileIOTool {
                     break;
                 }
             }
+            let rendered = if line_numbers {
+                format!("{:>6} | {}", line_idx + 1, line)
+            } else {
+                line
+            };
             if !result.is_empty() {
                 result.push('\n');
             }
-            result.push_str(&line);
+            result.push_str(&rendered);
             lines_returned += 1;
             line_idx += 1;
             // Stop reading once we've hit the line cap.
@@ -144,6 +153,7 @@ impl FileIOTool {
         Ok(ToolOutput::Success(serde_json::json!({
             "content": result,
             "total_lines": lines_returned,
+            "line_numbers": line_numbers,
         })))
     }
 
@@ -685,7 +695,7 @@ impl Tool for FileIOTool {
                         "start_line".to_string(),
                         crate::tools::types::FieldSchema {
                             type_name: "integer".to_string(),
-                            description: "Start line (0-indexed, inclusive) for read action. Defaults to 0.".to_string(),
+                            description: "Start line (1-indexed, inclusive) for read action. Defaults to 1.".to_string(),
                             nullable: true,
                         },
                     );
@@ -693,7 +703,15 @@ impl Tool for FileIOTool {
                         "end_line".to_string(),
                         crate::tools::types::FieldSchema {
                             type_name: "integer".to_string(),
-                            description: "End line (0-indexed, inclusive) for read action. Defaults to EOF.".to_string(),
+                            description: "End line (1-indexed, inclusive) for read action. Defaults to EOF.".to_string(),
+                            nullable: true,
+                        },
+                    );
+                    map.insert(
+                        "line_numbers".to_string(),
+                        crate::tools::types::FieldSchema {
+                            type_name: "boolean".to_string(),
+                            description: "For read action: prefix each line with its 1-based line number (cat -n style). Defaults to true.".to_string(),
                             nullable: true,
                         },
                     );
@@ -749,7 +767,8 @@ impl Tool for FileIOTool {
                 validate_path(&path)?;
                 let start_line: Option<usize> = params.get("start_line");
                 let end_line: Option<usize> = params.get("end_line");
-                self.exec_read(&path, start_line, end_line)
+                let line_numbers: Option<bool> = params.get("line_numbers");
+                self.exec_read(&path, start_line, end_line, line_numbers.unwrap_or(true))
             }
             "write" => {
                 let path: String = params
@@ -928,8 +947,9 @@ impl Tool for ReadFileTool {
             "Read a text file, optionally limited to a line range",
             &[
                 ("path", "string", "Path of the file to read.", false),
-                ("start_line", "integer", "First line to read (0-indexed). Defaults to 0.", true),
-                ("end_line", "integer", "Last line to read (0-indexed, inclusive). Defaults to end of file.", true),
+                ("start_line", "integer", "First line to read (1-indexed). Defaults to 1.", true),
+                ("end_line", "integer", "Last line to read (1-indexed, inclusive). Defaults to end of file.", true),
+                ("line_numbers", "boolean", "Prefix each line with its 1-based line number. Defaults to true.", true),
             ],
             &["path"],
         )
@@ -941,7 +961,8 @@ impl Tool for ReadFileTool {
         validate_path(&path)?;
         let start_line: Option<usize> = params.get("start_line");
         let end_line: Option<usize> = params.get("end_line");
-        FileIOTool.exec_read(&path, start_line, end_line)
+        let line_numbers: Option<bool> = params.get("line_numbers");
+        FileIOTool.exec_read(&path, start_line, end_line, line_numbers.unwrap_or(true))
     }
 }
 
@@ -1270,7 +1291,7 @@ mod tests {
         };
         match tool.execute(read_params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"].as_str().unwrap(), content);
+                assert_eq!(v["content"].as_str().unwrap(), "     1 | hello wuffagent test");
                 assert_eq!(v["total_lines"].as_u64().unwrap(), 1);
             }
             _ => panic!("read should succeed"),
@@ -1286,41 +1307,47 @@ mod tests {
 
         let tool = FileIOTool::new();
 
-        // Read lines 1..3 (0-indexed, inclusive end)
-        let params = ToolParams {
-            values: {
-                let mut m = HashMap::new();
-                m.insert("path".to_string(), json!(&path));
-                m.insert("action".to_string(), json!("read"));
-                m.insert("start_line".to_string(), json!(1));
-                m.insert("end_line".to_string(), json!(3));
-                m
-            },
-        };
-        match tool.execute(params) {
-            Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"].as_str().unwrap(), "line1\nline2\nline3");
-                assert_eq!(v["total_lines"].as_u64().unwrap(), 3);
-            }
-            _ => panic!("read with line range should succeed"),
-        }
-
-        // Read from line 2 to EOF
+        // Read lines 2..4 (1-indexed, inclusive end)
         let params = ToolParams {
             values: {
                 let mut m = HashMap::new();
                 m.insert("path".to_string(), json!(&path));
                 m.insert("action".to_string(), json!("read"));
                 m.insert("start_line".to_string(), json!(2));
+                m.insert("end_line".to_string(), json!(4));
                 m
             },
         };
         match tool.execute(params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"].as_str().unwrap(), "line2\nline3\nline4");
+                assert_eq!(
+                    v["content"].as_str().unwrap(),
+                    "     2 | line1\n     3 | line2\n     4 | line3"
+                );
                 assert_eq!(v["total_lines"].as_u64().unwrap(), 3);
             }
-            _ => panic!("read from line 2 should succeed"),
+            _ => panic!("read with line range should succeed"),
+        }
+
+        // Read from line 3 to EOF
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("read"));
+                m.insert("start_line".to_string(), json!(3));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(
+                    v["content"].as_str().unwrap(),
+                    "     3 | line2\n     4 | line3\n     5 | line4"
+                );
+                assert_eq!(v["total_lines"].as_u64().unwrap(), 3);
+            }
+            _ => panic!("read from line 3 should succeed"),
         }
 
         // Read with end_line beyond file length → clamps
@@ -1329,17 +1356,37 @@ mod tests {
                 let mut m = HashMap::new();
                 m.insert("path".to_string(), json!(&path));
                 m.insert("action".to_string(), json!("read"));
-                m.insert("start_line".to_string(), json!(0));
                 m.insert("end_line".to_string(), json!(999));
                 m
             },
         };
         match tool.execute(params) {
             Ok(ToolOutput::Success(v)) => {
-                assert_eq!(v["content"].as_str().unwrap(), content.trim_end_matches('\n'));
+                assert_eq!(
+                    v["content"].as_str().unwrap(),
+                    "     1 | line0\n     2 | line1\n     3 | line2\n     4 | line3\n     5 | line4"
+                );
                 assert_eq!(v["total_lines"].as_u64().unwrap(), 5);
             }
             _ => panic!("read with out-of-range end_line should succeed"),
+        }
+
+        // line_numbers=false returns raw content without the prefix.
+        let params = ToolParams {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("path".to_string(), json!(&path));
+                m.insert("action".to_string(), json!("read"));
+                m.insert("line_numbers".to_string(), json!(false));
+                m
+            },
+        };
+        match tool.execute(params) {
+            Ok(ToolOutput::Success(v)) => {
+                assert_eq!(v["content"].as_str().unwrap(), content.trim_end_matches('\n'));
+                assert_eq!(v["line_numbers"].as_bool().unwrap(), false);
+            }
+            _ => panic!("read with line_numbers=false should succeed"),
         }
     }
 
@@ -2273,7 +2320,8 @@ mod tests {
             ToolOutput::Success(v) => v,
             _ => panic!("expected success"),
         };
-        assert_eq!(v["content"], "a\nb\nc");
+        assert_eq!(v["content"], "     1 | a\n     2 | b\n     3 | c");
+        assert_eq!(v["line_numbers"], true);
     }
 
     #[test]

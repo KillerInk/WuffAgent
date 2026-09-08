@@ -30,14 +30,30 @@ const TOOL_OUTPUT_SUMMARY_CHARS: usize = 200;
 /// Maximum characters of user request for verification prompts.
 const REQUEST_TRUNCATION_CHARS: usize = 500;
 
+/// Maximum characters of the assistant's final response for verification
+/// prompts. The response is model-generated (not user-controlled), so a
+/// generous budget is safe — this only bounds the judge call's prompt size.
+const RESPONSE_TRUNCATION_CHARS: usize = 2000;
+
 /// Timeout in seconds for verification LLM calls.
 const VERIFICATION_TIMEOUT_SECS: u64 = 60;
 
-/// System prompt for tool-output verification.
+/// System prompt for response verification.
+///
+/// The judge grades the assistant's *response* against the tool outputs it
+/// relied on — not the raw tool outputs alone. The old wording ("do the tool
+/// outputs answer the request?") failed legitimate answers: intermediate
+/// outputs (file dumps, search results) rarely contain the full answer by
+/// themselves, so the judge returned NEEDS_FIX and the loop wasted an extra
+/// LLM round re-asking a model that had already answered correctly.
 static VERIFICATION_SYSTEM_PROMPT: &str =
-    "You are verifying whether tool outputs answer the user's request. \
-     Respond with exactly 'VERIFIED' if the outputs are correct and complete, \
-     or 'NEEDS_FIX' followed by a brief explanation if something is wrong.";
+    "You are verifying whether an assistant's response fully satisfies the user's request, \
+     using the tool outputs it relied on as evidence. \
+     Respond with exactly 'VERIFIED' if the response is correct, complete, and consistent with the tool outputs. \
+     Respond with 'NEEDS_FIX' followed by a brief explanation ONLY if the response is factually wrong, \
+     incomplete, or contradicts the tool outputs. \
+     Do NOT reply NEEDS_FIX merely because the tool outputs alone do not spell out the full answer — \
+     the response itself is what you are grading.";
 
 /// A configurable agent that runs an LLM loop with tool calls.
 ///
@@ -713,7 +729,7 @@ impl Agent {
             verification_attempts += 1;
 
             let original_request = self.extract_original_request(messages);
-            let verification_result = self.verify_tool_outputs(messages, &original_request, cancel_token).await;
+            let verification_result = self.verify_tool_outputs(messages, &original_request, &display_content, cancel_token).await;
             match verification_result {
                 Ok(true) => {
                     tracing::info!(
@@ -736,7 +752,7 @@ impl Agent {
                     );
                     messages.push(Message {
                         role: "user".to_string(),
-                        content: "Your previous tool outputs did not fully satisfy the request. Please try again with corrected tool calls.".to_string(),
+                        content: "Your previous response did not fully satisfy the request. Improve it based on the tool outputs, or correct your tool calls and try again.".to_string(),
                         timestamp: String::new(),
                         tool_calls: None,
                         tool_call_id: None,
@@ -761,33 +777,56 @@ impl Agent {
         }
     }
 
-    /// Extract the original user request from the message history.
+    /// Extract the current turn's user request from the message history.
+    ///
+    /// Uses the LAST user message: the request the current turn's response is
+    /// answering. In a multi-turn session the first user message is stale and
+    /// would make the judge grade the current answer against the wrong request.
     fn extract_original_request(&self, messages: &[Message]) -> String {
         messages
             .iter()
+            .rev()
             .find(|m| m.role == "user")
             .map(|m| m.content.clone())
             .unwrap_or_default()
     }
 
-    /// Verify that the tool outputs in the message history satisfy the user's request.
+    /// Verify that the assistant's final response satisfies the user's request.
+    ///
+    /// The judge LLM sees three things: the original user request (truncated,
+    /// to blunt prompt injection), summaries of the tool outputs, and the
+    /// assistant's final response — and it grades the RESPONSE against the
+    /// outputs as evidence. (The pre-fix prompt asked only "do the tool
+    /// outputs answer the request?", which failed correct answers:
+    /// intermediate outputs rarely contain the full answer by themselves.)
     async fn verify_tool_outputs(
         &self,
         messages: &[Message],
         original_request: &str,
+        final_response: &str,
         cancel_token: &CancellationToken,
     ) -> Result<bool, String> {
+        // Scope the evidence to the current turn: only tool outputs produced
+        // after the most recent user message count as evidence for this
+        // turn's response. In a multi-turn session the full history holds stale
+        // tool results from earlier turns; feeding those to the judge made it
+        // return NEEDS_FIX for a perfectly complete answer to the current
+        // request, which then re-asked the model after it had already finished.
+        let turn_start = messages
+            .iter()
+            .rposition(|m| m.role == "user")
+            .unwrap_or(0);
         let tool_outputs: Vec<String> = messages
             .iter()
+            .skip(turn_start)
             .filter(|m| m.role == "tool")
             .map(|m| m.content.clone())
             .collect();
 
-        // Skip verification if no tool calls were made.
+        // Skip verification if no tool calls were made this turn.
         if tool_outputs.is_empty() {
             return Ok(true);
         }
-
         let recent_tool_summary: String = tool_outputs
             .iter()
             .map(|o| o.chars().take(TOOL_OUTPUT_SUMMARY_CHARS).collect::<String>())
@@ -808,10 +847,13 @@ impl Agent {
                 // Truncate the original request to avoid prompt injection
                 // via oversized or adversarially crafted messages.
                 content: format!(
-                    "User request (truncated to {} chars):\n{}\n\nRecent tool outputs:\n{}\n\nIs the request satisfied?",
+                    "User request (truncated to {} chars):\n{}\n\nRecent tool outputs ({} chars each, truncated):\n{}\n\nAssistant response (truncated to {} chars):\n{}\n\nDoes the assistant response fully satisfy the user's request?",
                     REQUEST_TRUNCATION_CHARS,
                     &original_request.chars().take(REQUEST_TRUNCATION_CHARS).collect::<String>(),
-                    recent_tool_summary
+                    TOOL_OUTPUT_SUMMARY_CHARS,
+                    recent_tool_summary,
+                    RESPONSE_TRUNCATION_CHARS,
+                    &final_response.chars().take(RESPONSE_TRUNCATION_CHARS).collect::<String>()
                 ),
                 timestamp: crate::types::format_timestamp(),
                 tool_calls: None,
@@ -834,7 +876,7 @@ impl Agent {
                     result = self.llm_client.complete(&verification_messages) => result,
                     _ = cancel_clone.cancelled() => Err("Verification cancelled".to_string()),
                 }
-            },
+            }
         )
         .await
         {
@@ -1320,5 +1362,169 @@ mod tests {
                 allowed_tools: vec![],
             }
         }
+    }
+
+    fn test_msg(role: &str, content: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    /// An LLM that fails every call — proves verification short-circuits
+    /// without any LLM round-trip when no tool outputs exist.
+    struct RefuseLlm;
+    #[async_trait::async_trait]
+    impl LlmClient for RefuseLlm {
+        async fn complete(&self, _messages: &[Message]) -> Result<String, String> {
+            Err("LLM must not be called".to_string())
+        }
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _chunk_handler: Box<dyn FnMut(String) + Send + Sync + 'static>,
+        ) -> Result<String, String> {
+            Err("LLM must not be called".to_string())
+        }
+    }
+
+    /// An LLM that returns a fixed verdict and records the prompt it was
+    /// given, so tests can assert what the judge actually sees.
+    struct JudgeLlm {
+        verdict: &'static str,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
+    }
+    #[async_trait::async_trait]
+    impl LlmClient for JudgeLlm {
+        async fn complete(&self, messages: &[Message]) -> Result<String, String> {
+            self.seen.lock().unwrap().extend_from_slice(messages);
+            Ok(self.verdict.to_string())
+        }
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _chunk_handler: Box<dyn FnMut(String) + Send + Sync + 'static>,
+        ) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    fn agent_with_llm(llm: std::sync::Arc<dyn LlmClient>) -> Agent {
+        let registry = std::sync::Arc::new(ToolRegistry::new(
+            vec![],
+            std::sync::Arc::new(TracingToolLogger),
+        ));
+        Agent::new(
+            AgentConfig {
+                name: "test".to_string(),
+                ..Default::default()
+            },
+            llm,
+            std::sync::Arc::new(Mutex::new(ToolManager::new(registry))),
+            std::sync::Arc::new(AgentInvocationRegistry::new()),
+            None,
+            std::sync::Arc::new(ChatClient::new("http://localhost:1")),
+            None,
+            None,
+            PathBuf::new(),
+        )
+    }
+
+    fn judge_agent(verdict: &'static str, seen: std::sync::Arc<std::sync::Mutex<Vec<Message>>>) -> Agent {
+        agent_with_llm(std::sync::Arc::new(JudgeLlm { verdict, seen }))
+    }
+
+    #[tokio::test]
+    async fn test_verify_no_tool_outputs_skips_llm() {
+        let agent = agent_with_llm(std::sync::Arc::new(RefuseLlm));
+        let messages = vec![test_msg("user", "hello"), test_msg("assistant", "hi there")];
+        let result = agent
+            .verify_tool_outputs(&messages, "hello", "hi there", &CancellationToken::new())
+            .await;
+        assert_eq!(result, Ok(true), "no tool outputs -> auto-verified without an LLM call");
+    }
+
+    #[tokio::test]
+    async fn test_verify_verdict_verified() {
+        let agent = judge_agent("VERIFIED", std::sync::Arc::new(Mutex::new(Vec::new())));
+        let messages = vec![
+            test_msg("user", "list the directory"),
+            test_msg("tool", "a.txt\nb.txt"),
+            test_msg("assistant", "There are two files: a.txt and b.txt."),
+        ];
+        assert_eq!(
+            agent
+                .verify_tool_outputs(&messages, "list the directory", "There are two files: a.txt and b.txt.", &CancellationToken::new())
+                .await,
+            Ok(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_verdict_needs_fix() {
+        let agent = judge_agent("NEEDS_FIX: the response misses b.txt", std::sync::Arc::new(Mutex::new(Vec::new())));
+        let messages = vec![
+            test_msg("user", "list the directory"),
+            test_msg("tool", "a.txt\nb.txt"),
+            test_msg("assistant", "There is one file: a.txt."),
+        ];
+        assert_eq!(
+            agent
+                .verify_tool_outputs(&messages, "list the directory", "There is one file: a.txt.", &CancellationToken::new())
+                .await,
+            Ok(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_ambiguous_verdict_defaults_to_verified() {
+        let agent = judge_agent("The answer looks plausible I guess", std::sync::Arc::new(Mutex::new(Vec::new())));
+        let messages = vec![
+            test_msg("user", "list the directory"),
+            test_msg("tool", "a.txt"),
+            test_msg("assistant", "One file."),
+        ];
+        assert_eq!(
+            agent
+                .verify_tool_outputs(&messages, "list the directory", "One file.", &CancellationToken::new())
+                .await,
+            Ok(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_prompt_includes_final_response_and_outputs() {
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let agent = judge_agent("VERIFIED", seen.clone());
+        let messages = vec![
+            test_msg("user", "read the readme"),
+            test_msg("tool", "README CONTENTS HERE"),
+            test_msg("assistant", "The readme says hello world."),
+        ];
+        agent
+            .verify_tool_outputs(&messages, "read the readme", "The readme says hello world.", &CancellationToken::new())
+            .await
+            .unwrap();
+        let joined: String = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("The readme says hello world."),
+            "judge prompt must include the assistant's final response: {}",
+            joined
+        );
+        assert!(
+            joined.contains("README CONTENTS HERE"),
+            "judge prompt must still include the tool outputs: {}",
+            joined
+        );
     }
 }

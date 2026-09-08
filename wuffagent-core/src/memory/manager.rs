@@ -34,13 +34,18 @@ impl MemoryManager {
     /// Create a new MemoryManager and load existing memories.
     pub fn new(config: MemoryConfig) -> Result<Self, String> {
         let storage_path = get_memories_path(&config);
-        let entries = match load_memories(&storage_path) {
+        let mut entries = match load_memories(&storage_path) {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!("Failed to load memories from {:?}: {}", storage_path, e);
                 Vec::new()
             }
         };
+        // Clean up expired and low-quality memories on load
+        let removed = clean_stale_entries(&mut entries);
+        if removed > 0 {
+            tracing::info!("Cleaned {} stale memories on load", removed);
+        }
         Ok(Self {
             entries: Arc::new(Mutex::new(entries)),
             config,
@@ -255,6 +260,44 @@ impl MemoryManager {
         self.save()
     }
 
+    /// Clean up expired and low-quality memories.
+    /// Removes expired entries (>90 days old) and entries with very low confidence.
+    /// Returns the number of entries removed.
+    pub fn cleanup(&self) -> Result<usize, String> {
+        let mut entries = self.entries.lock().unwrap();
+        let original_count = entries.len();
+
+        let now = chrono::Utc::now();
+
+        entries.retain(|e| {
+            // Keep if not expired
+            if let Some(ts) = e.timestamp {
+                let age_days = now.signed_duration_since(ts).num_days();
+                if age_days > 90 {
+                    tracing::debug!("[MEMORY] Cleaning expired memory ({} days old): {}", age_days, e.id);
+                    return false;
+                }
+            }
+
+            // Keep if confidence is reasonable (above 0.3)
+            if e.confidence < 0.3 {
+                tracing::debug!("[MEMORY] Cleaning low-confidence memory ({}): {}", e.confidence, e.id);
+                return false;
+            }
+
+            true
+        });
+
+        let removed = original_count - entries.len();
+        drop(entries);
+
+        if removed > 0 {
+            self.save()?;
+            tracing::info!("Cleaned up {} memories, {} remaining", removed, self.count());
+        }
+        Ok(removed)
+    }
+
     /// Save memories to disk.
     ///
     /// Clones the entries and releases the mutex *before* the filesystem I/O so
@@ -312,6 +355,22 @@ impl MemoryManager {
             _ => MemoryType::Fact,
         }
     }
+}
+
+/// Remove expired (>90 days) and low-confidence (<0.3) entries.
+/// Returns the number of entries removed.
+fn clean_stale_entries(entries: &mut Vec<MemoryEntry>) -> usize {
+    let original_count = entries.len();
+    let now = chrono::Utc::now();
+    entries.retain(|e| {
+        if let Some(ts) = e.timestamp {
+            if now.signed_duration_since(ts).num_days() > 90 {
+                return false;
+            }
+        }
+        e.confidence >= 0.3
+    });
+    original_count - entries.len()
 }
 
 #[cfg(test)]
@@ -381,7 +440,7 @@ mod tests {
 
         manager.add(MemoryEntry::new(
             MemoryType::Lesson,
-            "Shell tool uses nested config",
+            "Shell tool plan was implemented with nested config",
             "test",
             &["shell"],
         )).unwrap();

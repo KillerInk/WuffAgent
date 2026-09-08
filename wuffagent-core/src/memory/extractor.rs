@@ -84,6 +84,12 @@ pub async fn extract_memories(
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
         if !content.is_empty() {
+            // Filter out short, low-quality memories (less than 15 words)
+            let word_count = content.split_whitespace().count();
+            if word_count < 15 {
+                tracing::debug!("[MEMORY] Skipping short memory ({} words): {}", word_count, content);
+                continue;
+            }
             let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
             result.push(MemoryEntry::new(mem_type, &content, source, &tag_refs));
         }
@@ -130,20 +136,22 @@ fn recent_messages(messages: &[super::super::types::Message]) -> Vec<String> {
 pub(crate) fn build_extraction_prompt_from_conversation(project: &str, conversation: &str) -> String {
     format!(
         "You are analyzing a conversation to extract persistent memories about the project.\n\n\
-         Project: {}\n\n\
-         Conversation (last 30 messages):\n{}\n\n\
-         Extract memories in this JSON format:\n\
-         [\n  {{\"type\": \"fact\", \"content\": \"...\", \"tags\": [\"tag1\", \"tag2\"]}},\n  {{\"type\": \"lesson\", \"content\": \"...\", \"tags\": [\"tag1\"]}},\n  {{\"type\": \"decision\", \"content\": \"...\", \"tags\": [\"tag1\"]}}\n]\n\n\
-         Rules:\n\
-         - Only extract information that is likely useful in future sessions\n\
-         - Facts: project structure, architecture decisions, known issues\n\
-         - Lessons: things that went wrong, gotchas, patterns to avoid\n\
-         - Decisions: explicit choices made with rationale\n\
-         - Context: environment details, constraints, dependencies\n\
-         - Goals: ongoing objectives or TODOs\n\
-         - Do NOT repeat memories that already exist\n\
-         - Keep content concise but complete\n\
-         - Return an empty array [] if nothing new to extract",
+          Project: {}\n\n\
+          Conversation (recent messages):\n{}\n\n\
+          Extract memories in this JSON format:\n\
+          [\n  {{\"type\": \"fact\", \"content\": \"...\", \"tags\": [\"tag1\", \"tag2\"]}},\n  {{\"type\": \"lesson\", \"content\": \"...\", \"tags\": [\"tag1\"]}},\n  {{\"type\": \"decision\", \"content\": \"...\", \"tags\": [\"tag1\"]}}\n]\n\n\
+          Rules:\n\
+          - Be VERY selective. Extract only high-value, non-obvious information.\n\
+          - Facts: critical project structure, architecture, known bugs (not minor details)\n\
+          - Lessons: significant mistakes, non-obvious gotchas, patterns worth remembering\n\
+          - Decisions: major choices made with clear rationale\n\
+          - Skip routine operations, simple commands, trivial changes\n\
+          - Skip anything obvious or easily discoverable later\n\
+          - Skip temporary or ephemeral information\n\
+          - Each memory must be at least 15 words to have meaningful context\n\
+          - Do NOT repeat or closely duplicate existing memories\n\
+          - Keep content concise (2-3 sentences) but complete and specific\n\
+          - Return an empty array [] if nothing significant happened",
         project,
         conversation
     )

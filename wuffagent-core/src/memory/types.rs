@@ -167,12 +167,12 @@ pub struct MemoryConfig {
 }
 
 fn default_enabled() -> bool { true }
-fn default_max_entries() -> usize { 200 }
+fn default_max_entries() -> usize { 100 }
 fn default_injection_max_entries() -> usize { 5 }
 fn default_injection_max_chars() -> usize { 1000 }
 fn default_auto_extract_after_task() -> bool { true }
 fn default_auto_extract_after_session() -> bool { false }
-fn default_auto_extract_min_confidence() -> f32 { 0.7 }
+fn default_auto_extract_min_confidence() -> f32 { 0.8 }
 fn default_project() -> String { "default".to_string() }
 fn default_auto_improve() -> bool { false }
 fn default_improvement_trigger_lessons() -> usize { 1 }
@@ -181,14 +181,14 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_entries: 200,
+            max_entries: 100,
             injection_max_entries: 5,
             injection_max_chars: 1000,
             search_mode: SearchMode::default(),
             injection_mode: InjectionMode::Smart,
             auto_extract_after_task: true,
             auto_extract_after_session: false,
-            auto_extract_min_confidence: 0.7,
+            auto_extract_min_confidence: 0.8,
             project: "default".to_string(),
             memories_dir: None,
             auto_improve: false,

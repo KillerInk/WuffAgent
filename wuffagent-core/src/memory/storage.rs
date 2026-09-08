@@ -63,12 +63,11 @@ pub fn get_memories_path(config: &MemoryConfig) -> PathBuf {
     let memories_dir = if let Some(dir) = &config.memories_dir {
         PathBuf::from(dir)
     } else {
-        // Default: <config_dir>/memories/projects
-        dirs::config_dir()
+        // Default: ~/.wuffcode/memories
+        dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("wuffagent")
+            .join(".wuffcode")
             .join("memories")
-            .join("projects")
     };
     let path = memories_dir.join(format!("{}.json", config.project));
     tracing::debug!("[MEMORY] Memory storage path: {:?}", path);
