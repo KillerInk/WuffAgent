@@ -4,3 +4,10 @@ members = [
     "wuffagent-egui",
 ]
 resolver = "2"
+
+# egui re-runs the whole UI closure on every repaint; unoptimized debug builds
+# are 10-50x slower on that path (window drag / scroll / typing feel laggy even
+# when idle). Optimize the debug build so `cargo run` is usable for UI work.
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
