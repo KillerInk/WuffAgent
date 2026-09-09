@@ -202,7 +202,8 @@ impl ChatApp {
 }
 
 impl eframe::App for ChatApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx();
         // Request repaint during streaming for real-time updates
         if self.selected_chat_state().map(|c| c.is_generating).unwrap_or(false) {
             ctx.request_repaint();
@@ -303,8 +304,10 @@ impl eframe::App for ChatApp {
         self.show_presets_dialog(ctx);
         // Show agent config dialog
         self.show_agent_config_dialog(ctx);
-        // Draw main UI
-        self.setup_ui(ctx);
+        // Draw main UI into the root viewport ui (margins/background are
+        // applied by the panels themselves, mirroring the old CentralPanel
+        // fill behaviour).
+        self.setup_ui(ui);
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {

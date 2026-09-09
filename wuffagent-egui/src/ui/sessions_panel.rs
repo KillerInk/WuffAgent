@@ -176,7 +176,7 @@ impl SessionsPanel {
             } else {
                 egui::Color32::TRANSPARENT
             })
-            .rounding(4.0)
+            .corner_radius(4)
             .sense(egui::Sense::click()));
 
         response
@@ -192,8 +192,9 @@ impl SessionsPanel {
         &mut self,
         theme: &str,
         session_store: &std::collections::HashMap<String, crate::sessions::SessionRuntime>,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
     ) -> (Option<String>, Option<PanelAction>) {
+        let ctx = ui.ctx();
         let mut selected_id: Option<String> = None;
         let mut action: Option<PanelAction> = None;
         // Show the delete confirmation dialog if pending
@@ -224,11 +225,11 @@ impl SessionsPanel {
                 });
         }
 
-        egui::SidePanel::left("sessions_panel")
-            .default_width(220.0)
-            .min_width(150.0)
-            .max_width(320.0)
-            .show(ctx, |ui| {
+        egui::Panel::left("sessions_panel")
+            .default_size(220.0)
+            .min_size(150.0)
+            .max_size(320.0)
+            .show(ui, |ui| {
                 let theme = Theme::from_name(theme);
                 ui.visuals_mut().panel_fill = theme.panel_bg;
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 8.0);
@@ -243,7 +244,7 @@ impl SessionsPanel {
                 // New session button
                 let new_btn = egui::Button::new("+ New")
                     .fill(theme.primary)
-                    .rounding(4.0);
+                    .corner_radius(4);
                 if ui.add(new_btn).clicked() {
                     self.creating = true;
                     self.new_name = String::new();
@@ -252,7 +253,7 @@ impl SessionsPanel {
                 // Delete button
                 let delete_btn = egui::Button::new("Delete")
                     .fill(theme.surface_light)
-                    .rounding(4.0);
+                    .corner_radius(4);
                 if ui.add(delete_btn).clicked() {
                     let session_id = self.selected_id.clone();
                     let session = self.sessions.iter().find(|s| Some(&s.id) == session_id.as_ref());
@@ -372,7 +373,7 @@ impl SessionsPanel {
                 ui.horizontal(|ui| {
                     let export_btn = egui::Button::new("Export")
                         .fill(theme.surface_light)
-                        .rounding(4.0);
+                        .corner_radius(4);
                     if ui.add(export_btn).clicked()
                         && self.selected_id.is_some() {
                             action = Some(PanelAction::Export {
@@ -381,7 +382,7 @@ impl SessionsPanel {
                         }
                     let import_btn = egui::Button::new("Import")
                         .fill(theme.surface_light)
-                        .rounding(4.0);
+                        .corner_radius(4);
                     if ui.add(import_btn).clicked() {
                         action = Some(PanelAction::Import);
                     }

@@ -187,20 +187,20 @@ impl SettingsDialog {
                 ui.horizontal(|ui| {
                     if ui.add(egui::Button::new("Save")
                         .fill(theme.primary)
-                        .rounding(6.0)
+                        .corner_radius(6)
                     ).clicked() {
                         self.save(self.config.clone());
                         closed = true;
                     }
                     if ui.add(egui::Button::new("Reset")
                         .fill(theme.surface_light)
-                        .rounding(6.0)
+                        .corner_radius(6)
                     ).clicked() {
                         *self = SettingsDialog::new(&self.config);
                     }
                     if ui.add(egui::Button::new("Close")
                         .fill(theme.surface_light)
-                        .rounding(6.0)
+                        .corner_radius(6)
                     ).clicked() {
                         closed = true;
                     }

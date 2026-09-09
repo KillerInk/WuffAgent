@@ -133,7 +133,7 @@ impl ChatApp {
         let button_size = egui::vec2(36.0, 36.0);
         let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 16.0, 16.0);
         let button_rect = egui::Rect::from_min_size(button_pos, button_size);
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(button_rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
             ui.set_max_size(button_size);
             ui.set_min_size(button_size);
             // Apply opacity via semi-transparent fill color (premultiplied alpha)
@@ -146,7 +146,7 @@ impl ChatApp {
             );
             let scroll_btn = egui::Button::new("↓")
                 .fill(fill_color)
-                .rounding(18.0);
+                .corner_radius(18);
             if ui.add(scroll_btn).clicked() {
                 // Trigger auto-scroll on next frame
                 if let Some(sid) = &self.selected_session_id {
@@ -204,10 +204,10 @@ impl ChatApp {
                 ui.scope(|ui| {
                     ui.set_max_width(max_content_width);
                     ui.vertical(|ui| {
-                        let bubble_frame = egui::Frame::none()
+                        let bubble_frame = egui::Frame::NONE
                             .fill(theme.surface_light)
-                            .rounding(egui::Rounding::same(8.0))
-                            .inner_margin(egui::Margin::same(6.0));
+                            .corner_radius(8)
+                            .inner_margin(6);
                         bubble_frame.show(ui, |ui| {
                             ui.add(egui::Label::new(
                                 egui::RichText::new(stream_buffer)
@@ -334,16 +334,16 @@ impl ChatApp {
                     // Message bubble
                     ui.scope(|ui| {
                         ui.visuals_mut().widgets.noninteractive.bg_fill = bubble_bg;
-                        ui.style_mut().visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
-                        ui.style_mut().visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+                        ui.style_mut().visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(8);
+                        ui.style_mut().visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                         
                         // Use a frame-like container for the bubble
                         let _bubble_inner_padding = egui::vec2(8.0, 6.0);
-                        let bubble_frame = egui::Frame::none()
+                        let bubble_frame = egui::Frame::NONE
                             .fill(bubble_bg)
-                            .rounding(egui::Rounding::same(8.0))
-                            .inner_margin(egui::Margin::same(6.0));
+                            .corner_radius(8)
+                            .inner_margin(6);
                         
                         bubble_frame.show(ui, |ui| {
                             if is_editing {
@@ -392,7 +392,7 @@ impl ChatApp {
                                     // Copy button for non-tool messages
                                     ui.add_space(4.0);
                                     let copy_btn = egui::Button::new("📋 Copy")
-                                        .rounding(4.0)
+                                        .corner_radius(4)
                                         .sense(egui::Sense::click());
                                     if ui.add(copy_btn).clicked() {
                                         ui.ctx().copy_text(message.content.clone());
@@ -522,10 +522,10 @@ impl ChatApp {
                 if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
                     let max_entries = 50;
                     let display_entries: Vec<&serde_json::Value> = entries.iter().take(max_entries).collect();
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(egui::Color32::from_rgb(10, 10, 10))
-                        .rounding(4.0)
-                        .inner_margin(egui::Margin::same(6.0))
+                        .corner_radius(4)
+                        .inner_margin(6)
                         .show(ui, |ui| {
                             for entry in display_entries {
                                 if let Some(s) = entry.as_str() {
@@ -555,7 +555,7 @@ impl ChatApp {
                     } else {
                         format!("Show content ({} chars)", char_count)
                     };
-                    let btn = egui::Button::new(btn_text).rounding(4.0);
+                    let btn = egui::Button::new(btn_text).corner_radius(4);
                     if ui.add(btn).clicked() {
                         if let Some(sid) = &self.selected_session_id {
                             if let Some(runtime) = self.session_store.get_mut(sid) {
@@ -568,10 +568,10 @@ impl ChatApp {
                         }
                     }
                     if is_expanded {
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(egui::Color32::from_rgb(10, 10, 10))
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::same(6.0))
+                            .corner_radius(4)
+                            .inner_margin(6)
                             .show(ui, |ui| {
                                 egui::ScrollArea::vertical()
                                     .max_height(300.0)
@@ -629,7 +629,7 @@ impl ChatApp {
         // Copy button at the bottom
         ui.add_space(4.0);
         let copy_btn = egui::Button::new("📋 Copy")
-            .rounding(4.0)
+            .corner_radius(4)
             .sense(egui::Sense::click());
         if ui.add(copy_btn).clicked() {
             ui.ctx().copy_text(raw.to_string());
@@ -638,10 +638,10 @@ impl ChatApp {
 
     /// Render JSON as a key-value list.
     fn draw_tool_json_kv(&self, ui: &mut egui::Ui, json: &serde_json::Value, theme: &Theme) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(egui::Color32::from_rgb(10, 10, 10))
-            .rounding(4.0)
-            .inner_margin(egui::Margin::same(6.0))
+            .corner_radius(4)
+            .inner_margin(6)
             .show(ui, |ui| {
                 match json {
                     serde_json::Value::Object(map) => {
@@ -729,10 +729,10 @@ impl ChatApp {
 
     /// Render a plain (non-JSON) tool result as a monospace code block.
     fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, _theme: &Theme) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(egui::Color32::from_rgb(10, 10, 10))
-            .rounding(4.0)
-            .inner_margin(egui::Margin::same(6.0))
+            .corner_radius(4)
+            .inner_margin(6)
             .show(ui, |ui| {
                 let mut wrapped_text = text.to_string();
                 // Pre-wrap long lines to avoid horizontal overflow
@@ -755,7 +755,7 @@ impl ChatApp {
             });
         ui.add_space(4.0);
         let copy_btn = egui::Button::new("📋 Copy")
-            .rounding(4.0)
+            .corner_radius(4)
             .sense(egui::Sense::click());
         if ui.add(copy_btn).clicked() {
             ui.ctx().copy_text(text.to_string());

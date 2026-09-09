@@ -138,7 +138,7 @@ impl ChatApp {
                     // the message for the next turn, otherwise it starts a run.
                     let send_btn = egui::Button::new("Send")
                         .fill(theme.primary)
-                        .rounding(6.0)
+                        .corner_radius(6)
                         .min_size(egui::vec2(60.0, 28.0));
                     if ui.add(send_btn).clicked() {
                         let input = self.input_text_snapshot().trim().to_string();
@@ -150,7 +150,7 @@ impl ChatApp {
                         ui.add_space(6.0);
                         let stop_btn = egui::Button::new("Stop")
                             .fill(theme.error)
-                            .rounding(6.0)
+                            .corner_radius(6)
                             .min_size(egui::vec2(60.0, 28.0));
                         if ui.add(stop_btn).clicked() {
                             self.stop_generation();

@@ -59,10 +59,14 @@ fn bootstrap() -> (
     Arc<ToolManager>,
     Arc<AgentEngine>,
 ) {
+    // Default to `debug` for app crates, but silence the extremely chatty
+    // `naga` WGSL shader compiler (pulled in by wgpu/egui) whose DEBUG-level
+    // overload-resolution traces flood the console at startup. Users can still
+    // override the whole filter via RUST_LOG.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug,naga=off")),
         )
         .init();
 
