@@ -113,7 +113,15 @@ impl Agent {
         // /plan paths.
         let tool_manager = {
             let shared = tool_manager.lock().unwrap();
-            let tm = shared.with_shell_config(config.get_shell_config());
+            // The shell tool is advertised only when the agent's
+            // `shell_enabled` is true. A disabled shell is removed from the
+            // schema entirely instead of remaining as a tool whose calls
+            // always error out.
+            let tm = if config.get_shell_config().shell_enabled {
+                shared.with_shell_config(config.get_shell_config())
+            } else {
+                shared.without_shell()
+            };
             // Enforce the agent's `can_invoke` list on `agent_call`: a non-empty
             // list restricts the tool to those targets, an empty list removes
             // the tool from the schema entirely so the agent cannot delegate.
@@ -391,7 +399,16 @@ impl Agent {
             if self.config.allowed_tools.is_empty() {
                 manager.clone()
             } else {
-                manager.with_allowlist(&self.config.allowed_tools)
+                // The shell is gated by `shell_enabled`, not by
+                // `allowed_tools`, so an enabled shell must survive the
+                // allowlist filter.
+                let mut allowlist = self.config.allowed_tools.clone();
+                if self.config.get_shell_config().shell_enabled
+                    && !allowlist.iter().any(|t| t == "shell")
+                {
+                    allowlist.push("shell".to_string());
+                }
+                manager.with_allowlist(&allowlist)
             }
         };
 
@@ -1204,6 +1221,73 @@ mod tests {
         let invocation_registry = Arc::new(AgentInvocationRegistry::new());
         let client = Arc::new(ChatClient::new("http://localhost:1"));
         Agent::new(config, llm_client, tool_manager, invocation_registry, None, client, None, None, PathBuf::new())
+    }
+
+    /// Build an agent whose shared registry contains a `shell` tool, like the
+    /// global `register_builtins` registration, with `shell_enabled` set.
+    fn make_agent_with_shell(shell_enabled: bool) -> Agent {
+        let mut config = AgentConfig {
+            name: "test".to_string(),
+            ..Default::default()
+        };
+        config.shell_config.shell_enabled = shell_enabled;
+        let llm_client = Arc::new(NoopLlm);
+        let registry = ToolRegistry::new(vec![], Arc::new(TracingToolLogger));
+        registry
+            .register(crate::tools::registry::ToolEntry {
+                tool: Arc::new(crate::tools::builtin::shell::ShellTool::new(
+                    crate::tools::builtin::shell::ShellConfig {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                )),
+                metadata: crate::tools::types::ToolMetadata {
+                    name: "shell".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Execute shell commands on the local system".to_string(),
+                    dependencies: vec![],
+                },
+                loaded_at: std::time::Instant::now(),
+            })
+            .unwrap();
+        let tool_manager = Arc::new(Mutex::new(ToolManager::new(Arc::new(registry))));
+        let invocation_registry = Arc::new(AgentInvocationRegistry::new());
+        let client = Arc::new(ChatClient::new("http://localhost:1"));
+        Agent::new(
+            config,
+            llm_client,
+            tool_manager,
+            invocation_registry,
+            None,
+            client,
+            None,
+            None,
+            PathBuf::new(),
+        )
+    }
+
+    #[test]
+    fn test_disabled_shell_removed_from_agent_schema() {
+        let agent = make_agent_with_shell(false);
+        let defs = agent.tool_manager.lock().unwrap().get_tool_definitions();
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+        assert!(
+            !names.contains(&"shell".to_string()),
+            "a disabled shell should not be advertised: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_enabled_shell_present_in_agent_schema() {
+        let agent = make_agent_with_shell(true);
+        let defs = agent.tool_manager.lock().unwrap().get_tool_definitions();
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+        assert!(
+            names.contains(&"shell".to_string()),
+            "an enabled shell should be advertised: {:?}",
+            names
+        );
     }
 
     struct NoopLlm;

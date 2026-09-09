@@ -167,6 +167,23 @@ impl ToolManager {
         }
     }
 
+    /// Create a new ToolManager where the `shell` tool is removed from the
+    /// schema entirely. Used for agents whose `shell_enabled` is false, so
+    /// the model never sees a shell tool whose calls would always fail.
+    pub fn without_shell(&self) -> Self {
+        let mut entries = self.registry.list();
+        entries.retain(|e| e.metadata.name != "shell");
+        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+        }
+    }
+
     /// Execute a tool by name with the given parameters.
     pub async fn execute(
         &self,
@@ -301,5 +318,44 @@ mod tests {
             "agent_call should remain in the schema: {:?}",
             names
         );
+    }
+
+    /// Build a ToolManager whose registry contains a single `shell` entry,
+    /// mirroring the global registration in `register_builtins`.
+    fn manager_with_shell() -> ToolManager {
+        let registry = ToolRegistry::new(vec![], Arc::new(TracingToolLogger));
+        registry
+            .register(ToolEntry {
+                tool: Arc::new(crate::tools::builtin::shell::ShellTool::new(
+                    crate::tools::builtin::shell::ShellConfig {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                )),
+                metadata: ToolMetadata {
+                    name: "shell".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Execute shell commands on the local system".to_string(),
+                    dependencies: vec![],
+                },
+                loaded_at: std::time::Instant::now(),
+            })
+            .unwrap();
+        ToolManager::new(Arc::new(registry))
+    }
+
+    #[test]
+    fn test_without_shell_removes_shell_from_schema() {
+        let tm = manager_with_shell();
+        assert!(tm.get_allowed_tools().contains(&"shell".to_string()));
+
+        let tm = tm.without_shell();
+        let names = tm.get_allowed_tools();
+        assert!(
+            !names.contains(&"shell".to_string()),
+            "shell should be removed from the schema: {:?}",
+            names
+        );
+        assert!(tm.get_tool_definitions().is_empty());
     }
 }

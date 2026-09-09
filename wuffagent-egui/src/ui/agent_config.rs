@@ -45,10 +45,14 @@ impl AgentConfigDialog {
             .lock()
             .map(|m| m.list_agents().unwrap_or_default())
             .unwrap_or_default();
+        // `shell` is intentionally not in the tools list: its availability is
+        // controlled solely by the "Enable shell tool" checkbox (a disabled
+        // shell is removed from the agent's schema entirely).
         let available_tools: Vec<String> = tool_manager
             .get_tool_definitions()
             .into_iter()
             .map(|t| t.function.name)
+            .filter(|name| name != "shell")
             .collect();
         let tool_checkboxes = vec![false; available_tools.len()];
 
