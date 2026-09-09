@@ -151,7 +151,7 @@ impl ToolRegistry {
 mod tests {
     use super::*;
     use crate::tools::types::{ToolLogger, TracingToolLogger};
-    use crate::tools::builtin::{CalculationTool, FileIOTool};
+    use crate::tools::builtin::{CalculationTool, ReadFileTool};
 
     fn mock_logger() -> Arc<dyn ToolLogger> {
         Arc::new(TracingToolLogger)
@@ -221,7 +221,7 @@ mod tests {
     fn test_list_tools_after_adds() {
         let registry = ToolRegistry::new(vec![], mock_logger());
         registry.register(make_entry(Arc::new(CalculationTool::new()))).unwrap();
-        registry.register(make_entry(Arc::new(FileIOTool::new()))).unwrap();
+        registry.register(make_entry(Arc::new(ReadFileTool::new()))).unwrap();
 
         assert_eq!(registry.list().len(), 2);
     }

@@ -20,6 +20,13 @@ pub struct AgentConfigDialog {
     enabled: bool,
     /// Reasoning effort for this agent (Off = inherit the global toggle).
     reasoning_effort: crate::types::ReasoningEffort,
+    /// Shell settings (persisted as the agent's `shell_config`).
+    shell_enabled: bool,
+    shell_type: String,
+    shell_timeout_ms: u32,
+    /// Comma-separated list of allowed command patterns (empty = allow all
+    /// non-dangerous commands).
+    shell_allowed_commands: String,
     /// Checked status per tool index.
     tool_checkboxes: Vec<bool>,
     /// Available tool names from the tool registry.
@@ -54,6 +61,10 @@ impl AgentConfigDialog {
             system_prompt: String::new(),
             enabled: true,
             reasoning_effort: crate::types::ReasoningEffort::default(),
+            shell_enabled: false,
+            shell_type: "powershell".to_string(),
+            shell_timeout_ms: 300_000,
+            shell_allowed_commands: String::new(),
             tool_checkboxes,
             available_tools,
             allowed_tools: Vec::new(),
@@ -123,6 +134,7 @@ impl AgentConfigDialog {
                                             enabled: bool,
                                             allowed: Vec<String>,
                                             effort: crate::types::ReasoningEffort,
+                                            shell: wuffagent_core::agents::config::ShellConfig,
                                         }
                                         let button_data: Vec<AgentButtonData> = self.agents.iter().enumerate().map(|(i, agent)| {
                                             let selected = i as isize == self.selected_index;
@@ -136,6 +148,7 @@ impl AgentConfigDialog {
                                                 enabled: agent.enabled,
                                                 allowed: agent.allowed_tools.clone(),
                                                 effort: agent.reasoning_effort,
+                                                shell: agent.shell_config.clone(),
                                             }
                                         }).collect();
                                         for bd in &button_data {
@@ -147,6 +160,10 @@ impl AgentConfigDialog {
                                                 self.system_prompt = bd.prompt.clone();
                                                 self.enabled = bd.enabled;
                                                 self.reasoning_effort = bd.effort;
+                                                self.shell_enabled = bd.shell.shell_enabled;
+                                                self.shell_type = bd.shell.shell_type.clone();
+                                                self.shell_timeout_ms = bd.shell.shell_timeout_ms as u32;
+                                                self.shell_allowed_commands = bd.shell.allowed_commands.join(", ");
                                                 self.sync_tools_from_agent(&bd.allowed);
                                                 self.message = None;
                                             }
@@ -200,6 +217,30 @@ impl AgentConfigDialog {
                                                 for variant in crate::types::ReasoningEffort::VARIANTS {
                                                     ui.selectable_value(&mut self.reasoning_effort, variant, variant.name());
                                                 }
+                                            });
+
+                                            ui.separator();
+                                            ui.group(|ui| {
+                                                ui.checkbox(&mut self.shell_enabled, "Enable shell tool");
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Shell type:");
+                                                    for t in ["powershell", "cmd", "bash"] {
+                                                        ui.selectable_value(
+                                                            &mut self.shell_type,
+                                                            t.to_string(),
+                                                            t,
+                                                        );
+                                                    }
+                                                });
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Timeout (ms):");
+                                                    ui.add(
+                                                        egui::DragValue::new(&mut self.shell_timeout_ms)
+                                                            .range(1000..=600_000),
+                                                    );
+                                                });
+                                                ui.label("Allowed commands (comma-separated patterns; empty = allow all non-dangerous):");
+                                                ui.text_edit_singleline(&mut self.shell_allowed_commands);
                                             });
 
                                             ui.separator();
@@ -271,7 +312,18 @@ impl AgentConfigDialog {
             auto_refine: true,
             can_invoke: Vec::new(),
             handoff_enabled: false,
-            shell_config: wuffagent_core::agents::config::ShellConfig::default(),
+            shell_config: wuffagent_core::agents::config::ShellConfig {
+                allowed_commands: self
+                    .shell_allowed_commands
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                shell_type: self.shell_type.clone(),
+                shell_timeout_ms: self.shell_timeout_ms as u64,
+                shell_enabled: self.shell_enabled,
+                working_dir: None,
+            },
             agents_dir: std::path::PathBuf::from(""),
             custom_prompts: std::collections::HashMap::new(),
             reasoning_effort: self.reasoning_effort,
@@ -344,12 +396,17 @@ impl AgentConfigDialog {
         let agent_enabled = self.agents[idx].enabled;
         let agent_allowed = self.agents[idx].allowed_tools.clone();
         let agent_effort = self.agents[idx].reasoning_effort;
+        let agent_shell = self.agents[idx].shell_config.clone();
 
         self.name = agent_name;
         self.description = agent_desc;
         self.system_prompt = agent_prompt;
         self.enabled = agent_enabled;
         self.reasoning_effort = agent_effort;
+        self.shell_enabled = agent_shell.shell_enabled;
+        self.shell_type = agent_shell.shell_type.clone();
+        self.shell_timeout_ms = agent_shell.shell_timeout_ms as u32;
+        self.shell_allowed_commands = agent_shell.allowed_commands.join(", ");
 
         self.sync_tools_from_agent(&agent_allowed);
         self.message = None;
@@ -377,6 +434,10 @@ impl AgentConfigDialog {
         self.system_prompt.clear();
         self.enabled = true;
         self.reasoning_effort = crate::types::ReasoningEffort::default();
+        self.shell_enabled = false;
+        self.shell_type = "powershell".to_string();
+        self.shell_timeout_ms = 300_000;
+        self.shell_allowed_commands.clear();
         self.allowed_tools.clear();
         for cb in &mut self.tool_checkboxes {
             *cb = false;

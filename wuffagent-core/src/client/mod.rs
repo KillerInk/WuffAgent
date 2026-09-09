@@ -198,6 +198,17 @@ impl ChatClient {
     /// English/code content.
     const DEFAULT_CHARS_PER_TOKEN_X100: u32 = 350;
 
+    /// Percentage of the context window at which trimming kicks in (×100).
+    /// While the estimated conversation stays below this threshold, the full
+    /// history is kept untouched.
+    const TRIM_TRIGGER_PCT: u64 = 90;
+
+    /// Percentage of the context window to trim DOWN TO once the trigger
+    /// threshold is exceeded (×100). Trimming does not stop at "just below
+    /// the limit" — it drops the conversation well below (to 50%) so the
+    /// following rounds have headroom before the trigger fires again.
+    const TRIM_TARGET_PCT: u64 = 50;
+
     pub fn new(base_url: &str) -> Self {
         Self::new_with_timeout(base_url, Self::DEFAULT_TIMEOUT_SECS)
     }
@@ -284,19 +295,35 @@ impl ChatClient {
         chars.saturating_mul(100) / c
     }
 
-    /// Trim budget in char units for the current n_ctx: 90% of the window,
-    /// converted from tokens to chars via the calibrated ratio.
-    pub fn trim_budget_chars(&self) -> usize {
+    /// Char budget for a given percentage of the current n_ctx window,
+    /// converted from tokens to chars via the calibrated chars-per-token
+    /// ratio. Returns 0 when the window size is unknown.
+    fn char_budget_pct(&self, pct: u64) -> usize {
         let n_ctx = self.n_ctx();
         if n_ctx == 0 {
             return 0;
         }
-        // n_ctx tokens × 0.9 × (c / 100) chars/token
+        // n_ctx tokens × (pct / 100) × (c / 100) chars/token
         let c = self
             .chars_per_token_x100
             .load(std::sync::atomic::Ordering::Relaxed)
             .max(100) as u64;
-        ((n_ctx as u64) * 90 * c / 10_000) as usize
+        ((n_ctx as u64) * pct * c / 10_000) as usize
+    }
+
+    /// Trim trigger in char units for the current n_ctx: 90% of the window,
+    /// converted via the calibrated ratio. Trimming only kicks in once the
+    /// estimated conversation exceeds this.
+    pub fn trim_trigger_chars(&self) -> usize {
+        self.char_budget_pct(Self::TRIM_TRIGGER_PCT)
+    }
+
+    /// Trim target in char units for the current n_ctx: 50% of the window,
+    /// converted via the calibrated ratio. Once the trigger is exceeded, the
+    /// conversation is trimmed all the way down to this — far below the
+    /// limit, not just under it.
+    pub fn trim_target_chars(&self) -> usize {
+        self.char_budget_pct(Self::TRIM_TARGET_PCT)
     }
 
     /// Record the estimator char count of a prompt about to be sent, so the
@@ -668,7 +695,6 @@ impl ChatClient {
             }
             other => other,
         };
-
         let (content, usage) = result?;
 
         // Update conversation history
@@ -700,8 +726,8 @@ impl ChatClient {
         // 90% of n_ctx, the full history is kept.
         let n_ctx = self.n_ctx();
         if n_ctx > 0 {
-            let target_chars = self.trim_budget_chars();
-            if estimate_conversation_tokens(&self.conversation) > target_chars {
+            if estimate_conversation_tokens(&self.conversation) > self.trim_trigger_chars() {
+                let target_chars = self.trim_target_chars();
                 self.trim_conversation(self.max_messages);
                 self.trim_to_token_budget(target_chars);
             }
@@ -947,24 +973,29 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_budget_chars_uses_calibrated_ratio() {
+    fn test_trim_trigger_and_target_chars_use_calibrated_ratio() {
         let client = ChatClient::new("http://localhost:8080");
         client.set_n_ctx(100_096);
-        // Default 3.5 chars/token: 100096 × 0.9 × 3.5 = 315292.8 → 315292
-        assert_eq!(client.trim_budget_chars(), (100_096u64 * 90 * 350 / 10_000) as usize);
+        // Default 3.5 chars/token:
+        // trigger: 100096 × 0.9 × 3.5 = 315292.8 → 315292
+        assert_eq!(client.trim_trigger_chars(), (100_096u64 * 90 * 350 / 10_000) as usize);
+        // target:  100096 × 0.5 × 3.5 = 175168.0 → 175168
+        assert_eq!(client.trim_target_chars(), (100_096u64 * 50 * 350 / 10_000) as usize);
 
-        // Calibrate to 3.0 chars/token (English prose): budget shrinks
+        // Calibrate to 3.0 chars/token (English prose): both budgets shrink
         client.note_prompt_chars(30_000);
         client.calibrate_from_usage(Some(&crate::types::Usage {
             prompt_tokens: 10_000,
             completion_tokens: 0,
             total_tokens: 10_000,
         }));
-        assert_eq!(client.trim_budget_chars(), (100_096u64 * 90 * 300 / 10_000) as usize);
+        assert_eq!(client.trim_trigger_chars(), (100_096u64 * 90 * 300 / 10_000) as usize);
+        assert_eq!(client.trim_target_chars(), (100_096u64 * 50 * 300 / 10_000) as usize);
 
         // n_ctx = 0 → no budget
         client.set_n_ctx(0);
-        assert_eq!(client.trim_budget_chars(), 0);
+        assert_eq!(client.trim_trigger_chars(), 0);
+        assert_eq!(client.trim_target_chars(), 0);
     }
 
     #[test]

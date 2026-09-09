@@ -320,7 +320,17 @@ impl Agent {
             );
         }
 
-        // Inject relevant memories
+        // Add memory management tool guidance
+        prompt.push_str(
+            "\n\nYou have memory management tools (save_memory, update_memory, search_memory, consolidate_memories). Use them proactively:\n",
+        );
+        prompt.push_str("- save_memory: Save non-obvious facts, lessons, or decisions as you discover them during work\n");
+        prompt.push_str("- search_memory: Search memory before starting tasks to avoid repeating mistakes\n");
+        prompt.push_str("- update_memory: Update memories when you learn they're outdated or incomplete\n");
+        prompt.push_str("- consolidate_memories: Merge related memories into comprehensive entries\n");
+        prompt.push_str("Only save information that is persistent and useful across sessions. Don't save routine operations or temporary information.");
+
+        // Inject relevant memories from past sessions
         if let Some(memory) = &self.memory {
             let memory_block = memory.build_context_block("");
             if !memory_block.is_empty() {
@@ -372,15 +382,22 @@ impl Agent {
         let mut verification_attempts = 0u32;
         let start = Instant::now();
 
-        // Tool definitions for native function calling, filtered per-agent.
-        let tool_defs: Option<Vec<crate::tools::ToolDefinition>> = {
+        // Per-agent tool manager, filtered by `allowed_tools`. An empty list
+        // means "all tools". Used for BOTH the tool definitions sent to the
+        // model and the execution of its tool calls, so the model can only
+        // ever see and run tools it is authorized for.
+        let tool_manager: crate::tools::ToolManager = {
             let manager = self.tool_manager.lock().unwrap();
-            let mgr = if self.config.allowed_tools.is_empty() {
+            if self.config.allowed_tools.is_empty() {
                 manager.clone()
             } else {
                 manager.with_allowlist(&self.config.allowed_tools)
-            };
-            let defs = mgr.get_tool_definitions();
+            }
+        };
+
+        // Tool definitions for native function calling, filtered per-agent.
+        let tool_defs: Option<Vec<crate::tools::ToolDefinition>> = {
+            let defs = tool_manager.get_tool_definitions();
             if defs.is_empty() { None } else { Some(defs) }
         };
 
@@ -410,12 +427,18 @@ impl Agent {
             // so we must trim it manually. Without this, a single large
             // tool result (100k+ tokens) can exceed n_ctx and the server
             // rejects the request.
+            //
+            // Two thresholds: history grows freely until it crosses the
+            // trigger (90% of n_ctx); once it does, we do NOT stop just
+            // under the limit — we trim all the way down to the target
+            // (50% of n_ctx) so the following rounds have headroom.
             if self.client.n_ctx() > 0 {
-                // Budget in char units: 90% of n_ctx tokens converted to chars
-                // via the client's calibrated chars-per-token ratio.
-                let target_chars = self.client.trim_budget_chars();
                 let msg_count = messages.len();
-                if msg_count > 4 {
+                let total_chars = crate::trimming::message_char_count(messages);
+                if msg_count > 4 && total_chars > self.client.trim_trigger_chars() {
+                    // Target in char units: 50% of n_ctx tokens converted to
+                    // chars via the client's calibrated chars-per-token ratio.
+                    let target_chars = self.client.trim_target_chars();
                     // Trim self.messages directly: stream_with_messages_arc writes to a
                     // throwaway local_conv and never touches self.client.conversation,
                     // so trimming the client's conversation would be a no-op.
@@ -589,7 +612,7 @@ impl Agent {
                                 continue;
                             }
                         };
-                        let manager = self.tool_manager.lock().unwrap().clone();
+                        let manager = tool_manager.clone();
                         let tool_result = manager.execute(&call.function.name, params).await;
                         // Tools must always return *something*: an empty result
                         // string becomes an empty `role: "tool"` message, which
@@ -664,7 +687,7 @@ impl Agent {
                                 continue;
                             }
                         };
-                        let manager = self.tool_manager.lock().unwrap().clone();
+                        let manager = tool_manager.clone();
                         let tool_result = manager.execute(&call.function.name, params).await;
                         let result_str = match tool_result {
                             Ok(output) => {
@@ -1056,7 +1079,9 @@ impl Agent {
     }
 
     /// Extract bash/code blocks from LLM responses and convert them to the
-    /// named file tools (read_file, list_dir, search_files, file_ops, ...).
+    /// named file tools (read_file, list_dir, search_files, ...).
+    /// Commands without a named equivalent (mkdir, rm, cp, mv, pwd) fall
+    /// through to the generic shell tool.
     fn extract_bash_as_tool_calls(&self, response: &str) -> Option<Vec<ToolCall>> {
         let mut calls = Vec::new();
         let mut id_counter = 0u32;
@@ -1120,36 +1145,17 @@ impl Agent {
                     }
                     "find" => {
                         let path = args_parts.first().copied().unwrap_or(".");
-                        emit_tool("search_files", serde_json::json!({ "path": path, "pattern": "*" }));
-                    }
-                    "pwd" => {
-                        emit_tool("file_ops", serde_json::json!({ "action": "file_info", "path": "." }));
-                    }
-                    "mkdir" => {
-                        if let Some(path) = args_parts.first() {
-                            let recursive = raw_parts.iter().any(|p| *p == "-p" || *p == "--parents");
-                            emit_tool("file_ops", serde_json::json!({ "action": "mkdir", "path": path, "recursive": recursive }));
-                        }
-                    }
-                    "rm" => {
-                        for path in &args_parts {
-                            emit_tool("file_ops", serde_json::json!({ "action": "delete", "path": path }));
-                        }
-                    }
-                    "cp" => {
-                        if args_parts.len() >= 2 {
-                            emit_tool("file_ops", serde_json::json!({ "action": "copy", "src": args_parts[0], "dest": args_parts[1] }));
-                        }
-                    }
-                    "mv" => {
-                        if args_parts.len() >= 2 {
-                            emit_tool("file_ops", serde_json::json!({ "action": "move", "src": args_parts[0], "dest": args_parts[1] }));
-                        }
+                        let pattern = format!("{path}/*");
+                        emit_tool("search_files", serde_json::json!({ "pattern": pattern }));
                     }
                     "head" | "tail" => {
                         if let Some(path) = args_parts.last() {
                             emit_tool("read_file", serde_json::json!({ "path": path }));
                         }
+                    }
+                    // No named file tool equivalent — run via the shell tool.
+                    "pwd" | "mkdir" | "rm" | "cp" | "mv" => {
+                        emit_tool("shell", serde_json::json!({ "command": cmd_line }));
                     }
                     _ => continue,
                 }

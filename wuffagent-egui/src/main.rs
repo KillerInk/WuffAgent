@@ -175,7 +175,7 @@ fn bootstrap() -> (
     );
     let tool_manager_for_engine: Arc<Mutex<ToolManager>> = Arc::new(Mutex::new((*tool_manager).clone()));
 
-    // Initialize memory manager with LLM client for extraction and improvement
+    // Initialize memory manager
     let memory_config = config.memory_config.clone();
     let llm_client_clone = llm_client.clone();
     let memory_manager = wuffagent_core::memory::MemoryManager::new_with_llm(memory_config, llm_client_clone)
@@ -185,6 +185,9 @@ fn bootstrap() -> (
                 .unwrap_or_else(|_| wuffagent_core::memory::MemoryManager::new(wuffagent_core::memory::MemoryConfig::default()).unwrap())
         });
     let memory_manager = Arc::new(memory_manager);
+
+    // Register memory tools with the memory manager
+    builtin::register_memory_tools(&registry, memory_manager.clone()).expect("Failed to register memory tools");
 
     let mut agent_engine = AgentEngine::new(
         agent_registry.clone(),

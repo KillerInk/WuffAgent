@@ -231,7 +231,6 @@ impl AgentEngine {
 
         // Create the agent and execute — use the shared invocation registry
         let memory = self.memory.clone();
-        let agent_config_for_improve = agent_config.clone();
         let mut agent = Agent::new(
             agent_config,
             self.llm_client.clone(),
@@ -245,36 +244,6 @@ impl AgentEngine {
         );
 
         let result = agent.execute(request, cancel_token).await;
-
-        // Post-task: extract memories and suggest improvements
-        if let Some(memory) = &self.memory {
-            // Only extract memories when memory is enabled to avoid unnecessary LLM calls.
-            if memory.config().enabled {
-                // Extract memories from the actual agent conversation messages
-                let agent_messages = agent.messages();
-                if !agent_messages.is_empty() {
-                    let _ = memory.extract_and_save(agent_messages, "agent_task").await;
-                }
-            }
-            
-            // Suggest improvements if auto_improve is enabled
-            if memory.config().auto_improve {
-                let result_str = match &result {
-                    Ok(r) => r.clone(),
-                    Err(e) => format!("Error: {}", e),
-                };
-                let suggestions = memory.suggest_improvements(&agent_config_for_improve, request, &result_str).await;
-                if let Ok(suggestions) = suggestions {
-                    if !suggestions.is_empty() {
-                        self.send_chain_event(crate::types::AppEvent::ImprovementSuggested {
-                            agent_name: agent_name.to_string(),
-                            suggestions,
-                            session_id: self.session_id(),
-                        });
-                    }
-                }
-            }
-        }
 
         result
     }
@@ -305,10 +274,8 @@ impl AgentEngine {
         // Apply the selected profile's tool policy. An empty allowed_tools means
         // the chat agent gets all available tools (the old default); the shell
         // config is what lets a profile like "coder" restrict the shell to its
-        // own allowlist instead of the global allow-all shell.
         chat_config.allowed_tools = tool_policy.allowed_tools.clone();
         chat_config.shell_config = tool_policy.shell_config.clone();
-        let chat_config_for_improve = chat_config.clone();
 
         let mut agent = Agent::new(
             chat_config,
@@ -329,32 +296,6 @@ impl AgentEngine {
         // AgentChainCancelled early-return above is kept: the agent never
         // runs on that path.)
         let result = agent.execute(request, cancel_token).await;
-
-        // Post-task: extract memories and suggest improvements (mirrors execute_with_agent)
-        if let Some(memory) = &self.memory {
-            if memory.config().enabled {
-                let agent_messages = agent.messages();
-                if !agent_messages.is_empty() {
-                    let _ = memory.extract_and_save(agent_messages, "chat").await;
-                }
-            }
-            if memory.config().auto_improve {
-                let result_str = match &result {
-                    Ok(r) => r.clone(),
-                    Err(e) => format!("Error: {}", e),
-                };
-                let suggestions = memory.suggest_improvements(&chat_config_for_improve, request, &result_str).await;
-                if let Ok(suggestions) = suggestions {
-                    if !suggestions.is_empty() {
-                        self.send_chain_event(crate::types::AppEvent::ImprovementSuggested {
-                            agent_name: "chat".to_string(),
-                            suggestions,
-                            session_id: self.session_id(),
-                        });
-                    }
-                }
-            }
-        }
 
         result
     }
