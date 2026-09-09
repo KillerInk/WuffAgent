@@ -101,14 +101,9 @@ impl ChatApp {
                 self.draw_input_area(ui);
             });
 
-        // Chat area fills all remaining space between top bar and input panel
-        egui::CentralPanel::default().show(ui, |ui| {
-            let theme = Theme::from_name(&self.config.theme);
-            ui.visuals_mut().panel_fill = theme.background;
-            self.draw_chat_area(ui);
-        });
-
-        // Agent chain side panel
+        // Agent chain side panel. Must be declared before the CentralPanel,
+        // since the central panel claims all remaining space — a side panel
+        // declared after it would have no room and be invisible.
         if self.show_agent_chain
             || !self.agent_chain_state.entries.is_empty()
             || self.agent_chain_state.cancelled {
@@ -121,6 +116,14 @@ impl ChatApp {
                     self.draw_agent_chain_panel(ui);
                 });
         }
+
+        // Chat area fills all remaining space (between top bar, input panel and
+        // the agent chain side panel)
+        egui::CentralPanel::default().show(ui, |ui| {
+            let theme = Theme::from_name(&self.config.theme);
+            ui.visuals_mut().panel_fill = theme.background;
+            self.draw_chat_area(ui);
+        });
 
         // Draw improvements panel on top
         let ctx = ui.ctx();
