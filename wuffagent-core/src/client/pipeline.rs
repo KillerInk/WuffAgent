@@ -11,8 +11,9 @@ use crate::agents::AgentEngine;
 use crate::types::{AppEvent, ReasoningEffort};
 
 /// The selected chat profile's tool policy, carried onto the chat path so the
-/// chat agent runs with that profile's tool set and shell restrictions
-/// (instead of the old "all tools + allow-all shell" default).
+/// chat agent runs with that profile's tool set, shell restrictions, delegation
+/// rights, reasoning effort, and trim configuration (instead of the old
+/// "all tools + allow-all shell" default).
 #[derive(Clone)]
 pub struct ChatToolPolicy {
     /// Tool names the profile authorizes. The chat agent is given all available
@@ -20,6 +21,13 @@ pub struct ChatToolPolicy {
     pub allowed_tools: Vec<String>,
     /// The profile's shell config (allowlist/enabled/timeout).
     pub shell_config: ShellConfig,
+    /// Agent names the profile may invoke via agent_call (empty = the
+    /// agent_call tool is stripped from the chat agent).
+    pub can_invoke: Vec<String>,
+    /// The profile's reasoning effort (Off = inherit the global toggle).
+    pub reasoning_effort: ReasoningEffort,
+    /// The profile's context-trimming configuration.
+    pub trim_config: crate::trimming::config::TrimConfig,
 }
 
 impl ChatToolPolicy {
@@ -33,6 +41,9 @@ impl ChatToolPolicy {
                 allowed_commands: Vec::new(),
                 ..ShellConfig::default()
             },
+            can_invoke: Vec::new(),
+            reasoning_effort: ReasoningEffort::default(),
+            trim_config: crate::trimming::config::TrimConfig::default(),
         }
     }
 }

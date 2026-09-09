@@ -273,9 +273,14 @@ impl AgentEngine {
         chat_config.task_timeout_ms = 0; // no timeout for chat
         // Apply the selected profile's tool policy. An empty allowed_tools means
         // the chat agent gets all available tools (the old default); the shell
-        // config is what lets a profile like "coder" restrict the shell to its
+        // config lets a profile like "coder" restrict the shell to its allowlist.
         chat_config.allowed_tools = tool_policy.allowed_tools.clone();
         chat_config.shell_config = tool_policy.shell_config.clone();
+        // Carry over the profile's delegation rights, reasoning effort, and
+        // trim config so the chat agent behaves like the profile it came from.
+        chat_config.can_invoke = tool_policy.can_invoke.clone();
+        chat_config.reasoning_effort = tool_policy.reasoning_effort;
+        chat_config.trim_config = tool_policy.trim_config.clone();
 
         let mut agent = Agent::new(
             chat_config,

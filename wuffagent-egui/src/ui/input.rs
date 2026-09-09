@@ -258,9 +258,10 @@ impl ChatApp {
         self.start_pipeline_for_session(sid, &input, image, self.resolve_agent_prompt(), self.resolve_tool_policy(), false);
     }
 
-    /// Resolve the selected agent profile's tool policy (allowed_tools +
-    /// shell config) for the current selection. None/"Auto" or a profile not
-    /// found yields an unrestricted policy (all tools + allow-all shell).
+    /// Resolve the selected agent profile's tool policy (allowed_tools, shell
+    /// config, delegation rights, reasoning effort, trim config) for the
+    /// current selection. None/"Auto" or a profile not found yields an
+    /// unrestricted policy (all tools + allow-all shell, no delegation).
     fn resolve_tool_policy(&self) -> crate::client::pipeline::ChatToolPolicy {
         let policy = match self.selected_agent_index {
             Some(i) => {
@@ -273,6 +274,9 @@ impl ChatApp {
             Some(cfg) => crate::client::pipeline::ChatToolPolicy {
                 allowed_tools: cfg.allowed_tools,
                 shell_config: cfg.shell_config,
+                can_invoke: cfg.can_invoke,
+                reasoning_effort: cfg.reasoning_effort,
+                trim_config: cfg.trim_config,
             },
             None => crate::client::pipeline::ChatToolPolicy::unrestricted(),
         }
@@ -512,19 +516,9 @@ impl ChatApp {
             }
         }
 
-        // Append available subagent hint so the model knows when to delegate.
-        if let Some(names) = self.agent_engine.available_agent_names() {
-            if !names.is_empty() {
-                prompt.push_str(&format!(
-                    "\n\nYou can delegate tasks to other agents using the agent_call tool. Available agents: {}. \
-                     Prefer your own tools when a task can be done in a single step — \
-                     delegate only when the sub-task needs another agent's specialization, \
-                     since each delegation spawns a full sub-conversation and is more \
-                     expensive than a direct tool call.",
-                    names
-                ));
-            }
-        }
+        // The delegation hint is appended by `Agent::build_system_prompt`
+        // based on the profile's `can_invoke` list — mirroring it here would
+        // advertise agents the chat agent cannot actually invoke.
 
         prompt
     }
