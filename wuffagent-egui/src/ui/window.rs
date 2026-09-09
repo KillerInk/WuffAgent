@@ -5,11 +5,29 @@ use crate::config::{get_presets_path, PresetStore};
 pub use crate::ui::state::ChatApp;
 
 impl ChatApp {
+    /// Shared config handle used by the settings/presets dialogs. Created when
+    /// the settings dialog opens (as a clone of the live config) and dropped
+    /// when it closes. Each frame the app syncs `self.config` from it so that
+    /// Save (settings) and Load (presets) take effect in the running app.
+    fn active_config_handle(&self) -> Option<Arc<Mutex<crate::config::Config>>> {
+        self.settings_dialog
+            .as_ref()
+            .map(|d| d.config.clone())
+            .or_else(|| self.presets_dialog.as_ref().map(|d| d.config.clone()))
+    }
+
     pub fn show_settings_dialog(&mut self, ctx: &egui::Context) {
         if self.show_settings && self.settings_dialog.is_none() {
             let show_presets = Arc::new(Mutex::new(false));
+            // Reuse the presets dialog's shared config if one is already open,
+            // so both dialogs and the app stay in sync.
+            let shared = self
+                .presets_dialog
+                .as_ref()
+                .map(|d| d.config.clone())
+                .unwrap_or_else(|| Arc::new(Mutex::new(self.config.clone())));
             self.settings_dialog =
-                Some(super::settings::SettingsDialog::new_with_presets_flag(&Arc::new(Mutex::new(self.config.clone())), show_presets));
+                Some(super::settings::SettingsDialog::new_with_presets_flag(&shared, show_presets));
         }
         if let Some(dialog) = self.settings_dialog.as_mut() {
             let closed = dialog.show(ctx);
@@ -18,6 +36,7 @@ impl ChatApp {
                 self.settings_dialog = None;
             }
         }
+        self.sync_config_from_dialogs();
     }
 
     pub fn show_presets_dialog(&mut self, ctx: &egui::Context) {
@@ -30,9 +49,12 @@ impl ChatApp {
                     }
                     if self.presets_dialog.is_none() {
                         if let Ok(store) = PresetStore::load(&get_presets_path()) {
+                            // Share the settings dialog's config handle so
+                            // "Load" in presets and the app stay in sync.
+                            let shared = sd.config.clone();
                             self.presets_dialog = Some(super::presets_dialog::PresetsDialog::new(
                                 store,
-                                &Arc::new(Mutex::new(self.config.clone())),
+                                &shared,
                             ));
                         }
                     }
@@ -43,15 +65,22 @@ impl ChatApp {
         if let Some(dialog) = self.presets_dialog.as_mut() {
             let closed = dialog.show(ctx);
             if closed {
-                if let Ok(path) = std::env::current_exe() {
-                    if let Some(dir) = path.parent() {
-                        let presets_path = dir.join("presets.json");
-                        if let Err(e) = dialog.store.save(&presets_path) {
-                            eprintln!("Failed to save presets: {}", e);
-                        }
-                    }
+                if let Err(e) = dialog.store.save(&get_presets_path()) {
+                    eprintln!("Failed to save presets: {}", e);
                 }
                 self.presets_dialog = None;
+            }
+        }
+        self.sync_config_from_dialogs();
+    }
+
+    /// Copy the shared dialog config back into `self.config` if any dialog is
+    /// open. Dialogs mutate their (shared) config on Save/Load and persist it
+    /// to disk; without this sync the running app would keep using stale values.
+    fn sync_config_from_dialogs(&mut self) {
+        if let Some(handle) = self.active_config_handle() {
+            if let Ok(cfg) = handle.try_lock() {
+                self.config = (*cfg).clone();
             }
         }
     }

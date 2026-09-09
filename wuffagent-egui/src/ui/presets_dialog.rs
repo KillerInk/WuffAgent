@@ -33,7 +33,7 @@ pub struct PresetsDialog {
     /// The store (loaded from disk on open).
     pub store: PresetStore,
     /// Shared config handle (written back when a preset is applied).
-    config: Arc<Mutex<Config>>,
+    pub(crate) config: Arc<Mutex<Config>>,
 }
 
 impl PresetsDialog {
