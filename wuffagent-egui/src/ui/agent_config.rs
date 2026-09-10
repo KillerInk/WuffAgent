@@ -1,4 +1,4 @@
-use eframe::egui;
+﻿use eframe::egui;
 use std::sync::{Arc, Mutex};
 
 use crate::agents::config::{AgentConfig, AgentManager};
@@ -279,7 +279,7 @@ impl AgentConfigDialog {
                                             }
                                         });
                                     } else {
-                                        // No agent selected â€” show info
+                                        // No agent selected Ã¢â‚¬â€ show info
                                         ui.vertical_centered(|ui| {
                                             ui.label(egui::RichText::new("Select an agent from the list, or click \"+ Add Agent\" to create one.").strong());
                                         });
@@ -306,16 +306,7 @@ impl AgentConfigDialog {
             system_prompt: self.system_prompt.clone(),
             allowed_tools: self.allowed_tools.clone(),
             enabled: self.enabled,
-            priority: 0,
-            max_concurrent: 1,
-            max_depth: 5,
-            recovery_policy: wuffagent_core::agents::config::RecoveryPolicy::default(),
-            max_plan_iterations: 5,
-            max_parallel_workers: 4,
             task_timeout_ms: 60_000,
-            auto_refine: true,
-            can_invoke: Vec::new(),
-            handoff_enabled: false,
             shell_config: wuffagent_core::agents::config::ShellConfig {
                 allowed_commands: self
                     .shell_allowed_commands

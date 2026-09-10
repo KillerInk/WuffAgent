@@ -55,13 +55,14 @@ impl ChatApp {
                         self.toggle_theme(ui.ctx());
                     }
 
-                    // Agent chain button
-                    let chain_btn = egui::Button::new("🔗")
+                    // Improvements panel button
+                    let improvements_btn = egui::Button::new("✨")
                         .fill(theme.surface_light)
                         .corner_radius(4);
-                    if ui.add(chain_btn).clicked() {
-                        self.show_agent_chain = !self.show_agent_chain;
+                    if ui.add(improvements_btn).clicked() {
+                        self.improvements_panel.show_panel = true;
                     }
+
                     // Agent config button
                     let agent_btn = egui::Button::new("🤖")
                         .fill(theme.surface_light)
@@ -101,24 +102,7 @@ impl ChatApp {
                 self.draw_input_area(ui);
             });
 
-        // Agent chain side panel. Must be declared before the CentralPanel,
-        // since the central panel claims all remaining space — a side panel
-        // declared after it would have no room and be invisible.
-        if self.show_agent_chain
-            || !self.agent_chain_state.entries.is_empty()
-            || self.agent_chain_state.cancelled {
-            egui::Panel::right("agent_chain_panel")
-                .default_size(280.0)
-                .resizable(true)
-                .show(ui, |ui| {
-                    let theme = Theme::from_name(&self.config.theme);
-                    ui.visuals_mut().panel_fill = theme.surface;
-                    self.draw_agent_chain_panel(ui);
-                });
-        }
-
-        // Chat area fills all remaining space (between top bar, input panel and
-        // the agent chain side panel)
+        // Chat area fills all remaining space
         egui::CentralPanel::default().show(ui, |ui| {
             let theme = Theme::from_name(&self.config.theme);
             ui.visuals_mut().panel_fill = theme.background;

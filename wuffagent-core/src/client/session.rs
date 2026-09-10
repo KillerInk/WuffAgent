@@ -58,8 +58,6 @@ pub fn save_session(
         session.system_prompt = system_prompt.to_string();
     }
     session.id = id.to_string();
-    // Truncate agent_chain to prevent unbounded growth on save
-    session.truncate_agent_chain(crate::trimming::TrimConfig::default().max_chain_entries);
     // Retry with exponential backoff for transient failures
     let mut retries = 0;
     loop {
@@ -116,8 +114,6 @@ pub fn load_session(
     if !session.system_prompt.is_empty() {
         *system_prompt = session.system_prompt.clone();
     }
-    // Truncate agent_chain on load to prevent unbounded growth
-    session.truncate_agent_chain(crate::trimming::TrimConfig::default().max_chain_entries);
     Some(session)
 }
 

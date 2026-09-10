@@ -1,4 +1,4 @@
-use tracing;
+﻿use tracing;
 
 use super::state::ChatApp;
 use crate::types::{AppEvent, AppStatus, MessageKind};
@@ -20,14 +20,9 @@ impl ChatApp {
             | AppEvent::ToolCallError { session_id, .. }
             | AppEvent::StreamThinkingChunk { session_id, .. }
             | AppEvent::StreamThinkingComplete { session_id, .. }
-            | AppEvent::AgentChainStarted { session_id, .. }
-            | AppEvent::AgentChainCompleted { session_id, .. }
-            | AppEvent::AgentChainError { session_id, .. }
-            | AppEvent::AgentChainCancelled { session_id, .. }
-            | AppEvent::AgentChainComplete { session_id, .. }
             | AppEvent::NCtxUpdated { session_id, .. }
             | AppEvent::ImprovementSuggested { session_id, .. }
-            | AppEvent::AgentChainStopped { session_id, .. } => session_id.clone(),
+            => session_id.clone(),
         };
         match event {
             AppEvent::StreamChunk { content, .. } => {
@@ -106,7 +101,7 @@ impl ChatApp {
                 }
                 // Keep the queue alive: the failed turn is retried as the next
                 // turn after an earlier queued message, if any remain. An
-                // explicit Stop surfaces as error "Cancelled" — don't resume
+                // explicit Stop surfaces as error "Cancelled" â€” don't resume
                 // in that case.
                 if !cancelled {
                     self.drain_next_queued_message(&sid);
@@ -151,7 +146,7 @@ impl ChatApp {
                 tracing::trace!("UI: StreamThinkingComplete received, current_thinking_len={}", 
                     self.session_store.get(&sid).map(|r| r.chat_state.current_thinking.len()).unwrap_or(0));
                 // Commit the thinking as a typed message, then clear live state.
-                // Note: do NOT commit_stream() here — the round's text stays in
+                // Note: do NOT commit_stream() here â€” the round's text stays in
                 // stream_buffer and is committed by RoundComplete/StreamComplete,
                 // which keeps ordering correct (thinking first, text after) and
                 // prevents the StreamComplete fallback from re-appending it.
@@ -160,66 +155,6 @@ impl ChatApp {
                     if !thinking_text.is_empty() {
                         runtime.chat_state.push_message(MessageKind::Thinking, "assistant", &thinking_text);
                     }
-                }
-            }
-            AppEvent::AgentChainStarted { agent_name, depth, session_id: _ } => {
-                tracing::info!(agent_name, depth, "Agent chain started");
-                self.agent_chain_state.active = true;
-                self.agent_chain_state.current_agent = Some(agent_name);
-                self.agent_chain_state.cancelled = false;
-                self.show_agent_chain = true;
-            }
-            AppEvent::AgentChainCompleted { agent_name, result, depth, session_id: _ } => {
-                tracing::info!(agent_name, depth, "Agent chain completed");
-                self.agent_chain_state.current_agent = None;
-                if !result.is_empty() {
-                    self.agent_chain_state.entries.push(crate::sessions::model::AgentChainEntry {
-                        agent_name,
-                        request: result.clone(),
-                        result,
-                        depth,
-                        tool_calls: vec![],
-                        completed_at: chrono::Utc::now(),
-                        error: None,
-                        status: crate::sessions::model::AgentChainEntryStatus::Completed,
-                        checkpoint: None,
-                    });
-                }
-            }
-            AppEvent::AgentChainError { agent_name, error, depth, session_id: _ } => {
-                tracing::error!(agent_name, depth, error, "Agent chain error");
-                self.agent_chain_state.current_agent = None;
-                self.agent_chain_state.entries.push(crate::sessions::model::AgentChainEntry {
-                    agent_name,
-                    request: String::new(),
-                    result: error.clone(),
-                    depth,
-                    tool_calls: vec![],
-                    completed_at: chrono::Utc::now(),
-                    error: Some(error),
-                    status: crate::sessions::model::AgentChainEntryStatus::Failed,
-                    checkpoint: None,
-                });
-            }
-            AppEvent::AgentChainCancelled { agent_name, session_id: _ } => {
-                tracing::info!(agent_name, "Agent chain cancelled");
-                self.agent_chain_state.cancelled = true;
-            }
-            AppEvent::AgentChainComplete { response, entries, session_id: _ } => {
-                tracing::info!("Agent chain complete");
-                self.agent_chain_state.entries = entries;
-                if let Some(runtime) = self.session_store.get_mut(&sid) {
-                    runtime.chat_state.push_message(MessageKind::Normal, "assistant", &response);
-                }
-                self.show_agent_chain = false;
-            }
-            AppEvent::AgentChainStopped { session_id: _ } => {
-                tracing::info!("Agent chain stopped");
-                self.agent_chain_state.cancelled = true;
-                self.agent_chain_state.active = false;
-                self.agent_chain_state.current_agent = None;
-                if let Some(runtime) = self.session_store.get_mut(&sid) {
-                    runtime.chat_state.is_generating = false;
                 }
             }
             AppEvent::NCtxUpdated { n_ctx, session_id: _ } => {

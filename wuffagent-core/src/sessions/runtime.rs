@@ -179,6 +179,10 @@ pub struct SessionRuntime {
     pub engine: AgentEngine,
     /// Per-session cancellation token.
     pub cancel_token: CancellationToken,
+    /// The agent profile name selected for this session (changeable). Resolved
+    /// to a system prompt + tool policy at send time; `None` until the UI
+    /// picks one (new sessions default to a profile in the egui layer).
+    pub selected_agent: Option<String>,
     /// Chat area state for UI display.
     pub chat_state: ChatAreaState,
 }
@@ -200,6 +204,7 @@ impl SessionRuntime {
             pipeline,
             engine,
             cancel_token,
+            selected_agent: None,
             chat_state: ChatAreaState::default(),
         }
     }

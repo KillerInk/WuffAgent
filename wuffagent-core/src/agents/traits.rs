@@ -1,5 +1,3 @@
-use super::types::{AgentMetadata, AgentResult};
-
 /// Error type for agent operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -25,24 +23,3 @@ pub enum AgentError {
     Internal(String),
 }
 
-pub type AgentResultType<T> = Result<T, AgentError>;
-
-use tokio_util::sync::CancellationToken;
-
-/// Trait for agents that can be invoked by other agents.
-#[async_trait::async_trait]
-pub trait AgentInvocation: Send + Sync {
-    /// Invoke this agent with a task description and return the result.
-    ///
-    /// The `cancel_token` is forwarded from the parent agent so that
-    /// nested invocations can be cancelled when the parent is stopped.
-    async fn invoke(
-        &self,
-        request: &str,
-        context: &serde_json::Value,
-        cancel_token: &CancellationToken,
-    ) -> AgentResultType<AgentResult>;
-
-    /// Get metadata about this agent for discovery.
-    fn metadata(&self) -> AgentMetadata;
-}

@@ -14,7 +14,7 @@ pub use self::encryption::EncryptionSettings;
 pub use self::presets::{get_presets_path, LocalPreset, Preset, PresetError, PresetStore, RemotePreset};
 pub use self::search::{SearchConfig, SearchBackend, SearchRegion, TimeRange};
 pub use paths::{get_config_path, get_wuffagent_home};
-pub use crate::agents::config::{AgentConfig, RecoveryPolicy, ShellConfig, WorkerConfig};
+pub use crate::agents::config::{AgentConfig, ShellConfig, WorkerConfig};
 pub use crate::memory::types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};
 
 mod chat;
@@ -129,8 +129,6 @@ where
             system_prompt: legacy.system_prompt,
             allowed_tools: legacy.allowed_tools,
             enabled: true,
-            max_depth: 5,
-            recovery_policy: crate::agents::config::RecoveryPolicy::FailFast,
             ..Default::default()
         };
 

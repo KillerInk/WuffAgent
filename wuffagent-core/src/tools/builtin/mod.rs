@@ -1,7 +1,6 @@
 pub mod calculation;
 pub mod file_io;
 pub mod web_search;
-pub mod agent_call;
 pub mod memory;
 pub mod time;
 pub mod shell;
@@ -11,7 +10,6 @@ pub use file_io::{
     AppendFileTool, ApplyDiffTool, ListDirTool, ReadFileTool, SearchFilesTool, WriteFileTool,
 };
 pub use web_search::WebSearchTool;
-pub use agent_call::AgentCallTool;
 pub use memory::{SaveMemoryTool, UpdateMemoryTool, SearchMemoryTool, ConsolidateMemoriesTool};
 pub use time::TimeTool;
 pub use shell::{ShellTool, ShellConfig};
@@ -22,7 +20,6 @@ use crate::tools::registry::ToolEntry;
 /// Register all built-in tools that do not require external dependencies.
 pub fn register_builtins(
     registry: &crate::tools::registry::ToolRegistry,
-    invocation_registry: &crate::agents::invocation_registry::AgentInvocationRegistry,
 ) -> crate::tools::types::ToolResult<()> {
     // Create web search tool
     registry.register(ToolEntry {
@@ -88,17 +85,6 @@ pub fn register_builtins(
             name: "calculation".to_string(),
             version: "1.0.0".to_string(),
             description: "Evaluate mathematical expressions. Supports basic arithmetic (+, -, *, /), exponentiation (^), parentheses, negative numbers, common functions (sin, cos, tan, asin, acos, atan, sqrt, log, ln, log2, log10, abs, floor, ceil, exp, round, fact), and constants (pi, e)".to_string(),
-            dependencies: vec![],
-        },
-        loaded_at: std::time::Instant::now(),
-    })?;
-
-    registry.register(ToolEntry {
-        tool: std::sync::Arc::new(AgentCallTool::new(std::sync::Arc::new(invocation_registry.clone()))),
-        metadata: ToolMetadata {
-            name: "agent_call".to_string(),
-            version: "1.0.0".to_string(),
-            description: "Invoke another agent to execute a sub-task".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

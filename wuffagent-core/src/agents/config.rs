@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing;
@@ -163,33 +163,6 @@ impl WorkerConfig {
         Ok(())
     }
 
-    /// Derive an AgentType from the worker's allowed tools and description.
-    pub fn infer_agent_type(&self) -> crate::agents::types::AgentType {
-        let desc_lower = self.description.to_lowercase();
-        let tool_names: Vec<&str> = self.allowed_tools.iter().map(|s| s.as_str()).collect();
-
-        // Heuristic: infer agent type from tool names and description
-        if tool_names.contains(&"web_search")
-            || desc_lower.contains("research") || desc_lower.contains("search")
-        {
-            return crate::agents::types::AgentType::Research;
-        }
-        if tool_names.contains(&"read_file")
-            || tool_names.contains(&"write_file")
-            || tool_names.contains(&"file_ops")
-            || tool_names.contains(&"file_io")
-            || desc_lower.contains("code") || desc_lower.contains("write") || desc_lower.contains("read")
-        {
-            return crate::agents::types::AgentType::Coding;
-        }
-        if tool_names.contains(&"calculation")
-            || desc_lower.contains("execute") || desc_lower.contains("build") || desc_lower.contains("deploy")
-        {
-            return crate::agents::types::AgentType::Implementation;
-        }
-        crate::agents::types::AgentType::General
-    }
-
     /// Get the shell configuration, returning a default if not explicitly set.
     pub fn get_shell_config(&self) -> ShellConfig {
         if self.shell_config.shell_enabled || !self.shell_config.allowed_commands.is_empty() {
@@ -270,16 +243,7 @@ impl AgentManager {
                             system_prompt: legacy.system_prompt,
                             allowed_tools: legacy.allowed_tools,
                             enabled: legacy.enabled,
-                            priority: legacy.priority,
-                            max_concurrent: legacy.max_concurrent,
-                            max_depth: 5,
-                            recovery_policy: RecoveryPolicy::default(),
-                            max_plan_iterations: 5,
-                            max_parallel_workers: 4,
                             task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
-                            auto_refine: true,
-                            can_invoke: legacy.can_invoke,
-                            handoff_enabled: legacy.handoff_enabled,
                             shell_config: legacy.shell_config,
                             agents_dir: self.agents_dir.clone(),
                             custom_prompts: HashMap::new(),
@@ -324,7 +288,7 @@ impl AgentManager {
             }
         }
 
-        agents.sort_by_key(|a| a.priority);
+        agents.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(agents)
     }
 
@@ -381,67 +345,6 @@ impl AgentManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_worker_config_infer_research() {
-        let config = WorkerConfig {
-            name: "researcher".to_string(),
-            description: "Web research and search".to_string(),
-            system_prompt: String::new(),
-            allowed_tools: vec!["web_search".to_string()],
-            priority: 0,
-            max_concurrent: 1,
-            enabled: true,
-            ..Default::default()
-        };
-        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Research);
-    }
-
-    #[test]
-    fn test_worker_config_infer_coding() {
-        let config = WorkerConfig {
-            name: "coder".to_string(),
-            description: "Code file manipulation".to_string(),
-            system_prompt: String::new(),
-            allowed_tools: vec!["file_io".to_string()],
-            priority: 0,
-            max_concurrent: 1,
-            enabled: true,
-            ..Default::default()
-        };
-        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Coding);
-    }
-
-    #[test]
-    fn test_worker_config_infer_implementation() {
-        let config = WorkerConfig {
-            name: "builder".to_string(),
-            description: "Build and deploy".to_string(),
-            system_prompt: String::new(),
-            allowed_tools: vec!["calculation".to_string()],
-            priority: 0,
-            max_concurrent: 1,
-            enabled: true,
-            ..Default::default()
-        };
-        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Implementation);
-    }
-
-    #[test]
-    fn test_worker_config_infer_general() {
-        let config = WorkerConfig {
-            name: "general".to_string(),
-            description: "General purpose tasks".to_string(),
-            system_prompt: String::new(),
-            allowed_tools: vec!["web_search".to_string()],
-            priority: 0,
-            max_concurrent: 1,
-            enabled: true,
-            ..Default::default()
-        };
-        // web_search maps to Research, so we use a tool that doesn't match any category
-        assert_eq!(config.infer_agent_type(), crate::agents::types::AgentType::Research);
-    }
 
     #[test]
     fn test_worker_config_backwards_compat_personality() {
@@ -628,15 +531,6 @@ mod tests {
     }
 }
 
-/// Recovery policy for agent task failures.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub enum RecoveryPolicy {
-    #[default]
-    FailFast,
-    Retry,
-    ContinueWithFallback,
-}
-
 /// Per-agent configuration, loaded from a JSON file in the agents directory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -654,36 +548,9 @@ pub struct AgentConfig {
     /// Whether this agent is enabled.
     #[serde(default = "default_enabled_agent")]
     pub enabled: bool,
-    /// Priority for Supervisor selection (lower = preferred).
-    #[serde(default = "default_priority")]
-    pub priority: u32,
-    /// Maximum concurrent tasks this agent can handle.
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent: usize,
-    /// Maximum recursion depth for agent calls.
-    #[serde(default = "default_max_depth")]
-    pub max_depth: u32,
-    /// Recovery policy when a task fails.
-    #[serde(default)]
-    pub recovery_policy: RecoveryPolicy,
-    /// Maximum feedback loop iterations before giving up.
-    #[serde(default = "default_max_iterations")]
-    pub max_plan_iterations: u32,
-    /// Maximum concurrent worker tasks across all workers.
-    #[serde(default = "default_max_parallel")]
-    pub max_parallel_workers: usize,
     /// Timeout for each task execution (milliseconds).
     #[serde(default = "default_task_timeout_ms")]
     pub task_timeout_ms: u64,
-    /// Whether to enable automatic plan refinement.
-    #[serde(default = "default_auto_refine")]
-    pub auto_refine: bool,
-    /// Names of agents this agent can invoke via agent_call.
-    #[serde(default)]
-    pub can_invoke: Vec<String>,
-    /// Whether runtime handoffs are allowed.
-    #[serde(default = "default_handoff_enabled")]
-    pub handoff_enabled: bool,
     /// Shell configuration for this agent.
     #[serde(default)]
     pub shell_config: ShellConfig,
@@ -710,11 +577,7 @@ pub struct AgentConfig {
 }
 
 fn default_enabled_agent() -> bool { true }
-fn default_max_depth() -> u32 { 5 }
-fn default_max_iterations() -> u32 { 5 }
-fn default_max_parallel() -> usize { 4 }
 fn default_task_timeout_ms() -> u64 { 60_000 }
-fn default_auto_refine() -> bool { true }
 fn default_agents_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -730,16 +593,7 @@ impl Default for AgentConfig {
             system_prompt: String::new(),
             allowed_tools: Vec::new(),
             enabled: true,
-            priority: 0,
-            max_concurrent: 1,
-            max_depth: 5,
-            recovery_policy: RecoveryPolicy::default(),
-            max_plan_iterations: 5,
-            max_parallel_workers: 4,
             task_timeout_ms: 60_000,
-            auto_refine: true,
-            can_invoke: Vec::new(),
-            handoff_enabled: false,
             shell_config: ShellConfig::default(),
             agents_dir: default_agents_dir(),
             custom_prompts: HashMap::new(),
@@ -854,16 +708,7 @@ impl AgentConfig {
                             system_prompt: legacy.system_prompt,
                             allowed_tools: legacy.allowed_tools,
                             enabled: legacy.enabled,
-                            priority: legacy.priority,
-                            max_concurrent: legacy.max_concurrent,
-                            max_depth: 5,
-                            recovery_policy: RecoveryPolicy::default(),
-                            max_plan_iterations: 5,
-                            max_parallel_workers: 4,
                             task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
-                            auto_refine: true,
-                            can_invoke: legacy.can_invoke,
-                            handoff_enabled: legacy.handoff_enabled,
                             shell_config: legacy.shell_config,
                             agents_dir: self.agents_dir.clone(),
                             custom_prompts: HashMap::new(),
@@ -880,8 +725,7 @@ impl AgentConfig {
             }
         }
 
-        // Sort by priority (lower = first)
-        agents.sort_by_key(|a| a.priority);
+        agents.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(agents)
     }
 }

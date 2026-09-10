@@ -97,7 +97,11 @@ pub fn parse_props_n_ctx(body: &str) -> Option<u32> {
 
 #[derive(Clone)]
 pub struct ChatClient {
-    base_url: String,
+    /// Server base URL. Shared interior-mutable (like `n_ctx`) so the URL can
+    /// be updated in place from a running preset/settings change without
+    /// cloning the client: every holder of a clone (session runtimes, the
+    /// bootstrap engine, the non-streaming LLM adapter) reads the new value.
+    base_url: Arc<Mutex<String>>,
     system_prompt: String,
     /// Reasoning effort level for reasoning models (Off = omitted from requests).
     reasoning_effort: crate::types::ReasoningEffort,
@@ -217,7 +221,7 @@ impl ChatClient {
     pub fn new_with_timeout(base_url: &str, timeout_secs: u64) -> Self {
         let d = std::time::Duration::from_secs(timeout_secs);
         Self {
-            base_url: base_url.to_string(),
+            base_url: Arc::new(Mutex::new(base_url.to_string())),
             system_prompt: String::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
             conversation: Arc::new(Mutex::new(Vec::new())),
@@ -388,12 +392,23 @@ impl ChatClient {
         ((ov.n_ctx as u64) * 85 * ratio_x100) as usize / 10_000
     }
 
-    pub fn set_url(&mut self, url: &str) {
-        self.base_url = url.to_string();
+    /// Update the server URL in place. Works on a shared `Arc<ChatClient>`
+    /// because the URL is interior-mutable, so a preset/settings change can be
+    /// pushed to every live client (session runtimes, bootstrap engine, LLM
+    /// adapter) without rebuilding them.
+    pub fn set_url(&self, url: &str) {
+        *self.base_url.lock().unwrap() = url.to_string();
     }
 
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    pub fn base_url(&self) -> String {
+        self.base_url.lock().unwrap().clone()
+    }
+
+    /// Clone the current base URL into an owned `String`. Used at request-build
+    /// sites so the `MutexGuard` is dropped before any `.await` (a guard is not
+    /// `Send` and must not be held across an await boundary).
+    fn url(&self) -> String {
+        self.base_url.lock().unwrap().clone()
     }
 
     pub fn set_api_key(&mut self, key: Option<&str>) {
@@ -576,7 +591,7 @@ impl ChatClient {
         self.note_prompt_chars(message_char_count(&msgs));
         let result = send_message(
             &self.http_client,
-            &self.base_url,
+            &self.url(),
             self.api_key.as_deref(),
             &request,
         )
@@ -605,7 +620,7 @@ impl ChatClient {
                     self.note_prompt_chars(message_char_count(&msgs));
                     match send_message(
                         &self.http_client,
-                        &self.base_url,
+                        &self.url(),
                         self.api_key.as_deref(),
                         &request2,
                     )
@@ -646,7 +661,7 @@ impl ChatClient {
         self.note_prompt_chars(message_char_count(&request.messages));
         let result = send_message(
             &self.http_client,
-            &self.base_url,
+            &self.url(),
             self.api_key.as_deref(),
             &request,
         )
@@ -677,7 +692,7 @@ impl ChatClient {
                     self.note_prompt_chars(message_char_count(&request2.messages));
                     let retry = send_message(
                         &self.http_client,
-                        &self.base_url,
+                        &self.url(),
                         self.api_key.as_deref(),
                         &request2,
                     )
@@ -756,7 +771,7 @@ impl ChatClient {
         cancel_token: Option<&CancellationToken>,
     ) -> Result<(Message, Option<Usage>), Error> {
         let http_client = client.stream_http_client.clone();
-        let base_url = client.base_url.clone();
+        let base_url = client.url();
         let api_key = client.api_key.clone();
 
         let request = ChatRequest {

@@ -6,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 use tracing;
 
 use super::config::AgentConfig;
-use super::invocation_registry::AgentInvocationRegistry;
 use super::LlmClient;
 use crate::client::ChatClient;
 use super::types::AgentId;
@@ -57,15 +56,13 @@ static VERIFICATION_SYSTEM_PROMPT: &str =
 
 /// A configurable agent that runs an LLM loop with tool calls.
 ///
-/// Each agent has its own system prompt, allowed tools, and can invoke
-/// other agents via the agent_call tool.
+/// Each agent has its own system prompt, allowed tools, and shell config.
 #[derive(Clone)]
 pub struct Agent {
     id: AgentId,
     config: AgentConfig,
     llm_client: Arc<dyn LlmClient>,
     tool_manager: Arc<Mutex<ToolManager>>,
-    invocation_registry: Arc<AgentInvocationRegistry>,
     event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
     /// Chat client used for streaming (native tool-call) requests.
     client: Arc<ChatClient>,
@@ -89,7 +86,6 @@ impl Agent {
         config: AgentConfig,
         llm_client: Arc<dyn LlmClient>,
         tool_manager: Arc<Mutex<ToolManager>>,
-        invocation_registry: Arc<AgentInvocationRegistry>,
         event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
         client: Arc<ChatClient>,
         memory: Option<Arc<crate::memory::MemoryManager>>,
@@ -122,14 +118,6 @@ impl Agent {
             } else {
                 shared.without_shell()
             };
-            // Enforce the agent's `can_invoke` list on `agent_call`: a non-empty
-            // list restricts the tool to those targets, an empty list removes
-            // the tool from the schema entirely so the agent cannot delegate.
-            let tm = if config.can_invoke.is_empty() {
-                tm.with_agent_call_allowlist(&invocation_registry, None)
-            } else {
-                tm.with_agent_call_allowlist(&invocation_registry, Some(&config.can_invoke))
-            };
             Arc::new(Mutex::new(tm))
         };
         Self {
@@ -137,7 +125,6 @@ impl Agent {
             config,
             llm_client,
             tool_manager,
-            invocation_registry,
             event_tx,
             last_llm_call_at: Instant::now(),
             client,
@@ -196,7 +183,6 @@ impl Agent {
     pub fn from_config(
         config: AgentConfig,
         llm_client: Arc<dyn LlmClient>,
-        invocation_registry: Arc<AgentInvocationRegistry>,
         client: Arc<ChatClient>,
         memory: Option<Arc<crate::memory::MemoryManager>>,
     ) -> Self {
@@ -205,17 +191,7 @@ impl Agent {
             Arc::new(crate::tools::types::TracingToolLogger),
         ));
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
-        Self::new(
-            config,
-            llm_client,
-            tool_manager,
-            invocation_registry,
-            None,
-            client,
-            memory,
-            None,
-            PathBuf::new(),
-        )
+        Self::new(config, llm_client, tool_manager, None, client, memory, None, PathBuf::new())
     }
 
     fn send_event(&self, event: crate::types::AppEvent) {
@@ -266,12 +242,6 @@ impl Agent {
         // (which already contains the user message from the step above).
         let mut messages = self.build_initial_messages(request);
 
-        self.send_event(crate::types::AppEvent::AgentChainStarted {
-            agent_name: self.config.name.clone(),
-            depth: 0,
-            session_id: self.session_id(),
-        });
-
         let result = self.run_llm_loop(&mut messages, cancel_token).await;
 
         // Keep a clean copy (store snapshot, no system prompts) for memory
@@ -283,25 +253,6 @@ impl Agent {
         // agent and non-agent paths), so the agent does not write the session file
         // itself. This keeps a single writer per store and avoids a redundant save.
 
-        match &result {
-            Ok(response) => {
-                self.send_event(crate::types::AppEvent::AgentChainCompleted {
-                    agent_name: self.config.name.clone(),
-                    result: response.clone(),
-                    depth: 0,
-                    session_id: self.session_id(),
-                });
-            }
-            Err(e) => {
-                self.send_event(crate::types::AppEvent::AgentChainError {
-                    agent_name: self.config.name.clone(),
-                    error: e.clone(),
-                    depth: 0,
-                    session_id: self.session_id(),
-                });
-            }
-        }
-
         result
     }
 
@@ -312,21 +263,6 @@ impl Agent {
         } else {
             self.config.system_prompt.clone()
         };
-
-        // Add available agents for delegation. Only list the agents this agent
-        // is allowed to invoke (`can_invoke`); when the list is empty the
-        // agent_call tool is removed from its schema entirely, so no
-        // delegation hint is added.
-        if !self.config.can_invoke.is_empty() {
-            prompt.push_str("\n\nYou can delegate tasks to other agents using the agent_call tool. You may only invoke these agents: ");
-            prompt.push_str(&self.config.can_invoke.join(", "));
-            prompt.push_str(
-                "\nPrefer your own tools when a task can be done in a single step. \
-                 Delegate only when the sub-task needs another agent's specialization \
-                 or benefits from an isolated context — each delegation spawns a full \
-                 sub-conversation and is more expensive than a direct tool call.",
-            );
-        }
 
         // Add memory management tool guidance
         prompt.push_str(
@@ -1054,47 +990,6 @@ impl Agent {
         None
     }
 
-    /// Check if the LLM response is a routing JSON object and extract agent+task.
-    fn parse_routing_object(&self, response: &str) -> Option<(String, String)> {
-        let candidate: Option<(String, String)> =
-            serde_json::from_str::<serde_json::Value>(response)
-                .ok()
-                .and_then(|value| {
-                    let agent = value.get("agent")?.as_str()?;
-                    let task = value
-                        .get("task")
-                        .or_else(|| value.get("request"))?
-                        .as_str()?;
-                    Some((agent.to_string(), task.to_string()))
-                })
-                .or_else(|| {
-                    let start = response.find("```")?;
-                    let rest = &response[start + 3..];
-                    let end = rest.find("```")?;
-                    let json_str = &rest[..end];
-                    let value = serde_json::from_str::<serde_json::Value>(json_str).ok()?;
-                    let agent = value.get("agent")?.as_str()?;
-                    let task = value
-                        .get("task")
-                        .or_else(|| value.get("request"))?
-                        .as_str()?;
-                    Some((agent.to_string(), task.to_string()))
-                });
-
-        let (agent, task) = candidate?;
-
-        let is_known = self.invocation_registry.has(&agent);
-        if !is_known {
-            tracing::debug!(
-                "[AGENT] Routing candidate agent '{}' is not a known agent; treating response as a normal answer",
-                agent
-            );
-            return None;
-        }
-
-        Some((agent, task))
-    }
-
     /// Extract bash/code blocks from LLM responses and convert them to the
     /// named file tools (read_file, list_dir, search_files, ...).
     /// Commands without a named equivalent (mkdir, rm, cp, mv, pwd) fall
@@ -1207,8 +1102,6 @@ mod tests {
     use super::*;
     use crate::tools::registry::ToolRegistry;
     use crate::tools::types::TracingToolLogger;
-    use super::super::traits::{AgentError, AgentInvocation};
-    use super::super::types::{AgentMetadata, AgentResult, AgentType, TaskStatus};
 
     fn make_agent(name: &str) -> Agent {
         let config = AgentConfig {
@@ -1218,9 +1111,8 @@ mod tests {
         let llm_client = Arc::new(NoopLlm);
         let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
-        let invocation_registry = Arc::new(AgentInvocationRegistry::new());
         let client = Arc::new(ChatClient::new("http://localhost:1"));
-        Agent::new(config, llm_client, tool_manager, invocation_registry, None, client, None, None, PathBuf::new())
+        Agent::new(config, llm_client, tool_manager, None, client, None, None, PathBuf::new())
     }
 
     /// Build an agent whose shared registry contains a `shell` tool, like the
@@ -1251,19 +1143,8 @@ mod tests {
             })
             .unwrap();
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(Arc::new(registry))));
-        let invocation_registry = Arc::new(AgentInvocationRegistry::new());
         let client = Arc::new(ChatClient::new("http://localhost:1"));
-        Agent::new(
-            config,
-            llm_client,
-            tool_manager,
-            invocation_registry,
-            None,
-            client,
-            None,
-            None,
-            PathBuf::new(),
-        )
+        Agent::new(config, llm_client, tool_manager, None, client, None, None, PathBuf::new())
     }
 
     #[test]
@@ -1313,52 +1194,10 @@ mod tests {
     }
 
     #[test]
-    fn test_system_prompt_omits_delegation_when_can_invoke_empty() {
-        let agent = make_agent("test");
-        let prompt = agent.build_system_prompt();
-        assert!(
-            !prompt.contains("agent_call"),
-            "prompt should not mention agent_call when can_invoke is empty: {}",
-            prompt
-        );
-    }
-
-    #[test]
-    fn test_system_prompt_lists_only_allowed_agents_and_hint() {
-        let mut config = AgentConfig::default();
-        config.name = "generalist".to_string();
-        config.can_invoke = vec!["researcher".to_string(), "coder".to_string()];
-        let llm_client = Arc::new(NoopLlm);
-        let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
-        let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
-        let invocation_registry = Arc::new(AgentInvocationRegistry::new());
-        let client = Arc::new(ChatClient::new("http://localhost:1"));
-        let agent = Agent::new(
-            config,
-            llm_client,
-            tool_manager,
-            invocation_registry,
-            None,
-            client,
-            None,
-            None,
-            PathBuf::new(),
-        );
-        let prompt = agent.build_system_prompt();
-        assert!(prompt.contains("researcher, coder"), "prompt should list allowed agents: {}", prompt);
-        assert!(
-            prompt.contains("Prefer your own tools"),
-            "prompt should include the delegation policy hint: {}",
-            prompt
-        );
-    }
-
-    #[test]
     fn test_agent_per_agent_reasoning_effort() {
         let llm_client = Arc::new(NoopLlm);
         let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
-        let invocation_registry = Arc::new(AgentInvocationRegistry::new());
         // Global client set to Medium.
         let global_client = Arc::new({
             let mut c = ChatClient::new("http://localhost:1");
@@ -1374,7 +1213,6 @@ mod tests {
             config,
             llm_client.clone(),
             tool_manager.clone(),
-            invocation_registry.clone(),
             None,
             global_client.clone(),
             None,
@@ -1392,7 +1230,6 @@ mod tests {
             config,
             llm_client,
             tool_manager,
-            invocation_registry,
             None,
             global_client.clone(),
             None,
@@ -1401,57 +1238,6 @@ mod tests {
         );
         assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::Medium);
         assert!(Arc::ptr_eq(&agent.client, &global_client));
-    }
-
-    #[test]
-    fn test_parse_routing_object_known_agent() {
-        let agent = make_agent("test");
-        // Register "coder" as an invokable agent
-        agent.invocation_registry.register("coder", Arc::new(MockInvokable::new("coder")));
-        
-        let response = r#"{"agent": "coder", "task": "write a file"}"#;
-        let result = agent.parse_routing_object(response);
-        assert!(result.is_some());
-        let (agent_name, task) = result.unwrap();
-        assert_eq!(agent_name, "coder");
-        assert_eq!(task, "write a file");
-    }
-
-    #[test]
-    fn test_parse_routing_object_unknown_agent() {
-        let agent = make_agent("test");
-        let response = r#"{"agent": "nonexistent", "task": "do something"}"#;
-        assert!(agent.parse_routing_object(response).is_none());
-    }
-
-    struct MockInvokable {
-        name: String,
-    }
-    impl MockInvokable {
-        fn new(name: &str) -> Self { Self { name: name.to_string() } }
-    }
-    #[async_trait::async_trait]
-    impl AgentInvocation for MockInvokable {
-        async fn invoke(&self, _request: &str, _context: &serde_json::Value, _cancel_token: &tokio_util::sync::CancellationToken) -> Result<AgentResult, AgentError> {
-            Ok(AgentResult {
-                task_id: "test".to_string(),
-                agent_id: self.name.clone(),
-                agent_type: AgentType::General,
-                status: TaskStatus::Completed,
-                output: serde_json::json!("mock result"),
-                summary: String::new(),
-                duration_ms: 0,
-                completed_at: None,
-            })
-        }
-        fn metadata(&self) -> AgentMetadata {
-            AgentMetadata {
-                name: self.name.clone(),
-                description: format!("Mock agent: {}", self.name),
-                agent_type: AgentType::General,
-                allowed_tools: vec![],
-            }
-        }
     }
 
     fn test_msg(role: &str, content: &str) -> Message {
@@ -1515,7 +1301,6 @@ mod tests {
             },
             llm,
             std::sync::Arc::new(Mutex::new(ToolManager::new(registry))),
-            std::sync::Arc::new(AgentInvocationRegistry::new()),
             None,
             std::sync::Arc::new(ChatClient::new("http://localhost:1")),
             None,

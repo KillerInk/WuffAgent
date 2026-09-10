@@ -324,17 +324,6 @@ impl ContextTrimming {
         }
     }
 
-    /// Truncate agent chain entries to the configured max.
-    pub fn truncate_agent_chain(&self, entries: &mut Vec<crate::sessions::model::AgentChainEntry>, config: &TrimConfig) {
-        if !config.is_enabled() {
-            return;
-        }
-        let max = config.max_chain_entries;
-        if entries.len() > max {
-            entries.drain(..entries.len() - max);
-        }
-    }
-
     /// Token count of a message string: 1 char = 1 token unit (exact, no estimation).
     /// Since real tokens are sub-strings, tokens <= chars, so this is always an
     /// upper bound on the true token count — trimming triggers early rather than

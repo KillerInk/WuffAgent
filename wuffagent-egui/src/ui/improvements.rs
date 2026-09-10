@@ -61,7 +61,7 @@ impl ImprovementsPanel {
 
     /// Draw the improvements panel.
     pub fn draw(&mut self, ctx: &egui::Context) {
-        if !self.show_panel || self.pending.is_empty() {
+        if !self.show_panel {
             return;
         }
 
@@ -75,6 +75,14 @@ impl ImprovementsPanel {
 
                 ui.heading("Improvement Suggestions");
                 ui.separator();
+
+                if self.pending.is_empty() {
+                    ui.label("No pending improvements yet.");
+                    if ui.button("Close").clicked() {
+                        self.show_panel = false;
+                    }
+                    return;
+                }
 
                 // Collect indices to remove to avoid borrow checker issues
                 let mut to_remove = Vec::new();
@@ -114,11 +122,11 @@ impl ImprovementsPanel {
                         ui.separator();
                         ui.horizontal(|ui| {
                             if ui.add_enabled(imp.prompt_change.is_some(),
-                                egui::Button::new("✓ Approve").fill(theme.primary)
+                                egui::Button::new("âœ“ Approve").fill(theme.primary)
                             ).clicked() {
                                 tracing::info!("Approved improvement for agent {}", imp.agent_name);
                             }
-                            if ui.add(egui::Button::new("✗ Dismiss")).clicked() {
+                            if ui.add(egui::Button::new("âœ— Dismiss")).clicked() {
                                 to_remove.push(i);
                             }
                         });

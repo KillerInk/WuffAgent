@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use wuffagent_core::{
-    agents::{AgentEngine, AgentRegistry},
+    agents::AgentEngine,
     client::ChatClient,
     config::Config,
     server::ServerManager,
@@ -58,6 +58,8 @@ fn bootstrap() -> (
     ServerManager,
     Arc<ToolManager>,
     Arc<AgentEngine>,
+    ChatClient,
+    ChatClient,
 ) {
     // Default to `debug` for app crates, but silence the extremely chatty
     // `naga` WGSL shader compiler (pulled in by wgpu/egui) whose DEBUG-level
@@ -123,6 +125,10 @@ fn bootstrap() -> (
         }
     }
     let _ = client.load_session();
+    // Clone for the UI so a preset/settings URL change can be pushed to the
+    // bootstrap engine's own client (used before per-session engines exist) in
+    // place. Shares the same interior-mutable base_url as `client_for_engine`.
+    let bootstrap_stream_client = client.clone();
 
     // Non-streaming LlmClient for agents: configure auth + request options
     // BEFORE wrapping in the adapter (the adapter only holds the client handle).
@@ -131,38 +137,14 @@ fn bootstrap() -> (
     non_streaming.set_api_key(api_key.as_deref());
     non_streaming.set_reasoning_effort(config.reasoning_effort);
     non_streaming.set_n_ctx(config.n_ctx);
+    // Keep a clone for the UI: it shares the same interior-mutable base_url as
+    // the adapter's client, so the app can push a preset/settings URL change
+    // to every non-streaming call path in place.
+    let bootstrap_llm_client = non_streaming.clone();
     let llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(non_streaming));
     let client_for_engine = Arc::new(client.clone());
 
-    let config_path_clone = config_path.clone();
-    let config_agents_dir = config_path_clone
-        .parent()
-        .map(|p| p.join("agents"))
-        .unwrap_or_else(|| config_path_clone.clone());
-
-    // Load agents FIRST, then build the invocation registry, then register builtins
-    // so that agent_call resolves against a populated registry.
-    let agent_registry = match AgentRegistry::load(vec![config_agents_dir.clone()], &registry) {
-        Ok(reg) => {
-            tracing::info!("Loaded {} agents from {:?}", reg.agent_count(), config_agents_dir);
-            reg
-        }
-        Err(e) => {
-            tracing::warn!("Failed to load agents: {}, using empty registry", e);
-            AgentRegistry::default()
-        }
-    };
-    let agent_registry = Arc::new(agent_registry);
-
-    // Build the shared invocation registry now that agents are loaded
-    let invocation_registry = agent_registry.build_invocation_registry(
-        llm_client.clone(),
-        Arc::new(Mutex::new(ToolManager::new(registry.clone()))),
-        client_for_engine.clone(),
-    );
-
-    // Register builtins — agent_call will use the populated registry
-    builtin::register_builtins(&registry, &invocation_registry).expect("Failed to register built-in tools");
+    builtin::register_builtins(&registry).expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
         eprintln!("Warning: failed to discover plugins: {}", e);
     }
@@ -193,43 +175,20 @@ fn bootstrap() -> (
     // Register memory tools with the memory manager
     builtin::register_memory_tools(&registry, memory_manager.clone()).expect("Failed to register memory tools");
 
-    let mut agent_engine = AgentEngine::new(
-        agent_registry.clone(),
+    let agent_engine = AgentEngine::new(
         llm_client,
         tool_manager_for_engine,
         client_for_engine,
-        invocation_registry,
     ).with_memory(memory_manager);
-
-    // Load the most recent agent session for the selected agent so the engine
-    // starts with conversation context from a previous session.
-    if let Some(agent_name) = agent_registry.agent_names().first() {
-        let agent_dir = sessions_dir
-            .join("agents")
-            .join(agent_name);
-        if agent_dir.exists() {
-            let sessions = wuffagent_core::sessions::list_sessions(&agent_dir);
-            // list_sessions sorts by created_at descending, so the newest session is first.
-            if let Some(latest) = sessions.first() {
-                tracing::info!(
-                    "Loading most recent agent session for '{}': {} ({} messages)",
-                    agent_name,
-                    latest.id,
-                    latest.messages.len()
-                );
-                agent_engine.set_agent_session(Some(latest.id.clone()), agent_dir.clone());
-            }
-        }
-    }
 
     let agent_engine = Arc::new(agent_engine);
 
-    (config, server, tool_manager, agent_engine)
+    (config, server, tool_manager, agent_engine, bootstrap_llm_client, bootstrap_stream_client)
 }
 
 #[tokio::main]
 async fn main() -> eframe::Result {
-    let (config, server, tool_manager, agent_engine) = bootstrap();
+    let (config, server, tool_manager, agent_engine, bootstrap_llm_client, bootstrap_stream_client) = bootstrap();
     
     // Initialize session store with the configured session
     // Shared event channel: the UI polls the receiver each frame; the pipeline
@@ -263,8 +222,11 @@ async fn main() -> eframe::Result {
             // Per-session engine: bound to this session's client so the agent
             // chat loop reads/writes an isolated conversation store (the shared
             // bootstrap engine's client would otherwise be mutated by every
-            // session in parallel — a cross-session data race).
-            let session_engine = (*agent_engine).clone().with_client(session_client.clone());
+            // session in parallel â€” a cross-session data race).
+            let session_engine = (*agent_engine)
+                .clone()
+                .with_client(session_client.clone())
+                .with_session_id(session_id.clone());
             // Create pipeline (carries the session_id for event routing) and runtime.
             let pipeline = wuffagent_core::client::ChatPipeline::new(
                 Arc::new(session_engine.clone()),
@@ -305,8 +267,8 @@ async fn main() -> eframe::Result {
         Box::new(move |cc| {
             cc.egui_ctx.set_fonts(emoji_fonts());
             Ok(Box::new(ui::state::ChatApp::new(
-                config, server, tool_manager, agent_engine, session_store, selected_session_id,
-                event_tx, event_rx,
+                config, server, tool_manager, agent_engine, bootstrap_llm_client,
+                bootstrap_stream_client, session_store, selected_session_id, event_tx, event_rx,
             )))
         }),
     )

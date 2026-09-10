@@ -83,6 +83,34 @@ impl ChatApp {
                 self.config = (*cfg).clone();
             }
         }
+        self.sync_base_url();
+    }
+
+    /// Push the config's base URL to every live client (session runtimes, the
+    /// bootstrap engine, and the non-streaming LLM adapter) in place. This is
+    /// the fix for "I saved the correct URL but the app still connects to the
+    /// old one": clients are constructed once at startup and `set_url` was
+    /// never called after a preset/settings change, so they kept the stale URL.
+    ///
+    /// `base_url` on `ChatClient` is interior-mutable (shared `Arc<Mutex>>`), so
+    /// updating a single clone updates every holder. Guarded by
+    /// `last_synced_base_url` so this is a cheap no-op unless the URL actually
+    /// changed.
+    fn sync_base_url(&mut self) {
+        let new_url = self.config.base_url();
+        if new_url == self.last_synced_base_url {
+            return;
+        }
+        for runtime in self.session_store.values_mut() {
+            runtime.client.set_url(&new_url);
+        }
+        // The bootstrap engine's per-session clients are created fresh from
+        // config at session-creation time; the shared bootstrap engine's own
+        // client (streaming) and the non-streaming adapter are the ones that
+        // outlive a preset change, so update them here.
+        self.bootstrap_llm_client.set_url(&new_url);
+        self.bootstrap_stream_client.set_url(&new_url);
+        self.last_synced_base_url = new_url;
     }
 
     pub fn show_agent_config_dialog(&mut self, ctx: &egui::Context) {

@@ -9,12 +9,10 @@
 //! ├── client         (ChatClient: HTTP/SSE streaming) → uses types
 //! ├── config         (Config, ConnectionType) → re-exports agents::config, memory::types
 //! ├── config_types   (shared re-exports) → uses agents::config, memory::types
-//! ├── agents         (Agent, AgentEngine, AgentRegistry) → uses llm, client, tools, types, sessions, memory
+//! ├── agents         (Agent, AgentEngine) → uses llm, client, tools, types, sessions, memory
 //! │   ├── config     (AgentConfig, ShellConfig, WorkerConfig)
-//! │   ├── types      (AgentId, AgentType, AgentMetadata, AgentResult)
-//! │   ├── traits     (AgentInvocation, AgentError)
-//! │   ├── invocation_registry
-//! │   ├── registry
+//! │   ├── types      (AgentId)
+//! │   ├── traits     (AgentError)
 //! │   ├── engine
 //! │   └── agent
 //! ├── tools          (ToolManager, ToolRegistry) → uses types
@@ -55,4 +53,4 @@ pub use client::ChatClient;
 pub use config::Config;
 pub use server::ServerManager;
 pub use tools::ToolManager;
-pub use agents::{AgentEngine, AgentRegistry};
+pub use agents::AgentEngine;

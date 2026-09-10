@@ -14,7 +14,8 @@ impl ChatApp {
 
         // Snapshot the selected session's display values up front so we don't
         // hold an immutable borrow of `self` across the self-mutating UI closures.
-        let (has_session, has_image, is_generating, input_len) =
+        // The agent selection is per-session (SessionRuntime.selected_agent).
+        let (has_session, has_image, is_generating, input_len, has_history, selected_agent) =
             self.selected_session_id
                 .as_ref()
                 .and_then(|sid| self.session_store.get(sid))
@@ -24,9 +25,11 @@ impl ChatApp {
                         r.chat_state.pending_image.is_some(),
                         r.chat_state.is_generating,
                         r.chat_state.input_text.len(),
+                        !r.chat_state.messages.is_empty(),
+                        r.selected_agent.clone(),
                     )
                 })
-                .unwrap_or((false, false, false, 0));
+                .unwrap_or((false, false, false, 0, false, None));
 
         if has_session {
             // Validate input length
@@ -43,14 +46,14 @@ impl ChatApp {
             // Image preview area
             if has_image {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("📷 Image attached").size(11.0).color(theme.text_secondary));
+                    ui.label(egui::RichText::new("ðŸ“· Image attached").size(11.0).color(theme.text_secondary));
                 });
             }
 
             // Input area: text field + button row below
             let input_width = ui.available_width();
             ui.vertical(|ui| {
-                // Text input — constrained width, multiline
+                // Text input â€” constrained width, multiline
                 ui.scope(|ui| {
                     ui.set_max_width(input_width);
                     // We can't bind to chat_state.input_text directly due to borrowing,
@@ -60,7 +63,7 @@ impl ChatApp {
                         .hint_text("Type a message...")
                         .desired_width(f32::INFINITY);
                     let response = ui.add(text_edit);
-                    // Send on Ctrl+Enter (allowed while generating — queues the
+                    // Send on Ctrl+Enter (allowed while generating â€” queues the
                     // message to run after the current task finishes).
                     let modifiers = ui.ctx().input(|i| i.modifiers);
                     if response.has_focus()
@@ -83,27 +86,35 @@ impl ChatApp {
 
                 // Button row below the text area
                 ui.horizontal(|ui| {
-                    // Agent selector dropdown
+                    // Per-session agent selector (bound to the current session's
+                    // SessionRuntime.selected_agent, not a global index).
                     let agent_names = self.get_agent_names();
-                    let selected = self.selected_agent_index;
-                    let selected_label = selected
-                        .map(|i| agent_names.get(i).cloned().unwrap_or_default())
+                    let selected_label = selected_agent
+                        .clone()
                         .unwrap_or_else(|| "Auto".to_string());
-                    let mut next_idx = selected;
+                    let mut next_agent: Option<String> = selected_agent.clone();
                     egui::ComboBox::from_id_salt("agent_selector")
                         .width(120.0)
                         .selected_text(selected_label)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut next_idx, None, "Auto");
-                            for (i, name) in agent_names.iter().enumerate() {
-                                ui.selectable_value(&mut next_idx, Some(i), name);
+                            ui.selectable_value(&mut next_agent, None, "Auto");
+                            for name in agent_names.iter() {
+                                ui.selectable_value(&mut next_agent, Some(name.clone()), name);
                             }
                             if agent_names.is_empty() {
                                 ui.label(egui::RichText::new("No agents found").size(10.0).color(theme.text_secondary));
                             }
                         });
-                    if next_idx != selected {
-                        self.selected_agent_index = next_idx;
+                    if let Some(next) = next_agent {
+                        if let Some(sid) = self.selected_session_id.clone() {
+                            if let Some(runtime) = self.session_store.get_mut(&sid) {
+                                runtime.selected_agent = Some(next);
+                            }
+                        }
+                    } else if let Some(sid) = self.selected_session_id.clone() {
+                        if let Some(runtime) = self.session_store.get_mut(&sid) {
+                            runtime.selected_agent = None;
+                        }
                     }
                     ui.add_space(6.0);
 
@@ -155,11 +166,22 @@ impl ChatApp {
                         if ui.add(stop_btn).clicked() {
                             self.stop_generation();
                         }
+                    } else if has_history {
+                        // Session is idle with a preserved conversation: offer to
+                        // continue the agent run on that conversation.
+                        ui.add_space(6.0);
+                        let continue_btn = egui::Button::new("â–¶ Continue")
+                            .fill(theme.surface_light)
+                            .corner_radius(6)
+                            .min_size(egui::vec2(88.0, 28.0));
+                        if ui.add(continue_btn).clicked() {
+                            self.continue_generation();
+                        }
                     }
                 });
             });
         } else {
-            // No session selected — show empty input
+            // No session selected â€” show empty input
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Select or create a session to start chatting").size(12.0).color(theme.text_secondary));
             });
@@ -188,10 +210,11 @@ impl ChatApp {
                 // AI is still working: display the message immediately and queue it
                 // to run as the next turn once the current run (and any earlier
                 // queued messages) finishes.
-                // Resolve the agent prompt/policy first — these borrow `self`
+                // Resolve the agent prompt/policy first â€” these borrow `self`
                 // and can't be called while `cs` holds a mutable borrow of the store.
-                let agent_prompt = self.resolve_agent_prompt();
-                let tool_policy = self.resolve_tool_policy();
+                let agent = runtime.selected_agent.clone().unwrap_or_default();
+                let agent_prompt = self.resolve_agent_prompt(&agent);
+                let tool_policy = self.resolve_tool_policy(&agent);
                 if let Some(cs) = self.session_store.get_mut(&sid) {
                     cs.chat_state.messages.push(crate::types::ChatMessage {
                         kind: MessageKind::Normal,
@@ -208,7 +231,7 @@ impl ChatApp {
                         tool_policy,
                     });
                     cs.chat_state.show_notification(
-                        &format!("Queued — will run after the current task ({} waiting)", cs.chat_state.queued_messages.len()),
+                        &format!("Queued â€” will run after the current task ({} waiting)", cs.chat_state.queued_messages.len()),
                         true,
                     );
                 }
@@ -216,6 +239,31 @@ impl ChatApp {
                 self.send_message_to_session(&sid);
             }
         }
+    }
+
+    /// Continue the current session's conversation: re-invoke the session's agent
+    /// on the preserved conversation store with a "continue" turn. No checkpoint
+    /// machinery â€” the pipeline simply resumes on the existing messages.
+    pub(super) fn continue_generation(&mut self) {
+        let sid = match self.selected_session_id.clone() {
+            Some(sid) => sid,
+            None => return,
+        };
+        if let Some(runtime) = self.session_store.get(&sid) {
+            if runtime.chat_state.is_generating {
+                return;
+            }
+        }
+        let agent = self
+            .selected_session_id
+            .as_ref()
+            .and_then(|sid| self.session_store.get(sid))
+            .and_then(|r| r.selected_agent.clone())
+            .unwrap_or_default();
+        let text = "Continue from where you left off.".to_string();
+        let agent_prompt = self.resolve_agent_prompt(&agent);
+        let tool_policy = self.resolve_tool_policy(&agent);
+        self.start_pipeline_for_session(&sid, &text, None, agent_prompt, tool_policy, false);
     }
 
     /// Snapshot the selected session's input text (empty string if no session).
@@ -233,14 +281,14 @@ impl ChatApp {
         }
         const MAX_MESSAGE_LENGTH: usize = 4000;
         if text.len() > MAX_MESSAGE_LENGTH {
-            return Err(format!("Message too long (max {} characters)", MAX_MESSAGE_LENGTH));
+            return Err(format!("Message too long (max {} characters)", text.len()));
         }
         Ok(())
     }
 
     pub(super) fn send_message_to_session(&mut self, sid: &str) {
-        let input = match self.session_store.get(sid) {
-            Some(r) => r.chat_state.input_text.trim().to_string(),
+        let (input, agent) = match self.session_store.get(sid) {
+            Some(r) => (r.chat_state.input_text.trim().to_string(), r.selected_agent.clone().unwrap_or_default()),
             None => return,
         };
         if let Err(e) = self.validate_input(&input) {
@@ -255,26 +303,26 @@ impl ChatApp {
         } else {
             None
         };
-        self.start_pipeline_for_session(sid, &input, image, self.resolve_agent_prompt(), self.resolve_tool_policy(), false);
+        let agent_prompt = self.resolve_agent_prompt(&agent);
+        let tool_policy = self.resolve_tool_policy(&agent);
+        self.start_pipeline_for_session(sid, &input, image, agent_prompt, tool_policy, false);
     }
 
-    /// Resolve the selected agent profile's tool policy (allowed_tools, shell
-    /// config, delegation rights, reasoning effort, trim config) for the
-    /// current selection. None/"Auto" or a profile not found yields an
-    /// unrestricted policy (all tools + allow-all shell, no delegation).
-    fn resolve_tool_policy(&self) -> crate::client::pipeline::ChatToolPolicy {
-        let policy = match self.selected_agent_index {
-            Some(i) => {
-                let name = self.get_agent_names().get(i).cloned().unwrap_or_default();
-                self.load_agent_config(&[name.as_str()])
-            }
-            None => self.load_agent_config(&["general", "generalist"]),
+    /// Resolve the tool policy for an agent profile by name. An empty name
+    /// ("Auto") or a profile not found yields an unrestricted policy (all tools
+    /// + allow-all shell, no delegation).
+    fn resolve_tool_policy(&self, agent_name: &str) -> crate::client::pipeline::ChatToolPolicy {
+        let names: Vec<&str> = if agent_name.is_empty() {
+            vec!["general", "generalist"]
+        } else {
+            vec![agent_name]
         };
+        let policy = self.load_agent_config(&names);
         match policy {
             Some(cfg) => crate::client::pipeline::ChatToolPolicy {
                 allowed_tools: cfg.allowed_tools,
                 shell_config: cfg.shell_config,
-                can_invoke: cfg.can_invoke,
+                can_invoke: Vec::new(),
                 reasoning_effort: cfg.reasoning_effort,
                 trim_config: cfg.trim_config,
             },
@@ -321,18 +369,15 @@ impl ChatApp {
         None
     }
 
-    /// Resolve the selected agent profile's system prompt for the current
-    /// selection (None = "Auto" -> the general profile).
-    fn resolve_agent_prompt(&self) -> String {
-        let prompt = match self.selected_agent_index {
-            Some(i) => {
-                let name = self.get_agent_names().get(i).cloned().unwrap_or_default();
-                self.load_agent_system_prompt(&[name.as_str()])
-            }
-            None => {
-                self.load_agent_system_prompt(&["general", "generalist"])
-            }
+    /// Resolve the system prompt for an agent profile by name (empty = "Auto"
+    /// -> the general profile).
+    fn resolve_agent_prompt(&self, agent_name: &str) -> String {
+        let names: Vec<&str> = if agent_name.is_empty() {
+            vec!["general", "generalist"]
+        } else {
+            vec![agent_name]
         };
+        let prompt = self.load_agent_system_prompt(&names);
         if prompt.is_empty() {
             tracing::warn!("No agent system prompt found - chat will run without one");
         }
@@ -385,7 +430,7 @@ impl ChatApp {
             runtime.client.set_n_ctx(effective_n_ctx);
             // Rebind the per-session engine to this session's client so the
             // agent chat loop runs against THIS session's isolated conversation
-            // store — not the shared bootstrap engine's client, which would be
+            // store â€” not the shared bootstrap engine's client, which would be
             // mutated by every session in parallel (a cross-session data race).
             let new_engine = runtime.engine.clone().with_client(runtime.client.clone());
             runtime.engine = new_engine;
@@ -422,7 +467,7 @@ impl ChatApp {
         );
         // The message is already displayed in the chat (pushed at queue time);
         // start_pipeline_for_session won't push it again. Remove it from the queue
-        // and hand off — `start_pipeline_for_session` re-borrows the store, so the
+        // and hand off â€” `start_pipeline_for_session` re-borrows the store, so the
         // mutable borrow above must have ended (it has, via `cloned()`).
         if let Some(runtime) = self.session_store.get_mut(sid) {
             runtime.chat_state.queued_messages.remove(0);
@@ -435,10 +480,10 @@ impl ChatApp {
     /// already finished, clear the generating state and commit any partial
     /// stream.
     ///
-    /// This catches the cases where a terminal event never arrives — most
+    /// This catches the cases where a terminal event never arrives â€” most
     /// commonly when a new `start_pipeline_for_session` call aborts a task that
     /// was in the middle of emitting its final event, or when the task panics
-    /// — so the chat-area spinner can no longer spin forever.
+    /// â€” so the chat-area spinner can no longer spin forever.
     pub(super) fn sweep_finished_pipelines(&mut self) {
         // Collect the ids that need finalizing (we can't mutate the store while
         // iterating it).
@@ -517,7 +562,7 @@ impl ChatApp {
         }
 
         // The delegation hint is appended by `Agent::build_system_prompt`
-        // based on the profile's `can_invoke` list — mirroring it here would
+        // based on the profile's `can_invoke` list â€” mirroring it here would
         // advertise agents the chat agent cannot actually invoke.
 
         prompt
@@ -577,12 +622,6 @@ impl ChatApp {
                 runtime.chat_state.pending_error = None;
             }
         }
-
-        // Cancel agent engine
-        self.agent_cancel_token.cancel();
-
-        // Mark the chain as cancelled so the UI reflects it immediately
-        self.agent_chain_state.cancelled = true;
 
         // Flush any in-progress streamed text into the display, then persist the
         // session.

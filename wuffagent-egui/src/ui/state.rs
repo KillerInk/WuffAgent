@@ -10,16 +10,6 @@ use crate::tools::ToolManager;
 
 use crate::types::{AppEvent, AppStatus};
 
-/// A single task progress entry in the pipeline panel.
-/// State for the agent chain panel.
-#[derive(Clone, Debug, Default)]
-pub struct AgentChainState {
-    pub active: bool,
-    pub entries: Vec<crate::sessions::model::AgentChainEntry>,
-    pub current_agent: Option<String>,
-    pub cancelled: bool,
-}
-
 /// A message sent while the AI is still working (now stored per-session in core).
 pub use crate::sessions::QueuedMessage;
 
@@ -29,6 +19,13 @@ pub struct ChatApp {
     pub server: ServerManager,
     pub tool_manager: Arc<ToolManager>,
     pub agent_engine: Arc<crate::agents::AgentEngine>,
+    /// Clone of the bootstrap non-streaming LLM client (shares interior-mutable
+    /// `base_url` with the adapter, so a URL change here propagates in-place).
+    pub bootstrap_llm_client: crate::client::ChatClient,
+    /// Clone of the bootstrap streaming client (also held by the engine).
+    pub bootstrap_stream_client: crate::client::ChatClient,
+    /// Last base_url synced to per-session clients (no-op guard).
+    pub last_synced_base_url: String,
     /// Per-session runtime state keyed by session ID.
     pub session_store: HashMap<String, crate::sessions::SessionRuntime>,
     /// ID of the currently selected session (None = no session selected).
@@ -41,16 +38,11 @@ pub struct ChatApp {
     pub presets_dialog: Option<super::presets_dialog::PresetsDialog>,
     pub show_agent_config: bool,
     pub agent_config_dialog: Option<super::agent_config::AgentConfigDialog>,
-    pub agent_chain_state: AgentChainState,
-    pub agent_chain_expanded: Vec<usize>,
-    pub show_agent_chain: bool,
     /// Channel sender for relaying core events (EngineEvent, AppEvent) to the UI thread.
     /// The corresponding receiver is stored separately so `process_pending_events` can poll it.
     pub pending_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     pub pending_rx: Option<mpsc::Receiver<AppEvent>>,
     pub agent_cancel_token: CancellationToken,
-    /// Index of the currently selected agent for chat (None = auto-select).
-    pub selected_agent_index: Option<usize>,
     /// Reasoning effort for reasoning models (Off = omitted from requests).
     pub reasoning_effort: crate::types::ReasoningEffort,
     /// Remote n_ctx value (for remote mode).
@@ -80,6 +72,8 @@ impl ChatApp {
         server: ServerManager,
         tool_manager: Arc<ToolManager>,
         agent_engine: Arc<crate::agents::AgentEngine>,
+        bootstrap_llm_client: crate::client::ChatClient,
+        bootstrap_stream_client: crate::client::ChatClient,
         session_store: HashMap<String, crate::sessions::SessionRuntime>,
         selected_session_id: Option<String>,
         event_tx: mpsc::Sender<AppEvent>,
@@ -97,6 +91,9 @@ impl ChatApp {
             server,
             tool_manager,
             agent_engine,
+            bootstrap_llm_client,
+            bootstrap_stream_client,
+            last_synced_base_url: String::new(),
             session_store,
             selected_session_id,
             sessions_panel,
@@ -106,13 +103,9 @@ impl ChatApp {
             presets_dialog: None,
             show_agent_config: false,
             agent_config_dialog: None,
-            agent_chain_state: AgentChainState::default(),
-            agent_chain_expanded: Vec::new(),
-            show_agent_chain: false,
             pending_tx: Some(Arc::new(Mutex::new(event_tx))),
             pending_rx: Some(event_rx),
             agent_cancel_token: CancellationToken::new(),
-            selected_agent_index: None,
             reasoning_effort,
             improvements_panel: super::improvements::ImprovementsPanel::new(),
             display_snapshot: std::sync::Arc::new(Vec::new()),
@@ -206,7 +199,10 @@ impl ChatApp {
                 // reads/writes an isolated conversation store (the shared
                 // bootstrap engine's client would otherwise be mutated by every
                 // session in parallel — a cross-session data race).
-                let session_engine = (*self.agent_engine).clone().with_client(session_client.clone());
+                let session_engine = (*self.agent_engine)
+                    .clone()
+                    .with_client(session_client.clone())
+                    .with_session_id(session.id.clone());
                 let pipeline = crate::client::ChatPipeline::new(
                     Arc::new(session_engine.clone()),
                     self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
@@ -215,7 +211,7 @@ impl ChatApp {
                 );
                 let cancel_token = tokio_util::sync::CancellationToken::new();
 
-                let runtime = crate::sessions::SessionRuntime::new(
+                let mut runtime = crate::sessions::SessionRuntime::new(
                     session.id.clone(),
                     session.name.clone(),
                     session_client,
@@ -223,6 +219,10 @@ impl ChatApp {
                     session_engine,
                     cancel_token,
                 );
+
+                // Default the new session agent to "general" (per-session
+                // selection shown in the input selector).
+                runtime.selected_agent = Some("general".to_string());
 
                 self.session_store.insert(session.id.clone(), runtime);
                 *panel.selected_id_mut() = Some(session.id.clone());
@@ -284,7 +284,9 @@ impl ChatApp {
                         panel.show_notification(&format!("Imported session: {}", new_id), true);
                         panel.refresh();
                     }
-                    Err(e) => panel.show_notification(&format!("Import failed: {}", e), false),
+                    Err(e) => {
+                        panel.show_notification(&format!("Import failed: {}", e), false);
+                    }
                 }
             }
         }
@@ -306,4 +308,3 @@ impl ChatApp {
             .map(|r| &r.client)
     }
 }
-

@@ -152,13 +152,6 @@ pub enum AppEvent {
     // Thinking output events (e.g. Claude-style reasoning)
     StreamThinkingChunk { content: String, session_id: String },
     StreamThinkingComplete { content: String, session_id: String },
-    // Agent chain events
-    AgentChainStarted { agent_name: String, depth: u32, session_id: String },
-    AgentChainCompleted { agent_name: String, result: String, depth: u32, session_id: String },
-    AgentChainError { agent_name: String, error: String, depth: u32, session_id: String },
-    AgentChainCancelled { agent_name: String, session_id: String },
-    AgentChainComplete { response: String, entries: Vec<crate::sessions::model::AgentChainEntry>, session_id: String },
-    AgentChainStopped { session_id: String },
     /// Remote server n_ctx was updated.
     NCtxUpdated { n_ctx: u32, session_id: String },
     /// Agent self-improvement suggestions generated.
