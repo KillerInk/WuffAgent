@@ -122,11 +122,11 @@ impl ImprovementsPanel {
                         ui.separator();
                         ui.horizontal(|ui| {
                             if ui.add_enabled(imp.prompt_change.is_some(),
-                                egui::Button::new("âœ“ Approve").fill(theme.primary)
+                                egui::Button::new("✓ Approve").fill(theme.primary)
                             ).clicked() {
                                 tracing::info!("Approved improvement for agent {}", imp.agent_name);
                             }
-                            if ui.add(egui::Button::new("âœ— Dismiss")).clicked() {
+                            if ui.add(egui::Button::new("✗ Dismiss")).clicked() {
                                 to_remove.push(i);
                             }
                         });

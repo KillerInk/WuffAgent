@@ -170,7 +170,7 @@ impl ChatApp {
                         // Session is idle with a preserved conversation: offer to
                         // continue the agent run on that conversation.
                         ui.add_space(6.0);
-                        let continue_btn = egui::Button::new("â–¶ Continue")
+                        let continue_btn = egui::Button::new("▶ Continue")
                             .fill(theme.surface_light)
                             .corner_radius(6)
                             .min_size(egui::vec2(88.0, 28.0));
