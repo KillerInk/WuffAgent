@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,8 +21,6 @@ pub struct AgentEngine {
     pub(super) memory: Option<Arc<crate::memory::MemoryManager>>,
     /// Session ID for this agent engine's persistent conversation.
     pub(super) agent_session_id: Option<String>,
-    /// Directory where this agent engine's session files are stored.
-    pub(super) agent_session_dir: PathBuf,
     /// Completed task count, shared across clones; throttles post-task work.
     tasks_completed: Arc<AtomicUsize>,
 }
@@ -45,7 +42,6 @@ impl AgentEngine {
             client,
             memory: None,
             agent_session_id: None,
-            agent_session_dir: PathBuf::new(),
             tasks_completed: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -86,20 +82,9 @@ impl AgentEngine {
         self
     }
 
-    /// Set the agent session for this engine.
-    pub fn set_agent_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {
-        self.agent_session_id = session_id;
-        self.agent_session_dir = session_dir;
-    }
-
     /// Return the current agent session ID.
     pub fn agent_session_id(&self) -> Option<&str> {
         self.agent_session_id.as_deref()
-    }
-
-    /// Return the current agent session dir.
-    pub fn agent_session_dir(&self) -> &PathBuf {
-        &self.agent_session_dir
     }
 
     /// Execute a chat request using the agent engine's tool pipeline with a
@@ -142,7 +127,6 @@ impl AgentEngine {
             self.client.clone(),
             self.memory.clone(),
             self.agent_session_id.clone(),
-            self.agent_session_dir.clone(),
         );
 
         let result = agent.execute(request, cancel_token).await;

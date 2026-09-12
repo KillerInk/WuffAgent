@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,7 +7,6 @@ use tracing;
 use super::config::AgentConfig;
 use super::LlmClient;
 use crate::client::ChatClient;
-use super::types::AgentId;
 use crate::tools::ToolManager;
 use crate::types::Message;
 use crate::trimming::ContextTrimming;
@@ -59,7 +57,6 @@ static VERIFICATION_SYSTEM_PROMPT: &str =
 /// Each agent has its own system prompt, allowed tools, and shell config.
 #[derive(Clone)]
 pub struct Agent {
-    id: AgentId,
     config: AgentConfig,
     llm_client: Arc<dyn LlmClient>,
     tool_manager: Arc<Mutex<ToolManager>>,
@@ -74,8 +71,6 @@ pub struct Agent {
     last_llm_call_at: Instant,
     /// Session ID for this agent's persistent conversation.
     agent_session_id: Option<String>,
-    /// Directory where this agent's session files are stored.
-    agent_session_dir: PathBuf,
     /// Centralized trimming engine.
     trimming: ContextTrimming,
 }
@@ -90,7 +85,6 @@ impl Agent {
         client: Arc<ChatClient>,
         memory: Option<Arc<crate::memory::MemoryManager>>,
         agent_session_id: Option<String>,
-        agent_session_dir: PathBuf,
     ) -> Self {
         // Apply the agent's per-agent reasoning effort: give it its own
         // client clone with the effort set. Off = inherit the global
@@ -121,7 +115,6 @@ impl Agent {
             Arc::new(Mutex::new(tm))
         };
         Self {
-            id: AgentId::generate(),
             config,
             llm_client,
             tool_manager,
@@ -131,7 +124,6 @@ impl Agent {
             memory,
             messages: Vec::new(),
             agent_session_id,
-            agent_session_dir,
             trimming: ContextTrimming::new(),
         }
     }
@@ -192,7 +184,7 @@ impl Agent {
             Arc::new(crate::tools::types::TracingToolLogger),
         ));
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
-        Self::new(config, llm_client, tool_manager, None, client, memory, None, PathBuf::new())
+        Self::new(config, llm_client, tool_manager, None, client, memory, None)
     }
 
     fn send_event(&self, event: crate::types::AppEvent) {
@@ -1246,7 +1238,7 @@ mod tests {
         let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
         let client = Arc::new(ChatClient::new("http://localhost:1"));
-        Agent::new(config, llm_client, tool_manager, None, client, None, None, PathBuf::new())
+        Agent::new(config, llm_client, tool_manager, None, client, None, None)
     }
 
     /// Build an agent whose shared registry contains a `shell` tool, like the
@@ -1278,7 +1270,7 @@ mod tests {
             .unwrap();
         let tool_manager = Arc::new(Mutex::new(ToolManager::new(Arc::new(registry))));
         let client = Arc::new(ChatClient::new("http://localhost:1"));
-        Agent::new(config, llm_client, tool_manager, None, client, None, None, PathBuf::new())
+        Agent::new(config, llm_client, tool_manager, None, client, None, None)
     }
 
     #[test]
@@ -1324,7 +1316,6 @@ mod tests {
     fn test_agent_creation() {
         let agent = make_agent("test");
         assert_eq!(agent.config.name, "test");
-        assert!(!agent.id.to_string().is_empty());
     }
 
     #[test]
@@ -1351,7 +1342,6 @@ mod tests {
             global_client.clone(),
             None,
             None,
-            PathBuf::new(),
         );
         assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::High);
         assert!(!Arc::ptr_eq(&agent.client, &global_client));
@@ -1368,7 +1358,6 @@ mod tests {
             global_client.clone(),
             None,
             None,
-            PathBuf::new(),
         );
         assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::Medium);
         assert!(Arc::ptr_eq(&agent.client, &global_client));
@@ -1439,7 +1428,6 @@ mod tests {
             std::sync::Arc::new(ChatClient::new("http://localhost:1")),
             None,
             None,
-            PathBuf::new(),
         )
     }
 

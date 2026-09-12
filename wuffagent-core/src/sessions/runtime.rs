@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::AgentEngine;
@@ -204,6 +206,70 @@ impl SessionRuntime {
             pipeline,
             engine,
             cancel_token,
+            selected_agent: None,
+            chat_state: ChatAreaState::default(),
+        }
+    }
+
+    /// Build a full per-session runtime from the app-level config: a session
+    /// client (request options, encryption, session binding, tool event
+    /// routing; URL + API key come from the shared `connection` settings so
+    /// settings/preset changes reach it), a per-session engine cloned from
+    /// to this session's client (so each session's agent chat loop reads/writes
+    /// an isolated conversation store), a pipeline carrying the session ID for
+    /// event routing, and a fresh cancellation token.
+    ///
+    /// If the session file exists on disk it is loaded into the client and its
+    /// on-disk name wins (the caller's `name` is only a fallback for
+    /// brand-new sessions that have no persisted file yet).
+    pub fn create_from_config(
+        config: &crate::config::Config,
+        connection: &crate::client::ConnectionSettings,
+        template_engine: &AgentEngine,
+        session_id: String,
+        name: String,
+        event_tx: std::sync::mpsc::Sender<crate::types::AppEvent>,
+    ) -> Self {
+        let mut client = crate::client::ChatClient::from_settings(connection.clone());
+        client.set_session(Some(session_id.clone()), config.sessions_dir.clone());
+        client.set_reasoning_effort(config.reasoning_effort);
+        client.set_max_messages(config.max_messages);
+        client.set_n_ctx(config.n_ctx);
+        if config.encryption_enabled {
+            if let Some(key) = config.encryption_key() {
+                client.set_encryption_key(Some(key));
+            }
+        }
+        let name = client
+            .load_session()
+            .map(|s| s.name)
+            .unwrap_or(name);
+
+        // Route tool-call events into the shared channel.
+        client.set_tool_event_sender(event_tx.clone());
+
+        // Per-session engine: bound to this session's client so the agent
+        // chat loop reads/writes an isolated conversation store (the shared
+        // bootstrap engine's client would otherwise be mutated by every
+        // session in parallel — a cross-session data race).
+        let engine = template_engine
+            .clone()
+            .with_client(client.clone())
+            .with_session_id(session_id.clone());
+        let pipeline = ChatPipeline::new(
+            Arc::new(engine.clone()),
+            event_tx,
+            config.reasoning_effort,
+            session_id.clone(),
+        );
+
+        Self {
+            session_id,
+            name,
+            client,
+            pipeline,
+            engine,
+            cancel_token: CancellationToken::new(),
             selected_agent: None,
             chat_state: ChatAreaState::default(),
         }

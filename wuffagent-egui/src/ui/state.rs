@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::server::ServerManager;
@@ -14,9 +13,26 @@ use crate::types::{AppEvent, AppStatus};
 pub use crate::sessions::QueuedMessage;
 
 /// Main application state for the egui UI.
+///
+/// Fields are flat `pub` (UI modules access them directly via `self.<field>`)
+/// but grouped by concern:
+///
+/// - **Core services** — app-wide handles created at startup.
+/// - **Sessions** — per-session runtime state + selection.
+/// - **Dialogs & panels** — transient UI windows.
+/// - **Event relay** — core → UI event channel.
+/// - **Remote n_ctx** — server-synced context window state.
+/// - **Display snapshot** — cached rendered messages (perf).
 pub struct ChatApp {
+    // ── Core services (app-wide, created at startup) ─────────────────
     pub config: Config,
     pub server: ServerManager,
+    /// Shared connection settings (URL + API key) used by every client in the
+    /// app (session runtimes, bootstrap engine, non-streaming LLM adapter).
+    /// One `update()` here propagates to all of them.
+    pub connection: Arc<crate::client::ConnectionSettings>,
+    /// Last base_url synced to the shared connection settings (no-op guard).
+    pub last_synced_base_url: String,
     pub tool_manager: Arc<ToolManager>,
     pub agent_engine: Arc<crate::agents::AgentEngine>,
     /// Shared memory manager (single-writer discipline; all UI memory writes go
@@ -24,19 +40,18 @@ pub struct ChatApp {
     pub memory_manager: Arc<crate::memory::MemoryManager>,
     /// Dedicated runtime for UI-triggered async memory work (maintenance pass).
     pub memory_runtime: tokio::runtime::Runtime,
-    /// Clone of the bootstrap non-streaming LLM client (shares interior-mutable
-    /// `base_url` with the adapter, so a URL change here propagates in-place).
-    pub bootstrap_llm_client: crate::client::ChatClient,
-    /// Clone of the bootstrap streaming client (also held by the engine).
-    pub bootstrap_stream_client: crate::client::ChatClient,
-    /// Last base_url synced to per-session clients (no-op guard).
-    pub last_synced_base_url: String,
+
+    // ── Sessions ─────────────────────────────────────────────────────
     /// Per-session runtime state keyed by session ID.
     pub session_store: HashMap<String, crate::sessions::SessionRuntime>,
     /// ID of the currently selected session (None = no session selected).
     pub selected_session_id: Option<String>,
     /// The sessions sidebar widget (manages its own list + selection).
     pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
+    /// Reasoning effort for reasoning models (Off = omitted from requests).
+    pub reasoning_effort: crate::types::ReasoningEffort,
+
+    // ── Dialogs & panels (transient UI windows) ──────────────────────
     pub status: AppStatus,
     pub show_settings: bool,
     pub settings_dialog: Option<super::settings::SettingsDialog>,
@@ -46,21 +61,24 @@ pub struct ChatApp {
     /// The memory panel widget (owns its own list/search/edit state).
     /// `show_panel` gates whether the window is drawn.
     pub memory_panel: super::memory_panel::MemoryPanel,
+    /// Pending agent improvement suggestions.
+    pub improvements_panel: super::improvements::ImprovementsPanel,
+
+    // ── Event relay (core → UI) ──────────────────────────────────────
     /// Channel sender for relaying core events (EngineEvent, AppEvent) to the UI thread.
     /// The corresponding receiver is stored separately so `process_pending_events` can poll it.
     pub pending_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     pub pending_rx: Option<mpsc::Receiver<AppEvent>>,
-    pub agent_cancel_token: CancellationToken,
-    /// Reasoning effort for reasoning models (Off = omitted from requests).
-    pub reasoning_effort: crate::types::ReasoningEffort,
+
+    // ── Remote n_ctx (server-synced context window) ──────────────────
     /// Remote n_ctx value (for remote mode).
     pub remote_n_ctx: u32,
     /// Handle for the remote n_ctx update task.
     pub remote_n_ctx_handle: Option<JoinHandle<()>>,
     /// Arc for the remote n_ctx atomic value.
     pub remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
-    /// Pending agent improvement suggestions.
-    pub improvements_panel: super::improvements::ImprovementsPanel,
+
+    // ── Display snapshot (perf: avoid deep-cloning messages per frame) ─
     /// Shared display snapshot of the selected session's messages. Rebuilt only
     /// when the session or its message set changes, so a per-frame redraw is an
     /// O(1) `Arc::clone` instead of a full deep clone of every message (which
@@ -80,8 +98,7 @@ impl ChatApp {
         server: ServerManager,
         tool_manager: Arc<ToolManager>,
         agent_engine: Arc<crate::agents::AgentEngine>,
-        bootstrap_llm_client: crate::client::ChatClient,
-        bootstrap_stream_client: crate::client::ChatClient,
+        connection: Arc<crate::client::ConnectionSettings>,
         session_store: HashMap<String, crate::sessions::SessionRuntime>,
         selected_session_id: Option<String>,
         event_tx: mpsc::Sender<AppEvent>,
@@ -103,8 +120,7 @@ impl ChatApp {
             agent_engine,
             memory_manager,
             memory_runtime,
-            bootstrap_llm_client,
-            bootstrap_stream_client,
+            connection,
             last_synced_base_url: String::new(),
             session_store,
             selected_session_id,
@@ -118,7 +134,6 @@ impl ChatApp {
             memory_panel: super::memory_panel::MemoryPanel::new(),
             pending_tx: Some(Arc::new(Mutex::new(event_tx))),
             pending_rx: Some(event_rx),
-            agent_cancel_token: CancellationToken::new(),
             reasoning_effort,
             improvements_panel: super::improvements::ImprovementsPanel::new(),
             display_snapshot: std::sync::Arc::new(Vec::new()),
@@ -189,48 +204,13 @@ impl ChatApp {
             PanelAction::Create(name) => {
                 let session = crate::sessions::create_session(&sessions_dir, &name);
 
-                let base_url = self.config.base_url();
-                let mut session_client = crate::client::ChatClient::new(&base_url);
-                session_client.set_api_key(self.config.remote_api_key.as_deref());
-                session_client.set_session(Some(session.id.clone()), sessions_dir.clone());
-                session_client.set_reasoning_effort(self.config.reasoning_effort);
-                session_client.set_max_messages(self.config.max_messages);
-                session_client.set_n_ctx(self.config.n_ctx);
-                if self.config.encryption_enabled {
-                    if let Some(key) = self.config.encryption_key() {
-                        session_client.set_encryption_key(Some(key));
-                    }
-                }
-                let _ = session_client.load_session();
-
-                session_client.set_tool_event_sender(
-                    self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
-                );
-
-                // Per-session engine: derived from the shared bootstrap engine
-                // but bound to THIS session's client so the agent chat loop
-                // reads/writes an isolated conversation store (the shared
-                // bootstrap engine's client would otherwise be mutated by every
-                // session in parallel — a cross-session data race).
-                let session_engine = (*self.agent_engine)
-                    .clone()
-                    .with_client(session_client.clone())
-                    .with_session_id(session.id.clone());
-                let pipeline = crate::client::ChatPipeline::new(
-                    Arc::new(session_engine.clone()),
-                    self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
-                    self.config.reasoning_effort,
-                    session.id.clone(),
-                );
-                let cancel_token = tokio_util::sync::CancellationToken::new();
-
-                let mut runtime = crate::sessions::SessionRuntime::new(
+                let mut runtime = crate::sessions::SessionRuntime::create_from_config(
+                    &self.config,
+                    &self.connection,
+                    &self.agent_engine,
                     session.id.clone(),
                     session.name.clone(),
-                    session_client,
-                    pipeline,
-                    session_engine,
-                    cancel_token,
+                    self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
                 );
 
                 // Default the new session agent to "general" (per-session

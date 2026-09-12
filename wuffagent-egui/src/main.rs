@@ -2,10 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use wuffagent_core::{
     agents::AgentEngine,
-    client::ChatClient,
+    client::{ChatClient, ConnectionSettings},
     config::Config,
     server::ServerManager,
-    sessions::{SessionRuntime, sessions_dir},
+    sessions::sessions_dir,
     tools::{builtin, registry::ToolRegistry, ToolManager, TracingToolLogger},
 };
 
@@ -59,8 +59,7 @@ fn bootstrap() -> (
     ServerManager,
     Arc<ToolManager>,
     Arc<AgentEngine>,
-    ChatClient,
-    ChatClient,
+    Arc<ConnectionSettings>,
     Arc<wuffagent_core::memory::MemoryManager>,
 ) {
     // Default to `debug` for app crates, but silence the extremely chatty
@@ -112,11 +111,16 @@ fn bootstrap() -> (
 
     let registry = Arc::new(ToolRegistry::new(discovery_paths, logger));
 
-    // Resolve search dirs for agent discovery
+    // Single shared connection settings: every client (bootstrap engine,
+    // per-session clients, non-streaming LLM adapter) reads its URL + key
+    // from here, so a settings/preset change propagates to all of them with
+    // one `update()` call (previously the app had to push `set_url` to every
+    // live client and stale clones could still go out of sync).
     let base_url = config.base_url();
-    let api_key = config.remote_api_key.clone();
-    let mut client = ChatClient::new(&base_url);
-    client.set_api_key(api_key.as_deref());
+    let connection = Arc::new(ConnectionSettings::new(&base_url, config.remote_api_key.as_deref()));
+
+    // Session-specific client for the bootstrap engine
+    let mut client = ChatClient::from_settings((*connection).clone());
     client.set_session(config.session_id.clone(), config.sessions_dir.clone());
     client.set_reasoning_effort(config.reasoning_effort);
     client.set_max_messages(config.max_messages);
@@ -127,22 +131,12 @@ fn bootstrap() -> (
         }
     }
     let _ = client.load_session();
-    // Clone for the UI so a preset/settings URL change can be pushed to the
-    // bootstrap engine's own client (used before per-session engines exist) in
-    // place. Shares the same interior-mutable base_url as `client_for_engine`.
-    let bootstrap_stream_client = client.clone();
 
-    // Non-streaming LlmClient for agents: configure auth + request options
-    // BEFORE wrapping in the adapter (the adapter only holds the client handle).
-    let base_url_clone = base_url.clone();
-    let mut non_streaming = ChatClient::new(&base_url_clone);
-    non_streaming.set_api_key(api_key.as_deref());
+    // Non-streaming LlmClient for agents: configure request options BEFORE
+    // wrapping in the adapter (the adapter only holds the client handle).
+    let mut non_streaming = ChatClient::from_settings((*connection).clone());
     non_streaming.set_reasoning_effort(config.reasoning_effort);
     non_streaming.set_n_ctx(config.n_ctx);
-    // Keep a clone for the UI: it shares the same interior-mutable base_url as
-    // the adapter's client, so the app can push a preset/settings URL change
-    // to every non-streaming call path in place.
-    let bootstrap_llm_client = non_streaming.clone();
     let llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(non_streaming));
     let client_for_engine = Arc::new(client.clone());
 
@@ -185,17 +179,27 @@ fn bootstrap() -> (
 
     let agent_engine = Arc::new(agent_engine);
 
-    (config, server, tool_manager, agent_engine, bootstrap_llm_client, bootstrap_stream_client, memory_manager)
+    (config, server, tool_manager, agent_engine, connection, memory_manager)
 }
 
 #[tokio::main]
 async fn main() -> eframe::Result {
-    let (config, server, tool_manager, agent_engine, bootstrap_llm_client, bootstrap_stream_client, memory_manager) = bootstrap();
+    let (config, server, tool_manager, agent_engine, connection, memory_manager) = bootstrap();
 
     // Dedicated runtime for UI-triggered async work (memory maintenance) so the
-    // UI thread can block on a blocking_call without touching the main runtime
-    // that the chat pipeline is spawned on.
-    let memory_runtime = tokio::runtime::Runtime::new().expect("failed to create memory runtime");
+    // UI thread can block on a `block_on` without touching the main runtime
+    // that the chat pipeline is spawned on. (The UI thread is NOT inside a
+    // tokio async context, so it could technically share the main runtime —
+    // its workers would keep servicing the pipeline while the UI thread waits.
+    // Keeping it dedicated isolates the UI's blocking call from the pipeline.)
+    // Worker threads are capped well below `num_cpus` since only the occasional
+    // foreground maintenance pass runs here; the default would spin up one idle
+    // thread per core.
+    let memory_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("failed to create memory runtime");
     
     // Initialize session store with the configured session
     // Shared event channel: the UI polls the receiver each frame; the pipeline
@@ -207,49 +211,14 @@ async fn main() -> eframe::Result {
     let mut selected_session_id: Option<String> = None;
 
     if let Some(session_id) = &config.session_id {
-        if let Some(session) = wuffagent_core::sessions::load_session(&config.sessions_dir, session_id) {
-            // Create a fresh client for this session
-            let base_url = config.base_url();
-            let mut session_client = ChatClient::new(&base_url);
-            session_client.set_api_key(config.remote_api_key.as_deref());
-            session_client.set_session(Some(session_id.clone()), config.sessions_dir.clone());
-            session_client.set_reasoning_effort(config.reasoning_effort);
-            session_client.set_max_messages(config.max_messages);
-            session_client.set_n_ctx(config.n_ctx);
-            if config.encryption_enabled {
-                if let Some(key) = config.encryption_key() {
-                    session_client.set_encryption_key(Some(key));
-                }
-            }
-            let _ = session_client.load_session();
-
-            // Route tool-call events into the shared channel.
-            session_client.set_tool_event_sender(event_tx.clone());
-
-            // Per-session engine: bound to this session's client so the agent
-            // chat loop reads/writes an isolated conversation store (the shared
-            // bootstrap engine's client would otherwise be mutated by every
-            // session in parallel â€” a cross-session data race).
-            let session_engine = (*agent_engine)
-                .clone()
-                .with_client(session_client.clone())
-                .with_session_id(session_id.clone());
-            // Create pipeline (carries the session_id for event routing) and runtime.
-            let pipeline = wuffagent_core::client::ChatPipeline::new(
-                Arc::new(session_engine.clone()),
+        if wuffagent_core::sessions::session_exists(&config.sessions_dir, session_id) {
+            let mut runtime = wuffagent_core::sessions::SessionRuntime::create_from_config(
+                &config,
+                &connection,
+                &agent_engine,
+                session_id.clone(),
+                "Untitled".to_string(),
                 event_tx.clone(),
-                config.reasoning_effort,
-                session_id.clone(),
-            );
-            let cancel_token = tokio_util::sync::CancellationToken::new();
-
-            let mut runtime = SessionRuntime::new(
-                session_id.clone(),
-                session.name.clone(),
-                session_client,
-                pipeline,
-                session_engine,
-                cancel_token,
             );
 
             // Populate the chat display from the loaded conversation so the
@@ -274,8 +243,8 @@ async fn main() -> eframe::Result {
         Box::new(move |cc| {
             cc.egui_ctx.set_fonts(emoji_fonts());
             Ok(Box::new(ui::state::ChatApp::new(
-                config, server, tool_manager, agent_engine, bootstrap_llm_client,
-                bootstrap_stream_client, session_store, selected_session_id, event_tx, event_rx,
+                config, server, tool_manager, agent_engine, connection,
+                session_store, selected_session_id, event_tx, event_rx,
                 memory_manager, memory_runtime,
             )))
         }),

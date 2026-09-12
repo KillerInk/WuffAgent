@@ -452,18 +452,17 @@ impl ChatApp {
             }
         }
         
-        // Update session
-        if let Some(sid) = &self.selected_session_id {
-            if let Some(runtime) = self.session_store.get(sid) {
-                let cl = runtime.client.clone();
-                let mut conv = cl.conversation().lock().unwrap();
+        // Update the underlying client conversation, then persist via the
+        // single save path.
+        if let Some(sid) = self.selected_session_id.clone() {
+            if let Some(runtime) = self.session_store.get(&sid) {
+                let mut conv = runtime.client.conversation().lock().unwrap();
                 if index < conv.len() {
                     conv[index].content = new_content;
                 }
-                drop(conv);
-                if let Err(e) = cl.save_session() {
-                    eprintln!("Failed to save session after edit: {}", e);
-                }
+            }
+            if let Err(e) = self.save_session_for(&sid) {
+                eprintln!("Failed to save session after edit: {}", e);
             }
         }
         
@@ -763,23 +762,19 @@ impl ChatApp {
     }
 
     pub(super) fn delete_message(&mut self, index: usize) {
-        if let Some(sid) = &self.selected_session_id {
-            if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(sid) = self.selected_session_id.clone() {
+            if let Some(runtime) = self.session_store.get_mut(&sid) {
                 if index < runtime.chat_state.messages.len() {
                     runtime.chat_state.messages.remove(index);
                 }
                 // Also remove from the underlying client conversation
-                {
-                    let cl = runtime.client.clone();
-                    let mut conv = cl.conversation().lock().unwrap();
-                    if index < conv.len() {
-                        conv.remove(index);
-                    }
-                    drop(conv);
-                    if let Err(e) = cl.save_session() {
-                        eprintln!("Failed to save session after delete: {}", e);
-                    }
+                let mut conv = runtime.client.conversation().lock().unwrap();
+                if index < conv.len() {
+                    conv.remove(index);
                 }
+            }
+            if let Err(e) = self.save_session_for(&sid) {
+                eprintln!("Failed to save session after delete: {}", e);
             }
         }
     }

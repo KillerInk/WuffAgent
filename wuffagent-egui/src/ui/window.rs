@@ -86,30 +86,21 @@ impl ChatApp {
         self.sync_base_url();
     }
 
-    /// Push the config's base URL to every live client (session runtimes, the
-    /// bootstrap engine, and the non-streaming LLM adapter) in place. This is
-    /// the fix for "I saved the correct URL but the app still connects to the
-    /// old one": clients are constructed once at startup and `set_url` was
-    /// never called after a preset/settings change, so they kept the stale URL.
+    /// Push the config's base URL + API key to the shared connection settings.
+    /// Every client in the app (session runtimes, bootstrap engine,
+    /// non-streaming LLM adapter) reads from that single instance, so one
+    /// `update()` call propagates to all of them — the fix for "I saved the
+    /// correct URL but the app still connects to the old one".
     ///
-    /// `base_url` on `ChatClient` is interior-mutable (shared `Arc<Mutex>>`), so
-    /// updating a single clone updates every holder. Guarded by
-    /// `last_synced_base_url` so this is a cheap no-op unless the URL actually
-    /// changed.
+    /// Guarded by `last_synced_base_url` so this is a cheap no-op unless the
+    /// URL actually changed.
     fn sync_base_url(&mut self) {
         let new_url = self.config.base_url();
         if new_url == self.last_synced_base_url {
             return;
         }
-        for runtime in self.session_store.values_mut() {
-            runtime.client.set_url(&new_url);
-        }
-        // The bootstrap engine's per-session clients are created fresh from
-        // config at session-creation time; the shared bootstrap engine's own
-        // client (streaming) and the non-streaming adapter are the ones that
-        // outlive a preset change, so update them here.
-        self.bootstrap_llm_client.set_url(&new_url);
-        self.bootstrap_stream_client.set_url(&new_url);
+        self.connection
+            .update(&new_url, self.config.remote_api_key.as_deref());
         self.last_synced_base_url = new_url;
     }
 
@@ -198,45 +189,21 @@ impl ChatApp {
             return;
         }
 
-        // Create a new runtime for this session
-        let base_url = self.config.base_url();
-        let mut session_client = crate::client::ChatClient::new(&base_url);
-        session_client.set_api_key(self.config.remote_api_key.as_deref());
+        // Create a runtime for this session from the shared app config
+        // (URL + key via the shared connection settings, isolated
+        // client/engine/pipeline, tool event routing).
         let sessions_dir = self.config.sessions_dir.clone();
-        session_client.set_session(Some(id.to_string()), sessions_dir.clone());
-        session_client.set_reasoning_effort(self.config.reasoning_effort);
-        session_client.set_max_messages(self.config.max_messages);
-        session_client.set_n_ctx(self.config.n_ctx);
-        if self.config.encryption_enabled {
-            if let Some(key) = self.config.encryption_key() {
-                session_client.set_encryption_key(Some(key));
-            }
-        }
-        let _ = session_client.load_session();
-
-        // Per-session engine: bound to this session's client so the agent chat
-        // loop reads/writes an isolated conversation store (see the same
-        // rationale in `state.rs` / `main.rs`).
-        let session_engine = (*self.agent_engine).clone().with_client(session_client.clone());
-        // Create pipeline (events flow through the shared pending_tx) and runtime
-        let pipeline = crate::client::ChatPipeline::new(
-            Arc::new(session_engine.clone()),
-            self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
-            self.config.reasoning_effort,
+        let runtime = crate::sessions::SessionRuntime::create_from_config(
+            &self.config,
+            &self.connection,
+            &self.agent_engine,
             id.to_string(),
-        );
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-
-        let runtime = crate::sessions::SessionRuntime::new(
-            id.to_string(),
-            // Try to get the session name from disk
+            // Fallback name only used when no session file exists on disk yet
+            // (the factory prefers the on-disk name).
             crate::sessions::load_session(&sessions_dir, id)
                 .map(|s| s.name)
                 .unwrap_or_else(|| format!("Session {}", id)),
-            session_client,
-            pipeline,
-            session_engine,
-            cancel_token,
+            self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
         );
 
         self.session_store.insert(id.to_string(), runtime);

@@ -14,6 +14,42 @@ use std::sync::{Arc, Mutex};
 
 use crate::types::{Message, ToolCall, Usage};
 
+/// Shared, live connection settings (base URL + API key).
+///
+/// One instance is shared by every `ChatClient` in the app (bootstrap engine
+/// client, per-session clients, non-streaming LLM adapter) via cheap `Arc`
+/// clones, so a settings/preset change propagates to all of them with a single
+/// `update()` call instead of walking every client and pushing `set_url`.
+#[derive(Clone)]
+pub struct ConnectionSettings {
+    base_url: Arc<Mutex<String>>,
+    api_key: Arc<Mutex<Option<String>>>,
+}
+
+impl ConnectionSettings {
+    pub fn new(base_url: &str, api_key: Option<&str>) -> Self {
+        Self {
+            base_url: Arc::new(Mutex::new(base_url.to_string())),
+            api_key: Arc::new(Mutex::new(api_key.map(|s| s.to_string()))),
+        }
+    }
+
+    pub fn base_url(&self) -> String {
+        self.base_url.lock().unwrap().clone()
+    }
+
+    pub fn api_key(&self) -> Option<String> {
+        self.api_key.lock().unwrap().clone()
+    }
+
+    /// Update URL and API key in place; every client sharing these settings
+    /// sees the new values on its next request.
+    pub fn update(&self, base_url: &str, api_key: Option<&str>) {
+        *self.base_url.lock().unwrap() = base_url.to_string();
+        *self.api_key.lock().unwrap() = api_key.map(|s| s.to_string());
+    }
+}
+
 // Re-export key types so the public API surface is unchanged
 pub use http::{build_request, send_message, build_stream_request, ChatRequest, Response, Choice};
 pub use sse::{process_sse_line, stream_message, add_streaming_messages, ToolCallTracker, looks_like_complete_json};
@@ -97,11 +133,11 @@ pub fn parse_props_n_ctx(body: &str) -> Option<u32> {
 
 #[derive(Clone)]
 pub struct ChatClient {
-    /// Server base URL. Shared interior-mutable (like `n_ctx`) so the URL can
-    /// be updated in place from a running preset/settings change without
-    /// cloning the client: every holder of a clone (session runtimes, the
-    /// bootstrap engine, the non-streaming LLM adapter) reads the new value.
-    base_url: Arc<Mutex<String>>,
+    /// Connection settings (base URL + API key). All app-level clients share
+    /// one `ConnectionSettings` instance, so a settings/preset change
+    /// propagates to every client without cloning or per-client `set_url`
+    /// pushes. `new()` creates a private instance for standalone clients.
+    settings: ConnectionSettings,
     system_prompt: String,
     /// Reasoning effort level for reasoning models (Off = omitted from requests).
     reasoning_effort: crate::types::ReasoningEffort,
@@ -118,7 +154,6 @@ pub struct ChatClient {
     /// the connection stays silent for the given duration, so streams of
     /// arbitrary length survive as long as tokens keep flowing.
     stream_http_client: Arc<reqwest::Client>,
-    api_key: Option<String>,
     session_id: Option<String>,
     session_dir: PathBuf,
     max_messages: usize,
@@ -221,7 +256,7 @@ impl ChatClient {
     pub fn new_with_timeout(base_url: &str, timeout_secs: u64) -> Self {
         let d = std::time::Duration::from_secs(timeout_secs);
         Self {
-            base_url: Arc::new(Mutex::new(base_url.to_string())),
+            settings: ConnectionSettings::new(base_url, None),
             system_prompt: String::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
             conversation: Arc::new(Mutex::new(Vec::new())),
@@ -247,7 +282,6 @@ impl ChatClient {
                     .build()
                     .unwrap()
             }),
-            api_key: None,
             session_id: None,
             session_dir: PathBuf::new(),
             max_messages: 100,
@@ -261,6 +295,16 @@ impl ChatClient {
             encryption_key: None,
             tool_event_tx: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Create a client that reads its base URL and API key from the shared
+    /// `settings` instance. All app-level clients should be built this way
+    /// (from the single bootstrap `ConnectionSettings`) so settings/preset
+    /// changes reach every client.
+    pub fn from_settings(settings: ConnectionSettings) -> Self {
+        let mut client = Self::new(&settings.base_url());
+        client.settings = settings;
+        client
     }
 
     pub fn set_tool_event_sender(&self, tx: mpsc::Sender<crate::types::AppEvent>) {
@@ -397,26 +441,28 @@ impl ChatClient {
     /// pushed to every live client (session runtimes, bootstrap engine, LLM
     /// adapter) without rebuilding them.
     pub fn set_url(&self, url: &str) {
-        *self.base_url.lock().unwrap() = url.to_string();
+        *self.settings.base_url.lock().unwrap() = url.to_string();
     }
 
     pub fn base_url(&self) -> String {
-        self.base_url.lock().unwrap().clone()
+        self.settings.base_url()
     }
 
     /// Clone the current base URL into an owned `String`. Used at request-build
     /// sites so the `MutexGuard` is dropped before any `.await` (a guard is not
     /// `Send` and must not be held across an await boundary).
     fn url(&self) -> String {
-        self.base_url.lock().unwrap().clone()
+        self.settings.base_url()
     }
 
-    pub fn set_api_key(&mut self, key: Option<&str>) {
-        self.api_key = key.map(|s| s.to_string());
+    pub fn set_api_key(&self, key: Option<&str>) {
+        *self.settings.api_key.lock().unwrap() = key.map(|s| s.to_string());
     }
 
-    pub fn api_key(&self) -> Option<&str> {
-        self.api_key.as_deref()
+    /// Current API key (owned clone — the key lives in shared interior-mutable
+    /// settings, so no `&str` can borrow out of the guard).
+    pub fn api_key(&self) -> Option<String> {
+        self.settings.api_key()
     }
 
     pub fn set_system_prompt(&mut self, prompt: &str) {
@@ -592,7 +638,7 @@ impl ChatClient {
         let result = send_message(
             &self.http_client,
             &self.url(),
-            self.api_key.as_deref(),
+            self.settings.api_key().as_deref(),
             &request,
         )
         .await;
@@ -621,7 +667,7 @@ impl ChatClient {
                     match send_message(
                         &self.http_client,
                         &self.url(),
-                        self.api_key.as_deref(),
+                        self.settings.api_key().as_deref(),
                         &request2,
                     )
                     .await
@@ -662,7 +708,7 @@ impl ChatClient {
         let result = send_message(
             &self.http_client,
             &self.url(),
-            self.api_key.as_deref(),
+            self.settings.api_key().as_deref(),
             &request,
         )
         .await;
@@ -693,7 +739,7 @@ impl ChatClient {
                     let retry = send_message(
                         &self.http_client,
                         &self.url(),
-                        self.api_key.as_deref(),
+                        self.settings.api_key().as_deref(),
                         &request2,
                     )
                     .await;
@@ -778,7 +824,7 @@ impl ChatClient {
     ) -> Result<(Message, Option<Usage>), Error> {
         let http_client = client.stream_http_client.clone();
         let base_url = client.url();
-        let api_key = client.api_key.clone();
+        let api_key = client.settings.api_key();
 
         let request = ChatRequest {
             model: "local".to_string(),
@@ -1201,10 +1247,10 @@ mod tests {
 
     #[test]
     fn test_chat_client_api_key() {
-        let mut client = ChatClient::new("http://localhost:8080");
+        let client = ChatClient::new("http://localhost:8080");
         assert_eq!(client.api_key(), None);
         client.set_api_key(Some("sk-test"));
-        assert_eq!(client.api_key(), Some("sk-test"));
+        assert_eq!(client.api_key(), Some("sk-test".to_string()));
     }
 
     #[test]
