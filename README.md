@@ -7,9 +7,9 @@ A desktop AI agent client written in Rust. WuffAgent connects to local (llama.cp
 - **Local & remote LLM backends** — connect to a local `llama-server` (or similar) or any remote OpenAI-compatible API. Connection presets can be saved and switched in the UI.
 - **Multi-agent system** — agents are defined as JSON files in the `agents/` directory. An `AgentEngine` routes requests to the best-matching agent and runs its LLM tool loop.
 - **Plan mode** — the `/plan <request>` command runs a planner → supervisor → workers pipeline. Each planned task is executed through the same `AgentEngine`, so both modes share one execution core.
-- **Tool calling** — built-in tools for file I/O, shell execution, calculation, time, web search, and agent-to-agent invocation. Native plugins can be loaded from `<config_dir>/wuffagent/plugins` via the `Tool` trait ABI.
+- **Tool calling** — built-in tools for file I/O, shell execution, calculation, time, web search, and agent-to-agent invocation. Native plugins can be loaded from `<config_dir>/wuffagent/plugins` via the `Tool` trait ABI. Inside an agent, a tool call is started in the background as soon as the model finishes emitting it (while the model keeps streaming/reasoning), so tool execution overlaps with model inference; results are still recorded in call order.
 - **Sessions** — conversation sessions are persisted as JSON (with optional ChaCha20Poly1305 encryption) and browsable from the sessions panel.
-- **Project memory** — per-project memory files are extracted, improved, and searched across conversations.
+- **Project memory** — per-project memory stores written by agent tools (`save_memory`, `update_memory`, `consolidate_memories`, `delete_memory`), with keyword search, query-aware injection into system prompts, and an opt-in LLM maintenance pass (merge/update/delete). Managed from a dedicated memory panel (list, search, edit, delete, run maintenance).
 - **Conversation trimming** — classifier + summarizer keep long conversations within context limits.
 - **egui frontend** — chat area, agent chain panel, presets dialog, settings, and status bar, all in a single-window desktop app.
 
@@ -27,7 +27,7 @@ Cargo.toml (workspace)
 │       ├── sessions/        # Session persistence (plain or encrypted)
 │       ├── tools/           # ToolManager, ToolRegistry, builtin + dynamic tools
 │       ├── agents/          # AgentConfig, AgentEngine, AgentRegistry
-│       ├── memory/          # MemoryManager: extraction, improvement, search
+│       ├── memory/          # MemoryManager: tool-based store, search, maintenance, self-improvement
 │       └── trimming/        # Conversation trimming: classifier, summarizer
 └── wuffagent-egui/          # egui/eframe frontend binary
     └── src/
@@ -64,7 +64,7 @@ On first run WuffAgent creates a config next to the executable (portable-app sty
 | `agents/<name>.json` | One agent config per file (name, description, personality, allowed tools, priorities) |
 | `sessions/` | Persisted conversation sessions |
 | `plugins/` | Native tool plugins (`.dll`/`.so`/`.dylib`) |
-| `memories/projects/<project>.json` | Per-project memory |
+| `memories/<project>.json` | Per-project memory |
 
 A sample agent config:
 
@@ -82,6 +82,17 @@ A sample agent config:
 ```
 
 Agent discovery order: config-dir `agents/`, then `<exe>/../agents`, then `./agents`. First-seen name wins.
+
+## Memory
+
+Memory is a per-project JSON store (default `~/.wuffagent/memories/<project>.json`) managed entirely through the [`MemoryManager`](wuffagent-core/src/memory/manager.rs). There is no background batch extraction — agents are the only write path:
+
+- **Tools** — `save_memory`, `update_memory`, `consolidate_memories`, and `delete_memory` let agents create, revise, merge, and prune entries. `save_memory` returns the new entry ID plus the top similar existing entries so the agent can update or consolidate instead of duplicating.
+- **Dedup gate** — `MemoryManager::add` runs a keyword search first; strong matches return the existing entry (id + content) rather than inserting a near-duplicate.
+- **Injection** — relevant memories are selected by the user's query (`search`) and injected into the agent system prompt; with no hits, Always mode falls back to the most recent active entries. `get_recent` skips superseded/expired entries.
+- **Maintenance (opt-in)** — with `memory_maintenance` enabled, `run_maintenance()` sends all entries to the LLM and applies its `merge`/`update`/`delete` actions (unknown ids skipped, never wipes everything). It auto-triggers after a task only when enabled, above `memory_maintenance_threshold`, and past the cooldown.
+- **Self-improvement** — when `auto_improve` is on, the engine calls `suggest_improvements` after a task and emits `ImprovementSuggested`; approving in the UI writes the updated agent JSON (or creates a new agent) and refreshes the registry.
+- **UI** — the memory panel (🧠) lists all entries, searches, edits content/tags, deletes (with confirm), and runs maintenance on demand; a memory settings section exposes enabled, injection mode, maintenance toggle/threshold, and the auto-improve toggle. The status bar shows an active-memory count with a tooltip.
 
 ## Development Notes
 

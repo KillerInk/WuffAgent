@@ -55,6 +55,14 @@ impl ChatApp {
                         self.toggle_theme(ui.ctx());
                     }
 
+                    // Memory panel button
+                    let memory_btn = egui::Button::new("🧠")
+                        .fill(theme.surface_light)
+                        .corner_radius(4);
+                    if ui.add(memory_btn).clicked() {
+                        self.memory_panel.show_panel = true;
+                    }
+
                     // Improvements panel button
                     let improvements_btn = egui::Button::new("✨")
                         .fill(theme.surface_light)
@@ -112,6 +120,15 @@ impl ChatApp {
         // Draw improvements panel on top
         let ctx = ui.ctx();
         self.draw_improvements_panel(ctx);
+
+        // Draw memory panel on top (disjoint field borrows).
+        self.draw_memory_panel(ctx);
+    }
+
+    fn draw_memory_panel(&mut self, ctx: &egui::Context) {
+        // Disjoint field borrows: the panel (mutable) + manager, runtime, config
+        // (immutable) are separate struct fields, so they can coexist.
+        self.memory_panel.draw(ctx, &self.memory_manager, &self.memory_runtime, &self.config);
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {

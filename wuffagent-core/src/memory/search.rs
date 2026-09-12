@@ -1,7 +1,33 @@
 use std::collections::HashMap;
-use tracing;
 
 use super::types::{MemoryEntry, MemoryConfig};
+
+/// Minimum token length to be considered for matching (single characters are noise).
+const MIN_TOKEN_LEN: usize = 2;
+
+/// Common English + German stopwords that carry no retrieval signal.
+const STOPWORDS: &[&str] = &[
+    // English
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "when", "while",
+    "of", "in", "on", "at", "to", "from", "by", "for", "with", "about", "into",
+    "over", "under", "is", "am", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "should",
+    "could", "can", "may", "might", "must", "it", "its", "this", "that",
+    "these", "those", "i", "you", "he", "she", "we", "they", "them", "his",
+    "her", "our", "your", "not", "no", "yes", "so", "as", "up", "down", "out",
+    // German
+    "und", "oder", "aber", "wenn", "dann", "dass", "dass", "bei", "aus",
+    "auf", "den", "dem", "der", "des", "die", "ein", "eine", "einen", "einem",
+    "einer", "einem", "mit", "nach", "von", "vor", "zu", "zum", "zur", "ist",
+    "sind", "war", "waren", "hat", "hatte", "haben", "habe", "wird", "wurde",
+    "ich", "du", "er", "sie", "wir", "ihr", "man", "nicht", "ja", "nein",
+    "auch", "als", "am", "im", "ins", "um", "noch", "nur", "sehr", "wie",
+    "was", "wer", "wo", "wohin", "wieso", "worum", "wollte", "kann", "muss",
+];
+
+fn is_stopword(token: &str) -> bool {
+    STOPWORDS.contains(&token)
+}
 
 /// Tokenize text into words for keyword matching.
 fn tokenize(text: &str) -> Vec<String> {
@@ -10,6 +36,7 @@ fn tokenize(text: &str) -> Vec<String> {
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })
         .collect::<String>()
         .split_whitespace()
+        .filter(|s| s.len() >= MIN_TOKEN_LEN && !is_stopword(s))
         .map(|s| s.to_string())
         .collect()
 }
@@ -36,15 +63,22 @@ fn keyword_score(entry: &MemoryEntry, query: &str) -> f64 {
 
     for q_token in &query_tokens {
         if let Some(&count) = entry_freq.get(q_token.as_str()) {
-            // TF-IDF style: term frequency * log(N/document_freq)
-            // Simplified: just use term frequency weighted by entry confidence
+            // Term frequency weighted by entry confidence.
             score += (count as f64 / total_tokens) * entry.confidence as f64;
         }
     }
 
-    // Bonus for tag matches
+    // Bonus for tag matches: exact tag match on a query token, or the tag is a
+    // prefix of a query token (so tag "rust" matches query "rustc").
+    let query_lower = query.to_lowercase();
     for tag in &entry.tags {
-        if query.to_lowercase().contains(&tag.to_lowercase()) {
+        let tag_lower = tag.to_lowercase();
+        let is_exact = query_tokens.iter().any(|t| *t == tag_lower);
+        let is_prefix = !tag_lower.is_empty()
+            && query_lower
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|t| t.len() > tag_lower.len() && t.starts_with(&tag_lower));
+        if is_exact || is_prefix {
             score += 0.5;
         }
     }
@@ -90,19 +124,7 @@ pub fn get_recent_memories(entries: &[MemoryEntry], count: usize) -> Vec<&Memory
 
 /// Search memories based on config settings.
 pub fn search_memories<'a>(entries: &'a [MemoryEntry], query: &str, config: &MemoryConfig) -> Vec<&'a MemoryEntry> {
-    let max_results = config.injection_max_entries;
-
-    match config.search_mode {
-        super::types::SearchMode::Keyword => {
-            keyword_search(entries, query, max_results)
-        }
-        super::types::SearchMode::Llm => {
-            // LLM search will be implemented in Phase 4
-            // For now, fall back to keyword search
-            tracing::debug!("LLM search requested, falling back to keyword search");
-            keyword_search(entries, query, max_results)
-        }
-    }
+    keyword_search(entries, query, config.injection_max_entries)
 }
 
 #[cfg(test)]
@@ -112,7 +134,7 @@ mod tests {
     #[test]
     fn test_tokenize() {
         let tokens = tokenize("Hello world! This is a test.");
-        assert_eq!(tokens, vec!["hello", "world", "this", "is", "a", "test"]);
+        assert_eq!(tokens, vec!["hello", "world", "test"]);
     }
 
     #[test]
@@ -167,5 +189,48 @@ mod tests {
         // Should return the two most recent: Third (newest) then Second
         assert_eq!(recent[0].content, "Third");
         assert_eq!(recent[1].content, "Second");
+    }
+
+    #[test]
+    fn test_tokenize_filters_stopwords_and_short_tokens() {
+        let tokens = tokenize("The agent and rustc 7 are working");
+        assert!(tokens.contains(&"agent".to_string()));
+        assert!(tokens.contains(&"rustc".to_string()));
+        // Stopwords and single characters are filtered.
+        assert!(!tokens.contains(&"the".to_string()));
+        assert!(!tokens.contains(&"and".to_string()));
+        assert!(!tokens.contains(&"7".to_string()));
+    }
+
+    #[test]
+    fn test_stopword_only_query_scores_zero() {
+        let entry = MemoryEntry::new(
+            super::super::types::MemoryType::Fact,
+            "cargo workspace layout",
+            "test",
+            &[],
+        );
+        // "the of and" has no signal tokens left after stopword filtering.
+        assert_eq!(keyword_score(&entry, "the of and"), 0.0);
+    }
+
+    #[test]
+    fn test_tag_prefix_match() {
+        let entry = MemoryEntry::new(
+            super::super::types::MemoryType::Fact,
+            "unrelated content here",
+            "test",
+            &["rust"],
+        );
+        // Query contains a word with the tag as a prefix ("rustc") -> tag bonus.
+        assert!(keyword_score(&entry, "how does rustc work") > 0.0);
+        // A word containing the tag but not as a prefix should not match the tag.
+        let entry2 = MemoryEntry::new(
+            super::super::types::MemoryType::Fact,
+            "unrelated content here",
+            "test",
+            &["rust"],
+        );
+        assert_eq!(keyword_score(&entry2, "a trust fund plan"), 0.0);
     }
 }

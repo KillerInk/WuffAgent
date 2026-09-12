@@ -1,20 +1,104 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::types::{Message, Usage};
+use crate::types::{Message, ToolCall, Usage};
 use super::Error;
+
+/// Tracks, across one stream, which tool call is currently receiving deltas.
+/// This is what lets us detect the moment the model has "moved past" a tool
+/// call (a text/reasoning delta arrives, or a delta for a different call
+/// arrives) — at that point the call's arguments are complete, so the caller
+/// can start executing it while the model keeps reasoning.
+///
+/// Create one fresh `ToolCallTracker` per stream.
+#[derive(Default)]
+pub struct ToolCallTracker {
+    /// Id of the tool call last touched by a delta.
+    active: Option<String>,
+    /// Ids already reported to the ready callback.
+    ready: HashSet<String>,
+}
+
+/// Cheap structural check that a JSON object string is complete: braces and
+/// brackets are balanced and we are not left inside a string. Not a full
+/// parse — just enough to avoid firing "tool call ready" while the
+/// arguments are still streaming.
+pub fn looks_like_complete_json(s: &str) -> bool {
+    let s = s.trim();
+    if !s.starts_with('{') || !s.ends_with('}') {
+        return false;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for ch in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escape = true,
+            '"' => in_string = !in_string,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    !in_string && depth == 0
+}
+
+/// Report the tool call with the given id via `on_tool_call_ready`, but only
+/// if it has not been reported yet and its accumulated arguments already look
+/// like complete JSON.
+fn fire_tool_ready_if_complete<G: FnMut(ToolCall)>(
+    tracker: &mut ToolCallTracker,
+    on_tool_call_ready: &mut G,
+    conversation: &Arc<Mutex<Vec<Message>>>,
+    id: &str,
+) {
+    if tracker.ready.contains(id) {
+        return;
+    }
+    let call = conversation.lock().ok().and_then(|conv| {
+        conv.iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .and_then(|m| m.tool_calls.as_ref())
+            .and_then(|tcs| tcs.iter().find(|c| c.id == id))
+            .cloned()
+    });
+    if let Some(c) = call {
+        if looks_like_complete_json(&c.function.arguments) {
+            tracker.ready.insert(id.to_string());
+            on_tool_call_ready(c);
+        }
+    }
+}
 
 /// Process a single SSE line and update the conversation.
 /// Returns Some(Usage) when the final usage chunk is encountered.
 /// The callback receives (content, is_thinking) where `is_thinking` indicates
 /// whether this chunk is part of the model's thinking/reasoning output.
+///
+/// `on_tool_call_ready` is invoked (mid-stream) the moment a tool call is
+/// complete and the model has moved past it, so callers can start executing
+/// tools while the model keeps reasoning. `tracker` carries the per-stream
+/// bookkeeping across lines (one fresh `ToolCallTracker` per stream).
 pub async fn process_sse_line(
     line: &str,
     callback: &mut impl FnMut(String, bool) -> Result<(), Error>,
     conversation: &Arc<Mutex<Vec<Message>>>,
+    on_tool_call_ready: &mut impl FnMut(ToolCall),
+    tracker: &mut ToolCallTracker,
 ) -> Result<Option<Usage>, Error> {
     // Callers pass lines including the trailing newline (stream_message slices
     // up to and including '\n'); strip line endings so the comparisons below
@@ -55,6 +139,74 @@ pub async fn process_sse_line(
             return Ok(None);
         }
     };
+
+    // ── Early tool-call detection ────────────────────────────────────────
+    // A tool call is ready to execute as soon as the stream moves PAST it:
+    // a text/reasoning delta arrives, or a delta for a different call does.
+    // At that point its arguments are complete, so the caller can start
+    // executing it while the model keeps reasoning. The very last tool call
+    // in a stream is never reported (nothing follows it to signal
+    // completion) — callers execute that one inline.
+    let has_text = chunk
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .map(|d| {
+            ["content", "thinking", "reasoning", "reasoning_content"]
+                .iter()
+                .any(|k| {
+                    d.get(*k)
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                })
+        })
+        .unwrap_or(false);
+    // Id of the tool call touched by THIS line (if any). Continuation
+    // chunks carry only an index — resolve it to the id of the call
+    // already accumulated at that slot.
+    let incoming_id: Option<String> = chunk
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("tool_calls"))
+        .and_then(|t| t.as_array())
+        .and_then(|tcs| tcs.first())
+        .and_then(|tc| {
+            tc.get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    tc.get("index")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|idx| {
+                            conversation
+                                .lock()
+                                .ok()?
+                                .last()?
+                                .tool_calls
+                                .as_ref()?
+                                .get(idx as usize)
+                                .map(|c| c.id.clone())
+                        })
+                })
+        });
+
+    if has_text {
+        // (id cloned so the mutable `tracker` borrow below is allowed)
+        if let Some(active_id) = tracker.active.clone() {
+            fire_tool_ready_if_complete(tracker, on_tool_call_ready, conversation, &active_id);
+        }
+    }
+    if let Some(ref incoming) = incoming_id {
+        if tracker.active.as_deref() != Some(incoming.as_str()) {
+            if let Some(active_id) = tracker.active.clone() {
+                fire_tool_ready_if_complete(tracker, on_tool_call_ready, conversation, &active_id);
+            }
+            tracker.active = Some(incoming.clone());
+        }
+    }
 
     if let Some(text) = chunk
         .get("choices")
@@ -218,6 +370,10 @@ pub async fn process_sse_line(
 }
 
 /// Stream a message and process SSE lines.
+/// `on_tool_call_ready` is invoked (mid-stream) the moment a tool call is
+/// complete and the model has moved past it, so the caller can start
+/// executing it while the stream continues (tools run while the model keeps
+/// reasoning). Pass one fresh `ToolCallTracker` per stream.
 /// `conversation` is updated in place with the new messages.
 /// `cancel_token` can be used to abort the stream early (e.g. user cancellation).
 /// Pass `None` to disable cancellation for this stream.
@@ -225,6 +381,8 @@ pub async fn stream_message(
     resp: reqwest::Response,
     conversation: &Arc<Mutex<Vec<Message>>>,
     callback: &mut (impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static),
+    on_tool_call_ready: &mut (impl FnMut(ToolCall) + Send + Sync + 'static),
+    tracker: &mut ToolCallTracker,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<Option<Usage>, Error> {
     let mut stream = resp.bytes_stream();
@@ -242,7 +400,9 @@ pub async fn stream_message(
                     while let Some(newline_pos) = buffer.find('\n') {
                         let line = buffer[..=newline_pos].to_string();
                         buffer.drain(..=newline_pos);
-                        if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
+                        if let Some(usage) =
+                            process_sse_line(&line, callback, conversation, on_tool_call_ready, tracker).await?
+                        {
                             last_usage = Some(usage);
                         }
                     }
@@ -262,7 +422,9 @@ pub async fn stream_message(
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..=newline_pos].to_string();
                 buffer.drain(..=newline_pos);
-                if let Some(usage) = process_sse_line(&line, callback, conversation).await? {
+                if let Some(usage) =
+                    process_sse_line(&line, callback, conversation, on_tool_call_ready, tracker).await?
+                {
                     last_usage = Some(usage);
                 }
             }

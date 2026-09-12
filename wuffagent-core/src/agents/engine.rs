@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc;
@@ -23,7 +24,12 @@ pub struct AgentEngine {
     pub(super) agent_session_id: Option<String>,
     /// Directory where this agent engine's session files are stored.
     pub(super) agent_session_dir: PathBuf,
+    /// Completed task count, shared across clones; throttles post-task work.
+    tasks_completed: Arc<AtomicUsize>,
 }
+
+/// Run the LLM memory-maintenance pass at most once every N completed tasks.
+const MAINTENANCE_TASK_COOLDOWN: usize = 10;
 
 impl AgentEngine {
     /// Create a new AgentEngine.
@@ -40,6 +46,7 @@ impl AgentEngine {
             memory: None,
             agent_session_id: None,
             agent_session_dir: PathBuf::new(),
+            tasks_completed: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -124,6 +131,9 @@ impl AgentEngine {
         chat_config.reasoning_effort = tool_policy.reasoning_effort;
         chat_config.trim_config = tool_policy.trim_config.clone();
 
+        // Keep a copy for the post-task improvement check (Agent::new takes ownership).
+        let maintenance_config = chat_config.clone();
+
         let mut agent = Agent::new(
             chat_config,
             self.llm_client.clone(),
@@ -137,6 +147,64 @@ impl AgentEngine {
 
         let result = agent.execute(request, cancel_token).await;
 
+        // Post-task: throttled LLM memory maintenance + optional self-improvement
+        // suggestions. Both are opt-in via MemoryConfig and never fail the task.
+        self.post_task_maintenance(&maintenance_config, request, &result).await;
+
         result
+    }
+
+    /// Run post-task memory upkeep: the maintenance pass (when enabled and the
+    /// entry count is high enough, at most once per `MAINTENANCE_TASK_COOLDOWN`
+    /// tasks) and self-improvement suggestions (when `auto_improve` is on).
+    async fn post_task_maintenance(
+        &self,
+        agent_config: &AgentConfig,
+        task: &str,
+        result: &std::result::Result<String, String>,
+    ) {
+        let memory = match &self.memory {
+            Some(m) => m.clone(),
+            None => return,
+        };
+        let task_result = match result {
+            Ok(r) => r.clone(),
+            Err(e) => format!("(task failed: {})", e),
+        };
+
+        let completed = self.tasks_completed.fetch_add(1, Ordering::SeqCst) + 1;
+        if memory.config().memory_maintenance
+            && memory.count() >= memory.config().memory_maintenance_threshold
+            && completed % MAINTENANCE_TASK_COOLDOWN == 0
+        {
+            match memory.run_maintenance().await {
+                Ok(report) => tracing::info!("[AGENT] {}", report.summary),
+                Err(e) => tracing::warn!("[AGENT] Memory maintenance failed: {}", e),
+            }
+        }
+
+        if memory.config().auto_improve {
+            match crate::memory::suggest_improvements(
+                &memory,
+                agent_config,
+                task,
+                &task_result,
+                &*self.llm_client,
+            )
+            .await
+            {
+                Ok(suggestions) if !suggestions.is_empty() => {
+                    if let Some(tx) = &self.event_tx {
+                        let _ = tx.lock().unwrap().send(AppEvent::ImprovementSuggested {
+                            agent_name: agent_config.name.clone(),
+                            suggestions,
+                            session_id: self.agent_session_id.clone().unwrap_or_default(),
+                        });
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("[AGENT] Improvement check failed: {}", e),
+            }
+        }
     }
 }

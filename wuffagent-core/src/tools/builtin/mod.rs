@@ -10,7 +10,7 @@ pub use file_io::{
     AppendFileTool, ApplyDiffTool, ListDirTool, ReadFileTool, SearchFilesTool, WriteFileTool,
 };
 pub use web_search::WebSearchTool;
-pub use memory::{SaveMemoryTool, UpdateMemoryTool, SearchMemoryTool, ConsolidateMemoriesTool};
+pub use memory::{SaveMemoryTool, UpdateMemoryTool, SearchMemoryTool, ConsolidateMemoriesTool, DeleteMemoryTool};
 pub use time::TimeTool;
 pub use shell::{ShellTool, ShellConfig};
 
@@ -166,6 +166,17 @@ pub fn register_memory_tools(
             name: "consolidate_memories".to_string(),
             version: "1.0.0".to_string(),
             description: "Merge multiple related memories into a single comprehensive entry".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+    })?;
+
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(DeleteMemoryTool::new(memory.clone())),
+        metadata: ToolMetadata {
+            name: "delete_memory".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Delete a memory entry by ID".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

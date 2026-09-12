@@ -38,6 +38,22 @@ impl ChatApp {
              
             ui.separator();
             ui.label(egui::RichText::new(format!("Messages: {}", chat.messages.len())).color(theme.text_secondary).size(11.0));
+
+            // Memory count indicator with a tooltip listing project + threshold.
+            let mem_count = self.memory_manager.count();
+            let mconfig = self.memory_manager.config();
+            ui.label(egui::RichText::new(format!("🧠 {}", mem_count)).color(theme.text_secondary).size(11.0))
+                .on_hover_text(format!(
+                    "{} active memories (project '{}', max {})\nMaintenance: {}",
+                    mem_count,
+                    mconfig.project,
+                    mconfig.max_entries,
+                    if mconfig.memory_maintenance {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                ));
         });
     }
 

@@ -17,6 +17,7 @@ pub use wuffagent_core::server;
 pub use wuffagent_core::sessions;
 pub use wuffagent_core::tools;
 pub use wuffagent_core::agents;
+pub use wuffagent_core::memory;
 
 mod ui;
 
@@ -60,6 +61,7 @@ fn bootstrap() -> (
     Arc<AgentEngine>,
     ChatClient,
     ChatClient,
+    Arc<wuffagent_core::memory::MemoryManager>,
 ) {
     // Default to `debug` for app crates, but silence the extremely chatty
     // `naga` WGSL shader compiler (pulled in by wgpu/egui) whose DEBUG-level
@@ -179,16 +181,21 @@ fn bootstrap() -> (
         llm_client,
         tool_manager_for_engine,
         client_for_engine,
-    ).with_memory(memory_manager);
+    ).with_memory(memory_manager.clone());
 
     let agent_engine = Arc::new(agent_engine);
 
-    (config, server, tool_manager, agent_engine, bootstrap_llm_client, bootstrap_stream_client)
+    (config, server, tool_manager, agent_engine, bootstrap_llm_client, bootstrap_stream_client, memory_manager)
 }
 
 #[tokio::main]
 async fn main() -> eframe::Result {
-    let (config, server, tool_manager, agent_engine, bootstrap_llm_client, bootstrap_stream_client) = bootstrap();
+    let (config, server, tool_manager, agent_engine, bootstrap_llm_client, bootstrap_stream_client, memory_manager) = bootstrap();
+
+    // Dedicated runtime for UI-triggered async work (memory maintenance) so the
+    // UI thread can block on a blocking_call without touching the main runtime
+    // that the chat pipeline is spawned on.
+    let memory_runtime = tokio::runtime::Runtime::new().expect("failed to create memory runtime");
     
     // Initialize session store with the configured session
     // Shared event channel: the UI polls the receiver each frame; the pipeline
@@ -196,8 +203,8 @@ async fn main() -> eframe::Result {
     // initial runtime so it can be shared with the first session.
     let (event_tx, event_rx) = std::sync::mpsc::channel::<wuffagent_core::types::AppEvent>();
 
-    let mut session_store = std::collections::HashMap::new();
-    let mut selected_session_id = None;
+    let mut session_store: std::collections::HashMap<String, wuffagent_core::sessions::SessionRuntime> = std::collections::HashMap::new();
+    let mut selected_session_id: Option<String> = None;
 
     if let Some(session_id) = &config.session_id {
         if let Some(session) = wuffagent_core::sessions::load_session(&config.sessions_dir, session_id) {
@@ -269,6 +276,7 @@ async fn main() -> eframe::Result {
             Ok(Box::new(ui::state::ChatApp::new(
                 config, server, tool_manager, agent_engine, bootstrap_llm_client,
                 bootstrap_stream_client, session_store, selected_session_id, event_tx, event_rx,
+                memory_manager, memory_runtime,
             )))
         }),
     )

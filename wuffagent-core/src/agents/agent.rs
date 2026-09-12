@@ -146,14 +146,15 @@ impl Agent {
     ///
     /// This list is a request body, not history: it may contain the system
     /// message and verification nudge, neither of which is persisted.
-    pub fn build_initial_messages(&self, _task: &str) -> Vec<Message> {
+    pub fn build_initial_messages(&self, task: &str) -> Vec<Message> {
         let now = crate::types::format_timestamp();
         let mut messages: Vec<Message> = Vec::new();
 
         // Start with the fresh system prompt (request-only, never stored).
+        // The task is passed so memory injection can be query-aware.
         messages.push(Message {
             role: "system".to_string(),
-            content: self.build_system_prompt(),
+            content: self.build_system_prompt(task),
             timestamp: now,
             tool_calls: None,
             tool_call_id: None,
@@ -257,7 +258,8 @@ impl Agent {
     }
 
     /// Build the system prompt for this agent.
-    fn build_system_prompt(&self) -> String {
+    /// `query` is the user's current request; it makes memory injection query-aware.
+    fn build_system_prompt(&self, query: &str) -> String {
         let mut prompt = if self.config.system_prompt.is_empty() {
             format!("You are the '{}' agent. {}", self.config.name, self.config.description)
         } else {
@@ -266,17 +268,22 @@ impl Agent {
 
         // Add memory management tool guidance
         prompt.push_str(
-            "\n\nYou have memory management tools (save_memory, update_memory, search_memory, consolidate_memories). Use them proactively:\n",
+            "\n\nYou have memory management tools (save_memory, update_memory, search_memory, consolidate_memories, delete_memory). Use them proactively:\n",
         );
+        prompt.push_str("- search_memory: Search memory before starting tasks and before saving anything new\n");
         prompt.push_str("- save_memory: Save non-obvious facts, lessons, or decisions as you discover them during work\n");
-        prompt.push_str("- search_memory: Search memory before starting tasks to avoid repeating mistakes\n");
-        prompt.push_str("- update_memory: Update memories when you learn they're outdated or incomplete\n");
-        prompt.push_str("- consolidate_memories: Merge related memories into comprehensive entries\n");
-        prompt.push_str("Only save information that is persistent and useful across sessions. Don't save routine operations or temporary information.");
+        prompt.push_str("- update_memory: Refine an existing entry (by ID) instead of re-adding similar information\n");
+        prompt.push_str("- consolidate_memories: Merge related entries (by IDs) into one comprehensive entry\n");
+        prompt.push_str("- delete_memory: Remove entries that turn out to be stale or wrong\n");
+        prompt.push_str(
+            "Tool responses include entry IDs - use them for updates, consolidation, and deletion. \
+             Only save information that is persistent and useful across sessions; don't save routine \
+             operations or temporary information.",
+        );
 
-        // Inject relevant memories from past sessions
+        // Inject memories relevant to the current request (query-aware)
         if let Some(memory) = &self.memory {
-            let memory_block = memory.build_context_block("");
+            let memory_block = memory.build_context_block(query);
             if !memory_block.is_empty() {
                 prompt.push_str("\n\n");
                 prompt.push_str(&memory_block);
@@ -420,6 +427,16 @@ impl Agent {
             // than `self`.
             let round_thinking = Arc::new(Mutex::new(String::new()));
 
+            // ── Parallel tool execution ─────────────────────────────────
+            // While the model is still streaming (often: still reasoning), a
+            // tool call becomes executable the moment the stream moves past
+            // it. The ready callback below spawns its execution in the
+            // background at that point, so tools run while the model keeps
+            // thinking. Results are collected in call order after the stream
+            // ends (see the native tool-call block further down).
+            let pending_tool_runs: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<Result<String, String>>>>> =
+                Arc::new(Mutex::new(std::collections::HashMap::new()));
+
             let (assistant_msg, usage) = {
                 self.client.note_prompt_chars(crate::trimming::message_char_count(messages));
                 let mut attempt = 0usize;
@@ -429,6 +446,11 @@ impl Agent {
                     let tx = self.event_tx.clone();
                     let sid = self.session_id();
                     let rt_attempt = round_thinking.clone();
+                    let ready_tx = self.event_tx.clone();
+                    let ready_sid = self.session_id();
+                    let ready_pending = Arc::clone(&pending_tool_runs);
+                    let ready_manager = tool_manager.clone();
+                    let ready_cancel = cancel_token.clone();
                     match ChatClient::stream_with_messages_arc(
                         &self.client,
                         messages,
@@ -448,12 +470,74 @@ impl Agent {
                             }
                             Ok(())
                         },
+                        move |call: crate::types::ToolCall| {
+                            // Early-start this tool call while the model is
+                            // still streaming: the SSE layer only reports a
+                            // call once its arguments are complete, so it is
+                            // safe to execute now.
+                            if call.id.is_empty() {
+                                return;
+                            }
+                            let id = call.id.clone();
+                            if ready_pending.lock().unwrap().contains_key(&id) {
+                                return; // defensive: already started
+                            }
+                            let name = call.function.name.clone();
+                            let args = call.function.arguments.clone();
+                            tracing::debug!(
+                                "[AGENT] Early-starting tool '{}' (id={}) while model is still streaming",
+                                name, id
+                            );
+                            if let Some(ref tx) = ready_tx {
+                                if let Ok(g) = tx.lock() {
+                                    let _ = g.send(crate::types::AppEvent::ToolCallStart {
+                                        tool_name: name.clone(),
+                                        call_id: id.clone(),
+                                        session_id: ready_sid.clone(),
+                                    });
+                                }
+                            }
+                            let tool_mgr = ready_manager.clone();
+                            let token = ready_cancel.clone();
+                            let handle = tokio::spawn(async move {
+                                let params = match crate::tools::manager::parse_tool_args(&args) {
+                                    Ok(p) => p,
+                                    Err(e) => return Err(e),
+                                };
+                                let result = tokio::select! {
+                                    r = tool_mgr.execute(&name, params) => r,
+                                    _ = token.cancelled() => {
+                                        return Ok(format!(
+                                            "Error: Cancelled (tool '{}' aborted)",
+                                            name
+                                        ))
+                                    }
+                                };
+                                Ok(match result {
+                                    Ok(output) => {
+                                        let s = format!("{}", output);
+                                        if s.trim().is_empty() {
+                                            "(no output)".to_string()
+                                        } else {
+                                            s
+                                        }
+                                    }
+                                    Err(e) => format!("Error: {}", e),
+                                })
+                            });
+                            ready_pending.lock().unwrap().insert(id, handle);
+                        },
                         Some(cancel_token),
                     )
                     .await
                     {
                         Ok((msg, usage)) => break (msg, usage),
-                        Err(crate::client::Error::Cancelled) => return Err("Cancelled".to_string()),
+                        Err(crate::client::Error::Cancelled) => {
+                            for h in pending_tool_runs.lock().unwrap().values() {
+                                h.abort();
+                            }
+                            return Err("Cancelled".to_string());
+                        }
                         Err(e) if attempt == 1 => {
                             // Backstop: the trim estimator is a heuristic — if the
                             // server still rejects the request as over-context,
@@ -475,9 +559,18 @@ impl Agent {
                                 self.config.name, removed, target
                             );
                             self.client.note_prompt_chars(crate::trimming::message_char_count(messages));
+                            for h in pending_tool_runs.lock().unwrap().values() {
+                                h.abort();
+                            }
+                            pending_tool_runs.lock().unwrap().clear();
                             continue;
                         }
-                        Err(e) => return Err(format!("LLM call failed: {}", e)),
+                        Err(e) => {
+                            for h in pending_tool_runs.lock().unwrap().values() {
+                                h.abort();
+                            }
+                            return Err(format!("LLM call failed: {}", e));
+                        }
                     }
                 }
             };
@@ -531,59 +624,100 @@ impl Agent {
             }
 
             // ── Native tool calls ───────────────────────────────────────
+            // Calls the model has already moved past were early-started
+            // mid-stream (ready callback above) — collect their results
+            // here, in call order. Calls that never got a "moved past"
+            // signal (typically the LAST one in the stream) are executed
+            // inline, exactly as before.
             if let Some(calls) = &tool_calls {
                 if !calls.is_empty() {
                     for call in calls {
                         if cancel_token.is_cancelled() {
+                            // Stop early-started runs that have not been
+                            // collected yet so nothing keeps executing in
+                            // the background for a dead turn.
+                            for h in pending_tool_runs.lock().unwrap().values() {
+                                h.abort();
+                            }
                             return Err("Cancelled".to_string());
                         }
-                        self.send_event(crate::types::AppEvent::ToolCallStart {
-                            tool_name: call.function.name.clone(),
-                            call_id: call.id.clone(),
-                            session_id: self.session_id(),
-                        });
-                        let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                tracing::warn!("[AGENT] Bad args for '{}': {}", call.function.name, e);
-                                self.send_event(crate::types::AppEvent::ToolCallError {
+                        // Bind the handle out of the map before awaiting: the
+                        // mutex guard must not live across the await (the
+                        // enclosing future must stay Send).
+                        let early_handle = pending_tool_runs.lock().unwrap().remove(&call.id);
+                        let result_str: String = if let Some(handle) = early_handle {
+                                match handle.await {
+                                    Ok(Ok(s)) => s,
+                                    Ok(Err(bad_args)) => {
+                                        tracing::warn!("[AGENT] Bad args for '{}': {}", call.function.name, bad_args);
+                                        self.send_event(crate::types::AppEvent::ToolCallError {
+                                            tool_name: call.function.name.clone(),
+                                            call_id: call.id.clone(),
+                                            error: bad_args.clone(),
+                                            session_id: self.session_id(),
+                                        });
+                                        format!("Error: {}", bad_args)
+                                    }
+                                    Err(join_err) => {
+                                        let e = format!("tool task failed: {}", join_err);
+                                        self.send_event(crate::types::AppEvent::ToolCallError {
+                                            tool_name: call.function.name.clone(),
+                                            call_id: call.id.clone(),
+                                            error: e.clone(),
+                                            session_id: self.session_id(),
+                                        });
+                                        format!("Error: {}", e)
+                                    }
+                                }
+                            } else {
+                                // Inline fallback: the stream ended while this
+                                // call was still the active one.
+                                self.send_event(crate::types::AppEvent::ToolCallStart {
                                     tool_name: call.function.name.clone(),
                                     call_id: call.id.clone(),
-                                    error: e.clone(),
                                     session_id: self.session_id(),
                                 });
-                                let bad_args_msg = Message {
-                                    role: "tool".to_string(),
-                                    content: format!("Error: {}", e),
-                                    timestamp: crate::types::format_timestamp(),
-                                    tool_calls: None,
-                                    tool_call_id: Some(call.id.clone()),
-                                    reasoning_content: None,
+                                let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        tracing::warn!("[AGENT] Bad args for '{}': {}", call.function.name, e);
+                                        self.send_event(crate::types::AppEvent::ToolCallError {
+                                            tool_name: call.function.name.clone(),
+                                            call_id: call.id.clone(),
+                                            error: e.clone(),
+                                            session_id: self.session_id(),
+                                        });
+                                        let bad_args_msg = Message {
+                                            role: "tool".to_string(),
+                                            content: format!("Error: {}", e),
+                                            timestamp: crate::types::format_timestamp(),
+                                            tool_calls: None,
+                                            tool_call_id: Some(call.id.clone()),
+                                            reasoning_content: None,
+                                        };
+                                        messages.push(bad_args_msg.clone());
+                                        self.record_in_store(&bad_args_msg);
+                                        continue;
+                                    }
                                 };
-                                messages.push(bad_args_msg.clone());
-                                self.record_in_store(&bad_args_msg);
-                                continue;
-                            }
-                        };
-                        let manager = tool_manager.clone();
-                        let tool_result = manager.execute(&call.function.name, params).await;
-                        // Tools must always return *something*: an empty result
-                        // string becomes an empty `role: "tool"` message, which
-                        // the model/server rejects.
-                        let result_str = match tool_result {
-                            Ok(output) => {
-                                let s = format!("{}", output);
-                                if s.trim().is_empty() {
-                                    "(no output)".to_string()
-                                } else {
-                                    s
+                                let manager = tool_manager.clone();
+                                let tool_result = manager.execute(&call.function.name, params).await;
+                                // Tools must always return *something*: an empty result
+                                // string becomes an empty `role: "tool"` message, which
+                                // the model/server rejects.
+                                match tool_result {
+                                    Ok(output) => {
+                                        let s = format!("{}", output);
+                                        if s.trim().is_empty() { "(no output)".to_string() } else { s }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("[AGENT] Tool '{}' failed: {}", call.function.name, e);
+                                        format!("Error: {}", e)
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                tracing::warn!("[AGENT] Tool '{}' failed: {}", call.function.name, e);
-                                format!("Error: {}", e)
-                            }
-                        };
+                            };
+                        // Early-started calls sent their ToolCallStart mid-stream;
+                        // emit the completion in call order now.
                         self.send_event(crate::types::AppEvent::ToolCallComplete {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),

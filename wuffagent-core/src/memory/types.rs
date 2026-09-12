@@ -82,20 +82,30 @@ impl MemoryEntry {
 fn default_confidence() -> f32 { 1.0 }
 
 /// Search mode for memory retrieval.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, Default)]
 pub enum SearchMode {
     #[serde(rename = "keyword")]
     #[default]
     Keyword,
-    #[serde(rename = "llm")]
-    Llm,
+}
+
+/// Deserialize a search mode, mapping the legacy `"llm"` value to `Keyword`
+/// so existing config files keep loading after the dead variant was removed.
+pub fn deserialize_search_mode<'de, D>(deserializer: D) -> Result<SearchMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    match value.to_lowercase().as_str() {
+        "keyword" | "llm" => Ok(SearchMode::Keyword),
+        other => Err(serde::de::Error::unknown_variant(other, &["keyword"])),
+    }
 }
 
 impl std::fmt::Display for SearchMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SearchMode::Keyword => write!(f, "keyword"),
-            SearchMode::Llm => write!(f, "llm"),
         }
     }
 }
@@ -138,20 +148,11 @@ pub struct MemoryConfig {
     #[serde(default = "default_injection_max_chars")]
     pub injection_max_chars: usize,
     /// Search mode.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_search_mode")]
     pub search_mode: SearchMode,
     /// Injection mode.
     #[serde(default)]
     pub injection_mode: InjectionMode,
-    /// Whether to auto-extract memories after agent tasks.
-    #[serde(default = "default_auto_extract_after_task")]
-    pub auto_extract_after_task: bool,
-    /// Whether to auto-extract memories at end of session.
-    #[serde(default = "default_auto_extract_after_session")]
-    pub auto_extract_after_session: bool,
-    /// Minimum confidence to auto-save extracted memories.
-    #[serde(default = "default_auto_extract_min_confidence")]
-    pub auto_extract_min_confidence: f32,
     /// Project name for memory scoping.
     #[serde(default = "default_project")]
     pub project: String,
@@ -164,18 +165,23 @@ pub struct MemoryConfig {
     /// Minimum number of relevant lessons to trigger improvement check.
     #[serde(default = "default_improvement_trigger_lessons")]
     pub improvement_trigger_lessons: usize,
+    /// Whether the LLM memory-maintenance pass is enabled (opt-in).
+    #[serde(default = "default_memory_maintenance")]
+    pub memory_maintenance: bool,
+    /// Run the maintenance pass only when active entries reach this count.
+    #[serde(default = "default_memory_maintenance_threshold")]
+    pub memory_maintenance_threshold: usize,
 }
 
 fn default_enabled() -> bool { true }
 fn default_max_entries() -> usize { 100 }
 fn default_injection_max_entries() -> usize { 5 }
 fn default_injection_max_chars() -> usize { 1000 }
-fn default_auto_extract_after_task() -> bool { true }
-fn default_auto_extract_after_session() -> bool { false }
-fn default_auto_extract_min_confidence() -> f32 { 0.8 }
 fn default_project() -> String { "default".to_string() }
 fn default_auto_improve() -> bool { false }
 fn default_improvement_trigger_lessons() -> usize { 1 }
+fn default_memory_maintenance() -> bool { false }
+fn default_memory_maintenance_threshold() -> usize { 40 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -186,13 +192,46 @@ impl Default for MemoryConfig {
             injection_max_chars: 1000,
             search_mode: SearchMode::default(),
             injection_mode: InjectionMode::Smart,
-            auto_extract_after_task: true,
-            auto_extract_after_session: false,
-            auto_extract_min_confidence: 0.8,
             project: "default".to_string(),
             memories_dir: None,
             auto_improve: false,
             improvement_trigger_lessons: 1,
+            memory_maintenance: false,
+            memory_maintenance_threshold: 40,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_legacy_llm_search_mode_migrates_to_keyword() {
+        let json = r#"{"enabled": true, "search_mode": "llm"}"#;
+        let config: MemoryConfig = serde_json::from_str(json).expect("legacy config should load");
+        assert_eq!(config.search_mode, SearchMode::Keyword);
+    }
+
+    #[test]
+    fn test_keyword_search_mode_parses() {
+        let json = r#"{"enabled": true, "search_mode": "keyword"}"#;
+        let config: MemoryConfig = serde_json::from_str(json).expect("config should load");
+        assert_eq!(config.search_mode, SearchMode::Keyword);
+    }
+
+    #[test]
+    fn test_unknown_search_mode_rejected() {
+        let json = r#"{"enabled": true, "search_mode": "vector"}"#;
+        let config: Result<MemoryConfig, _> = serde_json::from_str(json);
+        assert!(config.is_err());
+    }
+
+    #[test]
+    fn test_legacy_auto_extract_field_ignored() {
+        // T1 removed auto_extract_after_task; old configs must still load.
+        let json = r#"{"enabled": true, "auto_extract_after_task": true}"#;
+        let config: MemoryConfig = serde_json::from_str(json).expect("legacy config should load");
+        assert!(config.enabled);
     }
 }

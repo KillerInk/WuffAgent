@@ -19,6 +19,11 @@ pub struct ChatApp {
     pub server: ServerManager,
     pub tool_manager: Arc<ToolManager>,
     pub agent_engine: Arc<crate::agents::AgentEngine>,
+    /// Shared memory manager (single-writer discipline; all UI memory writes go
+    /// through it). Shared with the agent engine and the memory tools.
+    pub memory_manager: Arc<crate::memory::MemoryManager>,
+    /// Dedicated runtime for UI-triggered async memory work (maintenance pass).
+    pub memory_runtime: tokio::runtime::Runtime,
     /// Clone of the bootstrap non-streaming LLM client (shares interior-mutable
     /// `base_url` with the adapter, so a URL change here propagates in-place).
     pub bootstrap_llm_client: crate::client::ChatClient,
@@ -38,6 +43,9 @@ pub struct ChatApp {
     pub presets_dialog: Option<super::presets_dialog::PresetsDialog>,
     pub show_agent_config: bool,
     pub agent_config_dialog: Option<super::agent_config::AgentConfigDialog>,
+    /// The memory panel widget (owns its own list/search/edit state).
+    /// `show_panel` gates whether the window is drawn.
+    pub memory_panel: super::memory_panel::MemoryPanel,
     /// Channel sender for relaying core events (EngineEvent, AppEvent) to the UI thread.
     /// The corresponding receiver is stored separately so `process_pending_events` can poll it.
     pub pending_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
@@ -78,6 +86,8 @@ impl ChatApp {
         selected_session_id: Option<String>,
         event_tx: mpsc::Sender<AppEvent>,
         event_rx: mpsc::Receiver<AppEvent>,
+        memory_manager: Arc<crate::memory::MemoryManager>,
+        memory_runtime: tokio::runtime::Runtime,
     ) -> Self {
         let reasoning_effort = config.reasoning_effort;
         // Build the sessions sidebar widget, pre-selecting the active session.
@@ -91,6 +101,8 @@ impl ChatApp {
             server,
             tool_manager,
             agent_engine,
+            memory_manager,
+            memory_runtime,
             bootstrap_llm_client,
             bootstrap_stream_client,
             last_synced_base_url: String::new(),
@@ -103,6 +115,7 @@ impl ChatApp {
             presets_dialog: None,
             show_agent_config: false,
             agent_config_dialog: None,
+            memory_panel: super::memory_panel::MemoryPanel::new(),
             pending_tx: Some(Arc::new(Mutex::new(event_tx))),
             pending_rx: Some(event_rx),
             agent_cancel_token: CancellationToken::new(),
