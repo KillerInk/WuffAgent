@@ -12,6 +12,56 @@ use crate::types::{AppEvent, AppStatus};
 /// A message sent while the AI is still working (now stored per-session in core).
 pub use crate::sessions::QueuedMessage;
 
+/// A tokio `Runtime` (held in an `Arc`) that is dropped on a dedicated plain
+/// OS thread.
+///
+/// Dropping a tokio `Runtime` performs a blocking wait for its worker threads.
+/// If that drop happens on a thread that has already entered a tokio runtime
+/// context (e.g. the main thread driving `#[tokio::main]`), tokio panics with
+/// "Cannot drop a runtime in a context where blocking is not allowed".
+///
+/// `ChatApp` (which owns the memory runtime) is dropped by eframe on the main
+/// thread after the window closes, and the main thread is still inside the
+/// `#[tokio::main]` runtime context at that point. We therefore move the
+/// `Arc` to a fresh thread with no runtime context and drop it there, so the
+/// blocking shutdown wait (which only runs when the LAST `Arc` is dropped) is
+/// always safe. Helper threads holding other `Arc` clones (the memory
+/// maintenance thread) keep the runtime alive until they finish; those are
+/// plain threads with no runtime context, so they can drop the last `Arc`
+/// safely too.
+pub struct RuntimeOnThread(Option<Arc<tokio::runtime::Runtime>>);
+
+impl RuntimeOnThread {
+    pub fn new(rt: Arc<tokio::runtime::Runtime>) -> Self {
+        Self(Some(rt))
+    }
+
+    /// Borrow the inner runtime. Clone the returned `Arc` to keep the runtime
+    /// alive on another thread (the maintenance helper thread does this so it
+    /// can `block_on` the runtime safely).
+    pub fn as_ref(&self) -> &Arc<tokio::runtime::Runtime> {
+        self.0.as_ref().expect("memory runtime already dropped")
+    }
+}
+
+impl Drop for RuntimeOnThread {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            // Drop the Arc on a plain thread (no tokio context entered), then
+            // wait for it so shutdown is deterministic. If a maintenance
+            // helper thread still holds a clone, the actual `Runtime` drop
+            // (and its blocking shutdown wait) happens on that thread instead
+            // — which is also outside any runtime context.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                drop(rt);
+                let _ = tx.send(());
+            });
+            let _ = rx.recv();
+        }
+    }
+}
+
 /// Main application state for the egui UI.
 ///
 /// Fields are flat `pub` (UI modules access them directly via `self.<field>`)
@@ -39,7 +89,9 @@ pub struct ChatApp {
     /// through it). Shared with the agent engine and the memory tools.
     pub memory_manager: Arc<crate::memory::MemoryManager>,
     /// Dedicated runtime for UI-triggered async memory work (maintenance pass).
-    pub memory_runtime: tokio::runtime::Runtime,
+    /// Wrapped in [`RuntimeOnThread`] so its `Drop` (a blocking wait) never
+    /// runs on a thread inside another runtime's async context.
+    pub memory_runtime: RuntimeOnThread,
 
     // ── Sessions ─────────────────────────────────────────────────────
     /// Per-session runtime state keyed by session ID.
@@ -104,7 +156,7 @@ impl ChatApp {
         event_tx: mpsc::Sender<AppEvent>,
         event_rx: mpsc::Receiver<AppEvent>,
         memory_manager: Arc<crate::memory::MemoryManager>,
-        memory_runtime: tokio::runtime::Runtime,
+        memory_runtime: Arc<tokio::runtime::Runtime>,
     ) -> Self {
         let reasoning_effort = config.reasoning_effort;
         // Build the sessions sidebar widget, pre-selecting the active session.
@@ -119,7 +171,7 @@ impl ChatApp {
             tool_manager,
             agent_engine,
             memory_manager,
-            memory_runtime,
+            memory_runtime: RuntimeOnThread::new(memory_runtime),
             connection,
             last_synced_base_url: String::new(),
             session_store,

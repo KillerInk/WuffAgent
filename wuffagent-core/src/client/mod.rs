@@ -307,6 +307,15 @@ impl ChatClient {
         client
     }
 
+    /// Like [`from_settings`], but with a custom total timeout (in seconds)
+    /// for non-streaming requests (streaming requests keep using it as the
+    /// read/idle timeout).
+    pub fn from_settings_with_timeout(settings: ConnectionSettings, timeout_secs: u64) -> Self {
+        let mut client = Self::new_with_timeout(&settings.base_url(), timeout_secs);
+        client.settings = settings;
+        client
+    }
+
     pub fn set_tool_event_sender(&self, tx: mpsc::Sender<crate::types::AppEvent>) {
         *self.tool_event_tx.lock().unwrap() = Some(tx);
     }
@@ -767,6 +776,7 @@ impl ChatClient {
             tool_calls: None,
             tool_call_id: None,
         reasoning_content: None,
+            image: None,
         });
         conv.push(Message {
             role: "assistant".to_string(),
@@ -775,6 +785,7 @@ impl ChatClient {
             tool_calls: None,
             tool_call_id: None,
         reasoning_content: None,
+            image: None,
         });
         drop(conv);
 
@@ -864,6 +875,7 @@ impl ChatClient {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         }]));
 
         let mut boxed_cb = Box::new(callback);
@@ -878,6 +890,7 @@ impl ChatClient {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         });
 
         Ok((msg, usage))
@@ -1200,8 +1213,8 @@ mod tests {
         let client = ChatClient::new("http://localhost:8080");
         {
             let mut conv = client.conversation.lock().unwrap();
-            conv.push(Message { role: "user".into(), content: "Hi there".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None });
-                        conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None });
+            conv.push(Message { role: "user".into(), content: "Hi there".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None, image: None, });
+                        conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None, image: None, });
         }
         let request = build_request(
             &client.system_prompt,
@@ -1226,8 +1239,8 @@ mod tests {
         let client = ChatClient::new("http://localhost:8080");
         {
             let mut conv = client.conversation.lock().unwrap();
-            conv.push(Message { role: "user".into(), content: "Hi".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None });
-                        conv.push(Message { role: "assistant".into(), content: String::new(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None });
+            conv.push(Message { role: "user".into(), content: "Hi".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None, image: None, });
+                        conv.push(Message { role: "assistant".into(), content: String::new(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None, image: None, });
         }
         let request = build_request(
             &client.system_prompt,
@@ -1326,6 +1339,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         });
         drop(conv);
 
@@ -1367,6 +1381,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         reasoning_content: None,
+            image: None,
         });
         drop(conv);
 
@@ -1396,6 +1411,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         reasoning_content: None,
+            image: None,
         });
         drop(conv);
 
@@ -1432,6 +1448,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         reasoning_content: None,
+            image: None,
         });
         drop(conv);
 
@@ -1464,6 +1481,7 @@ mod tests {
             }]),
             tool_call_id: None,
         reasoning_content: None,
+            image: None,
         });
         drop(conv);
 
@@ -1491,6 +1509,7 @@ mod tests {
             }]),
             tool_call_id: None,
         reasoning_content: None,
+            image: None,
         });
         drop(conv);
 
@@ -1518,6 +1537,7 @@ mod tests {
             }]),
             tool_call_id: None,
         reasoning_content: None,
+            image: None,
         });
         drop(conv);
 
@@ -1539,6 +1559,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         });
     }
 

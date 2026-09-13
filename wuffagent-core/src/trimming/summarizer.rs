@@ -728,6 +728,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         }
     }
 
@@ -739,6 +740,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         }
     }
 
@@ -757,6 +759,7 @@ mod tests {
             }]),
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         }
     }
 
@@ -768,6 +771,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some(call_id.into()),
             reasoning_content: None,
+            image: None,
         }
     }
 
@@ -805,6 +809,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                image: None,
             },
             user_msg("first question"),
             assistant_msg("first answer"),
@@ -839,6 +844,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                image: None,
             },
             user_msg("q1"),
             assistant_msg("a1"),
@@ -993,6 +999,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                image: None,
             },
             user_msg("q"),
             assistant_tool_call("c1", "{}"),

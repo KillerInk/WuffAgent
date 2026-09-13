@@ -15,6 +15,6 @@ pub mod manager;
 pub mod improver;
 
 pub use types::{MemoryEntry, MemoryType, MemoryConfig, SearchMode, InjectionMode};
-pub use manager::{MemoryManager, MemoryAddResult, MaintenanceReport};
+pub use manager::{MemoryManager, MemoryAddResult, MaintenanceReport, MaintenanceProgress};
 pub use storage::{load_memories, save_memories, get_memories_path};
 pub use improver::{ImprovementSuggestion, NewAgentProposal, suggest_improvements};

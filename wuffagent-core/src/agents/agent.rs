@@ -151,6 +151,7 @@ impl Agent {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         });
 
         // Snapshot the shared store, skipping anything that must never appear in a
@@ -228,6 +229,7 @@ impl Agent {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                image: None,
             });
         }
 
@@ -594,6 +596,7 @@ impl Agent {
                 tool_calls: tool_calls.clone(),
                 tool_call_id: None,
                 reasoning_content: reasoning.clone(),
+                image: None,
             };
             messages.push(assistant_msg_rec.clone());
             self.record_in_store(&assistant_msg_rec);
@@ -686,6 +689,7 @@ impl Agent {
                                             tool_calls: None,
                                             tool_call_id: Some(call.id.clone()),
                                             reasoning_content: None,
+                                            image: None,
                                         };
                                         messages.push(bad_args_msg.clone());
                                         self.record_in_store(&bad_args_msg);
@@ -723,6 +727,7 @@ impl Agent {
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
                             reasoning_content: None,
+                            image: None,
                         };
                         messages.push(tool_msg.clone());
                         self.record_in_store(&tool_msg);
@@ -796,6 +801,7 @@ impl Agent {
                             }]),
                             tool_call_id: None,
                             reasoning_content: None,
+                            image: None,
                         };
                         messages.push(fb_assistant.clone());
                         self.record_in_store(&fb_assistant);
@@ -806,6 +812,7 @@ impl Agent {
                             tool_calls: None,
                             tool_call_id: Some(call.id.clone()),
                             reasoning_content: None,
+                            image: None,
                         };
                         messages.push(fb_tool.clone());
                         self.record_in_store(&fb_tool);
@@ -859,6 +866,7 @@ impl Agent {
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,
+                        image: None,
                     });
                     continue;
                 }
@@ -943,6 +951,7 @@ impl Agent {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                image: None,
             },
             Message {
                 role: "user".to_string(),
@@ -961,6 +970,7 @@ impl Agent {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                image: None,
             },
         ];
 
@@ -1117,9 +1127,9 @@ impl Agent {
     }
 
     /// Extract bash/code blocks from LLM responses and convert them to the
-    /// named file tools (read_file, list_dir, search_files, ...).
-    /// Commands without a named equivalent (mkdir, rm, cp, mv, pwd) fall
-    /// through to the generic shell tool.
+    /// named file tools (read_file, list_dir, search_files, search_content,
+    /// mkdir, delete, copy, move, ...). Only commands without a named
+    /// equivalent (pwd) fall through to the generic shell tool.
     fn extract_bash_as_tool_calls(&self, response: &str) -> Option<Vec<ToolCall>> {
         let mut calls = Vec::new();
         let mut id_counter = 0u32;
@@ -1186,13 +1196,64 @@ impl Agent {
                         let pattern = format!("{path}/*");
                         emit_tool("search_files", serde_json::json!({ "pattern": pattern }));
                     }
+                    "grep" => {
+                        // grep [-flags] pattern [path]
+                        if let Some(pattern) = args_parts.first() {
+                            let path = args_parts.get(1).copied().unwrap_or(".");
+                            let is_regex =
+                                raw_parts.iter().any(|p| *p == "-E" || *p == "-P");
+                            let case_sensitive = !raw_parts.iter().any(|p| *p == "-i");
+                            emit_tool(
+                                "search_content",
+                                serde_json::json!({
+                                    "pattern": pattern,
+                                    "path": path,
+                                    "regex": is_regex,
+                                    "case_sensitive": case_sensitive,
+                                }),
+                            );
+                        }
+                    }
                     "head" | "tail" => {
                         if let Some(path) = args_parts.last() {
                             emit_tool("read_file", serde_json::json!({ "path": path }));
                         }
                     }
+                    "mkdir" => {
+                        let path = args_parts.first().copied().unwrap_or(".");
+                        let recursive =
+                            raw_parts.iter().any(|p| *p == "-p" || *p == "--parents");
+                        emit_tool(
+                            "mkdir",
+                            serde_json::json!({ "path": path, "recursive": recursive }),
+                        );
+                    }
+                    "rm" => {
+                        for path in &args_parts {
+                            let recursive = raw_parts.iter().any(|p| {
+                                *p == "-r" || *p == "-R" || *p == "-rf" || *p == "-fr"
+                                    || *p == "--recursive"
+                            });
+                            emit_tool(
+                                "delete",
+                                serde_json::json!({ "path": path, "recursive": recursive }),
+                            );
+                        }
+                    }
+                    "cp" | "mv" => {
+                        if args_parts.len() >= 2 {
+                            let name = if cmd == "cp" { "copy" } else { "move" };
+                            emit_tool(
+                                name,
+                                serde_json::json!({
+                                    "src": args_parts[0],
+                                    "dest": args_parts[args_parts.len() - 1],
+                                }),
+                            );
+                        }
+                    }
                     // No named file tool equivalent — run via the shell tool.
-                    "pwd" | "mkdir" | "rm" | "cp" | "mv" => {
+                    "pwd" => {
                         emit_tool("shell", serde_json::json!({ "command": cmd_line }));
                     }
                     _ => continue,
@@ -1371,6 +1432,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            image: None,
         }
     }
 

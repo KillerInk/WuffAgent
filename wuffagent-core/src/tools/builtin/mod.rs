@@ -1,5 +1,6 @@
 pub mod calculation;
 pub mod file_io;
+pub mod search;
 pub mod web_search;
 pub mod memory;
 pub mod time;
@@ -7,8 +8,10 @@ pub mod shell;
 
 pub use calculation::CalculationTool;
 pub use file_io::{
-    AppendFileTool, ApplyDiffTool, ListDirTool, ReadFileTool, SearchFilesTool, WriteFileTool,
+    AppendFileTool, ApplyDiffTool, CopyTool, DeleteTool, FileInfoTool, ListDirTool, MkdirTool,
+    MoveTool, ReadFileTool, SearchFilesTool, WriteFileTool,
 };
+pub use search::SearchContentTool;
 pub use web_search::WebSearchTool;
 pub use memory::{SaveMemoryTool, UpdateMemoryTool, SearchMemoryTool, ConsolidateMemoriesTool, DeleteMemoryTool};
 pub use time::TimeTool;
@@ -38,7 +41,7 @@ pub fn register_builtins(
     for (name, desc, tool) in [
         (
             "read_file",
-            "Read a text file, optionally limited to a line range",
+            "Read a text file, optionally limited to a line range. Large files are truncated with a `truncated` flag and `total_lines` for paging",
             std::sync::Arc::new(ReadFileTool::new()) as std::sync::Arc<dyn Tool>,
         ),
         (
@@ -53,18 +56,48 @@ pub fn register_builtins(
         ),
         (
             "list_dir",
-            "List the entries in a directory",
+            "List directory entries (name, type, size) with directories first",
             std::sync::Arc::new(ListDirTool::new()) as std::sync::Arc<dyn Tool>,
         ),
         (
             "search_files",
-            "Find files matching a glob pattern",
+            "Find files matching a glob pattern. Skips .git and target directories; capped at 500 matches",
             std::sync::Arc::new(SearchFilesTool::new()) as std::sync::Arc<dyn Tool>,
         ),
         (
             "apply_diff",
             "Apply targeted edits to an existing file using SEARCH/REPLACE blocks",
             std::sync::Arc::new(ApplyDiffTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "mkdir",
+            "Create a directory (creates parent directories when recursive is true)",
+            std::sync::Arc::new(MkdirTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "delete",
+            "Delete a file or directory (non-empty directories require recursive)",
+            std::sync::Arc::new(DeleteTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "copy",
+            "Copy a file or directory (directories are copied recursively)",
+            std::sync::Arc::new(CopyTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "move",
+            "Move or rename a file or directory",
+            std::sync::Arc::new(MoveTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "file_info",
+            "Get file or directory metadata: size, modified time, type, permissions",
+            std::sync::Arc::new(FileInfoTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "search_content",
+            "Search for a text pattern or regex in file contents (like grep/ripgrep)",
+            std::sync::Arc::new(SearchContentTool::new()) as std::sync::Arc<dyn Tool>,
         ),
     ] {
         registry.register(ToolEntry {

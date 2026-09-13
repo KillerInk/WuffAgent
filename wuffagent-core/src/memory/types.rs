@@ -171,6 +171,17 @@ pub struct MemoryConfig {
     /// Run the maintenance pass only when active entries reach this count.
     #[serde(default = "default_memory_maintenance_threshold")]
     pub memory_maintenance_threshold: usize,
+    /// How long ONE maintenance step (a single batch / LLM call) may run
+    /// (seconds) before it is cancelled. Maintenance runs the store in
+    /// batches of `memory_maintenance_batch_size`, so this bounds each step,
+    /// not the whole pass. Local LLMs can be slow, so the default is
+    /// generous.
+    #[serde(default = "default_memory_maintenance_timeout_secs")]
+    pub memory_maintenance_timeout_secs: u64,
+    /// Number of entries per maintenance batch (one small LLM call each).
+    /// Clamped to 5..=100 at use site.
+    #[serde(default = "default_memory_maintenance_batch_size")]
+    pub memory_maintenance_batch_size: usize,
 }
 
 fn default_enabled() -> bool { true }
@@ -182,6 +193,8 @@ fn default_auto_improve() -> bool { false }
 fn default_improvement_trigger_lessons() -> usize { 1 }
 fn default_memory_maintenance() -> bool { false }
 fn default_memory_maintenance_threshold() -> usize { 40 }
+fn default_memory_maintenance_timeout_secs() -> u64 { 600 }
+fn default_memory_maintenance_batch_size() -> usize { 15 }
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -198,6 +211,8 @@ impl Default for MemoryConfig {
             improvement_trigger_lessons: 1,
             memory_maintenance: false,
             memory_maintenance_threshold: 40,
+            memory_maintenance_timeout_secs: 600,
+            memory_maintenance_batch_size: 15,
         }
     }
 }
@@ -225,6 +240,16 @@ mod tests {
         let json = r#"{"enabled": true, "search_mode": "vector"}"#;
         let config: Result<MemoryConfig, _> = serde_json::from_str(json);
         assert!(config.is_err());
+    }
+
+    #[test]
+    fn test_missing_maintenance_fields_use_defaults() {
+        // Old config files predate the batched-maintenance fields; they must
+        // load with the new defaults.
+        let json = r#"{"enabled": true}"#;
+        let config: MemoryConfig = serde_json::from_str(json).expect("old config should load");
+        assert_eq!(config.memory_maintenance_batch_size, 15);
+        assert_eq!(config.memory_maintenance_timeout_secs, 600);
     }
 
     #[test]

@@ -25,8 +25,11 @@ pub struct AgentEngine {
     tasks_completed: Arc<AtomicUsize>,
 }
 
-/// Run the LLM memory-maintenance pass at most once every N completed tasks.
-const MAINTENANCE_TASK_COOLDOWN: usize = 10;
+/// Run an LLM memory-maintenance step at most once every N completed tasks.
+/// Each step is a single small batch (see `memory_maintenance_batch_size`),
+/// so it stays cheap enough to run fairly often; repeated steps make forward
+/// progress on the oldest entries of the store.
+const MAINTENANCE_TASK_COOLDOWN: usize = 3;
 
 impl AgentEngine {
     /// Create a new AgentEngine.
@@ -138,9 +141,10 @@ impl AgentEngine {
         result
     }
 
-    /// Run post-task memory upkeep: the maintenance pass (when enabled and the
-    /// entry count is high enough, at most once per `MAINTENANCE_TASK_COOLDOWN`
-    /// tasks) and self-improvement suggestions (when `auto_improve` is on).
+    /// Run post-task memory upkeep: a single maintenance STEP (when enabled
+    /// and the entry count is high enough, at most once per
+    /// `MAINTENANCE_TASK_COOLDOWN` tasks) and self-improvement suggestions
+    /// (when `auto_improve` is on).
     async fn post_task_maintenance(
         &self,
         agent_config: &AgentConfig,
@@ -161,9 +165,12 @@ impl AgentEngine {
             && memory.count() >= memory.config().memory_maintenance_threshold
             && completed % MAINTENANCE_TASK_COOLDOWN == 0
         {
-            match memory.run_maintenance().await {
+            // The step is internally bounded by `memory_maintenance_timeout_secs`
+            // (per batch) inside `run_maintenance_step`, so no outer timeout is
+            // needed — a hung LLM call can't hold task completion hostage.
+            match memory.run_maintenance_step().await {
                 Ok(report) => tracing::info!("[AGENT] {}", report.summary),
-                Err(e) => tracing::warn!("[AGENT] Memory maintenance failed: {}", e),
+                Err(e) => tracing::warn!("[AGENT] Memory maintenance step failed: {}", e),
             }
         }
 

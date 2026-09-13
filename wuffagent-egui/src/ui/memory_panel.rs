@@ -1,13 +1,16 @@
 use eframe::egui;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::memory::{InjectionMode, MemoryEntry, MemoryManager};
+use crate::memory::{InjectionMode, MaintenanceProgress, MaintenanceReport, MemoryEntry, MemoryManager};
 use super::theme::Theme;
 
-/// How long a maintenance LLM call may block the UI before we give up on this
-/// frame (it keeps running in the background on the dedicated runtime).
-const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Floor for the maintenance timeout so a misconfigured 0 can't cancel the
+/// pass instantly.
+const MIN_MAINTENANCE_TIMEOUT_SECS: u64 = 10;
 
 /// Full memory panel: list, search, edit, delete, and run-maintenance.
 ///
@@ -29,6 +32,19 @@ pub struct MemoryPanel {
     message: Option<String>,
     /// Latest maintenance summary.
     maintenance_report: Option<String>,
+    /// In-flight maintenance pass (result channel + start time); `None` when
+    /// no pass is running.
+    maintenance: Option<MaintenanceJob>,
+}
+
+/// An in-flight maintenance pass. The batched pass runs on a helper thread
+/// (the UI thread cannot `block_on` a runtime — see `start_maintenance`); the
+/// result is delivered through `rx` and collected in `draw` each frame, while
+/// `progress` (current/total batch) updates live for the "step i/M" hint.
+struct MaintenanceJob {
+    started_at: Instant,
+    rx: mpsc::Receiver<Result<MaintenanceReport, String>>,
+    progress: MaintenanceProgress,
 }
 
 impl Default for MemoryPanel {
@@ -48,6 +64,7 @@ impl MemoryPanel {
             pending_delete: None,
             message: None,
             maintenance_report: None,
+            maintenance: None,
         }
     }
 
@@ -59,10 +76,32 @@ impl MemoryPanel {
     pub fn draw(
         &mut self,
         ctx: &egui::Context,
-        memory: &MemoryManager,
-        runtime: &tokio::runtime::Runtime,
+        memory: &Arc<MemoryManager>,
+        runtime: &Arc<tokio::runtime::Runtime>,
         config: &Config,
     ) {
+        // Collect a finished maintenance pass (even while the window is
+        // closed) so the result is ready the next time the panel is shown.
+        if let Some(job) = &mut self.maintenance {
+            let outcome = job.rx.try_recv();
+            match outcome {
+                Ok(Ok(report)) => {
+                    self.maintenance_report = Some(report.summary.clone());
+                    self.message = Some(format!("✓ Maintenance: {}", report.summary));
+                    self.maintenance = None;
+                }
+                Ok(Err(e)) => {
+                    self.message = Some(format!("✗ Maintenance failed: {}", e));
+                    self.maintenance = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                // Helper thread exited without sending (shouldn't happen).
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.maintenance = None;
+                }
+            }
+        }
+
         if !self.show_panel {
             return;
         }
@@ -129,11 +168,17 @@ impl MemoryPanel {
                     });
                 }
 
-                egui::ScrollArea::vertical().show_rows(ui, 46.0, entries.len(), |ui, range| {
-                    for entry in &entries[range.clone()] {
-                        self.draw_entry_row(ui, &theme, entry, memory);
-                    }
-                });
+                // Cap the visible height: with auto_shrink (the default) the
+                // area would otherwise request the full content height (dozens
+                // of entries => thousands of px) and stretch the window to the
+                // screen height.
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .show_rows(ui, 46.0, entries.len(), |ui, range| {
+                        for entry in &entries[range.clone()] {
+                            self.draw_entry_row(ui, &theme, entry, memory);
+                        }
+                    });
 
                 ui.separator();
 
@@ -356,9 +401,23 @@ impl MemoryPanel {
                         .prefix("at ≥ "),
                 )
                 .changed();
+            let batch_changed = ui
+                .add(
+                    egui::DragValue::new(&mut mconfig.memory_maintenance_batch_size)
+                        .range(5..=100)
+                        .suffix(" entries / step"),
+                )
+                .changed();
+            let timeout_changed = ui
+                .add(
+                    egui::DragValue::new(&mut mconfig.memory_maintenance_timeout_secs)
+                        .range(MIN_MAINTENANCE_TIMEOUT_SECS..=3600)
+                        .suffix(" s step timeout"),
+                )
+                .changed();
             let auto_changed = ui.add(egui::Checkbox::new(&mut mconfig.auto_improve, "Auto-improve prompts (off by default)")).changed();
 
-            if enabled || max_changed || inj_changed || maint_changed || thresh_changed || auto_changed {
+            if enabled || max_changed || inj_changed || maint_changed || thresh_changed || batch_changed || timeout_changed || auto_changed {
                 memory.set_config(mconfig.clone());
                 self.message = Some("✓ Memory settings updated".to_string());
             }
@@ -370,50 +429,126 @@ impl MemoryPanel {
         &mut self,
         ui: &mut egui::Ui,
         theme: &Theme,
-        memory: &MemoryManager,
-        runtime: &tokio::runtime::Runtime,
+        memory: &Arc<MemoryManager>,
+        runtime: &Arc<tokio::runtime::Runtime>,
     ) {
         let mconfig = memory.config();
         let count = memory.count();
+        let running = self.maintenance.is_some();
+        // Per-STEP (batch) timeout, user-configurable (Settings → "… s step
+        // timeout"). Each batch self-bounds to this inside
+        // `run_maintenance_full`, so the outer pass timeout below scales with
+        // the estimated number of batches.
+        let step_timeout = Duration::from_secs(
+            mconfig
+                .memory_maintenance_timeout_secs
+                .max(MIN_MAINTENANCE_TIMEOUT_SECS),
+        );
+        let batch_size = mconfig.memory_maintenance_batch_size.clamp(5, 100);
+        let est_batches = ((count + batch_size - 1) / batch_size).max(1);
+        let total_timeout = Duration::from_secs(step_timeout.as_secs() * est_batches as u64);
 
         ui.horizontal(|ui| {
             ui.label("Maintenance:");
-            let can_run = mconfig.memory_maintenance && count >= mconfig.memory_maintenance_threshold;
-            let hint = if !mconfig.memory_maintenance {
+            let can_run = mconfig.memory_maintenance
+                && count >= mconfig.memory_maintenance_threshold
+                && !running;
+            let hint = if running {
+                let job = self.maintenance.as_ref().unwrap();
+                let secs = job.started_at.elapsed().as_secs();
+                let current = job.progress.current.load(Ordering::SeqCst);
+                let total = job.progress.total.load(Ordering::SeqCst);
+                let step = if total == 0 {
+                    "starting".to_string()
+                } else {
+                    format!("step {current}/{total}")
+                };
+                format!(
+                    "running in background: {step} ({}s elapsed, {}s limit per step)",
+                    secs,
+                    step_timeout.as_secs()
+                )
+            } else if !mconfig.memory_maintenance {
                 "disabled in settings".to_string()
             } else if count < mconfig.memory_maintenance_threshold {
                 format!("below threshold ({})", mconfig.memory_maintenance_threshold)
             } else {
-                "ready".to_string()
+                format!(
+                    "ready (runs in batches of {})",
+                    batch_size
+                )
             };
 
             if ui
                 .add_enabled(can_run, egui::Button::new("Run maintenance now").fill(theme.primary))
                 .clicked()
             {
-                // Run the (blocking, async) maintenance pass on the dedicated
-                // runtime so we don't touch the chat pipeline's runtime.
-                let result = runtime.block_on(async {
-                    tokio::time::timeout(MAINTENANCE_TIMEOUT, memory.run_maintenance()).await
-                });
-                match result {
-                    Ok(Ok(report)) => {
-                        self.maintenance_report = Some(report.summary.clone());
-                        self.message = Some(format!("✓ Maintenance: {}", report.summary));
-                    }
-                    Ok(Err(e)) => {
-                        self.message = Some(format!("✗ Maintenance failed: {}", e));
-                    }
-                    Err(_) => {
-                        self.message = Some("✗ Maintenance timed out".to_string());
-                    }
-                }
+                self.start_maintenance(memory, runtime, total_timeout);
             }
             ui.label(egui::RichText::new(hint).color(theme.text_dim).small());
         });
 
         if let Some(report) = &self.maintenance_report {
             ui.add(egui::Label::new(egui::RichText::new(report).color(theme.text_secondary)).wrap());
+        }
+    }
+
+    /// Start a maintenance pass on a helper thread and track it in
+    /// `self.maintenance` (result collected per-frame in `draw`).
+    ///
+    /// The UI thread is inside the `#[tokio::main]` runtime context, so
+    /// `block_on`-ing ANY runtime from here would panic with "Cannot start a
+    /// runtime from within a runtime". A fresh OS thread has no runtime
+    /// context, so `block_on`-ing the dedicated memory runtime on it is safe.
+    fn start_maintenance(
+        &mut self,
+        memory: &Arc<MemoryManager>,
+        runtime: &Arc<tokio::runtime::Runtime>,
+        total_timeout: Duration,
+    ) {
+        // A pass is already in flight (the button is disabled, just in case).
+        if self.maintenance.is_some() {
+            return;
+        }
+        let memory = memory.clone();
+        let runtime = runtime.clone();
+        let (tx, rx) = mpsc::channel();
+        // Live batch progress (current/total), shared with the helper thread.
+        let progress = MaintenanceProgress {
+            current: Arc::new(AtomicUsize::new(0)),
+            total: Arc::new(AtomicUsize::new(0)),
+        };
+        let progress_for_ui = progress.clone();
+        let spawned = std::thread::Builder::new()
+            .name("memory-maintenance".to_string())
+            .spawn(move || {
+                // The outer timeout is a safety net over the WHOLE batched
+                // pass (steps × per-step limit; each batch already self-bounds
+                // inside the manager). Dropping it cancels the pass.
+                let result = runtime.block_on(async {
+                    tokio::time::timeout(total_timeout, memory.run_maintenance_full(Some(progress))).await
+                });
+                let outcome: Result<MaintenanceReport, String> = match result {
+                    Ok(inner) => inner,
+                    Err(_) => Err(format!(
+                        "Maintenance timed out after {}s total (raise the step limit in Settings)",
+                        total_timeout.as_secs()
+                    )),
+                };
+                let _ = tx.send(outcome);
+            });
+        match spawned {
+            Ok(_) => {
+                self.maintenance = Some(MaintenanceJob {
+                    started_at: Instant::now(),
+                    rx,
+                    progress: progress_for_ui,
+                });
+                self.message = Some("✓ Maintenance started (running in background)".to_string());
+            }
+            Err(e) => {
+                self.message = Some(format!("✗ Failed to start maintenance: {}", e));
+            }
         }
     }
 }

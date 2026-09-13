@@ -113,6 +113,7 @@ pub async fn suggest_improvements(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        image: None,
     }];
 
     let response = llm_client.complete(&messages).await?;

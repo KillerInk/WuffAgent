@@ -527,11 +527,21 @@ impl ChatApp {
                         .inner_margin(6)
                         .show(ui, |ui| {
                             for entry in display_entries {
-                                if let Some(s) = entry.as_str() {
-                                    ui.add(egui::Label::new(egui::RichText::new(s)
-                                        .color(egui::Color32::from_rgb(180, 180, 180))
-                                        .monospace()).wrap());
-                                }
+                                // New list_dir returns {name, type, size} objects;
+                                // older sessions stored plain strings.
+                                let line = if let Some(s) = entry.as_str() {
+                                    s.to_string()
+                                } else {
+                                    let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                                    let typ = entry.get("type").and_then(|v| v.as_str()).unwrap_or("file");
+                                    let size = entry.get("size").and_then(|v| v.as_u64())
+                                        .map(|n| format!("  {} bytes", n))
+                                        .unwrap_or_default();
+                                    format!("{}  [{}{}]", name, typ, size)
+                                };
+                                ui.add(egui::Label::new(egui::RichText::new(line)
+                                    .color(egui::Color32::from_rgb(180, 180, 180))
+                                    .monospace()).wrap());
                             }
                             if entries.len() > max_entries {
                                 ui.label(egui::RichText::new(format!("... and {} more entries", entries.len() - max_entries))
@@ -575,7 +585,10 @@ impl ChatApp {
                                 egui::ScrollArea::vertical()
                                     .max_height(300.0)
                                     .show(ui, |ui| {
-                                    ui.add(egui::Label::new(egui::RichText::new(content)
+                                    // Long unbroken code lines would otherwise
+                                    // overflow the block (word-wrap can't split them).
+                                    let content_text = Self::hard_wrap_to_width(ui, content);
+                                    ui.add(egui::Label::new(egui::RichText::new(content_text)
                                         .color(egui::Color32::from_rgb(200, 200, 200))
                                         .monospace()).wrap());
                                 });
@@ -606,11 +619,15 @@ impl ChatApp {
             if let Some(expr) = json.get("expression").and_then(|v| v.as_str()) {
                 if let Some(result) = json.get("result").and_then(|v| v.as_f64()) {
                     // Calculation result
+                    // The expression wraps at the block width; the result goes
+                    // on its own line so a long expression cannot push it past
+                    // the right edge.
+                    let expr_text = Self::hard_wrap_to_width(ui, expr);
+                    ui.add(egui::Label::new(egui::RichText::new(expr_text)
+                        .color(theme.text_secondary)
+                        .monospace()).wrap());
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(expr)
-                            .color(theme.text_secondary)
-                            .monospace());
-                        ui.label(egui::RichText::new(" = ").color(theme.text_dim));
+                        ui.label(egui::RichText::new("= ").color(theme.text_dim));
                         ui.colored_label(theme.success, format!("{}", result));
                     });
                 } else {
@@ -700,8 +717,24 @@ impl ChatApp {
     fn draw_tool_path_badge(&self, ui: &mut egui::Ui, path: &str, theme: &Theme) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("📄").size(11.0));
+            // Elide the displayed path when it cannot fit (buttons can't
+            // wrap); the click handler still uses the full path.
+            let font_id = egui::FontId::new(10.0, egui::FontFamily::Monospace);
+            let per_char = Self::char_width(ui, &font_id);
+            // Reserve room for the icon, item spacing and button padding.
+            let budget = (ui.available_width() - 32.0).max(40.0);
+            let max_chars = ((budget * 0.98) / per_char).floor() as usize;
+            let path_chars: Vec<char> = path.chars().collect();
+            let display = if path_chars.len() > max_chars && max_chars >= 2 {
+                let mut s = String::with_capacity(max_chars);
+                s.push('…');
+                s.extend(path_chars.iter().skip(path_chars.len() - (max_chars - 1)));
+                s
+            } else {
+                path.to_string()
+            };
             // Path as a clickable button
-            let path_btn = egui::Button::new(egui::RichText::new(path)
+            let path_btn = egui::Button::new(egui::RichText::new(display)
                 .color(theme.accent)
                 .size(10.0)
                 .monospace());
@@ -726,6 +759,49 @@ impl ChatApp {
         });
     }
 
+    /// Pixel width of a single glyph in the given font.
+    /// egui memoizes layout results, so this stays cheap across frames.
+    fn char_width(ui: &egui::Ui, font_id: &egui::FontId) -> f32 {
+        const SAMPLE: &str = "0123456789";
+        let width = ui.ctx().fonts_mut(|fonts| {
+            fonts.layout_no_wrap(SAMPLE.to_string(), font_id.clone(), egui::Color32::WHITE)
+                .rect
+                .width()
+        });
+        (width / SAMPLE.len() as f32).max(1.0)
+    }
+
+    /// Split every line longer than `cols` characters into chunks of at most
+    /// `cols`. Existing line breaks are preserved (unlike re-chunking the
+    /// whole string, which destroys them).
+    fn hard_wrap(text: &str, cols: usize) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for line in text.split('\n') {
+            let chars: Vec<char> = line.chars().collect();
+            for chunk in chars.chunks(cols) {
+                lines.push(chunk.iter().collect());
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Return `text` hard-wrapped so no line can overflow the current
+    /// available width when rendered in the default monospace font.
+    /// Short texts are returned unchanged (no re-allocation of the layout).
+    fn hard_wrap_to_width(ui: &egui::Ui, text: &str) -> String {
+        let max_width = ui.available_width();
+        if max_width <= 0.0 {
+            return text.to_string();
+        }
+        let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+        // 2% safety margin so the galley never exceeds the block width.
+        let cols = ((max_width * 0.98) / Self::char_width(ui, &font_id)).floor() as usize;
+        if cols < 8 || !text.split('\n').any(|l| l.chars().count() > cols) {
+            return text.to_string();
+        }
+        Self::hard_wrap(text, cols)
+    }
+
     /// Render a plain (non-JSON) tool result as a monospace code block.
     fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, _theme: &Theme) {
         egui::Frame::NONE
@@ -733,24 +809,13 @@ impl ChatApp {
             .corner_radius(4)
             .inner_margin(6)
             .show(ui, |ui| {
-                let mut wrapped_text = text.to_string();
-                // Pre-wrap long lines to avoid horizontal overflow
-                let max_width = ui.available_width();
-                if max_width > 0.0 {
-                    let approx_chars_per_line = (max_width / 8.0).max(20.0) as usize; // monospace ~8px/char
-                    if wrapped_text.len() > approx_chars_per_line {
-                        let mut result = String::new();
-                        let chars: Vec<char> = wrapped_text.chars().collect();
-                        for chunk in chars.chunks(approx_chars_per_line) {
-                            result.push_str(&chunk.iter().collect::<String>());
-                            result.push('\n');
-                        }
-                        wrapped_text = result.trim_end().to_string();
-                    }
-                }
-                ui.label(egui::RichText::new(wrapped_text)
+                // Hard-wrap lines that exceed the measured width (keeps the
+                // original line structure); the wrapping label then does
+                // exact word wrapping as a safety net.
+                let wrapped_text = Self::hard_wrap_to_width(ui, text);
+                ui.add(egui::Label::new(egui::RichText::new(wrapped_text)
                     .color(egui::Color32::from_rgb(200, 200, 200))
-                    .monospace());
+                    .monospace()).wrap());
             });
         ui.add_space(4.0);
         let copy_btn = egui::Button::new("📋 Copy")

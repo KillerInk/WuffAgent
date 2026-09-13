@@ -444,6 +444,7 @@ pub fn add_streaming_messages(conversation: &Arc<Mutex<Vec<Message>>>, prompt: &
         tool_calls: None,
         tool_call_id: None,
     reasoning_content: None,
+        image: None,
     });
     conv.push(Message {
         role: "assistant".to_string(),
@@ -452,5 +453,6 @@ pub fn add_streaming_messages(conversation: &Arc<Mutex<Vec<Message>>>, prompt: &
         tool_calls: None,
         tool_call_id: None,
     reasoning_content: None,
+        image: None,
     });
 }

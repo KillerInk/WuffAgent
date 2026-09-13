@@ -140,6 +140,24 @@ fn bootstrap() -> (
     let llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(non_streaming));
     let client_for_engine = Arc::new(client.clone());
 
+    // Dedicated non-streaming client for the memory subsystem (maintenance,
+    // auto-improve). Maintenance runs the store in small batches
+    // (`memory_maintenance_batch_size`), one non-streaming prompt each; a
+    // single batch on a local model can still take several minutes — far
+    // beyond the regular 300 s total timeout (the cause of the "error sending
+    // request for url .../v1/chat/completions" failures after 5 min). The
+    // actual give-up point is the user-configurable
+    // `memory_maintenance_timeout_secs`, now applied PER STEP via
+    // tokio::time::timeout in both the panel (around the whole batched pass)
+    // and the post-task engine path (around a single step); this 3600 s
+    // client timeout (= the config's maximum) is only a safety net against a
+    // hung server, so the configured value is always the effective bound.
+    const MEMORY_LLM_TIMEOUT_SECS: u64 = 3600;
+    let mut memory_llm = ChatClient::from_settings_with_timeout((*connection).clone(), MEMORY_LLM_TIMEOUT_SECS);
+    memory_llm.set_reasoning_effort(config.reasoning_effort);
+    memory_llm.set_n_ctx(config.n_ctx);
+    let memory_llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(memory_llm));
+
     builtin::register_builtins(&registry).expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
         eprintln!("Warning: failed to discover plugins: {}", e);
@@ -157,10 +175,11 @@ fn bootstrap() -> (
     );
     let tool_manager_for_engine: Arc<Mutex<ToolManager>> = Arc::new(Mutex::new((*tool_manager).clone()));
 
-    // Initialize memory manager
+    // Initialize memory manager (with the memory-dedicated LLM client that
+    // has the longer total timeout — see MEMORY_LLM_TIMEOUT_SECS above).
     let memory_config = config.memory_config.clone();
-    let llm_client_clone = llm_client.clone();
-    let memory_manager = wuffagent_core::memory::MemoryManager::new_with_llm(memory_config, llm_client_clone)
+    let memory_llm_client_clone = memory_llm_client.clone();
+    let memory_manager = wuffagent_core::memory::MemoryManager::new_with_llm(memory_config, memory_llm_client_clone)
         .unwrap_or_else(|e| {
             tracing::warn!("Failed to initialize memory manager with LLM: {}, falling back", e);
             wuffagent_core::memory::MemoryManager::new(wuffagent_core::memory::MemoryConfig::default())
@@ -186,20 +205,26 @@ fn bootstrap() -> (
 async fn main() -> eframe::Result {
     let (config, server, tool_manager, agent_engine, connection, memory_manager) = bootstrap();
 
-    // Dedicated runtime for UI-triggered async work (memory maintenance) so the
-    // UI thread can block on a `block_on` without touching the main runtime
-    // that the chat pipeline is spawned on. (The UI thread is NOT inside a
-    // tokio async context, so it could technically share the main runtime —
-    // its workers would keep servicing the pipeline while the UI thread waits.
-    // Keeping it dedicated isolates the UI's blocking call from the pipeline.)
-    // Worker threads are capped well below `num_cpus` since only the occasional
-    // foreground maintenance pass runs here; the default would spin up one idle
-    // thread per core.
-    let memory_runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("failed to create memory runtime");
+    // Dedicated runtime for UI-triggered async work (memory maintenance).
+    // NOTE: the UI thread (main thread) IS inside the `#[tokio::main]` runtime
+    // context — the async `main` body blocks in `eframe::run_native`, which
+    // runs inside `rt.block_on`, and that context is also what lets the UI
+    // loop `tokio::spawn` (remote n_ctx fetch). Because of it, no
+    // `Runtime::block_on` may be called from the UI thread at all (it would
+    // panic with "Cannot start a runtime from within a runtime"); the memory
+    // panel therefore runs the maintenance pass on a helper thread that
+    // `block_on`s this dedicated runtime, keeping it separate from the main
+    // runtime.
+    // Worker threads are capped well below `num_cpus` since only the
+    // occasional maintenance pass runs here; the default would spin up one
+    // idle thread per core.
+    let memory_runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to create memory runtime"),
+    );
     
     // Initialize session store with the configured session
     // Shared event channel: the UI polls the receiver each frame; the pipeline

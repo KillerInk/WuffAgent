@@ -73,7 +73,7 @@ A sample agent config:
   "name": "generalist",
   "description": "General purpose worker for tasks that don't fit other categories",
   "personality": "You are a versatile generalist worker...",
-  "allowed_tools": ["file_io", "calculation", "web_search", "time", "agent_call"],
+  "allowed_tools": ["read_file", "write_file", "apply_diff", "list_dir", "search_files", "search_content", "mkdir", "delete", "copy", "move", "file_info", "calculation", "web_search", "time", "agent_call"],
   "priority": 10,
   "max_concurrent": 4,
   "can_invoke": ["researcher", "coder", "executor"],

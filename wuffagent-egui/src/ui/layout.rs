@@ -128,7 +128,7 @@ impl ChatApp {
     fn draw_memory_panel(&mut self, ctx: &egui::Context) {
         // Disjoint field borrows: the panel (mutable) + manager, runtime, config
         // (immutable) are separate struct fields, so they can coexist.
-        self.memory_panel.draw(ctx, &self.memory_manager, &self.memory_runtime, &self.config);
+        self.memory_panel.draw(ctx, &self.memory_manager, self.memory_runtime.as_ref(), &self.config);
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {

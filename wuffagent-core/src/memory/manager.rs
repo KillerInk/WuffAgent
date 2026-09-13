@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use tracing;
@@ -329,82 +330,224 @@ impl MemoryManager {
         Ok(removed)
     }
 
-    /// Run an LLM memory-maintenance pass.
+    /// Run a full LLM memory-maintenance pass over the whole store.
     ///
-    /// Sends all active entries to the LLM and applies the returned JSON
-    /// actions (`merge`, `update`, `delete`) with safety checks:
+    /// The store is processed in batches of `memory_maintenance_batch_size`
+    /// (oldest entries first) so every LLM call is small and bounded — each
+    /// batch is one non-streaming prompt, actions are applied before the next
+    /// batch runs, and the returned report aggregates all batches. A batch
+    /// failure (e.g. its timeout firing) is logged and the sweep continues.
+    ///
+    /// Per-batch safety checks:
     /// - unknown IDs are skipped
     /// - consolidated content is capped in length
-    /// - a single pass can never merge/delete all entries
+    /// - no batch can ever merge/delete the entire (global) store
     ///
     /// Returns `Ok(report)` with `summary` describing what happened.
     /// Returns `Err` when no LLM client is attached.
     pub async fn run_maintenance(&self) -> Result<MaintenanceReport, String> {
+        self.run_maintenance_full(None).await
+    }
+
+    /// Same as [`Self::run_maintenance`], but reports live batch progress via
+    /// `progress` (1-based current batch / total batches) so a UI can show
+    /// "step i/M" while the pass runs on a helper thread.
+    pub async fn run_maintenance_full(
+        &self,
+        progress: Option<MaintenanceProgress>,
+    ) -> Result<MaintenanceReport, String> {
+        if self.llm_client.is_none() {
+            return Err("No LLM client attached for memory maintenance".to_string());
+        }
+        let mut entries = self.get_all_memories();
+        if entries.len() < 2 {
+            let report = MaintenanceReport::summary("Maintenance skipped: fewer than 2 entries");
+            tracing::info!("[MEMORY] {}", report.summary);
+            return Ok(report);
+        }
+        // Oldest first: stale/overlapping entries consolidate early, and a
+        // manual sweep makes forward progress on the oldest part of the store.
+        entries.sort_by_key(|e| e.timestamp.unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC));
+        let batch_size = self.config().memory_maintenance_batch_size.clamp(5, 100);
+        // A single leftover entry cannot be merged with anything; skip it.
+        let chunks: Vec<&[MemoryEntry]> = entries
+            .chunks(batch_size)
+            .filter(|c| c.len() >= 2)
+            .collect();
+        let total_batches = chunks.len();
+        if let Some(p) = &progress {
+            p.total.store(total_batches, Ordering::SeqCst);
+        }
+
+        let mut merges = 0;
+        let mut updated = 0;
+        let mut deleted = 0;
+        let mut had_actions = false;
+        let mut failures = 0;
+        for (i, chunk) in chunks.iter().enumerate() {
+            let n = i + 1;
+            if let Some(p) = &progress {
+                p.current.store(n, Ordering::SeqCst);
+            }
+            match self.run_maintenance_batch(*chunk, entries.len()).await {
+                Ok(r) => {
+                    merges += r.merges;
+                    updated += r.updated;
+                    deleted += r.deleted;
+                    had_actions = had_actions || r.had_actions;
+                }
+                Err(e) => {
+                    failures += 1;
+                    tracing::warn!("[MEMORY] Maintenance batch {n}/{total_batches} failed: {e}");
+                }
+            }
+        }
+
+        let summary = if merges + updated + deleted == 0 {
+            if had_actions {
+                "Maintenance complete: no changes applied".to_string()
+            } else {
+                "Maintenance complete: no changes suggested".to_string()
+            }
+        } else {
+            let mut parts = Vec::new();
+            if merges > 0 {
+                parts.push(format!("{merges} merged"));
+            }
+            if updated > 0 {
+                parts.push(format!("{updated} updated"));
+            }
+            if deleted > 0 {
+                parts.push(format!("{deleted} deleted"));
+            }
+            format!("Maintenance complete: {} ({} batches)", parts.join(", "), total_batches)
+        };
+        let report = MaintenanceReport {
+            summary,
+            batches: total_batches,
+            merges,
+            updated,
+            deleted,
+            had_actions,
+        };
+        if failures > 0 {
+            tracing::warn!("[MEMORY] {failures} maintenance batch(es) failed; see earlier log lines");
+        }
+        tracing::info!("[MEMORY] {}", report.summary);
+        Ok(report)
+    }
+
+    /// Run exactly ONE maintenance batch over the oldest
+    /// `memory_maintenance_batch_size` active entries.
+    ///
+    /// Used by the post-task engine path so every step stays small and fast;
+    /// repeated tasks make forward progress on the oldest entries of the
+    /// store. Returns `Err` when no LLM client is attached.
+    pub async fn run_maintenance_step(&self) -> Result<MaintenanceReport, String> {
+        if self.llm_client.is_none() {
+            return Err("No LLM client attached for memory maintenance".to_string());
+        }
+        let mut entries = self.get_all_memories();
+        if entries.len() < 2 {
+            return Ok(MaintenanceReport::summary(
+                "Maintenance step skipped: fewer than 2 entries",
+            ));
+        }
+        entries.sort_by_key(|e| e.timestamp.unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC));
+        let batch_size = self.config().memory_maintenance_batch_size.clamp(5, 100);
+        let chunk: Vec<MemoryEntry> = entries.drain(..batch_size.min(entries.len())).collect();
+        // `entries` is the remainder after draining: the pre-step global
+        // count (for the never-wipe check) is chunk + remainder.
+        let report = self
+            .run_maintenance_batch(&chunk, chunk.len() + entries.len())
+            .await?;
+        tracing::info!("[MEMORY] {}", report.summary);
+        Ok(report)
+    }
+
+    /// One maintenance batch: a single small LLM call covering only `chunk`,
+    /// followed by applying the returned actions.
+    ///
+    /// `total_entries` is the size of the WHOLE store (not the batch) so the
+    /// "never let one merge wipe the store" check stays globally correct.
+    async fn run_maintenance_batch(
+        &self,
+        chunk: &[MemoryEntry],
+        total_entries: usize,
+    ) -> Result<MaintenanceReport, String> {
         let llm = match &self.llm_client {
             Some(c) => c.clone(),
             None => return Err("No LLM client attached for memory maintenance".to_string()),
         };
 
-        let entries = self.get_all_memories();
-        let report = if entries.len() < 2 {
-            MaintenanceReport::summary("Maintenance skipped: fewer than 2 entries")
-        } else {
-            let mut lines = Vec::new();
-            for e in &entries {
-                let age = e
-                    .timestamp
-                    .map(|ts| format!("{}d old", chrono::Utc::now().signed_duration_since(ts).num_days().max(0)))
-                    .unwrap_or_default();
-                lines.push(format!(
-                    "- id: {} | type: {} | tags: [{}] | age: {} | {}",
-                    e.id,
-                    e.r#type,
-                    e.tags.join(", "),
-                    age,
-                    e.content
-                ));
-            }
-            let prompt = format!(
-                "You are maintaining a memory store for an AI agent. Below are all stored memory entries.\n\
-                 Identify duplicates, stale or contradictory entries, and overlapping information.\n\
-                 \n\
-                 Memory entries:\n{}\n\
-                 \n\
-                 Return a JSON object with optional keys (omit empty arrays):\n\
-                 {{\n\
-                 \"merge\": [{{\"ids\": [\"id1\", \"id2\"], \"consolidated\": \"merged content\", \"tags\": [\"tag\"]}}],\n\
-                 \"update\": [{{\"id\": \"id1\", \"content\": \"improved content\", \"tags\": [\"tag\"]}}],\n\
-                 \"delete\": [{{\"id\": \"id1\", \"reason\": \"why\"}}]\n\
-                 }}\n\
-                 Rules: only merge entries that are genuinely duplicates or heavily overlapping; \
-                 never delete the only entry covering a topic; prefer update over delete when in doubt; \
-                 return an empty object {{}} if no changes are needed.",
-                lines.join("\n")
-            );
-            let messages = vec![Message {
-                role: "user".to_string(),
-                content: prompt,
-                timestamp: String::new(),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            }];
+        let mut lines = Vec::new();
+        for e in chunk {
+            let age = e
+                .timestamp
+                .map(|ts| format!("{}d old", chrono::Utc::now().signed_duration_since(ts).num_days().max(0)))
+                .unwrap_or_default();
+            lines.push(format!(
+                "- id: {} | type: {} | tags: [{}] | age: {} | {}",
+                e.id,
+                e.r#type,
+                e.tags.join(", "),
+                age,
+                e.content
+            ));
+        }
+        let prompt = format!(
+            "You are maintaining a memory store for an AI agent. Below are a batch of stored memory entries (the store is maintained in batches).\n\
+             Identify duplicates, stale or contradictory entries, and overlapping information within this batch.\n\
+             \n\
+             Memory entries:\n{}\n\
+             \n\
+             Return a JSON object with optional keys (omit empty arrays):\n\
+             {{\n\
+             \"merge\": [{{\"ids\": [\"id1\", \"id2\"], \"consolidated\": \"merged content\", \"tags\": [\"tag\"]}}],\n\
+             \"update\": [{{\"id\": \"id1\", \"content\": \"improved content\", \"tags\": [\"tag\"]}}],\n\
+             \"delete\": [{{\"id\": \"id1\", \"reason\": \"why\"}}]\n\
+             }}\n\
+             Rules: only merge entries that are genuinely duplicates or heavily overlapping; \
+             never delete the only entry covering a topic; prefer update over delete when in doubt; \
+             return an empty object {{}} if no changes are needed.",
+            lines.join("\n")
+        );
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: prompt,
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        }];
 
-            let response = llm.complete(&messages).await.map_err(|e| {
+        // Per-step timeout: `memory_maintenance_timeout_secs` bounds this
+        // single batch (LLM call), so one slow batch can neither stall a
+        // multi-batch sweep nor hold a task completion hostage.
+        let per_step = std::time::Duration::from_secs(
+            self.config().memory_maintenance_timeout_secs.max(10),
+        );
+        let response = tokio::time::timeout(per_step, llm.complete(&messages))
+            .await
+            .map_err(|_| {
+                format!(
+                    "Maintenance batch timed out after {}s (raise the step limit in Settings)",
+                    per_step.as_secs()
+                )
+            })?
+            .map_err(|e| {
                 tracing::warn!("[MEMORY] Maintenance LLM call failed: {}", e);
                 format!("Maintenance LLM call failed: {}", e)
             })?;
-            let actions = parse_maintenance_actions(&response);
-            if actions.is_empty() {
-                MaintenanceReport::summary("Maintenance complete: no changes suggested")
-            } else {
-                tracing::info!("[MEMORY] Applying maintenance: {} merges, {} updates, {} deletes",
-                    actions.merge.len(), actions.update.len(), actions.delete.len());
-                apply_maintenance_actions(self, &entries, &actions)
-            }
-        };
-        tracing::info!("[MEMORY] {}", report.summary);
-        Ok(report)
+        let actions = parse_maintenance_actions(&response);
+        if actions.is_empty() {
+            Ok(MaintenanceReport::summary("Maintenance complete: no changes suggested"))
+        } else {
+            tracing::info!("[MEMORY] Applying maintenance: {} merges, {} updates, {} deletes",
+                actions.merge.len(), actions.update.len(), actions.delete.len());
+            Ok(apply_maintenance_actions(self, chunk, total_entries, &actions))
+        }
     }
 
     /// Save memories to disk.
@@ -492,15 +635,46 @@ pub enum MemoryAddResult {
     Duplicate(MemoryEntry),
 }
 
-/// A human-readable report of a memory-maintenance pass.
+/// A human-readable report of a memory-maintenance pass (or a single batch
+/// step). Counts are used to aggregate multi-batch passes.
+#[derive(Clone, Debug)]
 pub struct MaintenanceReport {
+    /// Human-readable summary of what happened.
     pub summary: String,
+    /// Number of batches this pass covered (1 for a single-batch step).
+    pub batches: usize,
+    /// Total merge actions applied (one action may combine >2 source entries).
+    pub merges: usize,
+    /// Total entries updated.
+    pub updated: usize,
+    /// Total entries deleted.
+    pub deleted: usize,
+    /// Whether the LLM suggested any actions (they may all have been skipped).
+    pub had_actions: bool,
 }
 
 impl MaintenanceReport {
     fn summary(summary: impl Into<String>) -> Self {
-        Self { summary: summary.into() }
+        Self {
+            summary: summary.into(),
+            batches: 1,
+            merges: 0,
+            updated: 0,
+            deleted: 0,
+            had_actions: false,
+        }
     }
+}
+
+/// Live progress of a batched maintenance pass, shared with the UI (the pass
+/// runs on a helper thread). Both counters are 0 until the pass starts
+/// (`total`) / begins its first batch (`current`).
+#[derive(Clone, Default)]
+pub struct MaintenanceProgress {
+    /// 1-based index of the batch currently running.
+    pub current: Arc<AtomicUsize>,
+    /// Total batches in this pass.
+    pub total: Arc<AtomicUsize>,
 }
 
 /// Actions requested by the LLM during a maintenance pass.
@@ -569,11 +743,13 @@ fn parse_maintenance_actions(response: &str) -> MaintenanceActions {
 
 /// Apply the parsed actions to the store, with safety checks.
 ///
-/// `entries` is the pre-pass snapshot (from `get_all_memories`) used to
-/// validate IDs and enforce "never wipe everything".
+/// `entries` is the batch snapshot used to validate IDs and source content;
+/// `total_entries` is the size of the WHOLE store, used to enforce "never
+/// wipe everything" globally (a batch is usually a subset of the store).
 fn apply_maintenance_actions(
     manager: &MemoryManager,
     entries: &[MemoryEntry],
+    total_entries: usize,
     actions: &MaintenanceActions,
 ) -> MaintenanceReport {
     let existing_ids: std::collections::HashSet<&str> =
@@ -596,8 +772,9 @@ fn apply_maintenance_actions(
             skipped.push(format!("merge needs at least 2 known ids (got {})", merge.ids.len()));
             continue;
         }
-        // Safety: never let a single merge consume the entire store.
-        if valid.len() >= entries.len() {
+        // Safety: never let a single merge consume the entire store
+        // (checked against the global store size, not this batch).
+        if total_entries > 0 && valid.len() >= total_entries {
             skipped.push(format!("merge of {} entries would remove the whole store", valid.len()));
             continue;
         }
@@ -714,7 +891,14 @@ fn apply_maintenance_actions(
     if !skipped.is_empty() {
         tracing::debug!("[MEMORY] Maintenance skipped actions: {:?}", skipped);
     }
-    MaintenanceReport { summary }
+    MaintenanceReport {
+        summary,
+        batches: 1,
+        merges: merged.len(),
+        updated: updates_applied,
+        deleted: deleted.len(),
+        had_actions: true,
+    }
 }
 
 fn first_source_type(entries: &[MemoryEntry], ids: &[&String]) -> MemoryType {
@@ -1093,6 +1277,97 @@ mod tests {
 
     // --- Maintenance pass tests ---
 
+    /// Mock LLM returning a queued sequence of maintenance-actions JSON
+    /// responses (one per LLM call; falls back to `{}` when exhausted).
+    /// Records the call count and every prompt for batch assertions.
+    struct QueuedLlm {
+        responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+        calls: std::sync::atomic::AtomicUsize,
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl QueuedLlm {
+        fn new(responses: Vec<String>) -> Arc<Self> {
+            Arc::new(Self {
+                responses: std::sync::Mutex::new(std::collections::VecDeque::from(responses)),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                prompts: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn first_prompt(&self) -> String {
+            self.prompts.lock().unwrap().first().cloned().unwrap_or_default()
+        }
+        fn last_prompt(&self) -> String {
+            self.prompts.lock().unwrap().last().cloned().unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for QueuedLlm {
+        async fn complete(&self, messages: &[Message]) -> Result<String, String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.prompts
+                .lock()
+                .unwrap()
+                .push(messages.first().map(|m| m.content.clone()).unwrap_or_default());
+            Ok(self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| "{}".to_string()))
+        }
+
+        async fn stream(
+            &self,
+            messages: &[Message],
+            mut chunk_handler: Box<dyn FnMut(String) + Send + Sync + 'static>,
+        ) -> Result<String, String> {
+            let text = self.complete(messages).await?;
+            chunk_handler(text.clone());
+            Ok(text)
+        }
+    }
+
+    /// Build a manager with a queued-response LLM and a specific batch size.
+    fn manager_with_queued_llm(
+        dir: &std::path::Path,
+        responses: Vec<String>,
+        batch_size: usize,
+    ) -> (MemoryManager, Arc<QueuedLlm>) {
+        let llm = QueuedLlm::new(responses);
+        let config = MemoryConfig {
+            memories_dir: Some(dir.to_str().unwrap().to_string()),
+            memory_maintenance: true,
+            memory_maintenance_batch_size: batch_size,
+            ..Default::default()
+        };
+        (
+            MemoryManager::new_with_llm(config, llm.clone()).unwrap(),
+            llm,
+        )
+    }
+
+    /// Seed `n` mutually distinct entries with known IDs ("m-0", "m-1", ...).
+    /// Content has low token overlap so the add-time dedup gate never fires.
+    fn seed_distinct_with_ids(manager: &MemoryManager, n: usize) {
+        for i in 0..n {
+            manager
+                .add(entry_with_id(
+                    &format!("m-{i}"),
+                    MemoryType::Fact,
+                    &format!(
+                        "Distinct memory {i} covering topic alpha{i} with details beta{i} gamma{i} delta{i} epsilon{i}"
+                    ),
+                    &[],
+                ))
+                .unwrap();
+        }
+    }
+
     /// Mock LLM returning a fixed maintenance-actions JSON response.
     struct ScriptedLlm {
         response: String,
@@ -1216,5 +1491,123 @@ mod tests {
         };
         let manager = MemoryManager::new(config).unwrap();
         assert!(manager.run_maintenance().await.is_err());
+        assert!(manager.run_maintenance_step().await.is_err());
+    }
+
+    // --- Batched maintenance tests ---
+
+    #[tokio::test]
+    async fn test_maintenance_batched_chunks_oldest_first() {
+        let dir = tempdir().unwrap();
+        // 35 entries, batch 15 => chunks of 15 + 15 + 5 => exactly 3 LLM calls.
+        let (manager, llm) = manager_with_queued_llm(dir.path(), vec!["{}".to_string()], 15);
+        seed_distinct_with_ids(&manager, 35);
+
+        let report = manager.run_maintenance().await.unwrap();
+        assert_eq!(llm.call_count(), 3, "35/15 must be 3 batches (15+15+5)");
+        assert_eq!(report.batches, 3);
+        // Oldest-first: the first prompt holds the oldest entries only.
+        assert!(llm.first_prompt().contains("Distinct memory 0"));
+        assert!(!llm.first_prompt().contains("Distinct memory 15"));
+        // The last batch is the newest entries.
+        assert!(llm.last_prompt().contains("Distinct memory 34"));
+        // "{}" from every batch: no changes, store intact.
+        assert_eq!(manager.count(), 35);
+        assert!(report.summary.contains("no changes suggested"), "summary: {}", report.summary);
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_batched_applies_each_batch() {
+        let dir = tempdir().unwrap();
+        // 20 entries, batch 10 => 2 calls; each batch gets its own response.
+        let responses = vec![
+            r#"{"merge": [{"ids": ["m-0", "m-1"], "consolidated": "Consolidated oldest pair"}]}"#.to_string(),
+            r#"{"update": [{"id": "m-15", "content": "Updated middle entry content", "tags": ["t"]}]}"#.to_string(),
+        ];
+        let (manager, llm) = manager_with_queued_llm(dir.path(), responses, 10);
+        seed_distinct_with_ids(&manager, 20);
+
+        let report = manager.run_maintenance().await.unwrap();
+        assert_eq!(llm.call_count(), 2);
+        // Batch 1 actions applied to the oldest chunk...
+        assert!(manager.find("m-0").is_none(), "merge source m-0 must be removed");
+        assert!(manager.find("m-1").is_none(), "merge source m-1 must be removed");
+        // ...and batch 2 actions to the newest chunk.
+        let updated = manager.find("m-15").expect("m-15 must survive");
+        assert_eq!(updated.content, "Updated middle entry content");
+        // 20 - 2 merged sources + 1 consolidated = 19.
+        assert_eq!(manager.count(), 19);
+        assert!(report.summary.contains("merged"), "summary: {}", report.summary);
+        assert!(report.summary.contains("updated"), "summary: {}", report.summary);
+        assert_eq!(report.merges, 1, "one merge action (covering two source ids)");
+        assert_eq!(report.updated, 1);
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_batched_never_wipes_store() {
+        let dir = tempdir().unwrap();
+        // Every batch tries to delete all of ITS entries: the very last
+        // remaining entry in the store must be kept.
+        let del_0_9 = (0..10).map(|i| format!("{{\"id\": \"m-{i}\"}}")).collect::<Vec<_>>().join(",");
+        let del_10_19 = (10..20).map(|i| format!("{{\"id\": \"m-{i}\"}}")).collect::<Vec<_>>().join(",");
+        let responses = vec![
+            format!("{{\"delete\": [{del_0_9}]}}"),
+            format!("{{\"delete\": [{del_10_19}]}}"),
+        ];
+        let (manager, llm) = manager_with_queued_llm(dir.path(), responses, 10);
+        seed_distinct_with_ids(&manager, 20);
+
+        let report = manager.run_maintenance().await.unwrap();
+        assert_eq!(llm.call_count(), 2);
+        assert_eq!(manager.count(), 1, "store must never be emptied: {}", report.summary);
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_batched_skips_single_entry_chunk() {
+        let dir = tempdir().unwrap();
+        // 16 entries, batch 15 => 15 + 1; the lone leftover cannot be merged
+        // with anything, so only ONE LLM call happens.
+        let (manager, llm) = manager_with_queued_llm(dir.path(), vec!["{}".to_string()], 15);
+        seed_distinct_with_ids(&manager, 16);
+
+        let report = manager.run_maintenance().await.unwrap();
+        assert_eq!(llm.call_count(), 1, "single-entry chunk must be skipped");
+        assert_eq!(report.batches, 1);
+        assert_eq!(manager.count(), 16);
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_step_processes_only_oldest_batch() {
+        let dir = tempdir().unwrap();
+        // 20 entries, batch 10: the post-task step must make exactly ONE call
+        // covering only the oldest 10 entries.
+        let (manager, llm) = manager_with_queued_llm(dir.path(), vec!["{}".to_string()], 10);
+        seed_distinct_with_ids(&manager, 20);
+
+        let report = manager.run_maintenance_step().await.unwrap();
+        assert_eq!(llm.call_count(), 1, "step must be a single LLM call");
+        assert!(llm.first_prompt().contains("Distinct memory 0"));
+        assert!(!llm.first_prompt().contains("Distinct memory 19"));
+        assert_eq!(report.batches, 1);
+        assert_eq!(manager.count(), 20);
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_step_applies_actions() {
+        let dir = tempdir().unwrap();
+        let responses = vec![
+            r#"{"merge": [{"ids": ["m-0", "m-1"], "consolidated": "Consolidated oldest pair"}]}"#.to_string(),
+        ];
+        let (manager, llm) = manager_with_queued_llm(dir.path(), responses, 10);
+        seed_distinct_with_ids(&manager, 20);
+
+        let report = manager.run_maintenance_step().await.unwrap();
+        assert_eq!(llm.call_count(), 1);
+        assert!(manager.find("m-0").is_none());
+        assert!(manager.find("m-1").is_none());
+        // Newest entries must be untouched by a step.
+        assert!(manager.find("m-19").is_some());
+        assert_eq!(manager.count(), 19);
+        assert!(report.summary.contains("merged"), "summary: {}", report.summary);
     }
 }

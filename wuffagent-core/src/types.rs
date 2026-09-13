@@ -1,23 +1,136 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A chat message with a role (system/user/assistant/tool) and content.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+///
+/// `image` holds an attached image as a `data:` URI (e.g.
+/// `data:image/png;base64,...`). It is NOT stored as a separate JSON field:
+/// on the wire (and in session files) an image message serializes its
+/// `content` as the OpenAI multimodal parts array
+/// (`[{"type":"text",...},{"type":"image_url",...}]`) so vision-capable
+/// servers receive the standard format, and deserialization rebuilds
+/// `content` (joined text parts) + `image` (first `image_url`) from it.
+/// Messages without an image keep the plain string `content`.
+// Serialize/Deserialize are implemented manually below (see `MessageDe`):
+// `content` may be a plain string or a multimodal parts array, and serde
+// derive cannot express that.
+#[derive(Clone, Debug)]
 pub struct Message {
     pub role: String,
-    #[serde(default)]
     pub content: String,
-    #[serde(default)]
     pub timestamp: String,
     /// Tool call requests from the AI (non-null when the AI wants to invoke a tool).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     /// Reference to the tool call this result belongs to (for tool role messages).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// Model reasoning/thinking content (llama.cpp `reasoning_content`, DeepSeek/Qwen style).
     /// Round-tripped so the model can see its own prior reasoning across tool-call rounds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Attached image as a `data:` URI (user messages with an image).
+    /// Serialized inside `content` as an `image_url` part (see struct docs).
+    pub image: Option<String>,
+}
+
+/// Wire form of [`Message`] where `content` stays raw so it can be either a
+/// plain string (no image) or a JSON array of multimodal content parts.
+#[derive(Deserialize)]
+struct MessageDe {
+    role: String,
+    content: serde_json::Value,
+    #[serde(default)]
+    timestamp: String,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+/// Split the raw content value into plain text + attached image.
+/// Accepts both the legacy plain-string form and the multimodal parts
+/// array, so old session files keep loading unchanged.
+fn split_content(content: serde_json::Value) -> (String, Option<String>) {
+    match content {
+            serde_json::Value::String(s) => (s, None),
+            serde_json::Value::Array(parts) => {
+                let mut text = String::new();
+                let mut image = None;
+                for part in parts {
+                    match part.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    text.push('\n');
+                                }
+                                text.push_str(t);
+                            }
+                        }
+                        Some("image_url") => {
+                            if image.is_none() {
+                                image = part
+                                    .get("image_url")
+                                    .and_then(|u| u.get("url"))
+                                    .and_then(|u| u.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                (text, image)
+            }
+            // Null or any other shape — keep it loadable, display as empty.
+            _ => (String::new(), None),
+        }
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let de = MessageDe::deserialize(deserializer)?;
+        let (content, image) = split_content(de.content);
+        Ok(Message {
+            role: de.role,
+            content,
+            timestamp: de.timestamp,
+            tool_calls: de.tool_calls,
+            tool_call_id: de.tool_call_id,
+            reasoning_content: de.reasoning_content,
+            image: image,
+        })
+    }
+}
+
+impl Serialize for Message {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Message", 6)?;
+        state.serialize_field("role", &self.role)?;
+        if let Some(ref url) = self.image {
+            // Multimodal content parts (OpenAI/llama.cpp vision format).
+            let mut parts = Vec::new();
+            if !self.content.is_empty() {
+                parts.push(serde_json::json!({ "type": "text", "text": self.content }));
+            }
+            parts.push(serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": url },
+            }));
+            state.serialize_field("content", &parts)?;
+        } else {
+            state.serialize_field("content", &self.content)?;
+        }
+        state.serialize_field("timestamp", &self.timestamp)?;
+        if let Some(ref tool_calls) = self.tool_calls {
+            state.serialize_field("tool_calls", tool_calls)?;
+        }
+        if let Some(ref tool_call_id) = self.tool_call_id {
+            state.serialize_field("tool_call_id", tool_call_id)?;
+        }
+        if let Some(ref reasoning_content) = self.reasoning_content {
+            state.serialize_field("reasoning_content", reasoning_content)?;
+        }
+        state.end()
+    }
 }
 
 /// A single tool call requested by the AI.
@@ -170,4 +283,129 @@ pub fn format_timestamp() -> String {
 /// Format a tool call header for display.
 pub fn tool_call_header(name: &str, result: &str) -> String {
     format!("🔧 {}: {}", name, result.chars().take(80).collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(content: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: content.to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        }
+    }
+
+    fn msg_with_image(content: &str, url: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: content.to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: Some(url.to_string()),
+        }
+    }
+
+    /// Without an image, `content` must stay a plain JSON string — the format
+    /// every existing server and session file expects.
+    #[test]
+    fn message_without_image_serializes_plain_content() {
+        let json = serde_json::to_string(&msg("hello")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["content"], "hello");
+        assert!(v.get("image").is_none(), "no image field on the wire");
+    }
+
+    /// With an image, `content` becomes the OpenAI multimodal parts array and
+    /// there is no separate `image` field on the wire.
+    #[test]
+    fn message_with_image_serializes_content_parts() {
+        let url = "data:image/png;base64,AAAA";
+        let json = serde_json::to_string(&msg_with_image("describe this", url)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parts = v["content"].as_array().expect("content must be an array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "describe this");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], url);
+        assert!(v.get("image").is_none(), "no image field on the wire");
+    }
+
+    /// An image with empty text serializes as a single image_url part.
+    #[test]
+    fn image_only_message_omits_empty_text_part() {
+        let url = "data:image/png;base64,AAAA";
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&msg_with_image("", url)).unwrap()).unwrap();
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "image_url");
+    }
+
+    /// Round trip: image survives serialization + deserialization.
+    #[test]
+    fn message_with_image_round_trips() {
+        let url = "data:image/jpeg;base64,QUJD";
+        let original = msg_with_image("what is this?", url);
+        let json = serde_json::to_string(&original).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.role, "user");
+        assert_eq!(back.content, "what is this?");
+        assert_eq!(back.image.as_deref(), Some(url));
+        // And the re-serialized form is stable.
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+    }
+
+    /// Legacy session files stored `content` as a plain string (no image):
+    /// they must load with `image: None`.
+    #[test]
+    fn legacy_string_content_deserializes_with_no_image() {
+        let json = r#"{"role":"user","content":"hi","timestamp":"12:00:00"}"#;
+        let m: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(m.content, "hi");
+        assert_eq!(m.timestamp, "12:00:00");
+        assert!(m.image.is_none());
+    }
+
+    /// A parts-array content deserializes back into text + image; multiple
+    /// text parts are joined.
+    #[test]
+    fn parts_array_content_deserializes_into_text_and_image() {
+        let json = r#"{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QQ"}}
+            ],
+            "timestamp": ""
+        }"#;
+        let m: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(m.content, "first\nsecond");
+        assert_eq!(m.image.as_deref(), Some("data:image/png;base64,QQ"));
+    }
+
+    /// Tool-call fields still round-trip alongside the new layout.
+    #[test]
+    fn tool_call_fields_round_trip() {
+        let mut m = msg("do it");
+        m.role = "assistant".to_string();
+        m.tool_calls = Some(vec![ToolCall {
+            id: "c1".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "shell".to_string(),
+                arguments: "{\"command\":\"ls\"}".to_string(),
+            },
+        }]);
+        let back: Message = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.tool_calls.as_ref().unwrap()[0].function.name, "shell");
+    }
 }
