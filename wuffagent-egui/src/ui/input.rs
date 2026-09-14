@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine;
 use eframe::egui;
 
 use super::state::ChatApp;
@@ -15,21 +16,23 @@ impl ChatApp {
         // Snapshot the selected session's display values up front so we don't
         // hold an immutable borrow of `self` across the self-mutating UI closures.
         // The agent selection is per-session (SessionRuntime.selected_agent).
-        let (has_session, has_image, is_generating, input_len, has_history, selected_agent) =
+        // `pending_image` is cloned so the preview below can draw it without
+        // holding a borrow of the store.
+        let (has_session, pending_image, is_generating, input_len, has_history, selected_agent) =
             self.selected_session_id
                 .as_ref()
                 .and_then(|sid| self.session_store.get(sid))
                 .map(|r| {
                     (
                         true,
-                        r.chat_state.pending_image.is_some(),
+                        r.chat_state.pending_image.clone(),
                         r.chat_state.is_generating,
                         r.chat_state.input_text.len(),
                         !r.chat_state.messages.is_empty(),
                         r.selected_agent.clone(),
                     )
                 })
-                .unwrap_or((false, false, false, 0, false, None));
+                .unwrap_or((false, None, false, 0, false, None));
 
         if has_session {
             // Validate input length
@@ -43,11 +46,24 @@ impl ChatApp {
                 });
             }
 
-            // Image preview area
-            if has_image {
+            // Image preview: the image that will be attached to the next
+            // message (pasted with Ctrl/Cmd+V, or added via the attach button).
+            if let Some(img) = pending_image.clone() {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("ðŸ“· Image attached").size(11.0).color(theme.text_secondary));
+                    ui.label(egui::RichText::new("Image attached:").size(11.0).color(theme.text_secondary));
+                    ui.add(egui::Image::new(img).max_size(egui::Vec2::new(56.0, 56.0)));
+                    if ui
+                        .add(egui::Button::new("x").min_size(egui::vec2(18.0, 18.0)))
+                        .clicked()
+                    {
+                        if let Some(sid) = self.selected_session_id.clone() {
+                            if let Some(runtime) = self.session_store.get_mut(&sid) {
+                                runtime.chat_state.pending_image = None;
+                            }
+                        }
+                    }
                 });
+                ui.add_space(4.0);
             }
 
             // Input area: text field + button row below
@@ -62,7 +78,17 @@ impl ChatApp {
                     let text_edit = egui::TextEdit::multiline(&mut local_text)
                         .hint_text("Type a message...")
                         .desired_width(f32::INFINITY);
-                    let response = ui.add(text_edit);
+                    // Themed container matching the chat bubbles.
+                    // NOTE: use `.inner` (the TextEdit's own response), not the
+                    // Frame's — `has_focus()` is id-based and the Frame's
+                    // response never reports the inner edit's focus.
+                    let response = egui::Frame::NONE
+                        .fill(theme.surface)
+                        .stroke(egui::Stroke::new(1.0, theme.border))
+                        .corner_radius(10)
+                        .inner_margin(egui::Margin::same(6))
+                        .show(ui, |ui| ui.add(text_edit))
+                        .inner;
                     // Send on Ctrl+Enter (allowed while generating â€” queues the
                     // message to run after the current task finishes).
                     let modifiers = ui.ctx().input(|i| i.modifiers);
@@ -72,7 +98,29 @@ impl ChatApp {
                         && !local_text.trim().is_empty()
                     {
                         let input = local_text.trim().to_string();
-                        self.handle_send_input(&input);
+                        if self.handle_send_input(&input) {
+                            // Accepted (queued or started): clear the box so the
+                            // sync-back below doesn't restore the sent text.
+                            local_text.clear();
+                        }
+                    }
+                    // Paste an image (Ctrl/Cmd+V, or Shift+Insert on Windows).
+                    //
+                    // egui-winit can only paste TEXT: for an image-only
+                    // clipboard it logs "arboard paste error" and swallows the
+                    // key press entirely (no Event::Paste, no Event::Key for
+                    // the press). The RELEASE of the V key still reaches us,
+                    // so we detect the shortcut there and attach the clipboard
+                    // image ourselves (no-op when the clipboard holds text -
+                    // egui's own paste already ran in that case).
+                    let paste_attempted = ui.ctx().input(|i| {
+                        (i.key_released(egui::Key::V) && i.modifiers.command)
+                            || (cfg!(target_os = "windows")
+                                && i.key_released(egui::Key::Insert)
+                                && i.modifiers.shift)
+                    });
+                    if response.has_focus() && paste_attempted {
+                        self.paste_image_from_clipboard();
                     }
                     // Sync back to chat_state
                     if let Some(sid) = &self.selected_session_id {
@@ -145,24 +193,49 @@ impl ChatApp {
                         });
                     ui.add_space(6.0);
 
+                    // Attach an image to the next message: clipboard first
+                    // (the screenshot flow), file picker as fallback.
+                    let attach_btn = egui::Button::new(egui::RichText::new("IMG").size(11.0))
+                        .fill(theme.surface_light)
+                        .corner_radius(8)
+                        .min_size(egui::vec2(36.0, 28.0));
+                    let attach_tooltip = if pending_image.is_some() {
+                        "Image attached to the next message - click to replace"
+                    } else {
+                        "Attach image (from clipboard, or pick a file)"
+                    };
+                    if ui.add(attach_btn).on_hover_text(attach_tooltip).clicked() {
+                        self.attach_image_from_clipboard_or_file();
+                    }
+                    ui.add_space(6.0);
+
                     // Send is always available: while the AI is working it queues
                     // the message for the next turn, otherwise it starts a run.
-                    let send_btn = egui::Button::new("Send")
-                        .fill(theme.primary)
-                        .corner_radius(6)
-                        .min_size(egui::vec2(60.0, 28.0));
+                    let send_btn = egui::Button::new(
+                        egui::RichText::new("Send").color(egui::Color32::WHITE),
+                    )
+                    .fill(theme.primary)
+                    .corner_radius(8)
+                    .min_size(egui::vec2(60.0, 28.0));
                     if ui.add(send_btn).clicked() {
                         let input = self.input_text_snapshot().trim().to_string();
-                        if !input.is_empty() {
-                            self.handle_send_input(&input);
+                        if !input.is_empty() && self.handle_send_input(&input) {
+                            // Accepted (queued or started): clear the input box.
+                            if let Some(sid) = self.selected_session_id.clone() {
+                                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                                    runtime.chat_state.input_text.clear();
+                                }
+                            }
                         }
                     }
                     if is_generating {
                         ui.add_space(6.0);
-                        let stop_btn = egui::Button::new("Stop")
-                            .fill(theme.error)
-                            .corner_radius(6)
-                            .min_size(egui::vec2(60.0, 28.0));
+                        let stop_btn = egui::Button::new(
+                            egui::RichText::new("Stop").color(egui::Color32::WHITE),
+                        )
+                        .fill(theme.error)
+                        .corner_radius(8)
+                        .min_size(egui::vec2(60.0, 28.0));
                         if ui.add(stop_btn).clicked() {
                             self.stop_generation();
                         }
@@ -191,18 +264,22 @@ impl ChatApp {
         let _drop_zone = ui.allocate_space(egui::Vec2::new(ui.available_width(), 10.0));
     }
 
-    fn handle_send_input(&mut self, input: &str) {
+    /// Attempt to send `input` as a new user message: immediately when the
+    /// session is idle, or queued behind the running turn while generating.
+    /// Returns `true` when the message was accepted (so callers can clear
+    /// the input box), `false` when validation failed or nothing happened.
+    fn handle_send_input(&mut self, input: &str) -> bool {
         // Get the selected session
         let sid = match self.selected_session_id.clone() {
             Some(sid) => sid,
-            None => return,
+            None => return false,
         };
 
         if let Err(e) = self.validate_input(input) {
             if let Some(runtime) = self.session_store.get_mut(&sid) {
                 runtime.chat_state.pending_error = Some(e);
             }
-            return;
+            return false;
         }
 
         if let Some(runtime) = self.session_store.get(&sid) {
@@ -221,7 +298,7 @@ impl ChatApp {
                         role: "user".to_string(),
                         content: input.to_string(),
                         timestamp: crate::types::format_timestamp(),
-                        image: cs.chat_state.pending_image.as_ref().map(|_| String::new()),
+                        image: pending_image_b64(cs.chat_state.pending_image.as_ref()),
                     });
                     cs.chat_state.input_text.clear();
                     cs.chat_state.queued_messages.push(super::state::QueuedMessage {
@@ -237,6 +314,112 @@ impl ChatApp {
                 }
             } else {
                 self.send_message_to_session(&sid);
+            }
+        }
+        true
+    }
+
+    /// Paste an image from the system clipboard into the selected session's
+    /// pending-image slot. No-op when the clipboard holds no image (text is
+    /// pasted by egui itself; an empty clipboard simply does nothing).
+    fn paste_image_from_clipboard(&mut self) {
+        if self.selected_session_id.is_none() {
+            return;
+        }
+        if let Some(rgba) = clipboard_image_pixels() {
+            self.attach_rgba(rgba, "clipboard");
+        }
+    }
+
+    /// "Attach image" button: try the system clipboard first (the screenshot
+    /// flow), then fall back to a file picker for common image formats.
+    fn attach_image_from_clipboard_or_file(&mut self) {
+        if self.selected_session_id.is_none() {
+            return;
+        }
+        if let Some(rgba) = clipboard_image_pixels() {
+            if self.attach_rgba(rgba, "clipboard") {
+                return;
+            }
+        }
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
+            .pick_file()
+        {
+            match image_pixels_from_file(&path) {
+                Some(rgba) => {
+                    self.attach_rgba(rgba, "file");
+                }
+                None => self.notify_chat(
+                    &format!(
+                        "Could not read image file: {}",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                    false,
+                ),
+            }
+        }
+    }
+
+    /// Store RGBA8 pixels as the session's pending image (re-encoded as PNG).
+    /// Replaces any previously attached image (one image per message).
+    /// Returns true on success.
+    fn attach_rgba(&mut self, rgba: (u32, u32, Vec<u8>), source: &str) -> bool {
+        let sid = match self.selected_session_id.clone() {
+            Some(sid) => sid,
+            None => return false,
+        };
+        let (w, h, bytes) = rgba;
+        let expected = w.saturating_mul(h).saturating_mul(4) as usize;
+        if w == 0 || h == 0 || bytes.len() != expected {
+            tracing::warn!(
+                "[IMAGE] bad pixel data from {}: {}x{} ({} bytes, expected {})",
+                source,
+                w,
+                h,
+                bytes.len(),
+                expected
+            );
+            return false;
+        }
+        let png = match png_bytes_from_rgba(w, h, &bytes) {
+            Some(p) => p,
+            None => {
+                tracing::warn!("[IMAGE] PNG encoding failed for {} image", source);
+                return false;
+            }
+        };
+        let png_len = png.len();
+        if let Some(runtime) = self.session_store.get_mut(&sid) {
+            // URI unique per content: egui's bytes loader keeps the FIRST
+            // payload stored for a URI, so a fixed URI would show a stale
+            // image whenever a different one is attached (per-session
+            // pending images would also collide).
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hasher::write(&mut hasher, png.as_slice());
+            let hash = std::hash::Hasher::finish(&hasher);
+            runtime.chat_state.pending_image = Some(egui::ImageSource::Bytes {
+                uri: format!("bytes://attached_image_{hash:016x}.png").into(),
+                bytes: png.into(),
+            });
+        }
+        tracing::info!(
+            "[IMAGE] attached {}x{} image from {} ({} KB PNG)",
+            w,
+            h,
+            source,
+            png_len / 1024
+        );
+        true
+    }
+
+    /// Show a brief system notification in the selected session's chat area.
+    fn notify_chat(&mut self, msg: &str, success: bool) {
+        if let Some(sid) = self.selected_session_id.clone() {
+            if let Some(runtime) = self.session_store.get_mut(&sid) {
+                runtime.chat_state.show_notification(msg, success);
             }
         }
     }
@@ -388,6 +571,14 @@ impl ChatApp {
     fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: crate::client::pipeline::ChatToolPolicy, already_displayed: bool) {
         tracing::info!("[CHAT PATH] start_pipeline_for_session called with: {}", text);
 
+        // Convert the attached image (if any) into the two forms we need:
+        // raw base64 for the chat display (`ChatMessage.image`) and a `data:`
+        // URI for the model request (core serializes it into an OpenAI-style
+        // `image_url` content part on the user message).
+        let image_b64 = pending_image_b64(image.as_ref());
+        let image_data_uri =
+            image_b64.as_deref().map(|b64| format!("data:image/png;base64,{}", b64));
+
         if let Some(runtime) = self.session_store.get_mut(sid) {
             runtime.chat_state.is_generating = true;
             runtime.chat_state.pending_error = None;
@@ -402,7 +593,7 @@ impl ChatApp {
                     role: "user".to_string(),
                     content: text.to_string(),
                     timestamp: crate::types::format_timestamp(),
-                    image: image.map(|_| String::new()),
+                    image: image_b64.clone(),
                 });
             }
         }
@@ -441,8 +632,8 @@ impl ChatApp {
                 sid.to_string(),
             );
             runtime.pipeline = pipeline;
-            // Start the chat
-            runtime.pipeline.start(text, &agent_prompt, &tool_policy);
+            // Start the chat (with the attached image as a data: URI, if any)
+            runtime.pipeline.start(text, &agent_prompt, &tool_policy, image_data_uri.as_deref());
         }
     }
 
@@ -633,5 +824,55 @@ impl ChatApp {
         if let Err(e) = self.save_session() {
             tracing::warn!("Failed to save session after stop: {}", e);
         }
+    }
+}
+
+/// RGBA8 pixels (width, height, bytes) from the system clipboard, or `None`.
+///
+/// egui-winit can only paste TEXT from the clipboard: with an image-only
+/// clipboard it logs "arboard paste error" and emits no event at all for the
+/// key press, so image pastes are handled here instead. When the clipboard
+/// also holds text, egui's own text paste already ran, so we return `None`
+/// to avoid duplicating it.
+fn clipboard_image_pixels() -> Option<(u32, u32, Vec<u8>)> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    if clipboard.get_text().is_ok() {
+        return None;
+    }
+    let img = match clipboard.get_image() {
+        Ok(img) => img,
+        Err(e) => {
+            tracing::debug!("[IMAGE] clipboard has no image: {}", e);
+            return None;
+        }
+    };
+    if img.width == 0 || img.height == 0 || img.bytes.is_empty() {
+        return None;
+    }
+    Some((img.width as u32, img.height as u32, img.bytes.into_owned()))
+}
+
+/// Decode an image file (png/jpg/jpeg/webp/bmp/gif) into RGBA8 pixels.
+fn image_pixels_from_file(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
+    let img = image::open(path).ok()?.into_rgba8();
+    Some((img.width(), img.height(), img.into_raw()))
+}
+
+/// Encode RGBA8 pixels as PNG bytes.
+fn png_bytes_from_rgba(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())?;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+    Some(buf.into_inner())
+}
+
+/// Raw base64 (STANDARD) of a pending image's PNG bytes, for the chat display
+/// (`ChatMessage.image`). Only `Bytes`-based sources carry the payload.
+fn pending_image_b64(source: Option<&egui::ImageSource<'static>>) -> Option<String> {
+    match source? {
+        egui::ImageSource::Bytes { bytes, .. } => {
+            Some(base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()))
+        }
+        _ => None,
     }
 }

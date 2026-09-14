@@ -142,12 +142,19 @@ impl ChatAreaState {
                     });
                 }
             }
+            // The model layer stores the image as a `data:` URI; the chat
+            // display wants raw base64 (see `ChatMessage.image`).
+            let image = msg
+                .image
+                .as_ref()
+                .and_then(|uri| uri.rsplit_once("base64,"))
+                .map(|(_, b64)| b64.to_string());
             self.messages.push(crate::types::ChatMessage {
                 kind,
                 role: msg.role.clone(),
                 content: msg.content.clone(),
                 timestamp: ts,
-                image: None,
+                image,
             });
         }
         drop(conv);

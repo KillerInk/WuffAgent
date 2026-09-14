@@ -41,14 +41,24 @@ impl ChatApp {
         }
         let messages = self.display_snapshot.clone();
 
-        // Show pending error as inline warning (from the current session)
+        // Show pending error as a subtle red-tinted card (from the current session)
         if let Some(sid) = &self.selected_session_id {
             if let Some(runtime) = self.session_store.get(sid) {
                 if let Some(err) = &runtime.chat_state.pending_error {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(theme.error, format!("⚠ Error: {}", err));
-                    });
-                    ui.separator();
+                    egui::Frame::NONE
+                        .fill(theme.error.linear_multiply(0.12))
+                        .stroke(egui::Stroke::new(1.0, theme.error.linear_multiply(0.35)))
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.add(Self::breaking_label(
+                                format!("⚠  {}", err),
+                                egui::FontId::proportional(12.0),
+                                theme.error,
+                                false,
+                            ));
+                        });
+                    ui.add_space(10.0);
                 }
             }
         }
@@ -81,17 +91,39 @@ impl ChatApp {
                 }).unwrap_or(false)
             )
             .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    for (i, msg) in messages.iter().enumerate() {
-                        self.draw_message(ui, msg, i, &theme);
-                    }
-                    // Draw streaming line (values snapshotted before the scroll area).
-                    // Only while a response is actually in flight — otherwise the
-                    // empty-buffer branch would draw a stray "AI:" + spinner.
-                    if is_streaming {
-                        self.draw_streaming_line(ui, &theme, &streaming);
-                    }
+                // Centered content column with a max width so very wide
+                // windows don't stretch bubbles edge to edge.
+                ui.horizontal_centered(|ui| {
+                    ui.scope(|ui| {
+                        ui.set_max_width(880.0);
+                        ui.add_space(10.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                            if messages.is_empty() && !is_streaming {
+                                Self::draw_empty_state(ui, &theme);
+                                return;
+                            }
+                            let mut prev_day: Option<&str> = None;
+                            for (i, msg) in messages.iter().enumerate() {
+                                if let Some(day) = crate::types::timestamp_day(&msg.timestamp) {
+                                    if prev_day != Some(day) {
+                                        if prev_day.is_some() {
+                                            Self::draw_date_separator(ui, day, &theme);
+                                        }
+                                        prev_day = Some(day);
+                                    }
+                                }
+                                self.draw_message(ui, msg, i, &theme);
+                            }
+                            // Draw streaming line (values snapshotted before the scroll area).
+                            // Only while a response is actually in flight — otherwise the
+                            // empty-buffer branch would draw a stray "AI:" + spinner.
+                            if is_streaming {
+                                self.draw_streaming_line(ui, &theme, &streaming);
+                            }
+                        });
+                        ui.add_space(12.0);
+                    });
                 });
             });
 
@@ -129,6 +161,76 @@ impl ChatApp {
         }
     }
 
+    /// Placeholder shown for sessions without any messages yet.
+    fn draw_empty_state(ui: &mut egui::Ui, theme: &Theme) {
+        // Nudge down toward the vertical middle of the visible area.
+        let top_padding = (ui.available_height() - 160.0) * 0.35;
+        ui.add_space(top_padding.max(24.0));
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new("🐾").size(36.0));
+            ui.add_space(14.0);
+            ui.label(egui::RichText::new("Start a conversation")
+                .color(theme.text_primary)
+                .strong()
+                .size(16.0));
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Ask a question or give the agent a task.")
+                .color(theme.text_dim)
+                .size(12.0));
+        });
+    }
+
+    /// Centered divider ("Today" / "Yesterday" / date) between message groups
+    /// that cross a day boundary.
+    fn draw_date_separator(ui: &mut egui::Ui, day: &str, theme: &Theme) {
+        let label = Self::day_label(day);
+        ui.add_space(10.0);
+        let (row_rect, _resp) = ui
+            .allocate_exact_size(egui::vec2(ui.available_width().max(0.0), 16.0), egui::Sense::hover());
+        let font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
+        let galley = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme.text_dim));
+        let half_gap = galley.rect.width() / 2.0 + 12.0;
+        let line_y = row_rect.center().y;
+        let stroke = egui::Stroke::new(1.0, theme.divider);
+        ui.painter().hline(row_rect.left()..=(row_rect.center().x - half_gap), line_y, stroke);
+        ui.painter().hline((row_rect.center().x + half_gap)..=row_rect.right(), line_y, stroke);
+        ui.painter().text(row_rect.center(), egui::Align2::CENTER_CENTER, label, font, theme.text_dim);
+        ui.add_space(6.0);
+    }
+
+    /// Human label for a `YYYY-MM-DD` day string.
+    fn day_label(day: &str) -> String {
+        let now = chrono::Local::now();
+        let today = now.format("%Y-%m-%d").to_string();
+        let yesterday = (now - chrono::TimeDelta::days(1)).format("%Y-%m-%d").to_string();
+        if day == today {
+            "Today".to_string()
+        } else if day == yesterday {
+            "Yesterday".to_string()
+        } else {
+            chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+                .map(|d| d.format("%a, %b %e").to_string())
+                .unwrap_or_else(|_| day.to_string())
+        }
+    }
+
+    /// Rounded-square avatar with a letter label, allocated in row flow.
+    fn draw_avatar(&self, ui: &mut egui::Ui, theme: &Theme, is_user: bool, size: f32) {
+        let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(size, size));
+        let color = if is_user { theme.primary } else { theme.accent };
+        let label = if is_user { "U" } else { "AI" };
+        let font_size = if is_user { size * 0.42 } else { size * 0.34 };
+        ui.painter().rect(rect, 7.0, color, egui::Stroke::NONE, egui::StrokeKind::Middle);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::new(font_size, egui::FontFamily::Proportional),
+            egui::Color32::WHITE,
+        );
+        ui.allocate_space(egui::vec2(size, size));
+    }
+
     fn draw_scroll_to_bottom_button(&mut self, ui: &mut egui::Ui, theme: &Theme, button_opacity: f32) {
         let button_size = egui::vec2(36.0, 36.0);
         let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 16.0, 16.0);
@@ -137,16 +239,25 @@ impl ChatApp {
             ui.set_max_size(button_size);
             ui.set_min_size(button_size);
             // Apply opacity via semi-transparent fill color (premultiplied alpha)
-            let alpha = (button_opacity * 0.85 * 255.0) as u8;
+            let alpha = (button_opacity * 0.95 * 255.0) as u8;
             let fill_color = egui::Color32::from_rgba_premultiplied(
-                theme.primary.r(),
-                theme.primary.g(),
-                theme.primary.b(),
+                theme.surface_light.r(),
+                theme.surface_light.g(),
+                theme.surface_light.b(),
                 alpha
             );
-            let scroll_btn = egui::Button::new("↓")
-                .fill(fill_color)
-                .corner_radius(18);
+            let border_color = egui::Color32::from_rgba_premultiplied(
+                theme.border.r(),
+                theme.border.g(),
+                theme.border.b(),
+                alpha
+            );
+            let scroll_btn = egui::Button::new(
+                egui::RichText::new("↓").color(theme.text_primary).size(15.0),
+            )
+            .fill(fill_color)
+            .stroke(egui::Stroke::new(1.0, border_color))
+            .corner_radius(18);
             if ui.add(scroll_btn).clicked() {
                 // Trigger auto-scroll on next frame
                 if let Some(sid) = &self.selected_session_id {
@@ -158,75 +269,91 @@ impl ChatApp {
         });
     }
 
-    /// Live streaming line shown while a response is in flight.
-    /// Text renders as it arrives via StreamChunk events (no extra buffering).
+    /// Live streaming row shown while a response is in flight.
+    /// Mirrors the committed message layout (avatar + AI bubble) so the text
+    /// doesn't jump when the message is committed.
     fn draw_streaming_line(&mut self, ui: &mut egui::Ui, theme: &Theme, streaming: &(String, String)) {
         let (current_thinking, stream_buffer) = streaming;
-        let streaming_ts = chrono::Local::now().format("%H:%M:%S").to_string();
-        ui.add_space(10.0);
-        if !current_thinking.is_empty() {
-            // Header row; the thinking text wraps on its own line below.
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(egui::RichText::new(&streaming_ts)
-                    .color(theme.text_dim)
-                    .size(11.0));
-                ui.colored_label(theme.text_dim, "Thinking:");
-                ui.spinner();
-            });
-            ui.add(egui::Label::new(
-                egui::RichText::new(current_thinking)
-                    .color(theme.text_dim)
-                    .italics()
-                    .size(12.0)
-            ).wrap());
-        }
-        if !stream_buffer.is_empty() {
-            // Render the streamed text exactly like a completed AI message
-            // (width-constrained bubble + wrapping label), so line breaks
-            // match what the message looks like once it is committed.
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(egui::RichText::new(&streaming_ts)
-                    .color(theme.text_dim)
-                    .size(11.0));
-                ui.colored_label(theme.primary, "AI:");
-                ui.spinner();
-            });
-            // Bubble row: reserve the avatar column exactly like `draw_message`
-            // so the bubble's width and right edge match the committed messages.
-            let avatar_size = 28.0;
-            let avatar_margin = 16.0;
-            let max_content_width = (ui.available_width() - avatar_size - avatar_margin * 2.0).max(120.0);
-            ui.horizontal(|ui| {
-                ui.add_space(avatar_size);
-                ui.add_space(8.0); // gap between avatar and bubble
-                ui.scope(|ui| {
-                    ui.set_max_width(max_content_width);
-                    ui.vertical(|ui| {
-                        let bubble_frame = egui::Frame::NONE
-                            .fill(theme.surface_light)
-                            .corner_radius(8)
-                            .inner_margin(6);
-                        bubble_frame.show(ui, |ui| {
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(stream_buffer)
-                                    .color(theme.text_primary)
-                            ).wrap());
-                        });
-                    });
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            self.draw_avatar(ui, theme, false, 28.0);
+            ui.add_space(8.0);
+            ui.scope(|ui| {
+                ui.vertical(|ui| {
+                    // Thinking: dim italic text in a quiet framed card.
+                    if !current_thinking.is_empty() {
+                        egui::Frame::NONE
+                            .fill(theme.surface)
+                            .stroke(egui::Stroke::new(1.0, theme.bubble_border))
+                            .corner_radius(10)
+                            .inner_margin(egui::Margin::same(8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.label(egui::RichText::new("Thinking…")
+                                        .color(theme.text_dim)
+                                        .italics()
+                                        .size(11.0));
+                                    ui.spinner();
+                                });
+                                ui.add_space(4.0);
+                                ui.add(Self::breaking_label(
+                                    current_thinking,
+                                    egui::FontId::proportional(12.0),
+                                    theme.text_dim,
+                                    true,
+                                ));
+                            });
+                        ui.add_space(8.0);
+                    }
+                    if !stream_buffer.is_empty() {
+                        // Same bubble as a committed AI message.
+                        egui::Frame::NONE
+                            .fill(theme.ai_bg)
+                            .stroke(egui::Stroke::new(1.0, theme.bubble_border))
+                            .corner_radius(12)
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.add(Self::breaking_label(
+                                    stream_buffer,
+                                    egui::FontId::proportional(13.5),
+                                    theme.text_primary,
+                                    false,
+                                ));
+                            });
+                    } else if current_thinking.is_empty() {
+                        // Nothing yet: pulsing typing dots in an empty bubble.
+                        egui::Frame::NONE
+                            .fill(theme.ai_bg)
+                            .stroke(egui::Stroke::new(1.0, theme.bubble_border))
+                            .corner_radius(12)
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| {
+                                let t = ui.ctx().input(|i| i.time) as f32;
+                                let base = ui.cursor().min;
+                                let dot = 5.0;
+                                let gap = 4.0;
+                                for k in 0..3 {
+                                    let pulse = 0.5 + 0.5 * (t * 2.5 + k as f32 * 0.45).sin();
+                                    let alpha = ((0.25 + 0.6 * pulse) * 255.0) as u8;
+                                    let color = egui::Color32::from_rgba_premultiplied(
+                                        theme.primary.r(),
+                                        theme.primary.g(),
+                                        theme.primary.b(),
+                                        alpha,
+                                    );
+                                    ui.painter().circle_filled(
+                                        base + egui::vec2(k as f32 * (dot + gap) + dot / 2.0, dot / 2.0),
+                                        dot / 2.0,
+                                        color,
+                                    );
+                                }
+                                ui.allocate_space(egui::vec2(3.0 * dot + 2.0 * gap, dot));
+                            });
+                    }
                 });
             });
-        } else if current_thinking.is_empty() {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(egui::RichText::new(&streaming_ts)
-                    .color(theme.text_dim)
-                    .size(11.0));
-                ui.colored_label(theme.primary, "AI:");
-                ui.spinner();
-            });
-        }
+        });
     }
 
     /// Check if the scroll area is at the bottom using ScrollAreaOutput after render.
@@ -244,7 +371,28 @@ impl ChatApp {
         current_offset >= max_offset - Self::SCROLL_BOTTOM_THRESHOLD
     }
 
-    /// Strip <think>...</think> wrapper from thinking content for display.
+    /// Wrapping label that also splits long unbreakable words (URLs, long
+    /// paths, tokens). egui's default word-wrap prefers word boundaries and
+    /// will overflow the bubble when a single word is wider than the line,
+    /// so we enable `break_anywhere` on the layout job.
+    fn breaking_label(
+        text: impl AsRef<str>,
+        font_id: egui::FontId,
+        color: egui::Color32,
+        italics: bool,
+    ) -> egui::Label {
+        let mut job = egui::epaint::text::LayoutJob::default();
+        let mut tf = egui::epaint::text::TextFormat::default();
+        tf.font_id = font_id;
+        tf.color = color;
+        tf.italics = italics;
+        job.append(text.as_ref(), 0.0, tf);
+        job.wrap.break_anywhere = true;
+        egui::Label::new(job).wrap()
+    }
+
+
+    /// Strip <think</think>... tags wrapper from thinking content for display.
     fn strip_thinking_tags(content: &str) -> String {
         let t = content.trim();
         let t = t.strip_prefix("<think>").unwrap_or(t);
@@ -263,56 +411,42 @@ impl ChatApp {
             self.session_store.get(sid).map(|r| r.chat_state.editing_message_index == Some(index)).unwrap_or(false)
         }).unwrap_or(false);
 
-        // Constrain content width (leaves room for avatar + margins)
-        let avatar_size = 28.0;
-        let avatar_margin = 16.0; // space from edges + gap to content
-        let max_content_width = (ui.available_width() - avatar_size - avatar_margin * 2.0).max(120.0);
 
-        // Message bubble backgrounds with good contrast
-        let user_bubble_bg = egui::Color32::from_rgb(37, 99, 235); // dark blue for white text
         let bubble_bg = if is_user {
-            user_bubble_bg
+            theme.user_bg
         } else if message.kind == MessageKind::Tool {
             theme.tool_bg
         } else {
-            theme.surface_light
+            theme.ai_bg
         };
-        
-        // Add spacing between messages
-        ui.add_space(10.0);
-        
-        // Single horizontal layout: avatar | content
-        ui.horizontal(|ui| {
-            // Draw avatar
-            let avatar_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(avatar_size, avatar_size));
-            let avatar_color = if is_user { theme.primary } else { theme.accent };
-            let avatar_label = if is_user { "U" } else { "AI" };
-            let avatar_font = if is_user { 10.0 } else { 9.0 };
-            
-            ui.painter().circle(
-                avatar_rect.center(),
-                avatar_size / 2.0,
-                avatar_color,
-                egui::Stroke::NONE,
-            );
-            ui.painter().text(
-                avatar_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                avatar_label,
-                egui::FontId::new(avatar_font, egui::FontFamily::Monospace),
-                egui::Color32::WHITE,
-            );
-            
-            // Reserve space for avatar so content doesn't overlap
-            ui.allocate_space(egui::vec2(avatar_size, avatar_size));
+        let text_color = if is_user { egui::Color32::WHITE } else { theme.text_primary };
+
+        // Gap between messages.
+        ui.add_space(14.0);
+
+        // Row flows right-to-left for user messages so the whole
+        // avatar + bubble group sits at the right edge.
+        let row_layout = if is_user {
+            egui::Layout::right_to_left(egui::Align::TOP)
+        } else {
+            egui::Layout::left_to_right(egui::Align::TOP)
+        };
+
+        ui.with_layout(row_layout, |ui| {
+            self.draw_avatar(ui, theme, is_user, 28.0);
             ui.add_space(8.0); // gap between avatar and bubble
-            
-            // Content column (bubble + timestamp)
+
+            // Content column (bubble + hover metadata)
             ui.scope(|ui| {
-                ui.set_max_width(max_content_width);
-                
+                // Bubbles span the full chat width, docked edge-to-edge like
+                // the input field (user bubbles still sit at the right edge
+                // because the row flows right-to-left).
                 // Handle right-click context menu for edit/delete
-                let response = ui.interact(ui.max_rect(), ui.id().with(index), egui::Sense::click());
+                let response = ui.interact(
+                    ui.max_rect(),
+                    ui.id().with("msg_ctx").with(index),
+                    egui::Sense::click(),
+                );
                 if !is_editing && response.secondary_clicked() {
                     response.context_menu(|menu_ui| {
                         menu_ui.set_min_width(120.0);
@@ -331,52 +465,43 @@ impl ChatApp {
                 }
                 
                 ui.vertical(|ui| {
-                    // Message bubble
-                    ui.scope(|ui| {
-                        ui.visuals_mut().widgets.noninteractive.bg_fill = bubble_bg;
-                        ui.style_mut().visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(8);
-                        ui.style_mut().visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                        
-                        // Use a frame-like container for the bubble
-                        let _bubble_inner_padding = egui::vec2(8.0, 6.0);
-                        let bubble_frame = egui::Frame::NONE
-                            .fill(bubble_bg)
-                            .corner_radius(8)
-                            .inner_margin(6);
-                        
-                        bubble_frame.show(ui, |ui| {
+                    let inner = egui::Frame::NONE
+                        .fill(bubble_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.bubble_border))
+                        .corner_radius(12)
+                        .inner_margin(egui::Margin::same(10))
+                        .show(ui, |ui| {
                             if is_editing {
                                 if let Some(sid) = &self.selected_session_id {
                                     if let Some(runtime) = self.session_store.get_mut(sid) {
-                                        ui.text_edit_multiline(&mut runtime.chat_state.editing_message_content);
+                                        ui.add_sized(
+                                            egui::vec2(ui.available_width().max(160.0), 80.0),
+                                            egui::TextEdit::multiline(&mut runtime.chat_state.editing_message_content),
+                                        );
                                     }
                                 }
                             } else {
                                 // Display image if present
                                 if let Some(ref img_data) = message.image {
                                     if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, img_data) {
-                                        let img = egui::Image::from_bytes("image", decoded);
+                                        // Per-message id so multiple images don't
+                                        // share one texture slot.
+                                        let img = egui::Image::from_bytes(format!("chat_image_{}", index), decoded);
                                         let max_img_width = (ui.available_width() - 10.0).max(50.0);
                                         ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
                                     }
                                 }
                                 // Branch on message kind — no string-prefix sniffing
-                                let text_color = if is_user {
-                                    egui::Color32::WHITE
-                                } else {
-                                    theme.text_primary
-                                };
                                 if message.kind == MessageKind::Tool {
                                     self.draw_tool_message(ui, message, theme, index);
                                 } else if message.kind == MessageKind::Thinking {
                                     // Thinking message — render dim and italic
-                                    ui.add(egui::Label::new(
-                                        egui::RichText::new(&message.content)
-                                            .color(theme.text_dim)
-                                            .italics()
-                                            .size(12.0)
-                                    ).wrap());
+                                    ui.add(Self::breaking_label(
+                                        &message.content,
+                                        egui::FontId::proportional(12.5),
+                                        theme.text_dim,
+                                        true,
+                                    ));
                                 } else {
                                     // Normal message — strip any legacy <think> tags
                                     let display_content = if message.content.contains("<think>") || message.content.contains("</think>") {
@@ -384,35 +509,48 @@ impl ChatApp {
                                     } else {
                                         message.content.clone()
                                     };
-                                    let content_label = egui::Label::new(
-                                        egui::RichText::new(display_content)
-                                            .color(text_color)
-                                    ).wrap();
-                                    ui.add(content_label);
-                                    // Copy button for non-tool messages
-                                    ui.add_space(4.0);
-                                    let copy_btn = egui::Button::new("📋 Copy")
-                                        .corner_radius(4)
-                                        .sense(egui::Sense::click());
-                                    if ui.add(copy_btn).clicked() {
-                                        ui.ctx().copy_text(message.content.clone());
-                                    }
+                                    ui.add(Self::breaking_label(
+                                        display_content,
+                                        egui::FontId::proportional(13.5),
+                                        text_color,
+                                        false,
+                                    ));
                                 }
                             }
                         });
-                    });
-                    
-                    // Timestamp aligned under bubble content, not under avatar
-                    ui.add_space(3.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&message.timestamp)
-                            .color(theme.text_dim)
-                            .size(9.0));
-                    });
+
+                        // Timestamp — always visible, part of the layout flow.
+                        let ts = crate::types::timestamp_time(&message.timestamp);
+                        if !ts.is_empty() {
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(ts).color(theme.text_dim).size(9.5),
+                            ));
+                        }
+
+                        // Hover reveal: copy button in the top-right corner.
+                        // Placed (not laid out) so it never shifts the message flow.
+                        if inner.response.hovered() && !is_editing {
+                            let btn_size = egui::vec2(16.0, 16.0);
+                        let btn_rect = egui::Rect::from_min_size(
+                            inner.response.rect.right_top() - egui::vec2(btn_size.x + 3.0, 3.0),
+                            btn_size,
+                        );
+                        let copy_resp = ui.put(
+                            btn_rect,
+                            egui::Button::new(
+                                egui::RichText::new("⧉").color(theme.text_dim).size(11.0),
+                            )
+                            .fill(theme.hover_bg)
+                            .corner_radius(4),
+                        );
+                        if copy_resp.clicked() {
+                            ui.ctx().copy_text(message.content.clone());
+                        }
+                    }
                 });
             });
         });
-        
+
         // Handle keyboard shortcuts when editing
         if is_editing {
             ui.ctx().input(|i| {
@@ -486,14 +624,17 @@ impl ChatApp {
         if parts.len() >= 2 {
             // Render header + call id
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(egui::RichText::new(parts[0])
                     .color(theme.text_primary)
-                    .size(11.0));
+                    .strong()
+                    .size(11.5));
                 ui.label(egui::RichText::new(parts[1])
                     .color(theme.text_dim)
-                    .size(9.0));
+                    .size(9.0)
+                    .monospace());
             });
-            ui.add_space(3.0);
+            ui.add_space(4.0);
         }
         let raw_result = if parts.len() > 2 { parts[2] } else { message.content.as_str() };
 
@@ -521,11 +662,7 @@ impl ChatApp {
                 if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
                     let max_entries = 50;
                     let display_entries: Vec<&serde_json::Value> = entries.iter().take(max_entries).collect();
-                    egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(10, 10, 10))
-                        .corner_radius(4)
-                        .inner_margin(6)
-                        .show(ui, |ui| {
+                    Self::code_block(ui, theme, |ui| {
                             for entry in display_entries {
                                 // New list_dir returns {name, type, size} objects;
                                 // older sessions stored plain strings.
@@ -539,9 +676,12 @@ impl ChatApp {
                                         .unwrap_or_default();
                                     format!("{}  [{}{}]", name, typ, size)
                                 };
-                                ui.add(egui::Label::new(egui::RichText::new(line)
-                                    .color(egui::Color32::from_rgb(180, 180, 180))
-                                    .monospace()).wrap());
+                                ui.add(Self::breaking_label(
+                                    line,
+                                    egui::FontId::monospace(13.0),
+                                    theme.code_text,
+                                    false,
+                                ));
                             }
                             if entries.len() > max_entries {
                                 ui.label(egui::RichText::new(format!("... and {} more entries", entries.len() - max_entries))
@@ -577,22 +717,18 @@ impl ChatApp {
                         }
                     }
                     if is_expanded {
-                        egui::Frame::NONE
-                            .fill(egui::Color32::from_rgb(10, 10, 10))
-                            .corner_radius(4)
-                            .inner_margin(6)
-                            .show(ui, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .max_height(300.0)
-                                    .show(ui, |ui| {
-                                    // Long unbroken code lines would otherwise
-                                    // overflow the block (word-wrap can't split them).
-                                    let content_text = Self::hard_wrap_to_width(ui, content);
-                                    ui.add(egui::Label::new(egui::RichText::new(content_text)
-                                        .color(egui::Color32::from_rgb(200, 200, 200))
-                                        .monospace()).wrap());
-                                });
+                        Self::code_block(ui, theme, |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                ui.add(Self::breaking_label(
+                                    content,
+                                    egui::FontId::monospace(13.0),
+                                    theme.code_text,
+                                    false,
+                                ));
                             });
+                        });
                     }
                 }
             } else if is_file_write {
@@ -622,10 +758,12 @@ impl ChatApp {
                     // The expression wraps at the block width; the result goes
                     // on its own line so a long expression cannot push it past
                     // the right edge.
-                    let expr_text = Self::hard_wrap_to_width(ui, expr);
-                    ui.add(egui::Label::new(egui::RichText::new(expr_text)
-                        .color(theme.text_secondary)
-                        .monospace()).wrap());
+                    ui.add(Self::breaking_label(
+                        expr,
+                        egui::FontId::monospace(13.0),
+                        theme.text_secondary,
+                        false,
+                    ));
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("= ").color(theme.text_dim));
                         ui.colored_label(theme.success, format!("{}", result));
@@ -641,53 +779,48 @@ impl ChatApp {
                 self.draw_tool_plain_result(ui, raw, theme);
             }
         }
-
-        // Copy button at the bottom
-        ui.add_space(4.0);
-        let copy_btn = egui::Button::new("📋 Copy")
-            .corner_radius(4)
-            .sense(egui::Sense::click());
-        if ui.add(copy_btn).clicked() {
-            ui.ctx().copy_text(raw.to_string());
-        }
     }
 
     /// Render JSON as a key-value list.
     fn draw_tool_json_kv(&self, ui: &mut egui::Ui, json: &serde_json::Value, theme: &Theme) {
-        egui::Frame::NONE
-            .fill(egui::Color32::from_rgb(10, 10, 10))
-            .corner_radius(4)
-            .inner_margin(6)
-            .show(ui, |ui| {
+        Self::code_block(ui, theme, |ui| {
                 match json {
                     serde_json::Value::Object(map) => {
                         for (key, value) in map {
                             ui.horizontal(|ui| {
-                                ui.add(egui::Label::new(egui::RichText::new(format!("{}:", key))
-                                    .color(theme.text_secondary)
-                                    .monospace()
-                                    .size(11.0)).wrap());
+                                ui.add(Self::breaking_label(
+                                    format!("{}:", key),
+                                    egui::FontId::monospace(11.0),
+                                    theme.text_secondary,
+                                    false,
+                                ));
                                 let val_str = Self::json_value_to_string(value);
-                                ui.add(egui::Label::new(egui::RichText::new(val_str)
-                                    .color(egui::Color32::from_rgb(200, 200, 200))
-                                    .monospace()
-                                    .size(11.0)).wrap());
+                                ui.add(Self::breaking_label(
+                                    val_str,
+                                    egui::FontId::monospace(11.0),
+                                    theme.code_text,
+                                    false,
+                                ));
                             });
                         }
                     }
                     serde_json::Value::Array(arr) => {
                         for item in arr {
-                            ui.add(egui::Label::new(egui::RichText::new(Self::json_value_to_string(item))
-                                .color(egui::Color32::from_rgb(200, 200, 200))
-                                .monospace()
-                                .size(11.0)).wrap());
+                            ui.add(Self::breaking_label(
+                                Self::json_value_to_string(item),
+                                egui::FontId::monospace(11.0),
+                                theme.code_text,
+                                false,
+                            ));
                         }
                     }
                     other => {
-                        ui.add(egui::Label::new(egui::RichText::new(Self::json_value_to_string(other))
-                            .color(egui::Color32::from_rgb(200, 200, 200))
-                            .monospace()
-                            .size(11.0)).wrap());
+                        ui.add(Self::breaking_label(
+                            Self::json_value_to_string(other),
+                            egui::FontId::monospace(11.0),
+                            theme.code_text,
+                            false,
+                        ));
                     }
                 }
             });
@@ -713,50 +846,50 @@ impl ChatApp {
         }
     }
 
-    /// Draw a clickable file path badge.
+    /// Draw a clickable file path chip.
     fn draw_tool_path_badge(&self, ui: &mut egui::Ui, path: &str, theme: &Theme) {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("📄").size(11.0));
-            // Elide the displayed path when it cannot fit (buttons can't
-            // wrap); the click handler still uses the full path.
-            let font_id = egui::FontId::new(10.0, egui::FontFamily::Monospace);
-            let per_char = Self::char_width(ui, &font_id);
-            // Reserve room for the icon, item spacing and button padding.
-            let budget = (ui.available_width() - 32.0).max(40.0);
-            let max_chars = ((budget * 0.98) / per_char).floor() as usize;
-            let path_chars: Vec<char> = path.chars().collect();
-            let display = if path_chars.len() > max_chars && max_chars >= 2 {
-                let mut s = String::with_capacity(max_chars);
-                s.push('…');
-                s.extend(path_chars.iter().skip(path_chars.len() - (max_chars - 1)));
-                s
-            } else {
-                path.to_string()
-            };
-            // Path as a clickable button
-            let path_btn = egui::Button::new(egui::RichText::new(display)
-                .color(theme.accent)
-                .size(10.0)
-                .monospace());
-            if ui.add(path_btn).clicked() {
-                // Open parent directory in explorer
-                if let Some(parent) = std::path::Path::new(path).parent() {
-                    let parent_str = parent.to_string_lossy().to_string();
-                    #[cfg(windows)]
-                    {
-                        let _ = std::process::Command::new("explorer")
-                            .args(["/select,", &parent_str])
-                            .spawn();
-                    }
-                    #[cfg(unix)]
-                    {
-                        let _ = std::process::Command::new("xdg-open")
-                            .arg(parent_str)
-                            .spawn();
-                    }
+        // Elide the displayed path when it cannot fit (buttons can't
+        // wrap); the click handler still uses the full path.
+        let font_id = egui::FontId::new(10.0, egui::FontFamily::Monospace);
+        let per_char = Self::char_width(ui, &font_id);
+        // Reserve room for chip padding.
+        let budget = (ui.available_width() - 28.0).max(40.0);
+        let max_chars = ((budget * 0.96) / per_char).floor() as usize;
+        let path_chars: Vec<char> = path.chars().collect();
+        let display = if path_chars.len() > max_chars && max_chars >= 2 {
+            let mut s = String::with_capacity(max_chars);
+            s.push('…');
+            s.extend(path_chars.iter().skip(path_chars.len() - (max_chars - 1)));
+            s
+        } else {
+            path.to_string()
+        };
+        // Path as a clickable chip
+        let path_btn = egui::Button::new(egui::RichText::new(display)
+            .color(theme.badge_text)
+            .size(10.0)
+            .monospace())
+            .fill(theme.badge_bg)
+            .corner_radius(5)
+            .min_size(egui::vec2(0.0, 18.0));
+        if ui.add(path_btn).clicked() {
+            // Open parent directory in explorer
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                let parent_str = parent.to_string_lossy().to_string();
+                #[cfg(windows)]
+                {
+                    let _ = std::process::Command::new("explorer")
+                        .args(["/select,", &parent_str])
+                        .spawn();
+                }
+                #[cfg(unix)]
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(parent_str)
+                        .spawn();
                 }
             }
-        });
+        }
     }
 
     /// Pixel width of a single glyph in the given font.
@@ -771,59 +904,27 @@ impl ChatApp {
         (width / SAMPLE.len() as f32).max(1.0)
     }
 
-    /// Split every line longer than `cols` characters into chunks of at most
-    /// `cols`. Existing line breaks are preserved (unlike re-chunking the
-    /// whole string, which destroys them).
-    fn hard_wrap(text: &str, cols: usize) -> String {
-        let mut lines: Vec<String> = Vec::new();
-        for line in text.split('\n') {
-            let chars: Vec<char> = line.chars().collect();
-            for chunk in chars.chunks(cols) {
-                lines.push(chunk.iter().collect());
-            }
-        }
-        lines.join("\n")
-    }
-
-    /// Return `text` hard-wrapped so no line can overflow the current
-    /// available width when rendered in the default monospace font.
-    /// Short texts are returned unchanged (no re-allocation of the layout).
-    fn hard_wrap_to_width(ui: &egui::Ui, text: &str) -> String {
-        let max_width = ui.available_width();
-        if max_width <= 0.0 {
-            return text.to_string();
-        }
-        let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-        // 2% safety margin so the galley never exceeds the block width.
-        let cols = ((max_width * 0.98) / Self::char_width(ui, &font_id)).floor() as usize;
-        if cols < 8 || !text.split('\n').any(|l| l.chars().count() > cols) {
-            return text.to_string();
-        }
-        Self::hard_wrap(text, cols)
-    }
 
     /// Render a plain (non-JSON) tool result as a monospace code block.
-    fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, _theme: &Theme) {
+    fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, theme: &Theme) {
+        Self::code_block(ui, theme, |ui| {
+            ui.add(Self::breaking_label(
+                text,
+                egui::FontId::monospace(13.0),
+                theme.code_text,
+                false,
+            ));
+        });
+    }
+
+    /// Themed code block: theme background, 1px border, uniform padding.
+    fn code_block(ui: &mut egui::Ui, theme: &Theme, add_contents: impl FnOnce(&mut egui::Ui)) {
         egui::Frame::NONE
-            .fill(egui::Color32::from_rgb(10, 10, 10))
-            .corner_radius(4)
-            .inner_margin(6)
-            .show(ui, |ui| {
-                // Hard-wrap lines that exceed the measured width (keeps the
-                // original line structure); the wrapping label then does
-                // exact word wrapping as a safety net.
-                let wrapped_text = Self::hard_wrap_to_width(ui, text);
-                ui.add(egui::Label::new(egui::RichText::new(wrapped_text)
-                    .color(egui::Color32::from_rgb(200, 200, 200))
-                    .monospace()).wrap());
-            });
-        ui.add_space(4.0);
-        let copy_btn = egui::Button::new("📋 Copy")
-            .corner_radius(4)
-            .sense(egui::Sense::click());
-        if ui.add(copy_btn).clicked() {
-            ui.ctx().copy_text(text.to_string());
-        }
+            .fill(theme.code_bg)
+            .stroke(egui::Stroke::new(1.0, theme.code_border))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, add_contents);
     }
 
     pub(super) fn delete_message(&mut self, index: usize) {

@@ -207,9 +207,16 @@ impl Agent {
     }
 
     /// Execute a request with this agent.
+    ///
+    /// `image` is an optional `data:` URI (e.g. `data:image/png;base64,...`)
+    /// for an image attached by the user. It is stored on the user message in
+    /// the conversation store, which makes it part of every subsequent LLM
+    /// request (serialized as an OpenAI-style `image_url` content part) and
+    /// persisted with the session.
     pub async fn execute(
         &mut self,
         request: &str,
+        image: Option<&str>,
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {
         if cancel_token.is_cancelled() {
@@ -229,7 +236,7 @@ impl Agent {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
-                image: None,
+                image: image.map(str::to_string),
             });
         }
 

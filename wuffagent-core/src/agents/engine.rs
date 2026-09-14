@@ -94,11 +94,16 @@ impl AgentEngine {
     /// custom system prompt (instead of an agent's own system prompt).
     /// This is the chat path — same native tool-calling loop as /plan but with
     /// the prompt provided by the selected agent profile in the UI.
+    ///
+    /// `image` is an optional `data:` URI for a user-attached image (see
+    /// [`Agent::execute`]); it is recorded on the user message so the model
+    /// sees it on this turn and in later turns of the conversation.
     pub async fn execute_with_tools(
         &self,
         request: &str,
         system_prompt: &str,
         tool_policy: &crate::client::pipeline::ChatToolPolicy,
+        image: Option<&str>,
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {
         if cancel_token.is_cancelled() {
@@ -132,7 +137,7 @@ impl AgentEngine {
             self.agent_session_id.clone(),
         );
 
-        let result = agent.execute(request, cancel_token).await;
+        let result = agent.execute(request, image, cancel_token).await;
 
         // Post-task: throttled LLM memory maintenance + optional self-improvement
         // suggestions. Both are opt-in via MemoryConfig and never fail the task.

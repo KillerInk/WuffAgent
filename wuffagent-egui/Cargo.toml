@@ -18,3 +18,7 @@ dirs = "5.0"
 rfd = "0.14"
 reqwest = { version = "0.12", features = ["stream"] }
 base64 = "0.22"
+# Clipboard image access (Ctrl/Cmd+V paste) — the same crate egui-winit uses.
+arboard = "3.6"
+# Decoding picked image files + re-encoding clipboard pixels as PNG.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }

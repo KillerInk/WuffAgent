@@ -276,8 +276,33 @@ pub enum AppEvent {
 }
 
 /// Format the current time as a human-readable timestamp string.
+///
+/// Includes the local date (`YYYY-MM-DD HH:MM:SS`) so the UI can draw day
+/// separators. Display-only field — never parsed by the model layer. Legacy
+/// sessions stored the older 8-char `HH:MM:SS` form; see `timestamp_day` /
+/// `timestamp_time` for tolerant parsing.
 pub fn format_timestamp() -> String {
-    chrono::Local::now().format("%H:%M:%S").to_string()
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// The `YYYY-MM-DD` day part of a display timestamp, if it has one.
+/// Returns `None` for legacy time-only timestamps (no separator is drawn).
+pub fn timestamp_day(ts: &str) -> Option<&str> {
+    if ts.len() >= 11 && ts.as_bytes()[4] == b'-' {
+        Some(&ts[..10])
+    } else {
+        None
+    }
+}
+
+/// The time part of a display timestamp for rendering, or the whole string
+/// for legacy time-only timestamps.
+pub fn timestamp_time(ts: &str) -> &str {
+    if ts.len() >= 19 && ts.as_bytes()[10] == b' ' {
+        &ts[11..]
+    } else {
+        ts
+    }
 }
 
 /// Format a tool call header for display.
@@ -390,6 +415,22 @@ mod tests {
         let m: Message = serde_json::from_str(json).unwrap();
         assert_eq!(m.content, "first\nsecond");
         assert_eq!(m.image.as_deref(), Some("data:image/png;base64,QQ"));
+    }
+
+    /// Timestamp helpers: new format carries a day; legacy time-only does not.
+    #[test]
+    fn timestamp_helpers_parse_new_and_legacy() {
+        let new = format_timestamp();
+        assert_eq!(new.len(), 19, "new format is 'YYYY-MM-DD HH:MM:SS'");
+        assert_eq!(timestamp_day(&new).map(str::len), Some(10));
+        assert_eq!(timestamp_time(&new).len(), 8);
+
+        let legacy = "12:00:00";
+        assert_eq!(timestamp_day(legacy), None);
+        assert_eq!(timestamp_time(legacy), legacy);
+
+        assert_eq!(timestamp_day(""), None);
+        assert_eq!(timestamp_time(""), "");
     }
 
     /// Tool-call fields still round-trip alongside the new layout.

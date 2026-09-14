@@ -28,6 +28,31 @@ pub struct NewAgentProposal {
     pub allowed_tools: Vec<String>,
 }
 
+/// Gather relevant lesson memories for an improvement check.
+///
+/// Lessons live in the global memory store and are NOT tagged with the agent
+/// name (memory tools save with source "agent"), so searching by agent name
+/// alone almost never matches. Instead, relevance to the current task is the
+/// primary signal: search by agent name + task text, and fall back to the
+/// most recent lessons when the keyword search finds nothing.
+fn collect_lessons(manager: &MemoryManager, agent_name: &str, task: &str) -> Vec<String> {
+    let from_search = manager.search(&format!("{} {}", agent_name, task));
+    let mut lessons: Vec<String> = from_search
+        .iter()
+        .filter(|m| matches!(m.r#type, crate::memory::MemoryType::Lesson))
+        .map(|m| m.content.clone())
+        .collect();
+    if lessons.is_empty() {
+        lessons = manager
+            .get_recent(10)
+            .iter()
+            .filter(|m| matches!(m.r#type, crate::memory::MemoryType::Lesson))
+            .map(|m| m.content.clone())
+            .collect();
+    }
+    lessons
+}
+
 /// Suggest improvements for an agent based on its memory and recent task result.
 ///
 /// Returns a list of suggestions. Empty list means no improvements needed.
@@ -43,12 +68,7 @@ pub async fn suggest_improvements(
     }
 
     // Gather relevant lesson memories for this agent
-    let relevant = manager.search(&agent_config.name);
-    let lessons: Vec<String> = relevant
-        .iter()
-        .filter(|m| matches!(m.r#type, crate::memory::MemoryType::Lesson))
-        .map(|m| format!("[{}] {}", m.r#type, m.content))
-        .collect();
+    let lessons = collect_lessons(manager, &agent_config.name, task);
 
     if lessons.len() < manager.config().improvement_trigger_lessons {
         tracing::debug!(
@@ -148,6 +168,19 @@ pub async fn suggest_improvements(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::{MemoryConfig, MemoryEntry, MemoryType};
+    use tempfile::tempdir;
+
+    /// Manager with an isolated temp memories dir (default would hit
+    /// ~/.wuffagent/memories and leak real entries into the tests).
+    fn fresh_manager() -> (MemoryManager, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let config = MemoryConfig {
+            memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        (MemoryManager::new(config).unwrap(), dir)
+    }
 
     #[test]
     fn test_suggestion_serialization() {
@@ -175,5 +208,55 @@ mod tests {
         let parsed: NewAgentProposal = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, "researcher");
         assert_eq!(parsed.allowed_tools, vec!["web_search"]);
+    }
+
+    #[test]
+    fn test_collect_lessons_prefers_task_relevant_search() {
+        let (manager, _dir) = fresh_manager();
+        manager
+            .add(MemoryEntry::new(
+                MemoryType::Lesson,
+                "Use cargo check before running tests in the rust workspace",
+                "agent",
+                &[],
+            ))
+            .unwrap();
+        manager
+            .add(MemoryEntry::new(
+                MemoryType::Fact,
+                "An unrelated fact about rust crates and packaging",
+                "agent",
+                &[],
+            ))
+            .unwrap();
+
+        let lessons = collect_lessons(&manager, "coder", "run the tests in the rust workspace");
+        assert_eq!(lessons.len(), 1);
+        assert!(lessons[0].contains("cargo check"));
+    }
+
+    #[test]
+    fn test_collect_lessons_falls_back_to_recent_when_no_match() {
+        let (manager, _dir) = fresh_manager();
+        manager
+            .add(MemoryEntry::new(
+                MemoryType::Lesson,
+                "The shell tool fails when the working directory does not exist",
+                "agent",
+                &["shell"],
+            ))
+            .unwrap();
+
+        // No keyword overlap between the query and the stored lesson, so the
+        // recent-lessons fallback must surface it instead of skipping the check.
+        let lessons = collect_lessons(&manager, "coder", "completely unrelated topic zzz");
+        assert_eq!(lessons.len(), 1);
+        assert!(lessons[0].contains("shell tool"));
+    }
+
+    #[test]
+    fn test_collect_lessons_empty_store() {
+        let (manager, _dir) = fresh_manager();
+        assert!(collect_lessons(&manager, "coder", "some task").is_empty());
     }
 }

@@ -92,7 +92,11 @@ impl ChatPipeline {
     }
 
     /// Start a chat session with the given prompt, system prompt, and tool policy.
-    pub fn start(&self, prompt: &str, system_prompt: &str, tool_policy: &ChatToolPolicy) {
+    ///
+    /// `image` is an optional `data:` URI (e.g. `data:image/png;base64,...`)
+    /// for a user-attached image; it is recorded on the user message so the
+    /// model receives it (and it persists with the session).
+    pub fn start(&self, prompt: &str, system_prompt: &str, tool_policy: &ChatToolPolicy, image: Option<&str>) {
         // Cancel any existing task
         self.cancel();
 
@@ -116,6 +120,7 @@ impl ChatPipeline {
         let prompt = prompt.to_string();
         let system_prompt = system_prompt.to_string();
         let tool_policy = tool_policy.clone();
+        let image = image.map(str::to_string);
         let handle = tokio::spawn(async move {
             // Wire the event tx into the engine so chain events reach the UI,
             // and apply the current reasoning effort setting.
@@ -130,7 +135,7 @@ impl ChatPipeline {
             tracing::info!("[CHAT PIPELINE] Starting chat with prompt: {}", prompt);
 
             let result = tokio::select! {
-                result = engine.execute_with_tools(&prompt, &system_prompt, &tool_policy, cancel_token) => result,
+                result = engine.execute_with_tools(&prompt, &system_prompt, &tool_policy, image.as_deref(), cancel_token) => result,
                 _ = cancel_token.cancelled() => {
                     Ok(String::from("[CANCELLED]"))
                 }
