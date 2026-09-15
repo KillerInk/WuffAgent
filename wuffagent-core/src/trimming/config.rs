@@ -36,6 +36,11 @@ pub struct TrimConfig {
     /// Maximum items to keep for glob/file lists.
     #[serde(default = "default_list_max_items")]
     pub list_max_items: usize,
+
+    /// Enable freshness-aware invalidation of stale/superseded `read_file`
+    /// results at trim time (see `filestate`). Off = legacy size/age-only trim.
+    #[serde(default = "default_true")]
+    pub stale_file_invalidation: bool,
 }
 
 fn default_enabled() -> bool { true }
@@ -44,6 +49,7 @@ fn default_max_chain_entries() -> usize { 50 }
 fn default_code_max_lines() -> usize { 30 }
 fn default_log_max_lines() -> usize { 15 }
 fn default_list_max_items() -> usize { 20 }
+fn default_true() -> bool { true }
 
 impl Default for TrimConfig {
     fn default() -> Self {
@@ -54,6 +60,7 @@ impl Default for TrimConfig {
             code_max_lines: default_code_max_lines(),
             log_max_lines: default_log_max_lines(),
             list_max_items: default_list_max_items(),
+            stale_file_invalidation: default_true(),
         }
     }
 }
@@ -78,6 +85,7 @@ mod tests {
         assert_eq!(config.code_max_lines, 30);
         assert_eq!(config.log_max_lines, 15);
         assert_eq!(config.list_max_items, 20);
+        assert!(config.stale_file_invalidation);
     }
 
     #[test]

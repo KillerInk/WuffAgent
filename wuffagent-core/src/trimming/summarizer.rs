@@ -5,6 +5,7 @@
 
 use super::classifier::{classify_content, ContentType};
 use super::config::TrimConfig;
+use super::filestate;
 use crate::types::Message;
 use std::sync::{Arc, Mutex};
 
@@ -506,6 +507,24 @@ impl ContextTrimming {
             return 0;
         }
 
+        // ── Freshness pass: evict stale/superseded file reads ───────────────
+        // Runs BEFORE the age-based removal so old file snapshots — content
+        // the model can no longer trust (the file was modified after the read,
+        // or a newer read supersedes it) — are collapsed to one-line markers
+        // first, preserving budget for still-relevant context. Pre-tail only.
+        if config.stale_file_invalidation {
+            let index = filestate::build_file_state_index(messages);
+            if !index.last_read.is_empty() {
+                let protect_from = Self::protected_tail_start(messages);
+                let marked = filestate::invalidate_stale_reads(messages, protect_from, &index);
+                if marked > 0 {
+                    tracing::info!(
+                        "[TRIM] freshness pass: marked {marked} stale/superseded read_file result(s)"
+                    );
+                }
+            }
+        }
+
         let mut keep_from = if messages.first().map(|m| m.role.as_str()) == Some("system") { 1 } else { 0 };
 
         if keep_from >= messages.len() {
@@ -655,6 +674,7 @@ mod tests {
             code_max_lines: 10,
             log_max_lines: 8,
             list_max_items: 10,
+            stale_file_invalidation: true,
         }
     }
 
@@ -745,6 +765,11 @@ mod tests {
     }
 
     fn assistant_tool_call(call_id: &str, args: &str) -> Message {
+        assistant_call_named(call_id, "echo", args)
+    }
+
+    /// Assistant message requesting the named tool with the given raw args.
+    fn assistant_call_named(call_id: &str, tool_name: &str, args: &str) -> Message {
         Message {
             role: "assistant".into(),
             content: String::new(),
@@ -753,7 +778,7 @@ mod tests {
                 id: call_id.into(),
                 call_type: "function".into(),
                 function: crate::types::ToolFunction {
-                    name: "echo".into(),
+                    name: tool_name.into(),
                     arguments: args.into(),
                 },
             }]),
@@ -1026,5 +1051,239 @@ mod tests {
         assert!(messages[3].content.len() < big.len());
         // Fresh result untouched.
         assert_eq!(messages.last().unwrap().content, "fresh");
+    }
+
+    /// Content of the tool result paired with `call_id` (panics if missing).
+    fn tool_content_at<'a>(messages: &'a [Message], call_id: &str) -> &'a str {
+        messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some(call_id))
+            .map(|m| m.content.as_str())
+            .expect("tool result missing")
+    }
+
+    // ── Freshness pass (stale/superseded read_file eviction) ─────────────────
+
+    #[test]
+    fn test_stale_read_evicted_before_age_removal() {
+        // read A → write A → next turn: the old read is stale and must be
+        // collapsed to a marker while the write pair and the tail stay intact.
+        // Target is above the post-marker total, so the age-based loop must NOT
+        // run — proving the marker alone brought the list under budget.
+        let big = "L".repeat(5000);
+        let mut messages = vec![
+            user_msg("q1"),
+            assistant_call_named("c1", "read_file", "{\"path\":\"src/a.rs\"}"),
+            tool_result("c1", &big),
+            assistant_call_named("c2", "write_file", "{\"path\":\"src/a.rs\",\"content\":\"x\"}"),
+            tool_result("c2", "ok"),
+            user_msg("q2"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        let removed = trimming.trim_messages(&mut messages, 300, &make_config());
+
+        assert_eq!(removed, 0, "marker alone must bring the list under budget");
+        assert!(tool_content_at(&messages, "c1").contains("stale: file modified"));
+        assert!(tool_content_at(&messages, "c1").starts_with("[read_file of src/a.rs"));
+        assert_eq!(tool_content_at(&messages, "c2"), "ok", "write pair must be intact");
+        assert!(messages.iter().any(|m| m.content == "q2"), "tail untouched");
+        assert_pairs_intact(&messages);
+    }
+
+    #[test]
+    fn test_superseded_read_evicted() {
+        // read A → read A (no mutation): the older read is redundant; the
+        // newest read is the current content and stays in full.
+        let big1 = "A".repeat(3000);
+        let big2 = "B".repeat(3000);
+        let mut messages = vec![
+            user_msg("q1"),
+            assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+            tool_result("c1", &big1),
+            assistant_call_named("c2", "read_file", "{\"path\":\"a.rs\"}"),
+            tool_result("c2", &big2),
+            user_msg("q2"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        let removed = trimming.trim_messages(&mut messages, 4000, &make_config());
+
+        assert_eq!(removed, 0);
+        assert!(tool_content_at(&messages, "c1").contains("superseded by a newer read"));
+        assert_eq!(tool_content_at(&messages, "c2"), big2, "newest read stays in full");
+        assert_pairs_intact(&messages);
+    }
+
+    #[test]
+    fn test_read_write_reread_keeps_latest_snapshot() {
+        // read A → write A → read A: first read stale, second read current.
+        let r1 = "R1".repeat(500);
+        let r2 = "R2".repeat(500);
+        let mut messages = vec![
+            user_msg("q1"),
+            assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+            tool_result("c1", &r1),
+            assistant_call_named("c2", "write_file", "{\"path\":\"a.rs\",\"content\":\"x\"}"),
+            tool_result("c2", "ok"),
+            assistant_call_named("c3", "read_file", "{\"path\":\"a.rs\"}"),
+            tool_result("c3", &r2),
+            user_msg("q2"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        let removed = trimming.trim_messages(&mut messages, 2000, &make_config());
+
+        assert_eq!(removed, 0);
+        assert!(tool_content_at(&messages, "c1").contains("stale: file modified"));
+        assert_eq!(tool_content_at(&messages, "c2"), "ok");
+        assert_eq!(tool_content_at(&messages, "c3"), r2, "post-mutation read is current");
+    }
+
+    #[test]
+    fn test_stale_read_in_protected_tail_untouched() {
+        // Agent shape ending mid-round: the last assistant tool call starts the
+        // protected tail, so a stale read INSIDE the tail must stay in full.
+        let r1 = "R1".repeat(500);
+        let r2 = "R2".repeat(500);
+        let mut messages = vec![
+            user_msg("q1"),
+            assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+            tool_result("c1", &r1),
+            assistant_call_named("c2", "write_file", "{\"path\":\"a.rs\",\"content\":\"x\"}"),
+            tool_result("c2", "ok"),
+            assistant_call_named("c3", "read_file", "{\"path\":\"a.rs\"}"),
+            tool_result("c3", &r2),
+        ];
+
+        let trimming = ContextTrimming::new();
+        let removed = trimming.trim_messages(&mut messages, 2000, &make_config());
+
+        assert_eq!(removed, 0);
+        assert!(tool_content_at(&messages, "c1").contains("stale: file modified"));
+        assert_eq!(tool_content_at(&messages, "c3"), r2, "protected read must be untouched");
+    }
+
+    #[test]
+    fn test_failed_mutation_does_not_invalidate_read() {
+        // A write_file that failed ("Error:" prefix) did not change the file,
+        // so the earlier read is still current.
+        let r1 = "S".repeat(1000);
+        let mut messages = vec![
+            user_msg("q1"),
+            assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+            tool_result("c1", &r1),
+            assistant_call_named("c2", "write_file", "{\"path\":\"a.rs\",\"content\":\"x\"}"),
+            tool_result("c2", "Error: disk full"),
+            user_msg("q2"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        let removed = trimming.trim_messages(&mut messages, 2000, &make_config());
+
+        assert_eq!(removed, 0);
+        assert_eq!(tool_content_at(&messages, "c1"), r1, "read must stay current");
+    }
+
+    #[test]
+    fn test_copy_only_invalidates_dest() {
+        // copy A→B: reads of B (dest) go stale; reads of A (src) stay current.
+        let ra = "C".repeat(1000);
+        let rb = "D".repeat(1000);
+        let mut messages = vec![
+            user_msg("q1"),
+            assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+            tool_result("c1", &ra),
+            assistant_call_named("c2", "read_file", "{\"path\":\"b.rs\"}"),
+            tool_result("c2", &rb),
+            assistant_call_named("c3", "copy", "{\"src\":\"a.rs\",\"dest\":\"b.rs\"}"),
+            tool_result("c3", "ok"),
+            user_msg("q2"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        let removed = trimming.trim_messages(&mut messages, 2000, &make_config());
+
+        assert_eq!(removed, 0);
+        assert_eq!(tool_content_at(&messages, "c1"), ra, "src read must stay current");
+        assert!(tool_content_at(&messages, "c2").contains("stale: file modified"));
+    }
+
+    #[test]
+    fn test_plain_chat_no_tool_messages_noop() {
+        // No tool messages: the freshness pass is a no-op and age-based
+        // trimming behaves exactly as before.
+        let mut messages = vec![
+            user_msg(&format!("q1{}", "x".repeat(200))),
+            assistant_msg(&format!("a1{}", "y".repeat(200))),
+            user_msg("q2"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        let removed = trimming.trim_messages(&mut messages, 50, &make_config());
+
+        assert_eq!(removed, 2, "age-based removal must still run");
+        assert!(
+            !messages.iter().any(|m| m.content.starts_with("[read_file of ")),
+            "no markers may appear without tool messages"
+        );
+        assert_eq!(messages.last().unwrap().content, "q2");
+    }
+
+    #[test]
+    fn test_flag_off_keeps_legacy_behavior() {
+        // stale_file_invalidation = false: the stale read stays in full and the
+        // output is identical to the legacy trim.
+        let big = "L".repeat(5000);
+        let mut messages = vec![
+            user_msg("q1"),
+            assistant_call_named("c1", "read_file", "{\"path\":\"src/a.rs\"}"),
+            tool_result("c1", &big),
+            assistant_call_named("c2", "write_file", "{\"path\":\"src/a.rs\",\"content\":\"x\"}"),
+            tool_result("c2", "ok"),
+            user_msg("q2"),
+        ];
+
+        let mut config = make_config();
+        config.stale_file_invalidation = false;
+
+        let trimming = ContextTrimming::new();
+        // Target above the full (unmarked) total so the age loop never runs.
+        let removed = trimming.trim_messages(&mut messages, 6000, &config);
+
+        assert_eq!(removed, 0);
+        assert_eq!(tool_content_at(&messages, "c1"), big, "legacy: stale read stays in full");
+    }
+
+    #[test]
+    fn test_trim_messages_idempotent_second_call_noop() {
+        // A second trim over an already-marked list must change nothing.
+        let big = "L".repeat(5000);
+        let mut messages = vec![
+            user_msg("q1"),
+            assistant_call_named("c1", "read_file", "{\"path\":\"src/a.rs\"}"),
+            tool_result("c1", &big),
+            assistant_call_named("c2", "write_file", "{\"path\":\"src/a.rs\",\"content\":\"x\"}"),
+            tool_result("c2", "ok"),
+            user_msg("q2"),
+        ];
+
+        let trimming = ContextTrimming::new();
+        assert_eq!(trimming.trim_messages(&mut messages, 300, &make_config()), 0);
+        let marked = tool_content_at(&messages, "c1").to_string();
+        assert!(marked.contains("stale: file modified"));
+
+        let before: Vec<(String, String)> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        let removed = trimming.trim_messages(&mut messages, 300, &make_config());
+        let after: Vec<(String, String)> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+
+        assert_eq!(removed, 0, "second trim must remove nothing");
+        assert_eq!(before, after, "second trim must not modify the list");
     }
 }

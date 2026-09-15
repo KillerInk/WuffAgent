@@ -25,10 +25,12 @@
 
 pub mod classifier;
 pub mod config;
+pub mod filestate;
 pub mod summarizer;
 
 pub use classifier::classify_content;
 pub use config::TrimConfig;
+pub use filestate::{build_file_state_index, invalidate_stale_reads, normalize_path, FileStateIndex};
 pub use summarizer::ContextTrimming;
 
 // Re-export helper functions for backward compatibility
