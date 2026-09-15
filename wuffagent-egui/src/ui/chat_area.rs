@@ -297,7 +297,7 @@ impl ChatApp {
                     if !current_thinking.is_empty() {
                         egui::Frame::NONE
                             .fill(theme.surface)
-                            .stroke(egui::Stroke::new(1.0, theme.bubble_border))
+                            .stroke(egui::Stroke::NONE)
                             .corner_radius(10)
                             .inner_margin(egui::Margin::same(8))
                             .show(ui, |ui| {
@@ -424,6 +424,12 @@ impl ChatApp {
             self.session_store.get(sid).map(|r| r.chat_state.editing_message_index == Some(index)).unwrap_or(false)
         }).unwrap_or(false);
 
+        // Tool messages render as a compact collapsible card (result hidden
+        // by default, expandable on click) instead of a full bubble.
+        if message.kind == MessageKind::Tool && !is_editing {
+            self.draw_tool_card(ui, message, index, theme);
+            return;
+        }
 
         let bubble_bg = if is_user {
             theme.user_bg
@@ -480,7 +486,7 @@ impl ChatApp {
                 ui.vertical(|ui| {
                     let inner = egui::Frame::NONE
                         .fill(bubble_bg)
-                        .stroke(egui::Stroke::new(1.0, theme.bubble_border))
+                        .stroke(egui::Stroke::NONE)
                         .corner_radius(12)
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
@@ -507,10 +513,10 @@ impl ChatApp {
                                         ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
                                     }
                                 }
-                                // Branch on message kind — no string-prefix sniffing
-                                if message.kind == MessageKind::Tool {
-                                    self.draw_tool_message(ui, message, theme, index);
-                                } else if message.kind == MessageKind::Thinking {
+                                // Branch on message kind — no string-prefix sniffing.
+                                // (Tool messages never reach the bubble: they are
+                                // rendered as collapsible cards above.)
+                                if message.kind == MessageKind::Thinking {
                                     // Thinking message — render dim and italic
                                     ui.add(Self::breaking_label(
                                         &message.content,
@@ -641,38 +647,215 @@ impl ChatApp {
         self.display_dirty = true;
     }
 
-    /// Parse a tool message and render it with smart formatting.
-    /// Content is "header||call_id||result" — or a bare result for messages
-    /// loaded from older sessions (rendered without a header).
-    fn draw_tool_message(&mut self, ui: &mut egui::Ui, message: &ChatMessage, theme: &Theme, msg_index: usize) {
-        let parts: Vec<&str> = message.content.splitn(3, "||").collect();
-        if parts.len() >= 2 {
-            // Render header + call id
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(egui::RichText::new(parts[0])
-                    .color(theme.text_primary)
-                    .strong()
-                    .size(11.5));
-                ui.label(egui::RichText::new(parts[1])
-                    .color(theme.text_dim)
-                    .size(9.0)
-                    .monospace());
-            });
-            ui.add_space(4.0);
-        }
-        let raw_result = if parts.len() > 2 { parts[2] } else { message.content.as_str() };
+    /// Compact collapsible tool card.
+    ///
+    /// By default the card only shows the tool name plus a one-line summary
+    /// of the result; clicking the header row expands the full detail
+    /// (right-click opens the delete menu). The card is indented to sit under
+    /// the AI message column and has no avatar, keeping tool chatter visually
+    /// quiet compared to normal messages.
+    fn draw_tool_card(&mut self, ui: &mut egui::Ui, message: &ChatMessage, index: usize, theme: &Theme) {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            // Indent under the AI bubble (28px avatar + 8px gap).
+            ui.add_space(36.0);
+            // The card Frame's content ui inherits this ui's layout (egui 0.36
+            // Frame has no layout option of its own), so without this the card
+            // body would be laid out HORIZONTALLY: the header row (stretched to
+            // full width by the right-aligned timestamp) consumes the whole row
+            // and the expanded content is squeezed into a ~0px sliver, wrapping
+            // one character per line. Force a vertical layout for the card body.
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                let is_expanded = self.selected_session_id.as_ref().map(|sid| {
+                    self.session_store.get(sid).map(|r| r.chat_state.expanded_messages.contains(&index)).unwrap_or(false)
+                }).unwrap_or(false);
 
-        // Render result with smart formatting
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_result) {
-            self.draw_tool_json_result(ui, &json, raw_result, theme, msg_index);
+                // Content is "header||call_id||result" — or a bare result for
+                // messages loaded from older sessions.
+                let parts: Vec<&str> = message.content.splitn(3, "||").collect();
+                let header = parts.first().copied().unwrap_or("");
+                let raw_result: &str = if parts.len() > 2 { parts[2] } else { message.content.as_str() };
+                let (name, summary, is_error) = Self::tool_card_label(header, raw_result, parts.len() >= 2);
+                let ts = crate::types::timestamp_time(&message.timestamp);
+
+                egui::Frame::NONE
+                    .fill(theme.surface)
+                    .stroke(egui::Stroke::new(1.0, theme.bubble_border))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        // Header row: chevron + tool name + summary + timestamp.
+                        // The whole row is clickable (expand/collapse) and
+                        // right-clickable (delete).
+                        let row = ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let chev = if is_expanded { "▾" } else { "▸" };
+                            ui.label(egui::RichText::new(chev)
+                                .color(theme.text_dim).size(9.0).monospace());
+                            ui.label(egui::RichText::new(&name)
+                                .color(if is_error { theme.warning } else { theme.accent })
+                                .strong()
+                                .size(11.5));
+                            ui.label(egui::RichText::new(&summary)
+                                .color(theme.text_dim).size(10.5));
+                            if !ts.is_empty() {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(egui::RichText::new(ts)
+                                        .color(theme.text_dim).size(9.5));
+                                });
+                            }
+                        });
+                        // The layout's own response only tracks hover, so
+                        // register an explicit click interaction over the row.
+                        let row_click = ui.interact(
+                            row.response.rect,
+                            ui.id().with("tool_toggle").with(index),
+                            egui::Sense::click(),
+                        );
+                        if row_click.hovered() {
+                            // Subtle highlight signals the row is clickable.
+                            ui.painter().rect(
+                                row.response.rect,
+                                6.0,
+                                theme.hover_bg,
+                                egui::Stroke::NONE,
+                                egui::StrokeKind::Middle,
+                            );
+                        }
+                        if row_click.clicked() {
+                            if let Some(sid) = &self.selected_session_id {
+                                if let Some(runtime) = self.session_store.get_mut(sid) {
+                                    if is_expanded {
+                                        runtime.chat_state.expanded_messages.retain(|&i| i != index);
+                                    } else {
+                                        runtime.chat_state.expanded_messages.push(index);
+                                    }
+                                }
+                            }
+                        }
+                        if row_click.secondary_clicked() {
+                            row_click.context_menu(|menu_ui| {
+                                menu_ui.set_min_width(120.0);
+                                if menu_ui.button("Delete").clicked() {
+                                    self.delete_message(index);
+                                }
+                            });
+                        }
+                        if is_expanded {
+                            ui.add_space(6.0);
+                            let min = ui.cursor().min;
+                            ui.painter().hline(
+                                min.x..=min.x + ui.available_width(),
+                                min.y,
+                                egui::Stroke::new(1.0, theme.divider),
+                            );
+                            ui.add_space(6.0);
+                            if raw_result.trim().is_empty() {
+                                ui.label(egui::RichText::new("(no output)")
+                                    .color(theme.text_dim).italics().size(11.0));
+                            } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_result) {
+                                self.draw_tool_json_result(ui, &json, raw_result, theme);
+                            } else {
+                                self.draw_tool_plain_result(ui, raw_result, theme);
+                            }
+                        }
+                    });
+            });
+        });
+    }
+
+    /// (tool name, one-line summary, is_error) for a collapsed tool card.
+    fn tool_card_label(header: &str, raw_result: &str, has_header: bool) -> (String, String, bool) {
+        let header = header.trim();
+        // ToolCallError header: `Tool '<name>' error: <msg>`.
+        if let Some(stripped) = header.strip_prefix("Tool '") {
+            if let Some((name, rest)) = stripped.split_once('\'') {
+                let err = rest
+                    .trim()
+                    .strip_prefix("error:")
+                    .map(|e| e.trim())
+                    .unwrap_or(rest.trim());
+                return (name.to_string(), format!("✗ {}", err), true);
+            }
+        }
+        let name = if has_header {
+            // Normal header: "🔧 tool_name: <result preview>" (older sessions
+            // may use "🔍 tool_name(args)"). Strip the emoji and keep only the
+            // tool name.
+            let tail = header
+                .find(|c: char| c.is_alphanumeric())
+                .map(|i| &header[i..])
+                .unwrap_or(header);
+            let n: String = tail
+                .chars()
+                .take_while(|c| !matches!(c, ':' | '(' | ' '))
+                .collect();
+            if n.is_empty() { "Tool".to_string() } else { n }
         } else {
-            self.draw_tool_plain_result(ui, raw_result, theme);
+            "Tool".to_string()
+        };
+        (name, Self::tool_result_summary(raw_result), false)
+    }
+
+    /// One-line summary of a tool result shown in the collapsed tool card.
+    fn tool_result_summary(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return "(no output)".to_string();
+        }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+                if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
+                    return format!("{} · {} entries", path, entries.len());
+                }
+                if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                    let lines = json
+                        .get("total_lines")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize)
+                        .unwrap_or_else(|| content.lines().count());
+                    return format!("{} · {} lines", path, lines);
+                }
+                if let Some(bytes) = json.get("bytes_written").and_then(|v| v.as_u64()) {
+                    return format!("✓ {} bytes written", bytes);
+                }
+                if json.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                    return "✓ done".to_string();
+                }
+                return path.to_string();
+            }
+            if let Some(matches) = json.get("matches").and_then(|v| v.as_array()) {
+                let files = json
+                    .get("files_searched")
+                    .and_then(|v| v.as_u64())
+                    .map(|f| format!(" in {} files", f))
+                    .unwrap_or_default();
+                let plural = if matches.len() == 1 { "" } else { "es" };
+                return format!("{} match{}{}", matches.len(), plural, files);
+            }
+            if let Some(expr) = json.get("expression").and_then(|v| v.as_str()) {
+                if let Some(result) = json.get("result").and_then(|v| v.as_f64()) {
+                    return format!("{} = {}", expr, result);
+                }
+            }
+            return format!("{} chars", trimmed.len());
+        }
+        // Plain text: first line, truncated.
+        let first_line = trimmed.lines().next().unwrap_or("").trim();
+        let first: String = first_line.chars().take(72).collect();
+        if first_line.chars().count() > 72 {
+            format!("{}…", first)
+        } else if trimmed.lines().count() > 1 {
+            format!("{} … ({} lines)", first, trimmed.lines().count())
+        } else {
+            first
         }
     }
 
     /// Render a tool result that is valid JSON with smart field extraction.
-    fn draw_tool_json_result(&mut self, ui: &mut egui::Ui, json: &serde_json::Value, raw: &str, theme: &Theme, msg_index: usize) {
+    /// Called only with the tool card already expanded, so long content
+    /// (e.g. file reads) is shown directly in a height-capped scroll area.
+    fn draw_tool_json_result(&self, ui: &mut egui::Ui, json: &serde_json::Value, raw: &str, theme: &Theme) {
         // Check for common structured patterns
         if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
             // Has a path field — likely a file operation result
@@ -716,45 +899,23 @@ impl ChatApp {
                         });
                 }
             } else if is_file_read {
-                // File read: show path badge + show/hide content button
+                // File read: path badge + content in a height-capped scroll area
+                // (the surrounding tool card already controls expand/collapse).
                 self.draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
                 if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
-                    let char_count = content.len();
-                    let is_expanded = self.selected_session_id.as_ref().map(|sid| {
-                        self.session_store.get(sid).map(|r| r.chat_state.expanded_messages.contains(&msg_index)).unwrap_or(false)
-                    }).unwrap_or(false);
-                    let btn_text = if is_expanded {
-                        format!("Hide content ({} chars)", char_count)
-                    } else {
-                        format!("Show content ({} chars)", char_count)
-                    };
-                    let btn = egui::Button::new(btn_text).corner_radius(4);
-                    if ui.add(btn).clicked() {
-                        if let Some(sid) = &self.selected_session_id {
-                            if let Some(runtime) = self.session_store.get_mut(sid) {
-                                if is_expanded {
-                                    runtime.chat_state.expanded_messages.retain(|&i| i != msg_index);
-                                } else {
-                                    runtime.chat_state.expanded_messages.push(msg_index);
-                                }
-                            }
-                        }
-                    }
-                    if is_expanded {
-                        Self::code_block(ui, theme, |ui| {
-                            egui::ScrollArea::vertical()
-                                .max_height(300.0)
-                                .show(ui, |ui| {
+                    Self::code_block(ui, theme, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
                                 ui.add(Self::breaking_label(
                                     content,
-                                    egui::FontId::monospace(13.0),
+                                    egui::FontId::monospace(12.5),
                                     theme.code_text,
                                     false,
                                 ));
                             });
-                        });
-                    }
+                    });
                 }
             } else if is_file_write {
                 // File write: show compact success badge
