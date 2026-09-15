@@ -1,6 +1,22 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// A pending request to hand the session over to another agent profile.
+///
+/// Written by the `handoff` tool into the per-execution mailbox and consumed
+/// by `Agent::execute`, which switches to the target agent on the same
+/// conversation store.
+#[derive(Clone, Debug)]
+pub struct HandoffRequest {
+    /// Target agent name.
+    pub agent: String,
+    /// Resolved target profile (system prompt, tools, shell, effort, …).
+    pub config: super::config::AgentConfig,
+    /// Handoff instructions for the target agent (used as its task / memory
+    /// query and shown in the UI banner).
+    pub task: String,
+}
+
 /// Unique identifier for an agent instance.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(pub String);

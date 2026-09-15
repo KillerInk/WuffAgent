@@ -94,6 +94,14 @@ Memory is a per-project JSON store (default `~/.wuffagent/memories/<project>.jso
 - **Self-improvement** — when `auto_improve` is on, the engine calls `suggest_improvements` after a task and emits `ImprovementSuggested`; approving in the UI writes the updated agent JSON (or creates a new agent) and refreshes the registry.
 - **UI** — the memory panel (🧠) lists all entries, searches, edits content/tags, deletes (with confirm), and runs maintenance on demand; a memory settings section exposes enabled, injection mode, maintenance toggle/threshold, and the auto-improve toggle. The status bar shows an active-memory count with a tooltip.
 
+## Web search
+
+`web_search` (`{query, max_results?}` → `{query, results: [{title, url, snippet}]}`) and `fetch_url` (`{url, max_bytes?}` → page content as plain text) let agents research the web.
+
+- **Backends** — `Auto` (default: Bing → Yahoo → DuckDuckGo, automatic failover on error/empty results), `Bing`, `Yahoo`, `DuckDuckGo`, `SearXNG` (self-hosted, needs a base URL). Configured in the `search` block of `wuffagent.json` or in Settings → **Web search**; backend changes take effect on restart.
+- **Env overrides** (headless use; take precedence over config) — `WUFFAGENT_SEARCH_BACKEND=auto|bing|yahoo|duckduckgo` and `WUFFAGENT_SEARXNG_URL=https://…` (forces the SearXNG backend).
+- **Caching** — results are cached in memory with a TTL (`search.cache_duration_secs`, default 300 s), so repeated queries within the window cost no HTTP requests.
+
 ## Development Notes
 
 - See [AGENTS.md](AGENTS.md) for agent-oriented guidance and [BUILD.md](BUILD.md) for build details.

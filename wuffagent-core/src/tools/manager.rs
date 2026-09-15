@@ -117,6 +117,58 @@ impl ToolManager {
         }
     }
 
+    /// Create a new ToolManager whose `handoff` entry is replaced by the
+    /// provided per-execution tool (same rebuild pattern as
+    /// [`Self::with_shell_config`]). Used by `Agent::new` to give
+    /// `handoff_enabled` agents a handoff tool wired to their own mailbox,
+    /// agents dir, and target allowlist.
+    pub fn with_handoff_tool(&self, tool: crate::tools::builtin::handoff::HandoffTool) -> Self {
+        let mut entries = self.registry.list();
+        let meta = entries
+            .iter()
+            .find(|e| e.metadata.name == "handoff")
+            .map(|e| e.metadata.clone())
+            .unwrap_or_else(|| crate::tools::types::ToolMetadata {
+                name: "handoff".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Hand off the session to another agent".to_string(),
+                dependencies: vec![],
+            });
+        entries.retain(|e| e.metadata.name != "handoff");
+        entries.push(crate::tools::registry::ToolEntry {
+            tool: std::sync::Arc::new(tool),
+            metadata: meta,
+            loaded_at: std::time::Instant::now(),
+        });
+        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+        }
+    }
+
+    /// Create a new ToolManager where the `handoff` tool is removed from the
+    /// schema entirely. Used for agents whose `handoff_enabled` is false —
+    /// including target agents in a handoff chain built on top of a manager
+    /// that already carries a per-execution handoff tool.
+    pub fn without_handoff(&self) -> Self {
+        let mut entries = self.registry.list();
+        entries.retain(|e| e.metadata.name != "handoff");
+        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+        }
+    }
+
     /// Create a new ToolManager where the `shell` tool is removed from the
     /// schema entirely. Used for agents whose `shell_enabled` is false, so
     /// the model never sees a shell tool whose calls would always fail.
@@ -256,5 +308,35 @@ mod tests {
             names
         );
         assert!(tm.get_tool_definitions().is_empty());
+    }
+
+    #[test]
+    fn test_with_handoff_tool_swaps_entry() {
+        use crate::tools::builtin::handoff::HandoffTool;
+        let tm = manager_with_shell();
+        assert!(
+            !tm.get_allowed_tools().contains(&"handoff".to_string()),
+            "fresh manager has no handoff tool"
+        );
+
+        let mailbox = Arc::new(std::sync::Mutex::new(None));
+        let tool = HandoffTool::new(
+            mailbox,
+            std::path::PathBuf::from("does-not-matter"),
+            Vec::new(),
+            Vec::new(),
+        );
+        let tm = tm.with_handoff_tool(tool);
+
+        let names = tm.get_allowed_tools();
+        assert!(names.contains(&"handoff".to_string()), "handoff added: {:?}", names);
+        assert!(names.contains(&"shell".to_string()), "other tools preserved: {:?}", names);
+        // Exactly one handoff entry, and it is the per-execution one.
+        let defs: Vec<_> = tm
+            .get_tool_definitions()
+            .into_iter()
+            .filter(|d| d.function.name == "handoff")
+            .collect();
+        assert_eq!(defs.len(), 1);
     }
 }

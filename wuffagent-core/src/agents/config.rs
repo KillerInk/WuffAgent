@@ -246,9 +246,12 @@ impl AgentManager {
                             task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
                             shell_config: legacy.shell_config,
                             agents_dir: self.agents_dir.clone(),
+                            agents_search_dirs: Vec::new(),
                             custom_prompts: HashMap::new(),
                             reasoning_effort: legacy.reasoning_effort,
                             trim_config: crate::trimming::config::TrimConfig::default(),
+                            handoff_enabled: legacy.handoff_enabled,
+                            handoff_targets: legacy.can_invoke,
                         };
                         if seen.insert(config.name.clone(), ()).is_none() {
                             tracing::info!(
@@ -527,6 +530,133 @@ mod tests {
         let _ = std::fs::remove_dir_all(&primary_dir);
         let _ = std::fs::remove_dir_all(&search_dir);
     }
+
+    #[test]
+    fn test_agent_config_handoff_fields() {
+        let json = r#"{
+            "name": "planner",
+            "description": "Plans",
+            "system_prompt": "Plan things.",
+            "handoff_enabled": true,
+            "handoff_targets": ["coder", "reviewer"]
+        }"#;
+        let config: AgentConfig = serde_json::from_str(json).unwrap();
+        assert!(config.handoff_enabled);
+        assert_eq!(config.handoff_targets, vec!["coder", "reviewer"]);
+    }
+
+    #[test]
+    fn test_agent_config_can_invoke_alias() {
+        // Legacy files use `can_invoke`; it must map onto `handoff_targets`.
+        let json = r#"{
+            "name": "planner",
+            "description": "Plans",
+            "system_prompt": "Plan things.",
+            "handoff_enabled": true,
+            "can_invoke": ["coder"]
+        }"#;
+        let config: AgentConfig = serde_json::from_str(json).unwrap();
+        assert!(config.handoff_enabled);
+        assert_eq!(config.handoff_targets, vec!["coder"]);
+    }
+
+    #[test]
+    fn test_agent_config_handoff_defaults() {
+        let json = r#"{"name": "plain", "system_prompt": "Be plain."}"#;
+        let config: AgentConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.handoff_enabled);
+        assert!(config.handoff_targets.is_empty());
+    }
+
+    #[test]
+    fn test_load_agent_from_dir() {
+        let dir = std::env::temp_dir().join("wuffagent_test_handoff_agents");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Current-format agent, enabled, with handoff.
+        std::fs::write(
+            dir.join("planner.json"),
+            r#"{"name":"planner","system_prompt":"Plan.","handoff_enabled":true,"handoff_targets":["coder"]}"#,
+        )
+        .unwrap();
+        // Current-format agent, disabled.
+        std::fs::write(
+            dir.join("off.json"),
+            r#"{"name":"off","system_prompt":"Off.","enabled":false}"#,
+        )
+        .unwrap();
+        // Legacy WorkerConfig file using can_invoke + handoff_enabled.
+        std::fs::write(
+            dir.join("legacy.json"),
+            r#"{"name":"legacy","description":"Legacy","personality":"You are legacy.","handoff_enabled":true,"can_invoke":["coder"]}"#,
+        )
+        .unwrap();
+        // Non-JSON file must be skipped.
+        std::fs::write(dir.join("notes.txt"), "not an agent").unwrap();
+
+        let planner = load_agent_from_dir(&dir, "planner").unwrap();
+        assert!(planner.handoff_enabled);
+        assert_eq!(planner.handoff_targets, vec!["coder"]);
+        assert!(planner.enabled);
+
+        let legacy = load_agent_from_dir(&dir, "legacy").unwrap();
+        assert_eq!(legacy.system_prompt, "You are legacy.");
+        assert!(legacy.handoff_enabled, "legacy handoff_enabled must migrate");
+        assert_eq!(legacy.handoff_targets, vec!["coder"], "legacy can_invoke must migrate");
+
+        assert!(load_agent_from_dir(&dir, "off").is_none(), "disabled agent must not load");
+        assert!(load_agent_from_dir(&dir, "missing").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_agent_from_dirs_multi_dir_and_anchoring() {
+        let primary = std::env::temp_dir().join("wuffagent_test_handoff_dirs_primary");
+        let search_a = std::env::temp_dir().join("wuffagent_test_handoff_dirs_a");
+        let search_b = std::env::temp_dir().join("wuffagent_test_handoff_dirs_b");
+        for d in [&primary, &search_a, &search_b] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+
+        // "coder" exists in BOTH primary and search_b; search_a has "helper".
+        std::fs::write(
+            primary.join("coder.json"),
+            r#"{"name":"coder","system_prompt":"primary coder"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            search_a.join("helper.json"),
+            r#"{"name":"helper","system_prompt":"helps"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            search_b.join("coder.json"),
+            r#"{"name":"coder","system_prompt":"shadow coder"}"#,
+        )
+        .unwrap();
+
+        let dirs = vec![primary.clone(), search_a.clone(), search_b.clone()];
+
+        // First dir wins the dedup.
+        let coder = load_agent_from_dirs(&dirs, "coder").unwrap();
+        assert_eq!(coder.system_prompt, "primary coder");
+        assert_eq!(coder.agents_dir, primary);
+
+        // Found in the second dir: anchored there, remaining dirs (both
+        // sides, original order) become the search dirs for chained handoffs.
+        let helper = load_agent_from_dirs(&dirs, "helper").unwrap();
+        assert_eq!(helper.agents_dir, search_a);
+        assert_eq!(helper.agents_search_dirs, vec![primary.clone(), search_b.clone()]);
+
+        assert!(load_agent_from_dirs(&dirs, "missing").is_none());
+
+        for d in [&primary, &search_a, &search_b] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
 }
 
 /// Per-agent configuration, loaded from a JSON file in the agents directory.
@@ -555,6 +685,11 @@ pub struct AgentConfig {
     /// Directory containing per-agent JSON config files.
     #[serde(default = "default_agents_dir")]
     pub agents_dir: PathBuf,
+    /// Additional directories to scan for agent profiles, checked AFTER
+    /// `agents_dir` (first-seen name wins). Carried by the chat path so the
+    /// `handoff` tool sees the same profiles the UI agent selector does.
+    #[serde(default)]
+    pub agents_search_dirs: Vec<PathBuf>,
     /// Custom system prompts per agent type.
     #[serde(default)]
     pub custom_prompts: HashMap<String, String>,
@@ -565,11 +700,21 @@ pub struct AgentConfig {
     /// Configuration for intelligent context trimming.
     #[serde(default)]
     pub trim_config: crate::trimming::config::TrimConfig,
+    /// Whether this agent may hand off the session to another agent via the
+    /// `handoff` tool (gated by flag, like `shell` — not via `allowed_tools`).
+    /// Calling the tool ends this agent's turn; the target agent continues the
+    /// same conversation with its own prompt/tools/shell/reasoning.
+    #[serde(default)]
+    pub handoff_enabled: bool,
+    /// Agent names this agent may hand off to (empty = any enabled agent).
+    /// Also accepts the legacy `can_invoke` key.
+    #[serde(default, alias = "can_invoke")]
+    pub handoff_targets: Vec<String>,
 }
 
 fn default_enabled_agent() -> bool { true }
 fn default_task_timeout_ms() -> u64 { 60_000 }
-fn default_agents_dir() -> PathBuf {
+pub fn default_agents_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("wuffagent")
@@ -587,11 +732,97 @@ impl Default for AgentConfig {
             task_timeout_ms: 60_000,
             shell_config: ShellConfig::default(),
             agents_dir: default_agents_dir(),
+            agents_search_dirs: Vec::new(),
             custom_prompts: HashMap::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
             trim_config: crate::trimming::config::TrimConfig::default(),
+            handoff_enabled: false,
+            handoff_targets: Vec::new(),
         }
     }
+}
+
+/// Load an enabled agent profile by name from a directory of agent JSON files.
+///
+/// Tries the current `AgentConfig` format first, then the legacy
+/// `WorkerConfig` format (migrated, including `can_invoke` → `handoff_targets`
+/// and `handoff_enabled`). Returns `None` when no file matches `name` or the
+/// matched profile is not enabled.
+pub fn load_agent_from_dir(dir: &Path, name: &str) -> Option<AgentConfig> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(mut cfg) = serde_json::from_str::<AgentConfig>(&content) {
+            if cfg.name == name {
+                if !cfg.enabled {
+                    return None;
+                }
+                // Anchor the agents dir to the directory we actually scanned so
+                // further (chained) handoffs resolve targets from the same place.
+                cfg.agents_dir = dir.to_path_buf();
+                return Some(cfg);
+            }
+            continue;
+        }
+        if let Ok(legacy) = serde_json::from_str::<WorkerConfig>(&content) {
+            if legacy.name == name {
+                if !legacy.enabled {
+                    return None;
+                }
+                return Some(AgentConfig {
+                    name: legacy.name,
+                    description: legacy.description,
+                    system_prompt: legacy.system_prompt,
+                    allowed_tools: legacy.allowed_tools,
+                    enabled: legacy.enabled,
+                    task_timeout_ms: if legacy.task_timeout_ms > 0 {
+                        legacy.task_timeout_ms
+                    } else {
+                        60_000
+                    },
+                    shell_config: legacy.shell_config,
+                    agents_dir: dir.to_path_buf(),
+                    agents_search_dirs: Vec::new(),
+                    custom_prompts: HashMap::new(),
+                    reasoning_effort: legacy.reasoning_effort,
+                    trim_config: crate::trimming::config::TrimConfig::default(),
+                    handoff_enabled: legacy.handoff_enabled,
+                    handoff_targets: legacy.can_invoke,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Load an enabled agent profile by name from an ORDERED list of directories
+/// (primary first, then search dirs); the first directory containing the
+/// profile wins.
+///
+/// On a hit, the returned config is anchored for CHAINED handoffs: its
+/// `agents_dir` points at the directory we actually found the profile in and
+/// `agents_search_dirs` holds the remaining directories (original order), so
+/// the target agent's own `handoff` tool resolves targets the same way the
+/// caller's did.
+pub fn load_agent_from_dirs(dirs: &[PathBuf], name: &str) -> Option<AgentConfig> {
+    let mut cfg = None;
+    for (i, dir) in dirs.iter().enumerate() {
+        if let Some(found) = load_agent_from_dir(dir, name) {
+            cfg = Some((i, found));
+            break;
+        }
+    }
+    cfg.map(|(i, mut c)| {
+        c.agents_dir = dirs[i].clone();
+        c.agents_search_dirs = dirs[..i].iter().cloned().chain(dirs[i + 1..].iter().cloned()).collect();
+        c
+    })
 }
 
 impl AgentConfig {
@@ -700,9 +931,12 @@ impl AgentConfig {
                             task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
                             shell_config: legacy.shell_config,
                             agents_dir: self.agents_dir.clone(),
+                            agents_search_dirs: Vec::new(),
                             custom_prompts: HashMap::new(),
                             reasoning_effort: legacy.reasoning_effort,
                             trim_config: crate::trimming::config::TrimConfig::default(),
+                            handoff_enabled: legacy.handoff_enabled,
+                            handoff_targets: legacy.can_invoke,
                         };
                         agents.push(config);
                     } else {

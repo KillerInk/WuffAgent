@@ -1,30 +1,39 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
+use crate::config::SearchBackend;
 use crate::tools::types::{Tool, ToolOutput, ToolParams, ToolSchema};
 
-/// Search backend configuration.
-#[derive(Clone, Debug)]
-pub enum SearchBackend {
-    /// DuckDuckGo HTML search (with session warming to bypass bot detection).
-    DuckDuckGo,
-    /// Self-hosted SearXNG instance with JSON API.
-    SearXNG { base_url: String },
-    /// Brave Search API (requires API key).
-    Brave { api_key: String },
-}
+use super::html;
 
-/// A tool that searches the web via a configurable search endpoint.
+/// Desktop browser user agent for the HTML search backends.
+const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+/// Per-backend request timeout (failover chains must stay snappy).
+const BACKEND_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// A tool that searches the web via a configurable keyless search endpoint.
+///
+/// `backend` is `Auto` by default, which runs the failover chain
+/// Bing → Yahoo → DuckDuckGo and reports the backend that actually answered
+/// in the output JSON.
 pub struct WebSearchTool {
     http_client: reqwest::Client,
     backend: SearchBackend,
+    /// Default `max_results` when the caller omits the param (config, clamped 1..=20).
+    default_max_results: u32,
+    /// TTL for the in-memory result cache (`search.cache_duration_secs`).
+    cache_ttl: Duration,
 }
 
 /// Shared reqwest client used across all WebSearchTool instances for connection pooling.
 fn shared_client() -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(4)
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(Duration::from_secs(30))
         .build()
         .expect("reqwest client builder")
 }
@@ -39,29 +48,59 @@ static BLOCKING_RUNTIME: LazyLock<tokio::runtime::Runtime> =
             .expect("failed to build blocking runtime")
     });
 
-/// Pre-warm the DuckDuckGo session in a background task so the first search
-/// doesn't pay the warmup cost.
-fn warmup_ddg_client() {
-    // Skip warmup if no tokio runtime is available (e.g. unit tests)
-    if tokio::runtime::Handle::try_current().is_err() {
-        return;
-    }
-    let client = shared_client();
-    tokio::spawn(async move {
-        let _ = client
-            .get("https://duckduckgo.com/")
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-            .send()
-            .await;
-    });
+/// Run an async block to completion. Reuses the ambient runtime handle when
+/// available (e.g. inside `spawn_blocking`), otherwise the cached
+/// `BLOCKING_RUNTIME`. Used by ALL fetch functions (audit finding B8: the
+/// SearXNG/Brave fetchers used to build a fresh runtime per call).
+macro_rules! block_on {
+    ($expr:expr) => {{
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.block_on($expr),
+            Err(_) => BLOCKING_RUNTIME.block_on($expr),
+        }
+    }};
+}
+
+// ─── Result cache ────────────────────────────────────────────────────────────
+
+struct CacheEntry {
+    at: Instant,
+    results: Vec<Value>,
+    /// Empty results from a successful fetch (challenge page / no organic
+    /// items) are cached too, so a blocked backend doesn't hammer the network
+    /// for the TTL window. Network errors are NOT cached (transient).
+    blocked: bool,
+}
+
+static RESULT_CACHE: LazyLock<std::sync::Mutex<HashMap<(String, String), CacheEntry>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn cache_get(label: &str, query: &str, ttl: Duration) -> Option<(Vec<Value>, bool)> {
+    let map = RESULT_CACHE.lock().unwrap();
+    map.get(&(label.to_string(), query.to_string()))
+        .filter(|e| e.at.elapsed() < ttl)
+        .map(|e| (e.results.clone(), e.blocked))
+}
+
+fn cache_put(label: &str, query: &str, results: Vec<Value>, blocked: bool) {
+    let mut map = RESULT_CACHE.lock().unwrap();
+    map.insert(
+        (label.to_string(), query.to_string()),
+        CacheEntry {
+            at: Instant::now(),
+            results,
+            blocked,
+        },
+    );
 }
 
 impl WebSearchTool {
     pub fn new() -> Self {
-        warmup_ddg_client();
         Self {
             http_client: shared_client(),
-            backend: SearchBackend::DuckDuckGo,
+            backend: SearchBackend::Auto,
+            default_max_results: 10,
+            cache_ttl: Duration::from_secs(300),
         }
     }
 
@@ -72,6 +111,16 @@ impl WebSearchTool {
 
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
         self.http_client = client;
+        self
+    }
+
+    pub fn with_default_max_results(mut self, max_results: u32) -> Self {
+        self.default_max_results = max_results.min(20).max(1);
+        self
+    }
+
+    pub fn with_cache_ttl(mut self, cache_ttl: Duration) -> Self {
+        self.cache_ttl = cache_ttl;
         self
     }
 }
@@ -88,7 +137,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web for information using a search engine"
+        "Search the web for information using a search engine (Bing/Yahoo/DuckDuckGo with automatic failover, or SearXNG)"
     }
 
     fn parameters_schema(&self) -> ToolSchema {
@@ -129,100 +178,168 @@ impl Tool for WebSearchTool {
                 crate::tools::types::ToolError::InvalidParams("query is required".to_string())
             })?;
 
-        let max_results: u32 = params.get("max_results").unwrap_or(5);
+        let max_results: u32 = params
+            .get("max_results")
+            .unwrap_or(self.default_max_results)
+            .min(20)
+            .max(1);
+        let max = max_results as usize;
 
-        match &self.backend {
-            SearchBackend::DuckDuckGo => {
-                let html = self.fetch_ddg(&query)?;
-                let results = parse_duckduckgo_results(&html, max_results as usize);
-                Ok(ToolOutput::Success(serde_json::json!({
-                    "query": query,
-                    "max_results": max_results,
-                    "results": results
-                })))
+        // Explicit backends have a chain of one; Auto expands to the
+        // failover list. Per-backend errors are String so the chain can
+        // accumulate one reason per backend.
+        let chain = self.backend.chain();
+        let fetch = |backend: &SearchBackend| -> Result<Vec<Value>, String> {
+            match backend {
+                SearchBackend::Bing => self.fetch_bing(&query, max),
+                SearchBackend::Yahoo => self.fetch_yahoo(&query, max),
+                SearchBackend::DuckDuckGo => self.fetch_ddg(&query, max),
+                SearchBackend::SearXNG { base_url } => self.fetch_searxng(base_url, &query, max),
+                SearchBackend::Brave { api_key } => self.fetch_brave(api_key, &query, max),
+                SearchBackend::Auto => unreachable!("chain() never contains Auto"),
             }
-            SearchBackend::SearXNG { base_url } => {
-                let results = self.fetch_searxng(base_url, &query, max_results as usize)?;
-                Ok(ToolOutput::Success(serde_json::json!({
-                    "query": query,
-                    "max_results": max_results,
-                    "results": results
-                })))
-            }
-            SearchBackend::Brave { api_key } => {
-                let results = self.fetch_brave(api_key, &query, max_results as usize)?;
-                Ok(ToolOutput::Success(serde_json::json!({
-                    "query": query,
-                    "max_results": max_results,
-                    "results": results
-                })))
-            }
-        }
+        };
+
+        let (backend, results) = self
+            .run_chain(&chain, &query, fetch)
+            .map_err(|failures| {
+                crate::tools::types::ToolError::Execution(format!(
+                    "All search backends failed: {}",
+                    failures.join("; ")
+                ))
+            })?;
+
+        Ok(ToolOutput::Success(serde_json::json!({
+            "query": query,
+            "max_results": max_results,
+            "backend": backend.label(),
+            "results": results
+        })))
     }
 }
 
 impl WebSearchTool {
-    /// Fetch results from DuckDuckGo HTML search with session warming.
-    /// First visits the homepage to establish a session, then performs the search.
-    fn fetch_ddg(&self, query: &str) -> Result<String, crate::tools::types::ToolError> {
-        let warmup_url = "https://duckduckgo.com/";
+    /// Run the backend chain: first backend returning ≥1 result wins.
+    ///
+    /// - Fresh cache entry → used without a network call (empty + blocked
+    ///   counts as blocked and fails through).
+    /// - `Ok(results)` non-empty → success (cached).
+    /// - `Ok([])` → "no results (blocked)" (cached), continue.
+    /// - `Err(e)` → recorded, continue (not cached).
+    /// All backends failed → `Err` with one reason string per backend.
+    fn run_chain<F>(
+        &self,
+        chain: &[SearchBackend],
+        query: &str,
+        mut fetch: F,
+    ) -> Result<(SearchBackend, Vec<Value>), Vec<String>>
+    where
+        F: FnMut(&SearchBackend) -> Result<Vec<Value>, String>,
+    {
+        let mut failures: Vec<String> = Vec::new();
 
-        // Use try_current() to avoid panicking when called from a blocking thread
-        // (e.g. inside tokio::task::spawn_blocking from ToolManager::execute).
-        // Reuse a single cached runtime instead of creating one per call.
-        macro_rules! block_on {
-            ($expr:expr) => {{
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => handle.block_on($expr),
-                    Err(_) => BLOCKING_RUNTIME.block_on($expr),
+        for backend in chain {
+            let label = backend.label();
+
+            if let Some((results, blocked)) = cache_get(&label, query, self.cache_ttl) {
+                if blocked || results.is_empty() {
+                    failures.push(format!("{label}: no results (blocked, cached)"));
+                    continue;
                 }
-            }};
+                return Ok((backend.clone(), results));
+            }
+
+            match fetch(backend) {
+                Ok(results) if !results.is_empty() => {
+                    cache_put(&label, query, results.clone(), false);
+                    return Ok((backend.clone(), results));
+                }
+                Ok(_) => {
+                    cache_put(&label, query, Vec::new(), true);
+                    failures.push(format!("{label}: no results (blocked)"));
+                }
+                Err(e) => {
+                    failures.push(format!("{label}: {e}"));
+                }
+            }
         }
 
-        // Step 1: Warm up session by visiting the homepage
-        let _warmup = block_on!(async {
+        Err(failures)
+    }
+
+    /// Fetch results from Bing HTML search.
+    fn fetch_bing(&self, query: &str, max_results: usize) -> Result<Vec<Value>, String> {
+        let html_body = block_on!(async {
             self.http_client
-                .get(warmup_url)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .get("https://www.bing.com/search")
+                .query(&[("q", query), ("count", &max_results.to_string())])
+                .header("User-Agent", BROWSER_UA)
                 .header("Accept", "text/html")
-                .header("Accept-Language", "en-US,en;q=0.9,de;q=0.8")
-                .header("Accept-Encoding", "gzip, deflate, br")
-                .header("Connection", "keep-alive")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Accept-Encoding", "identity")
+                .timeout(BACKEND_TIMEOUT)
                 .send()
                 .await
-        });
+                .map_err(|e| format!("Bing HTTP request failed: {e}"))?
+                .text()
+                .await
+                .map_err(|e| format!("Failed to read Bing response: {e}"))
+        })?;
 
-        // Small delay to simulate human behavior
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        Ok(parse_bing_results(&html_body, max_results))
+    }
 
-        // Step 2: Perform the search
-        let html = block_on!(async {
+    /// Fetch results from Yahoo HTML search.
+    fn fetch_yahoo(&self, query: &str, max_results: usize) -> Result<Vec<Value>, String> {
+        let html_body = block_on!(async {
+            self.http_client
+                .get("https://search.yahoo.com/search")
+                .query(&[("p", query), ("n", &max_results.to_string())])
+                .header("User-Agent", BROWSER_UA)
+                .header("Accept", "text/html")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Accept-Encoding", "identity")
+                .timeout(BACKEND_TIMEOUT)
+                .send()
+                .await
+                .map_err(|e| format!("Yahoo HTTP request failed: {e}"))?
+                .text()
+                .await
+                .map_err(|e| format!("Failed to read Yahoo response: {e}"))
+        })?;
+
+        Ok(parse_yahoo_results(&html_body, max_results))
+    }
+
+    /// Fetch results from DuckDuckGo HTML search. Kept in the failover
+    /// chain because it works from some IPs; a bot-challenge page is
+    /// detected and reported as an error so the chain falls through.
+    fn fetch_ddg(&self, query: &str, max_results: usize) -> Result<Vec<Value>, String> {
+        let html_body = block_on!(async {
             self.http_client
                 .get("https://html.duckduckgo.com/html/")
                 .query(&[("q", query)])
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64")
+                .header("User-Agent", BROWSER_UA)
                 .header("Accept", "text/html")
-                .header("Accept-Language", "en-US,en;q=0.9,de;q=0.8")
+                .header("Accept-Language", "en-US,en;q=0.9")
                 .header("Accept-Encoding", "identity")
-                .header("Connection", "keep-alive")
-                .header("Upgrade-Insecure-Requests", "1")
+                .timeout(BACKEND_TIMEOUT)
                 .send()
                 .await
-                .map_err(|e| crate::tools::types::ToolError::Execution(format!("DDG HTTP request failed: {}", e)))?
+                .map_err(|e| format!("DDG HTTP request failed: {e}"))?
                 .text()
                 .await
-                .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read DDG response: {}", e)))
+                .map_err(|e| format!("Failed to read DDG response: {e}"))
         })?;
 
-        // Check if we got a bot challenge page instead of results
-        if html.contains("anomaly-modal") || html.contains("Unfortunately, bots use DuckDuckGo") {
-            return Err(crate::tools::types::ToolError::Execution(
-                "DuckDuckGo blocked the request (bot detection). Consider configuring a SearXNG backend or Brave Search API key."
-                    .to_string(),
-            ));
+        // Check if we got a bot challenge page instead of results.
+        if html_body.contains("anomaly-modal")
+            || html_body.contains("Unfortunately, bots use DuckDuckGo")
+        {
+            return Err("blocked by bot detection".to_string());
         }
 
-        Ok(html)
+        Ok(parse_duckduckgo_results(&html_body, max_results))
     }
 
     /// Fetch results from a SearXNG instance (JSON API).
@@ -231,45 +348,29 @@ impl WebSearchTool {
         base_url: &str,
         query: &str,
         max_results: usize,
-    ) -> Result<Vec<serde_json::Value>, crate::tools::types::ToolError> {
-        macro_rules! block_on {
-            ($expr:expr) => {{
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => handle.block_on($expr),
-                    Err(_) => {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to create runtime: {}", e)))?;
-                        rt.block_on($expr)
-                    }
-                }
-            }};
-        }
-
+    ) -> Result<Vec<Value>, String> {
         let resp = block_on!(async {
             self.http_client
                 .get(format!("{}/search", base_url.trim_end_matches('/')))
                 .query(&[("q", query), ("format", "json")])
                 .header("User-Agent", "WuffAgent/1.0")
+                .timeout(BACKEND_TIMEOUT)
                 .send()
                 .await
-                .map_err(|e| crate::tools::types::ToolError::Execution(format!("SearXNG HTTP request failed: {}", e)))
+                .map_err(|e| format!("SearXNG HTTP request failed: {e}"))
         })?;
 
         if !resp.status().is_success() {
-            return Err(crate::tools::types::ToolError::Execution(
-                format!("SearXNG returned status {}", resp.status()),
-            ));
+            return Err(format!("SearXNG returned status {}", resp.status()));
         }
 
-        let body: serde_json::Value = block_on!(async {
+        let body: Value = block_on!(async {
             resp.text()
                 .await
-                .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read SearXNG response: {}", e)))
+                .map_err(|e| format!("Failed to read SearXNG response: {e}"))
         })?
         .parse()
-        .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to parse SearXNG JSON: {}", e)))?;
+        .map_err(|e| format!("Failed to parse SearXNG JSON: {e}"))?;
 
         let results = body
             .get("results")
@@ -289,28 +390,13 @@ impl WebSearchTool {
         Ok(results)
     }
 
-    /// Fetch results from Brave Search API.
+    /// Fetch results from Brave Search API (compat backend, requires key).
     fn fetch_brave(
         &self,
         api_key: &str,
         query: &str,
         max_results: usize,
-    ) -> Result<Vec<serde_json::Value>, crate::tools::types::ToolError> {
-        macro_rules! block_on {
-            ($expr:expr) => {{
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => handle.block_on($expr),
-                    Err(_) => {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to create runtime: {}", e)))?;
-                        rt.block_on($expr)
-                    }
-                }
-            }};
-        }
-
+    ) -> Result<Vec<Value>, String> {
         let body = block_on!(async {
             self.http_client
                 .get("https://api.search.brave.com/res/v1/web/search")
@@ -319,17 +405,18 @@ impl WebSearchTool {
                 .header("Authorization", format!("Bearer {}", api_key))
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
+                .timeout(BACKEND_TIMEOUT)
                 .send()
                 .await
-                .map_err(|e| crate::tools::types::ToolError::Execution(format!("Brave HTTP request failed: {}", e)))?
+                .map_err(|e| format!("Brave HTTP request failed: {e}"))?
                 .text()
                 .await
-                .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to read Brave response: {}", e)))
+                .map_err(|e| format!("Failed to read Brave response: {e}"))
         })?;
 
-        let resp: serde_json::Value = body
+        let resp: Value = body
             .parse()
-            .map_err(|e| crate::tools::types::ToolError::Execution(format!("Failed to parse Brave JSON: {}", e)))?;
+            .map_err(|e| format!("Failed to parse Brave JSON: {e}"))?;
 
         let results = resp
             .get("web")
@@ -351,29 +438,191 @@ impl WebSearchTool {
     }
 }
 
-/// Minimal parser for DuckDuckGo HTML results.
-fn parse_duckduckgo_results(html: &str, limit: usize) -> Vec<serde_json::Value> {
+// ─── Parsers ─────────────────────────────────────────────────────────────────
+
+/// Minimal parser for Bing HTML results.
+///
+/// One organic result per `<li class="b_algo"` item; the anchor `href` is a
+/// `bing.com/ck/a` redirect whose `u=a1<base64>` query param carries the real
+/// URL.
+pub(crate) fn parse_bing_results(html: &str, limit: usize) -> Vec<Value> {
     let mut results = Vec::new();
 
-    // DuckDuckGo HTML results use <article class="result"> elements
-    let result_pattern = "<article";
-    let rows: Vec<&str> = html.split(result_pattern).skip(1).collect();
+    for seg in html.split("<li class=\"b_algo\"").skip(1).take(limit) {
+        // URL: `u=a1<base64>` — the base64 value ends at the next `&`.
+        let url = seg
+            .find("u=a1")
+            .and_then(|i| {
+                let rest = &seg[i + "u=a1".len()..];
+                let end = rest.find('&').unwrap_or(rest.len());
+                Some(&rest[..end])
+            })
+            .and_then(decode_bing_url);
+        let Some(url) = url else { continue };
 
-    for row in rows.iter().take(limit) {
-        // Extract title from <a class="result__a">
-        let title = extract_between(row, "class=\"result__a\"", ">")
-            .and_then(extract_text)
+        // Title: first <h2 …><a …>TITLE</a> in the item.
+        let title = seg
+            .find("<h2")
+            .and_then(|h2| {
+                let h2seg = &seg[h2..];
+                h2seg
+                    .find("<a")
+                    .and_then(|a| h2seg[a..].find('>')
+                        .map(|gt| &h2seg[a + gt + 1..]))
+            })
+            .and_then(|t| t.find("</a>").map(|e| &t[..e]))
+            .and_then(html::extract_text)
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+
+        // Snippet: <div class="b_caption"><p …>…</p>
+        let snippet = seg
+            .find("class=\"b_caption\"")
+            .and_then(|i| seg[i..].find('>')
+                .map(|gt| &seg[i + gt + 1..]))
+            .and_then(|s| s.find("</p>").map(|e| &s[..e]))
+            .and_then(html::extract_text)
             .unwrap_or_default();
 
-        // Extract URL from href attribute
-        let url = extract_between(row, "href=\"", "\"")
-            .or_else(|| extract_between(row, "href='", "'"))
+        results.push(serde_json::json!({
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+        }));
+    }
+
+    results
+}
+
+/// Decode Bing's `u=a1<base64>` redirect target; `None` when undecodable or
+/// not an http(s) URL.
+fn decode_bing_url(b64: &str) -> Option<String> {
+    use base64::Engine;
+    let b64 = b64.trim();
+    // Bing's `u=a1` values are unpadded (length ≡ 2 mod 4), so the
+    // padding-indifferent engines are required (`STANDARD` rejects them).
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(b64)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64))
+        .ok()?;
+    let url = String::from_utf8_lossy(&bytes).into_owned();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url)
+    } else {
+        None
+    }
+}
+
+/// Minimal parser for Yahoo HTML results.
+///
+/// One organic result per `<div class="compTitle options-toggle">` segment —
+/// the title anchor, the h3, and the `compText aAbs` snippet all live in the
+/// same segment. The real URL is the percent-encoded `RU=` param of the
+/// `r.search.yahoo.com` redirect (up to `/RK=`).
+pub(crate) fn parse_yahoo_results(html: &str, limit: usize) -> Vec<Value> {
+    let mut results = Vec::new();
+
+    for seg in html
+        .split("<div class=\"compTitle options-toggle\">")
+        .skip(1)
+        .take(limit)
+    {
+        // URL: first href in the segment; RU=<percent-encoded>/RK=.
+        let url = seg
+            .find("href=\"http")
+            .and_then(|i| {
+                let rest = &seg[i + "href=\"".len()..];
+                rest.find('"').map(|e| &rest[..e])
+            })
+            .and_then(|href| {
+                href.find("RU=").and_then(|ru| {
+                    let after = &href[ru + "RU=".len()..];
+                    let end = after.find("/RK=").unwrap_or(after.len());
+                    Some(&after[..end])
+                })
+            })
+            .map(html::percent_decode)
+            .filter(|u| u.starts_with("http://") || u.starts_with("https://"));
+        let Some(url) = url else { continue };
+
+        // Title: <h3 …><span …>TITLE</span>
+        let title = seg
+            .find("<h3")
+            .and_then(|h3| {
+                let h3seg = &seg[h3..];
+                h3seg
+                    .find("<span")
+                    .and_then(|sp| h3seg[sp..].find('>')
+                        .map(|gt| &h3seg[sp + gt + 1..]))
+            })
+            .and_then(|t| t.find("</span>").map(|e| &t[..e]))
+            .and_then(html::extract_text)
+            .unwrap_or_default();
+        if title.is_empty() {
+            continue;
+        }
+
+        // Snippet: <div class="compText aAbs"><p …>…</p>
+        let snippet = seg
+            .find("compText aAbs")
+            .and_then(|i| {
+                seg[i..]
+                    .find("<p")
+                    .and_then(|p| seg[i + p..].find('>')
+                        .map(|gt| &seg[i + p + gt + 1..]))
+            })
+            .and_then(|s| s.find("</p>").map(|e| &s[..e]))
+            .and_then(html::extract_text)
+            .unwrap_or_default();
+
+        results.push(serde_json::json!({
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+        }));
+    }
+
+    results
+}
+
+/// Minimal parser for DuckDuckGo HTML results.
+fn parse_duckduckgo_results(html: &str, limit: usize) -> Vec<Value> {
+    let mut results = Vec::new();
+
+    // DuckDuckGo HTML results use <article class="result"> elements.
+    let rows: Vec<&str> = html.split("<article").skip(1).take(limit).collect();
+
+    for row in rows {
+        // Title: text of <a class="result__a">…</a> (attribute order is not
+        // relied on: the anchor tag ends at the first `>` after the class).
+        let title = row
+            .find("class=\"result__a\"")
+            .and_then(|i| row[i..].find('>')
+                .map(|gt| &row[i + gt + 1..]))
+            .and_then(|t| t.find("</a>").map(|e| &t[..e]))
+            .and_then(html::extract_text)
+            .unwrap_or_default();
+
+        // Extract URL from the first href attribute.
+        let url = html::extract_between(row, "href=\"", "\"")
+            .or_else(|| {
+                row.find("href='").and_then(|i| {
+                    let rest = &row[i + "href='".len()..];
+                    rest.find('\'').map(|e| &rest[..e])
+                })
+            })
             .map(clean_ddg_url)
             .unwrap_or_default();
 
-        // Extract snippet from <div class="result__snippet">
-        let snippet = extract_between(row, "class=\"result__snippet\"", ">")
-            .and_then(extract_text)
+        // Snippet: text of <div class="result__snippet">…</div>
+        let snippet = row
+            .find("class=\"result__snippet\"")
+            .and_then(|i| row[i..].find('>')
+                .map(|gt| &row[i + gt + 1..]))
+            .and_then(|s| s.find("</").map(|e| &s[..e]))
+            .and_then(html::extract_text)
             .unwrap_or_default();
 
         if !title.is_empty() {
@@ -388,80 +637,205 @@ fn parse_duckduckgo_results(html: &str, limit: usize) -> Vec<serde_json::Value> 
     results
 }
 
-/// Extract text between two markers.
-fn extract_between<'a>(input: &'a str, start: &str, end: &str) -> Option<&'a str> {
-    let idx = input.find(start)? + start.len();
-    let rest = &input[idx..];
-    let end_idx = rest.find(end)?;
-    Some(&rest[..end_idx])
-}
-
-/// Strip HTML entities to get plain text.
-fn extract_text(input: &str) -> Option<String> {
-    let stripped = html_unescape(input);
-    Some(stripped.trim().to_string())
-}
-
-/// Simple HTML entity decoder.
-fn html_unescape(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '&' {
-            let remaining: String = chars.by_ref().take(10).collect();
-            match remaining.as_str() {
-                "quot;" => { result.push('"'); continue; }
-                "apos;" => { result.push('\''); continue; }
-                "lt;" => { result.push('<'); continue; }
-                "gt;" => { result.push('>'); continue; }
-                "amp;" => { result.push('&'); continue; }
-                "nbsp;" => { result.push(' '); continue; }
-                _ => { result.push(c); }
-            }
-        }
-        result.push(c);
-    }
-    result
-}
-
-/// DuckDuckGo wraps URLs in redirect links — extract the real URL.
+/// DuckDuckGo wraps URLs in redirect links — extract the real URL from the
+/// `uddg=` param (value ends at the next `&`).
 fn clean_ddg_url(url: &str) -> String {
-    if url.starts_with("/l/") && url.contains("uddg=") {
-        if let Some(eq_pos) = url.find("uddg=") {
-            let encoded = &url[eq_pos + 5..];
-            let encoded = encoded.trim_end_matches(['"', '\'']);
-            return percent_decode(encoded);
+    if let Some(eq_pos) = url.find("uddg=") {
+        let encoded = &url[eq_pos + "uddg=".len()..];
+        let encoded = encoded.split('&').next().unwrap_or("");
+        if !encoded.is_empty() {
+            return html::percent_decode(encoded);
         }
     }
     url.to_string()
 }
 
-/// ponytail: minimal percent-decode (+ = space, like urlencoding), no dep needed
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'+' {
-            out.push(b' ');
-        } else if b[i] == b'%' && i + 2 < b.len() {
-            if let (Some(h), Some(l)) = (hex_val(b[i + 1]), hex_val(b[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+// ─── Tests ───────────────────────────────────────────────────────────────────
+//
+// The search parsers are tested OFFLINE against saved HTML fixtures in
+// `wuffagent-core/tests/fixtures/` (bing/yahoo: real result pages; ddg: the
+// bot-challenge page). Keep the fixtures current when provider markup changes.
 
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BING_HTML: &str = include_str!("../../../tests/fixtures/bing.html");
+    const YAHOO_HTML: &str = include_str!("../../../tests/fixtures/yahoo.html");
+    const DDG_HTML: &str = include_str!("../../../tests/fixtures/ddg.html");
+    // Second Yahoo capture (2026-09, live): guards against markup drift —
+    // if this ever fails, re-probe the live page and update the parser.
+    const YAHOO_HTML_2026_09: &str =
+        include_str!("../../../tests/fixtures/yahoo-live-2026-09.html");
+
+    // Fixture query was "rust web framework" — first result on both engines:
+    const EXPECTED_URL: &str = "https://github.com/flosse/rust-web-framework-comparison";
+
+    #[test]
+    fn test_parse_bing_results_happy() {
+        let results = parse_bing_results(BING_HTML, 10);
+        assert!(results.len() >= 3, "expected >=3 results, got {}", results.len());
+
+        let first = &results[0];
+        assert_eq!(first["url"].as_str(), Some(EXPECTED_URL));
+        assert!(
+            first["title"].as_str().unwrap_or("").contains("Rust web framework comparison"),
+            "unexpected title: {}",
+            first["title"]
+        );
+        assert!(!first["snippet"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_yahoo_results_happy() {
+        let results = parse_yahoo_results(YAHOO_HTML, 10);
+        assert!(results.len() >= 3, "expected >=3 results, got {}", results.len());
+
+        let first = &results[0];
+        assert_eq!(first["url"].as_str(), Some(EXPECTED_URL));
+        assert!(
+            first["title"].as_str().unwrap_or("").contains("Rust web framework comparison"),
+            "unexpected title: {}",
+            first["title"]
+        );
+        assert!(!first["snippet"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_yahoo_results_2026_09_capture() {
+        // Live capture from 8 months later: same query, same first result —
+        // proves the parser survives Yahoo markup drift between captures.
+        let results = parse_yahoo_results(YAHOO_HTML_2026_09, 10);
+        assert!(results.len() >= 3, "expected >=3 results, got {}", results.len());
+        assert_eq!(results[0]["url"].as_str(), Some(EXPECTED_URL));
+    }
+
+    #[test]
+    fn test_parse_ddg_challenge_page_is_empty() {
+        // ddg.html is the bot-challenge page: no <article> results at all.
+        assert!(parse_duckduckgo_results(DDG_HTML, 10).is_empty());
+        assert!(DDG_HTML.contains("anomaly-modal"));
+    }
+
+    #[test]
+    fn test_parsers_empty_input() {
+        assert!(parse_bing_results("", 10).is_empty());
+        assert!(parse_yahoo_results("", 10).is_empty());
+        assert!(parse_duckduckgo_results("", 10).is_empty());
+    }
+
+    #[test]
+    fn test_parse_ddg_synthetic_happy_path() {
+        // Real-world attribute order (class before href) on both anchors.
+        let html = r#"<html><body>
+<article class="result results_links results_links_deep web-result">
+<h2 class="result__title"><a rel="nofollow" class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fpage1&rut=abc123">Example <b>Page</b> One</a></h2>
+<div class="result__snippet">Snippet one &amp; more.</div>
+</article>
+<article class="result results_links results_links_deep web-result">
+<h2 class="result__title"><a rel="nofollow" class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.org%2Ftwo&rut=def456">Example Page Two</a></h2>
+<div class="result__snippet">Snippet two.</div>
+</article>
+</body></html>"#;
+
+        let results = parse_duckduckgo_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["title"].as_str(), Some("Example Page One"));
+        assert_eq!(results[0]["url"].as_str(), Some("https://example.com/page1"));
+        assert_eq!(results[0]["snippet"].as_str(), Some("Snippet one & more."));
+        assert_eq!(results[1]["title"].as_str(), Some("Example Page Two"));
+        assert_eq!(results[1]["url"].as_str(), Some("https://example.org/two"));
+    }
+
+    #[test]
+    fn test_clean_ddg_url() {
+        assert_eq!(
+            clean_ddg_url("/l/?uddg=https%3A%2F%2Fexample.com%2Fx&rut=123"),
+            "https://example.com/x"
+        );
+        // Non-redirect URLs pass through.
+        assert_eq!(clean_ddg_url("https://plain.example/"), "https://plain.example/");
+    }
+
+    #[test]
+    fn test_run_chain_failover() {
+        let tool = WebSearchTool::new();
+        let ddg_results = vec![
+            serde_json::json!({"title": "t1", "url": "https://a.example", "snippet": ""}),
+            serde_json::json!({"title": "t2", "url": "https://b.example", "snippet": ""}),
+        ];
+
+        let (backend, results) = tool
+            .run_chain(
+                &[
+                    SearchBackend::Bing,
+                    SearchBackend::Yahoo,
+                    SearchBackend::DuckDuckGo,
+                ],
+                "failover-happy-test",
+                |b| match b {
+                    SearchBackend::Bing => Err("blocked by bot detection".to_string()),
+                    SearchBackend::Yahoo => Ok(Vec::new()),
+                    SearchBackend::DuckDuckGo => Ok(ddg_results.clone()),
+                    _ => unreachable!(),
+                },
+            )
+            .expect("chain should succeed on the third backend");
+
+        assert_eq!(backend, SearchBackend::DuckDuckGo);
+        assert_eq!(results, ddg_results);
+    }
+
+    #[test]
+    fn test_run_chain_first_backend_wins() {
+        let tool = WebSearchTool::new();
+        let bing_results = vec![serde_json::json!({"title": "t", "url": "https://x", "snippet": ""})];
+
+        let (backend, results) = tool
+            .run_chain(
+                &[SearchBackend::Bing, SearchBackend::Yahoo, SearchBackend::DuckDuckGo],
+                "failover-first-wins-test",
+                |b| {
+                    if matches!(b, SearchBackend::Bing) {
+                        Ok(bing_results.clone())
+                    } else {
+                        unreachable!("chain must stop at the first success")
+                    }
+                },
+            )
+            .expect("chain should succeed on the first backend");
+
+        assert_eq!(backend, SearchBackend::Bing);
+        assert_eq!(results, bing_results);
+    }
+
+    #[test]
+    fn test_run_chain_all_fail() {
+        let tool = WebSearchTool::new();
+        let failures = tool
+            .run_chain(
+                &[
+                    SearchBackend::Bing,
+                    SearchBackend::Yahoo,
+                    SearchBackend::DuckDuckGo,
+                ],
+                "failover-all-fail-test",
+                |b| match b {
+                    SearchBackend::Bing => Err("timeout".to_string()),
+                    SearchBackend::Yahoo => Ok(Vec::new()),
+                    SearchBackend::DuckDuckGo => Err("blocked by bot detection".to_string()),
+                    _ => unreachable!(),
+                },
+            )
+            .expect_err("chain should fail when every backend fails");
+
+        assert_eq!(failures.len(), 3);
+        assert!(failures[0].starts_with("bing: timeout"), "{}", failures[0]);
+        assert!(failures[1].starts_with("yahoo: no results (blocked)"), "{}", failures[1]);
+        assert!(
+            failures[2].starts_with("duckduckgo: blocked by bot detection"),
+            "{}",
+            failures[2]
+        );
     }
 }

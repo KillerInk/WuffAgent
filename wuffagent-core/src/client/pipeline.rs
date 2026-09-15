@@ -11,7 +11,7 @@ use crate::agents::AgentEngine;
 use crate::types::{AppEvent, ReasoningEffort};
 
 /// The selected chat profile's tool policy, carried onto the chat path so the
-/// chat agent runs with that profile's tool set, shell restrictions, delegation
+/// chat agent runs with that profile's tool set, shell restrictions, handoff
 /// rights, reasoning effort, and trim configuration (instead of the old
 /// "all tools + allow-all shell" default).
 #[derive(Clone)]
@@ -21,9 +21,14 @@ pub struct ChatToolPolicy {
     pub allowed_tools: Vec<String>,
     /// The profile's shell config (allowlist/enabled/timeout).
     pub shell_config: ShellConfig,
-    /// Agent names the profile may invoke via agent_call (empty = the
-    /// agent_call tool is stripped from the chat agent).
-    pub can_invoke: Vec<String>,
+    /// The selected profile's name (used for the chat agent's identity and
+    /// handoff markers, e.g. "[Handoff from 'architect' to 'coder']").
+    pub agent_name: String,
+    /// Whether the chat agent may hand off the session via the `handoff` tool
+    /// (the profile's `handoff_enabled` flag).
+    pub handoff_enabled: bool,
+    /// Agent names the profile may hand off to (empty = any enabled agent).
+    pub handoff_targets: Vec<String>,
     /// The profile's reasoning effort (Off = inherit the global toggle).
     pub reasoning_effort: ReasoningEffort,
     /// The profile's context-trimming configuration.
@@ -41,7 +46,12 @@ impl ChatToolPolicy {
                 allowed_commands: Vec::new(),
                 ..ShellConfig::default()
             },
-            can_invoke: Vec::new(),
+            agent_name: "chat".to_string(),
+            // Permissive = may hand off to any enabled agent (empty targets).
+            // Without this, "Auto" chat could never hand off to a profile,
+            // even though every other tool is unrestricted.
+            handoff_enabled: true,
+            handoff_targets: Vec::new(),
             reasoning_effort: ReasoningEffort::default(),
             trim_config: crate::trimming::config::TrimConfig::default(),
         }

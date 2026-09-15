@@ -22,6 +22,7 @@ impl ChatApp {
             | AppEvent::StreamThinkingComplete { session_id, .. }
             | AppEvent::NCtxUpdated { session_id, .. }
             | AppEvent::ImprovementSuggested { session_id, .. }
+            | AppEvent::AgentHandoff { session_id, .. }
             => session_id.clone(),
         };
         match event {
@@ -159,6 +160,21 @@ impl ChatApp {
             }
             AppEvent::NCtxUpdated { n_ctx, session_id: _ } => {
                 tracing::info!(n_ctx, "n_ctx updated");
+            }
+            AppEvent::AgentHandoff { from, to, task, .. } => {
+                tracing::info!(from, to, "Agent handoff");
+                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                    // The session is now owned by the target agent: follow the
+                    // switch so follow-up messages (and the next queued one)
+                    // run under the new profile.
+                    runtime.selected_agent = Some(to.clone());
+                    // Visible banner in the chat transcript.
+                    runtime.chat_state.push_message(
+                        MessageKind::Normal,
+                        "system",
+                        &format!("🔀 Handoff: {} → {} — {}", from, to, task),
+                    );
+                }
             }
             AppEvent::ImprovementSuggested { agent_name, suggestions, session_id: _ } => {
                 tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");

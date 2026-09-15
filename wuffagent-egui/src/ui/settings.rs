@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 
-use crate::config::{get_presets_path, Config, PresetStore};
+use crate::config::{get_presets_path, Config, PresetStore, SearchBackend};
 use super::theme::Theme;
 
 /// The settings dialog.
@@ -19,6 +19,10 @@ pub struct SettingsDialog {
     pub(crate) config: Arc<Mutex<Config>>,
     /// Set when the dialog's config changed (Save) so the app can sync it back.
     pub(crate) config_dirty: bool,
+    /// Web-search backend selection, as the combo-box label.
+    search_backend_label: String,
+    /// SearXNG instance URL (shown only for the SearXNG backend).
+    searxng_url: String,
 }
 
 impl SettingsDialog {
@@ -32,6 +36,15 @@ impl SettingsDialog {
     ) -> Self {
         let cfg = config.lock().unwrap();
         let presets = PresetStore::load(&get_presets_path()).unwrap_or_default();
+        let (search_backend_label, searxng_url) = match &cfg.search_config.backend {
+            SearchBackend::Auto => ("Auto".to_string(), String::new()),
+            SearchBackend::Bing => ("Bing".to_string(), String::new()),
+            SearchBackend::Yahoo => ("Yahoo".to_string(), String::new()),
+            SearchBackend::DuckDuckGo => ("DuckDuckGo".to_string(), String::new()),
+            SearchBackend::SearXNG { base_url } => ("SearXNG".to_string(), base_url.clone()),
+            // Compat backend: never re-selectable, keep the stored key.
+            SearchBackend::Brave { .. } => ("Brave (API key)".to_string(), String::new()),
+        };
         Self {
             system_prompt: cfg.system_prompt.clone(),
             theme: cfg.theme.clone(),
@@ -41,6 +54,8 @@ impl SettingsDialog {
             show_presets,
             config: config.clone(),
             config_dirty: false,
+            search_backend_label,
+            searxng_url,
         }
     }
 
@@ -104,6 +119,48 @@ impl SettingsDialog {
 
                 ui.separator();
 
+                // Section: Web search
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Web search").strong().color(theme.primary));
+                    });
+                    ui.separator();
+
+                    // Combo box options; "Brave (API key)" is only offered when
+                    // the config already uses it (compat, never re-created here).
+                    let options: Vec<String> =
+                        ["Auto", "Bing", "Yahoo", "DuckDuckGo", "SearXNG"].iter().map(|s| s.to_string()).collect();
+                    let options = if self.search_backend_label == "Brave (API key)" {
+                        let mut o = options;
+                        o.push("Brave (API key)".to_string());
+                        o
+                    } else {
+                        options
+                    };
+                    let mut selected = options
+                        .iter()
+                        .position(|o| *o == self.search_backend_label)
+                        .unwrap_or(0);
+                    // egui 0.36: ComboBox is a widget struct (no Ui::combo_box);
+                    // default CloseOnClick closes the popup when an item is picked.
+                    egui::ComboBox::from_label("Backend:")
+                        .selected_text(self.search_backend_label.clone())
+                        .show_index(ui, &mut selected, options.len(), |i| options[i].clone());
+                    self.search_backend_label = options[selected].clone();
+
+                    if self.search_backend_label == "SearXNG" {
+                        ui.horizontal(|ui| {
+                            ui.label("SearXNG URL:");
+                            ui.text_edit_singleline(&mut self.searxng_url);
+                        });
+                    }
+
+                    ui.label(egui::RichText::new("Backend changes take effect when the app restarts.")
+                        .size(12.0).color(theme.text_secondary));
+                });
+
+                ui.separator();
+
                 // Action buttons
                 ui.horizontal(|ui| {
                     if ui.add(egui::Button::new("Save")
@@ -141,6 +198,27 @@ impl SettingsDialog {
         cfg.system_prompt.clone_from(&self.system_prompt);
         cfg.theme.clone_from(&self.theme);
         cfg.max_messages = self.max_messages;
+
+        // Web search backend (env-var overrides are applied at tool
+        // registration, i.e. on restart).
+        cfg.search_config.backend = match self.search_backend_label.as_str() {
+            "Auto" => SearchBackend::Auto,
+            "Bing" => SearchBackend::Bing,
+            "Yahoo" => SearchBackend::Yahoo,
+            "DuckDuckGo" => SearchBackend::DuckDuckGo,
+            "SearXNG" => {
+                let url = self.searxng_url.trim().to_string();
+                if url.is_empty() {
+                    // No URL given — keep the previously configured backend
+                    // rather than saving a SearXNG entry that cannot work.
+                    cfg.search_config.backend.clone()
+                } else {
+                    SearchBackend::SearXNG { base_url: url }
+                }
+            }
+            // "Brave (API key)": keep the stored key unchanged.
+            _ => cfg.search_config.backend.clone(),
+        };
         // Save via the shared config reference
         if let Err(e) = cfg.save() {
             eprintln!("Failed to save config: {}", e);

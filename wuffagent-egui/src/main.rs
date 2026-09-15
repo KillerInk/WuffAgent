@@ -234,7 +234,7 @@ fn bootstrap() -> (
     memory_llm.set_n_ctx(config.n_ctx);
     let memory_llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(memory_llm));
 
-    builtin::register_builtins(&registry).expect("Failed to register built-in tools");
+    builtin::register_builtins(&registry, &config.search_config).expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
         eprintln!("Warning: failed to discover plugins: {}", e);
     }
@@ -266,11 +266,37 @@ fn bootstrap() -> (
     // Register memory tools with the memory manager
     builtin::register_memory_tools(&registry, memory_manager.clone()).expect("Failed to register memory tools");
 
+    // Agents directory (the `agents/` subdirectory next to the config file) —
+    // the chat path resolves `handoff` targets from here (same directory the
+    // UI's agent selector scans).
+    let agents_dir = config
+        .file_path
+        .parent()
+        .map(|p| p.join("agents"))
+        .unwrap_or_else(|| config.file_path.clone());
+
+    // Project-level agents dirs for handoff target discovery — MUST mirror the
+    // UI's agent selector (window.rs / improvements.rs): without these, the
+    // chat path's `handoff` tool only sees the config-dir `agents/` and
+    // reports "Available agents: none" when profiles live in the project.
+    let mut agents_search_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        agents_search_dirs.push(cwd.join("agents"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            agents_search_dirs.push(exe_dir.join("agents"));
+        }
+    }
+
     let agent_engine = AgentEngine::new(
         llm_client,
         tool_manager_for_engine,
         client_for_engine,
-    ).with_memory(memory_manager.clone());
+    )
+    .with_memory(memory_manager.clone())
+    .with_agents_dir(agents_dir)
+    .with_agents_search_dirs(agents_search_dirs);
 
     let agent_engine = Arc::new(agent_engine);
 

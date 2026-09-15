@@ -27,6 +27,10 @@ pub struct AgentConfigDialog {
     /// Comma-separated list of allowed command patterns (empty = allow all
     /// non-dangerous commands).
     shell_allowed_commands: String,
+    /// Whether this agent may hand off the session to another agent.
+    handoff_enabled: bool,
+    /// Comma-separated handoff target names (empty = any enabled agent).
+    handoff_targets: String,
     /// Checked status per tool index.
     tool_checkboxes: Vec<bool>,
     /// Available tool names from the tool registry.
@@ -69,6 +73,8 @@ impl AgentConfigDialog {
             shell_type: "powershell".to_string(),
             shell_timeout_ms: 300_000,
             shell_allowed_commands: String::new(),
+            handoff_enabled: false,
+            handoff_targets: String::new(),
             tool_checkboxes,
             available_tools,
             allowed_tools: Vec::new(),
@@ -139,6 +145,8 @@ impl AgentConfigDialog {
                                             allowed: Vec<String>,
                                             effort: crate::types::ReasoningEffort,
                                             shell: wuffagent_core::agents::config::ShellConfig,
+                                            handoff_enabled: bool,
+                                            handoff_targets: Vec<String>,
                                         }
                                         let button_data: Vec<AgentButtonData> = self.agents.iter().enumerate().map(|(i, agent)| {
                                             let selected = i as isize == self.selected_index;
@@ -153,6 +161,8 @@ impl AgentConfigDialog {
                                                 allowed: agent.allowed_tools.clone(),
                                                 effort: agent.reasoning_effort,
                                                 shell: agent.shell_config.clone(),
+                                                handoff_enabled: agent.handoff_enabled,
+                                                handoff_targets: agent.handoff_targets.clone(),
                                             }
                                         }).collect();
                                         for bd in &button_data {
@@ -168,6 +178,8 @@ impl AgentConfigDialog {
                                                 self.shell_type = bd.shell.shell_type.clone();
                                                 self.shell_timeout_ms = bd.shell.shell_timeout_ms as u32;
                                                 self.shell_allowed_commands = bd.shell.allowed_commands.join(", ");
+                                                self.handoff_enabled = bd.handoff_enabled;
+                                                self.handoff_targets = bd.handoff_targets.join(", ");
                                                 self.sync_tools_from_agent(&bd.allowed);
                                                 self.message = None;
                                             }
@@ -248,6 +260,16 @@ impl AgentConfigDialog {
                                             });
 
                                             ui.separator();
+                                            ui.group(|ui| {
+                                                ui.checkbox(
+                                                    &mut self.handoff_enabled,
+                                                    "Allow agent handoff (this agent may switch the session to another agent)",
+                                                );
+                                                ui.label("Handoff targets (comma-separated agent names; empty = any enabled agent):");
+                                                ui.text_edit_singleline(&mut self.handoff_targets);
+                                            });
+
+                                            ui.separator();
                                             ui.label("Allowed Tools:");
 
                                             // Tool checkboxes
@@ -320,9 +342,17 @@ impl AgentConfigDialog {
                 working_dir: None,
             },
             agents_dir: std::path::PathBuf::from(""),
+            agents_search_dirs: Vec::new(),
             custom_prompts: std::collections::HashMap::new(),
             reasoning_effort: self.reasoning_effort,
             trim_config: wuffagent_core::trimming::config::TrimConfig::default(),
+            handoff_enabled: self.handoff_enabled,
+            handoff_targets: self
+                .handoff_targets
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         };
 
         // Ensure the directory exists before saving
@@ -390,6 +420,8 @@ impl AgentConfigDialog {
         let agent_allowed = self.agents[idx].allowed_tools.clone();
         let agent_effort = self.agents[idx].reasoning_effort;
         let agent_shell = self.agents[idx].shell_config.clone();
+        let agent_handoff_enabled = self.agents[idx].handoff_enabled;
+        let agent_handoff_targets = self.agents[idx].handoff_targets.clone();
 
         self.name = agent_name;
         self.description = agent_desc;
@@ -400,6 +432,8 @@ impl AgentConfigDialog {
         self.shell_type = agent_shell.shell_type.clone();
         self.shell_timeout_ms = agent_shell.shell_timeout_ms as u32;
         self.shell_allowed_commands = agent_shell.allowed_commands.join(", ");
+        self.handoff_enabled = agent_handoff_enabled;
+        self.handoff_targets = agent_handoff_targets.join(", ");
 
         self.sync_tools_from_agent(&agent_allowed);
         self.message = None;
@@ -431,6 +465,8 @@ impl AgentConfigDialog {
         self.shell_type = "powershell".to_string();
         self.shell_timeout_ms = 300_000;
         self.shell_allowed_commands.clear();
+        self.handoff_enabled = false;
+        self.handoff_targets.clear();
         self.allowed_tools.clear();
         for cb in &mut self.tool_checkboxes {
             *cb = false;

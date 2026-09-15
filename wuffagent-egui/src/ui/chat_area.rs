@@ -4,11 +4,21 @@ use super::state::ChatApp;
 use crate::types::{ChatMessage, MessageKind};
 use super::theme::Theme;
 
+// ── TEMPORARY layout debugging (set WUFF_LAYOUT_DBG=1 to enable) ────────
+static LAYOUT_DBG_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn layout_dbg_enabled() -> bool {
+    std::env::var_os("WUFF_LAYOUT_DBG").is_some()
+        && (2..7).contains(&(LAYOUT_DBG_FRAME.load(std::sync::atomic::Ordering::Relaxed) % 1000))
+}
+// ────────────────────────────────────────────────────────────────────────
+
 impl ChatApp {
     /// Threshold in pixels to consider the user as "at bottom"
     const SCROLL_BOTTOM_THRESHOLD: f32 = 10.0;
 
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
+        LAYOUT_DBG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let theme = Theme::from_name(&self.config.theme);
 
         // Get the current session's chat state, or show empty state
@@ -99,6 +109,9 @@ impl ChatApp {
                         ui.add_space(10.0);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                            if layout_dbg_enabled() {
+                                eprintln!("[ldbg] list avail_w={:.1} max_rect={:?}", ui.available_width(), ui.max_rect());
+                            }
                             if messages.is_empty() && !is_streaming {
                                 Self::draw_empty_state(ui, &theme);
                                 return;
@@ -471,6 +484,9 @@ impl ChatApp {
                         .corner_radius(12)
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
+                            if layout_dbg_enabled() {
+                                eprintln!("[ldbg] msg {:>3} frame avail_w={:.1}", index, ui.available_width());
+                            }
                             if is_editing {
                                 if let Some(sid) = &self.selected_session_id {
                                     if let Some(runtime) = self.session_store.get_mut(sid) {
@@ -518,6 +534,15 @@ impl ChatApp {
                                 }
                             }
                         });
+
+                        if layout_dbg_enabled() {
+                            eprintln!(
+                                "[ldbg] msg {:>3} bubble_w={:.1} bubble_rect={:?}",
+                                index,
+                                inner.response.rect.width(),
+                                inner.response.rect
+                            );
+                        }
 
                         // Timestamp — always visible, part of the layout flow.
                         let ts = crate::types::timestamp_time(&message.timestamp);

@@ -32,9 +32,6 @@ const REQUEST_TRUNCATION_CHARS: usize = 500;
 /// generous budget is safe — this only bounds the judge call's prompt size.
 const RESPONSE_TRUNCATION_CHARS: usize = 2000;
 
-/// Timeout in seconds for verification LLM calls.
-const VERIFICATION_TIMEOUT_SECS: u64 = 60;
-
 /// System prompt for response verification.
 ///
 /// The judge grades the assistant's *response* against the tool outputs it
@@ -51,6 +48,20 @@ static VERIFICATION_SYSTEM_PROMPT: &str =
      incomplete, or contradicts the tool outputs. \
      Do NOT reply NEEDS_FIX merely because the tool outputs alone do not spell out the full answer — \
      the response itself is what you are grading.";
+
+/// Maximum number of handoff hops within a single user turn. Bounds
+/// handoff loops (A→B→A→…) — each hop is a full agent run, so this also
+/// caps the total work a single queued turn can trigger.
+const MAX_HANDOFF_DEPTH: usize = 8;
+
+/// Outcome of one agent's LLM loop.
+enum RunOutcome {
+    /// The turn completed; the assistant's final text.
+    Completed(String),
+    /// The `handoff` tool was called; `execute` switches to the target agent
+    /// on the same conversation store.
+    Handoff(crate::agents::types::HandoffRequest),
+}
 
 /// A configurable agent that runs an LLM loop with tool calls.
 ///
@@ -73,6 +84,10 @@ pub struct Agent {
     agent_session_id: Option<String>,
     /// Centralized trimming engine.
     trimming: ContextTrimming,
+    /// Per-execution handoff mailbox, present only when `handoff_enabled`.
+    /// The `handoff` tool writes a request here; `run_llm_loop` picks it up
+    /// before the next LLM round.
+    handoff_mailbox: Option<Arc<Mutex<Option<crate::agents::types::HandoffRequest>>>>,
 }
 
 impl Agent {
@@ -101,7 +116,7 @@ impl Agent {
         // allow-all shell. All other tools are shared. This is what makes an
         // agent's `shell` respect its per-agent restrictions on both the chat and
         // /plan paths.
-        let tool_manager = {
+        let (tool_manager, handoff_mailbox) = {
             let shared = tool_manager.lock().unwrap();
             // The shell tool is advertised only when the agent's
             // `shell_enabled` is true. A disabled shell is removed from the
@@ -112,7 +127,25 @@ impl Agent {
             } else {
                 shared.without_shell()
             };
-            Arc::new(Mutex::new(tm))
+            // The handoff tool is advertised only when `handoff_enabled` —
+            // gated by flag, like the shell above, NOT by `allowed_tools`.
+            // Each execution gets its own mailbox + tool instance (per-agent
+            // target allowlist, agents dir), injected exactly like the shell.
+            let (tm, handoff_mailbox) = if config.handoff_enabled {
+                let mailbox = Arc::new(Mutex::new(None));
+                let tool = crate::tools::builtin::handoff::HandoffTool::new(
+                    mailbox.clone(),
+                    config.agents_dir.clone(),
+                    config.agents_search_dirs.clone(),
+                    config.handoff_targets.clone(),
+                );
+                (tm.with_handoff_tool(tool), Some(mailbox))
+            } else {
+                // Drop any handoff tool inherited from a previous agent in a
+                // handoff chain (the shared base manager may carry one).
+                (tm.without_handoff(), None)
+            };
+            (Arc::new(Mutex::new(tm)), handoff_mailbox)
         };
         Self {
             config,
@@ -125,6 +158,7 @@ impl Agent {
             messages: Vec::new(),
             agent_session_id,
             trimming: ContextTrimming::new(),
+            handoff_mailbox,
         }
     }
 
@@ -201,6 +235,13 @@ impl Agent {
         self.agent_session_id.clone().unwrap_or_default()
     }
 
+    /// Take a pending handoff request written by the `handoff` tool (if any).
+    fn take_pending_handoff(&self) -> Option<crate::agents::types::HandoffRequest> {
+        self.handoff_mailbox
+            .as_ref()
+            .and_then(|m| m.lock().unwrap().take())
+    }
+
     /// Get the messages from the last execution for memory extraction.
     pub fn messages(&self) -> &[Message] {
         &self.messages
@@ -244,18 +285,108 @@ impl Agent {
         // (which already contains the user message from the step above).
         let mut messages = self.build_initial_messages(request);
 
-        let result = self.run_llm_loop(&mut messages, cancel_token).await;
+        // ── Handoff chain ────────────────────────────────────────────────
+        // If the running agent calls the `handoff` tool, its loop returns
+        // RunOutcome::Handoff; we then switch to a fresh Agent for the
+        // target profile, which continues on the SAME conversation store
+        // (shared client) with its own system prompt, tools, shell, and
+        // reasoning effort. Hops are capped at MAX_HANDOFF_DEPTH to break
+        // handoff loops (A→B→A→…).
+        let mut outcome = self.run_llm_loop(&mut messages, cancel_token).await?;
+        let mut hops: usize = 0;
+        // The name of the agent currently running the loop (the original
+        // agent for hop 0; the previous hop's target afterwards) so multi-hop
+        // chains report "B -> C", not "A -> C".
+        let mut current_name = self.config.name.clone();
+        loop {
+            let mut req = match outcome {
+                RunOutcome::Completed(_) => break,
+                RunOutcome::Handoff(req) => req,
+            };
+            hops += 1;
+            if hops > MAX_HANDOFF_DEPTH {
+                return Err(format!(
+                    "Handoff chain exceeded {MAX_HANDOFF_DEPTH} hops; stopping (possible handoff loop)"
+                ));
+            }
+            if cancel_token.is_cancelled() {
+                return Err("Cancelled".to_string());
+            }
+
+            let from = current_name.clone();
+            tracing::info!(
+                "[AGENT] Handing off the session: {} -> {} (task: {})",
+                from,
+                req.agent,
+                req.task
+            );
+
+            // Record the handoff in the store as a user-role marker so the
+            // target agent's snapshot (and every later turn, including after
+            // a session reload) sees the transition and why it happened.
+            let marker = Message {
+                role: "user".to_string(),
+                content: format!(
+                    "[Handoff from '{}' to '{}'] {}",
+                    from, req.agent, req.task
+                ),
+                timestamp: crate::types::format_timestamp(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                image: None,
+            };
+            self.record_in_store(&marker);
+            self.send_event(crate::types::AppEvent::AgentHandoff {
+                from: from.clone(),
+                to: req.agent.clone(),
+                task: req.task.clone(),
+                session_id: self.session_id(),
+            });
+
+            // The target agent gets a FRESH Agent (own system prompt, tool
+            // schema, shell/handoff swaps, client clone with its reasoning
+            // effort, trimming state) but shares the conversation store,
+            // event channel, memory manager, and session id. `self.tool_manager`
+            // (already the per-execution manager) is the shared base; the
+            // target's Agent::new applies its own shell/handoff swaps on top.
+            // The task timeout is a property of the SESSION run, not the
+            // profile: the target inherits the original agent's value so a
+            // no-timeout chat run (task_timeout_ms=0) stays timeout-free
+            // across every hop. Otherwise a profile default (e.g. 60s for
+            // coder) would force-kill long tasks after a handoff.
+            req.config.task_timeout_ms = self.config.task_timeout_ms;
+            let mut next = Self::new(
+                req.config.clone(),
+                self.llm_client.clone(),
+                self.tool_manager.clone(),
+                self.event_tx.clone(),
+                self.client.clone(),
+                self.memory.clone(),
+                self.agent_session_id.clone(),
+            );
+            // Memory injection is query-aware on the handoff task.
+            let mut next_messages = next.build_initial_messages(&req.task);
+            current_name = req.agent.clone();
+            outcome = next.run_llm_loop(&mut next_messages, cancel_token).await?;
+        }
 
         // Keep a clean copy (store snapshot, no system prompts) for memory
         // extraction. Assistant/tool messages were already recorded to the store
-        // as they were generated inside run_llm_loop, so there is no sync-back.
+        // as they were generated inside run_llm_loop (across every hop), so
+        // there is no sync-back.
         self.messages = self.client.conversation().lock().unwrap().clone();
 
         // Persistence is owned by the UI (it saves on StreamComplete, for both the
         // agent and non-agent paths), so the agent does not write the session file
         // itself. This keeps a single writer per store and avoids a redundant save.
 
-        result
+        match outcome {
+            RunOutcome::Completed(content) => Ok(content),
+            RunOutcome::Handoff(_) => {
+                unreachable!("handoff outcomes are consumed by the chain loop")
+            }
+        }
     }
 
     /// Build the system prompt for this agent.
@@ -281,6 +412,25 @@ impl Agent {
              Only save information that is persistent and useful across sessions; don't save routine \
              operations or temporary information.",
         );
+
+        // Handoff guidance: only when the agent actually has the tool.
+        if self.config.handoff_enabled {
+            prompt.push_str(
+                "\n\n## HANDOFF\n\
+                 You can switch the session to a different agent by calling the `handoff` tool with:\n\
+                 - `agent`: the target agent's profile name (e.g. \"coder\")\n\
+                 - `task`: what the target agent should do next (include the context it needs — it sees the full conversation too)\n\
+                 Call it when your part of the work is complete and another specialist should continue \
+                 (e.g. after finishing a plan, hand off to a coder to implement it). \
+                 Your turn ends when you call it; the session continues with the target agent.",
+            );
+            if !self.config.handoff_targets.is_empty() {
+                prompt.push_str(&format!(
+                    "\nYou may only hand off to: {}.",
+                    self.config.handoff_targets.join(", ")
+                ));
+            }
+        }
 
         // Inject memories relevant to the current request (query-aware)
         if let Some(memory) = &self.memory {
@@ -330,7 +480,7 @@ impl Agent {
         &mut self,
         messages: &mut Vec<Message>,
         cancel_token: &CancellationToken,
-    ) -> Result<String, String> {
+    ) -> Result<RunOutcome, String> {
         let mut verification_attempts = 0u32;
         let start = Instant::now();
 
@@ -343,14 +493,17 @@ impl Agent {
             if self.config.allowed_tools.is_empty() {
                 manager.clone()
             } else {
-                // The shell is gated by `shell_enabled`, not by
-                // `allowed_tools`, so an enabled shell must survive the
+                // `shell` and `handoff` are gated by their `*_enabled` flags,
+                // not by `allowed_tools`, so enabled ones must survive the
                 // allowlist filter.
                 let mut allowlist = self.config.allowed_tools.clone();
                 if self.config.get_shell_config().shell_enabled
                     && !allowlist.iter().any(|t| t == "shell")
                 {
                     allowlist.push("shell".to_string());
+                }
+                if self.config.handoff_enabled && !allowlist.iter().any(|t| t == "handoff") {
+                    allowlist.push("handoff".to_string());
                 }
                 manager.with_allowlist(&allowlist)
             }
@@ -365,6 +518,17 @@ impl Agent {
         loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
+            }
+
+            // A pending handoff (written by the `handoff` tool this turn)
+            // ends this agent's run: `execute` switches to the target agent.
+            if let Some(req) = self.take_pending_handoff() {
+                tracing::info!(
+                    "[AGENT] Agent '{}' handoff requested via the handoff tool; ending this agent's turn (to='{}')",
+                    self.config.name,
+                    req.agent
+                );
+                return Ok(RunOutcome::Handoff(req));
             }
 
             // Rate-limit LLM calls to avoid hitting API rate limits.
@@ -840,7 +1004,7 @@ impl Agent {
                     usage: usage.clone(),
                     session_id: self.session_id(),
                 });
-                return Ok(display_content);
+                return Ok(RunOutcome::Completed(display_content));
             }
             verification_attempts += 1;
 
@@ -857,7 +1021,7 @@ impl Agent {
                         usage: usage.clone(),
                         session_id: self.session_id(),
                     });
-                    return Ok(display_content);
+                    return Ok(RunOutcome::Completed(display_content));
                 }
                 Ok(false) => {
                     tracing::warn!(
@@ -888,7 +1052,7 @@ impl Agent {
                         usage: usage.clone(),
                         session_id: self.session_id(),
                     });
-                    return Ok(display_content);
+                    return Ok(RunOutcome::Completed(display_content));
                 }
             }
         }
@@ -986,22 +1150,20 @@ impl Agent {
             return Err("Verification cancelled".to_string());
         }
 
-        let response = match tokio::time::timeout(
-            std::time::Duration::from_secs(VERIFICATION_TIMEOUT_SECS),
-            async {
-                // Propagate cancellation during the LLM call.
-                let cancel_clone = cancel_token.clone();
-                tokio::select! {
-                    result = self.llm_client.complete(&verification_messages) => result,
-                    _ = cancel_clone.cancelled() => Err("Verification cancelled".to_string()),
-                }
-            }
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return Err(format!("Verification LLM call failed: {}", e)),
-            Err(_) => return Err("Verification LLM call timed out".to_string()),
+        // No outer timeout on the judge call: on a slow local model it can
+        // legitimately take minutes, and capping it (previously 60 s per
+        // attempt, up to 2 attempts = ~120 s of dead time) just made the
+        // verification step look hung. The non-streaming HTTP client's total
+        // request timeout (ChatClient::DEFAULT_TIMEOUT_SECS) still bounds a
+        // truly hung server.
+        let cancel_clone = cancel_token.clone();
+        let result = tokio::select! {
+            result = self.llm_client.complete(&verification_messages) => result,
+            _ = cancel_clone.cancelled() => Err("Verification cancelled".to_string()),
+        };
+        let response = match result {
+            Ok(r) => r,
+            Err(e) => return Err(format!("Verification LLM call failed: {}", e)),
         };
 
         // Robust verification: check NEEDS_FIX first (takes precedence),
@@ -1363,6 +1525,120 @@ mod tests {
             "an enabled shell should be advertised: {:?}",
             names
         );
+    }
+
+    /// Temp agents dir with an enabled `coder` (a valid handoff target).
+    fn handoff_agents_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wuffagent_test_agent_handoff_{}", tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("coder.json"),
+            r#"{"name":"coder","system_prompt":"Code things."}"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    /// `tag` must be unique per test: the fixture dir is shared with any
+    /// concurrently running test that uses the same tag, and each test deletes
+    /// it on cleanup (parallel test runs would race otherwise).
+    fn make_agent_with_handoff(enabled: bool, targets: Vec<String>, tag: &str) -> (Agent, std::path::PathBuf) {
+        let dir = handoff_agents_dir(tag);
+        let mut config = AgentConfig {
+            name: "planner".to_string(),
+            ..Default::default()
+        };
+        config.handoff_enabled = enabled;
+        config.handoff_targets = targets;
+        config.agents_dir = dir.clone();
+        let llm_client = Arc::new(NoopLlm);
+        let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
+        let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+        let client = Arc::new(ChatClient::new("http://localhost:1"));
+        let agent = Agent::new(config, llm_client, tool_manager, None, client, None, None);
+        (agent, dir)
+    }
+
+    #[test]
+    fn test_handoff_tool_injected_when_enabled() {
+        let (agent, dir) = make_agent_with_handoff(true, vec!["coder".to_string()], "inject_on");
+        let defs = agent.tool_manager.lock().unwrap().get_tool_definitions();
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+        assert!(
+            names.contains(&"handoff".to_string()),
+            "an enabled handoff should be advertised: {:?}",
+            names
+        );
+        assert!(
+            agent.handoff_mailbox.is_some(),
+            "an enabled handoff should create a mailbox"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_handoff_tool_absent_when_disabled() {
+        let (agent, dir) = make_agent_with_handoff(false, vec!["coder".to_string()], "inject_off");
+        let defs = agent.tool_manager.lock().unwrap().get_tool_definitions();
+        let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
+        assert!(
+            !names.contains(&"handoff".to_string()),
+            "a disabled handoff should not be advertised: {:?}",
+            names
+        );
+        assert!(
+            agent.handoff_mailbox.is_none(),
+            "a disabled handoff should not create a mailbox"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_take_pending_handoff() {
+        use crate::tools::types::ToolParams;
+
+        let (agent, dir) = make_agent_with_handoff(true, vec!["coder".to_string()], "take_on");
+        // Invoke the injected per-execution handoff tool through the manager.
+        let params = ToolParams {
+            values: serde_json::to_value(serde_json::json!({
+                "agent": "coder",
+                "task": "Implement the plan.",
+            }))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        };
+        let tm = agent.tool_manager.lock().unwrap();
+        let result = tm.execute("handoff", params).await;
+        assert!(
+            result.is_ok(),
+            "handoff tool call should succeed: {:?}",
+            result.err()
+        );
+        drop(tm);
+
+        // First take: the request; second take: empty.
+        let req = agent
+            .take_pending_handoff()
+            .expect("pending handoff expected");
+        assert_eq!(req.agent, "coder");
+        assert_eq!(req.config.name, "coder");
+        assert_eq!(req.task, "Implement the plan.");
+        assert!(
+            agent.take_pending_handoff().is_none(),
+            "mailbox is consumed exactly once"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // An agent without handoff never has a mailbox.
+        let (agent2, dir2) = make_agent_with_handoff(false, Vec::new(), "take_off");
+        assert!(agent2.handoff_mailbox.is_none());
+        assert!(agent2.take_pending_handoff().is_none());
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     struct NoopLlm;

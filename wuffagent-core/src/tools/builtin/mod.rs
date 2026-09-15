@@ -2,9 +2,12 @@ pub mod calculation;
 pub mod file_io;
 pub mod search;
 pub mod web_search;
+pub mod fetch_url;
+pub(crate) mod html;
 pub mod memory;
 pub mod time;
 pub mod shell;
+pub mod handoff;
 
 pub use calculation::CalculationTool;
 pub use file_io::{
@@ -13,9 +16,14 @@ pub use file_io::{
 };
 pub use search::SearchContentTool;
 pub use web_search::WebSearchTool;
+pub use fetch_url::FetchUrlTool;
 pub use memory::{SaveMemoryTool, UpdateMemoryTool, SearchMemoryTool, ConsolidateMemoriesTool, DeleteMemoryTool};
 pub use time::TimeTool;
 pub use shell::{ShellTool, ShellConfig};
+// NOTE: HandoffTool is NOT registered in `register_builtins` — it is
+// per-execution (own mailbox / agents dir / allowlist) and is injected by
+// `Agent::new` for agents with `handoff_enabled`, like the per-agent shell.
+pub use handoff::HandoffTool;
 
 use crate::tools::types::{Tool, ToolMetadata};
 use crate::tools::registry::ToolEntry;
@@ -23,14 +31,33 @@ use crate::tools::registry::ToolEntry;
 /// Register all built-in tools that do not require external dependencies.
 pub fn register_builtins(
     registry: &crate::tools::registry::ToolRegistry,
+    search: &crate::config::SearchConfig,
 ) -> crate::tools::types::ToolResult<()> {
-    // Create web search tool
+    // Create web search tool (backend + limits come from the search config,
+    // with env-var overrides applied for headless use).
     registry.register(ToolEntry {
-        tool: std::sync::Arc::new(WebSearchTool::new()),
+        tool: std::sync::Arc::new(
+            WebSearchTool::new()
+                .with_backend(crate::config::SearchBackend::resolve_with_env(search))
+                .with_default_max_results(search.max_results)
+                .with_cache_ttl(std::time::Duration::from_secs(search.cache_duration_secs)),
+        ),
         metadata: ToolMetadata {
             name: "web_search".to_string(),
             version: "1.0.0".to_string(),
-            description: "Search the web for information using a search engine".to_string(),
+            description: "Search the web (Bing/Yahoo/DuckDuckGo with automatic failover, or SearXNG)".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+    })?;
+
+    // Fetch a web page as plain text (companion to web_search).
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(FetchUrlTool::new()),
+        metadata: ToolMetadata {
+            name: "fetch_url".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Fetch a URL and return its content as plain text (HTML is converted to text). Params: url (required), max_bytes (optional, default 128KB)".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

@@ -273,6 +273,14 @@ pub enum AppEvent {
         suggestions: Vec<crate::memory::ImprovementSuggestion>,
         session_id: String,
     },
+    /// The session switched agents: the running agent called the `handoff`
+    /// tool and the target agent now continues the same conversation.
+    AgentHandoff {
+        from: String,
+        to: String,
+        task: String,
+        session_id: String,
+    },
 }
 
 /// Format the current time as a human-readable timestamp string.

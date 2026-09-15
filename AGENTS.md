@@ -25,3 +25,4 @@ Rust 2021 Cargo workspace: `wuffagent-core` (shared lib, crate name `wuffagent_c
 - **Memory file writes are atomic** via temp-file + rename (`wuffagent-core/src/memory/storage.rs`); keep this pattern for any new file persistence.
 - **Module dependency rules** documented in wuffagent-core/src/lib.rs: `types` has no internal deps; no circular deps between top-level modules. `config_types` mirrors `config` re-exports for backward compatibility — don't delete it.
 - **egui `main.rs` re-exports core modules** (`pub use wuffagent_core::{...}`) so `wuffagent-egui/src/ui/*` can use `crate::...` paths instead of full `wuffagent_core::` paths.
+- **Web-search parser fixtures**: offline parser tests read committed snapshots from `wuffagent-core/tests/fixtures/` (`bing.html`, `yahoo.html`) loaded via `include_str!`; `test_dir/` holds the original captured HTML (used for re-verification, not by the tests). Keep fixture files reasonably small; don't commit other large captures.

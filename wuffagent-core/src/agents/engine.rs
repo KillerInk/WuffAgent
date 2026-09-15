@@ -21,6 +21,13 @@ pub struct AgentEngine {
     pub(super) memory: Option<Arc<crate::memory::MemoryManager>>,
     /// Session ID for this agent engine's persistent conversation.
     pub(super) agent_session_id: Option<String>,
+    /// Directory holding agent profile JSON files, so the chat path can
+    /// resolve handoff targets (see `with_agents_dir`).
+    pub(super) agents_dir: Option<std::path::PathBuf>,
+    /// Additional agent profile dirs for the chat path's handoff target
+    /// resolution (see `with_agents_search_dirs`) — same discovery dirs the
+    /// UI agent selector scans.
+    pub(super) agents_search_dirs: Vec<std::path::PathBuf>,
     /// Completed task count, shared across clones; throttles post-task work.
     tasks_completed: Arc<AtomicUsize>,
 }
@@ -45,8 +52,27 @@ impl AgentEngine {
             client,
             memory: None,
             agent_session_id: None,
+            agents_dir: None,
+            agents_search_dirs: Vec::new(),
             tasks_completed: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Set the agents directory used by the chat path to resolve handoff
+    /// targets (agent profile JSON files). Without it, handoff target
+    /// resolution finds no profiles.
+    pub fn with_agents_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.agents_dir = Some(dir);
+        self
+    }
+
+    /// Set additional directories (beyond the primary agents dir) that the
+    /// chat path scans when resolving `handoff` targets. Without these,
+    /// profiles that live in project-level `agents/` dirs are invisible to
+    /// the handoff tool.
+    pub fn with_agents_search_dirs(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
+        self.agents_search_dirs = dirs;
+        self
     }
 
     /// Attach a memory manager to the engine.
@@ -111,7 +137,10 @@ impl AgentEngine {
         }
 
         let mut chat_config = AgentConfig::default();
-        chat_config.name = "chat".to_string();
+        // Use the profile's name so handoff markers read naturally
+        // ("[Handoff from 'architect' to 'coder']") and the model's system
+        // prompt identity matches the selected profile.
+        chat_config.name = tool_policy.agent_name.clone();
         chat_config.system_prompt = system_prompt.to_string();
         chat_config.task_timeout_ms = 0; // no timeout for chat
         // Apply the selected profile's tool policy. An empty allowed_tools means
@@ -123,6 +152,15 @@ impl AgentEngine {
         // chat agent behaves like the profile it came from.
         chat_config.reasoning_effort = tool_policy.reasoning_effort;
         chat_config.trim_config = tool_policy.trim_config.clone();
+        // Handoff: the profile's flag/targets gate the `handoff` tool, and the
+        // agents dir is where target profiles are resolved from.
+        chat_config.handoff_enabled = tool_policy.handoff_enabled;
+        chat_config.handoff_targets = tool_policy.handoff_targets.clone();
+        chat_config.agents_dir = self
+            .agents_dir
+            .clone()
+            .unwrap_or_else(crate::agents::config::default_agents_dir);
+        chat_config.agents_search_dirs = self.agents_search_dirs.clone();
 
         // Keep a copy for the post-task improvement check (Agent::new takes ownership).
         let maintenance_config = chat_config.clone();

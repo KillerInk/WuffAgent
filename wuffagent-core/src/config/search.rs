@@ -2,19 +2,108 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Search backend configuration.
+///
+/// Serde uses the PascalCase variant names (`"Auto"`, `"Bing"`, ...), which
+/// keeps existing config files containing `"DuckDuckGo"` / `"SearXNG"` /
+/// `"Brave"` deserializing unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum SearchBackend {
-    /// DuckDuckGo HTML search (with session warming to bypass bot detection).
+    /// Failover chain: Bing → Yahoo → DuckDuckGo (default).
+    Auto,
+    /// Bing HTML search.
+    Bing,
+    /// Yahoo HTML search.
+    Yahoo,
+    /// DuckDuckGo HTML search.
     DuckDuckGo,
     /// Self-hosted SearXNG instance with JSON API.
     SearXNG { base_url: String },
-    /// Brave Search API (requires API key).
+    /// Brave Search API (compat only — never created by the UI, no env var).
     Brave { api_key: String },
 }
 
 impl Default for SearchBackend {
     fn default() -> Self {
-        SearchBackend::DuckDuckGo
+        SearchBackend::Auto
+    }
+}
+
+impl SearchBackend {
+    /// Backends to try, in order. Auto = [Bing, Yahoo, DuckDuckGo]; anything
+    /// else is just itself.
+    pub fn chain(&self) -> Vec<SearchBackend> {
+        match self {
+            SearchBackend::Auto => vec![
+                SearchBackend::Bing,
+                SearchBackend::Yahoo,
+                SearchBackend::DuckDuckGo,
+            ],
+            other => vec![other.clone()],
+        }
+    }
+
+    /// Lowercase name for output JSON and cache keys:
+    /// `"auto" | "bing" | "yahoo" | "duckduckgo" | "searxng" | "brave"`.
+    pub fn label(&self) -> String {
+        match self {
+            SearchBackend::Auto => "auto".to_string(),
+            SearchBackend::Bing => "bing".to_string(),
+            SearchBackend::Yahoo => "yahoo".to_string(),
+            SearchBackend::DuckDuckGo => "duckduckgo".to_string(),
+            SearchBackend::SearXNG { .. } => "searxng".to_string(),
+            SearchBackend::Brave { .. } => "brave".to_string(),
+        }
+    }
+
+    /// Config backend with env-var overrides applied (handy for headless use):
+    /// - `WUFFAGENT_SEARCH_BACKEND` = `auto|bing|yahoo|duckduckgo|searxng`
+    ///   (PascalCase tolerated, unknown values ignored).
+    /// - `WUFFAGENT_SEARXNG_URL` overrides the SearXNG `base_url` whenever the
+    ///   resolved backend is SearXNG. Selecting `searxng` via the backend env
+    ///   var without any URL (env or configured) keeps the configured backend.
+    pub fn resolve_with_env(cfg: &SearchConfig) -> SearchBackend {
+        let backend = match std::env::var("WUFFAGENT_SEARCH_BACKEND") {
+            Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "auto" => SearchBackend::Auto,
+                "bing" => SearchBackend::Bing,
+                "yahoo" => SearchBackend::Yahoo,
+                "duckduckgo" => SearchBackend::DuckDuckGo,
+                "searxng" => match searxng_url_from_env_or_config(cfg) {
+                    Some(url) => SearchBackend::SearXNG { base_url: url },
+                    // No URL anywhere — keep the configured backend.
+                    None => cfg.backend.clone(),
+                },
+                _ => cfg.backend.clone(),
+            },
+            Err(_) => cfg.backend.clone(),
+        };
+
+        // A configured/selected SearXNG backend picks up the env URL override.
+        match &backend {
+            SearchBackend::SearXNG { .. } => match std::env::var("WUFFAGENT_SEARXNG_URL") {
+                Ok(url) if !url.trim().is_empty() => {
+                    SearchBackend::SearXNG { base_url: url.trim().to_string() }
+                }
+                _ => backend,
+            },
+            other => other.clone(),
+        }
+    }
+}
+
+/// SearXNG base URL from `WUFFAGENT_SEARXNG_URL`, falling back to the
+/// configured SearXNG URL when it is non-empty.
+fn searxng_url_from_env_or_config(cfg: &SearchConfig) -> Option<String> {
+    if let Ok(url) = std::env::var("WUFFAGENT_SEARXNG_URL") {
+        if !url.trim().is_empty() {
+            return Some(url.trim().to_string());
+        }
+    }
+    match &cfg.backend {
+        SearchBackend::SearXNG { base_url } if !base_url.trim().is_empty() => {
+            Some(base_url.trim().to_string())
+        }
+        _ => None,
     }
 }
 
@@ -128,7 +217,7 @@ pub struct SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            backend: SearchBackend::DuckDuckGo,
+            backend: SearchBackend::Auto,
             region: SearchRegion::All,
             time_range: TimeRange::All,
             max_results: 10,
@@ -182,4 +271,140 @@ fn default_max_results() -> u32 {
 
 fn default_cache_duration() -> u64 {
     300 // 5 minutes
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_chain_auto() {
+        let chain = SearchBackend::Auto.chain();
+        assert_eq!(
+            chain,
+            vec![
+                SearchBackend::Bing,
+                SearchBackend::Yahoo,
+                SearchBackend::DuckDuckGo,
+            ]
+        );
+        let labels: Vec<String> = chain.iter().map(|b| b.label()).collect();
+        assert_eq!(labels, vec!["bing", "yahoo", "duckduckgo"]);
+    }
+
+    #[test]
+    fn test_backend_chain_explicit_is_itself() {
+        assert_eq!(
+            SearchBackend::Bing.chain(),
+            vec![SearchBackend::Bing]
+        );
+        assert_eq!(
+            SearchBackend::DuckDuckGo.chain(),
+            vec![SearchBackend::DuckDuckGo]
+        );
+        assert_eq!(
+            SearchBackend::SearXNG { base_url: "http://x".into() }.chain(),
+            vec![SearchBackend::SearXNG { base_url: "http://x".into() }]
+        );
+    }
+
+    #[test]
+    fn test_backend_label() {
+        assert_eq!(SearchBackend::Auto.label(), "auto");
+        assert_eq!(SearchBackend::Bing.label(), "bing");
+        assert_eq!(SearchBackend::Yahoo.label(), "yahoo");
+        assert_eq!(SearchBackend::DuckDuckGo.label(), "duckduckgo");
+        assert_eq!(
+            SearchBackend::SearXNG { base_url: "u".into() }.label(),
+            "searxng"
+        );
+        assert_eq!(
+            SearchBackend::Brave { api_key: "k".into() }.label(),
+            "brave"
+        );
+    }
+
+    #[test]
+    fn test_search_config_default_backend_is_auto() {
+        assert_eq!(SearchConfig::default().backend, SearchBackend::Auto);
+        assert_eq!(SearchBackend::default(), SearchBackend::Auto);
+    }
+
+    /// Env-var tests mutate process-wide env vars, so they run sequentially in
+    /// a single test and restore everything afterwards.
+    #[test]
+    fn test_resolve_with_env() {
+        std::env::remove_var("WUFFAGENT_SEARCH_BACKEND");
+        std::env::remove_var("WUFFAGENT_SEARXNG_URL");
+
+        // Unset → config value.
+        let cfg_ddg = SearchConfig {
+            backend: SearchBackend::DuckDuckGo,
+            ..SearchConfig::default()
+        };
+        assert_eq!(SearchBackend::resolve_with_env(&cfg_ddg), SearchBackend::DuckDuckGo);
+
+        // WUFFAGENT_SEARCH_BACKEND=bing → Bing.
+        std::env::set_var("WUFFAGENT_SEARCH_BACKEND", "bing");
+        assert_eq!(SearchBackend::resolve_with_env(&cfg_ddg), SearchBackend::Bing);
+
+        // PascalCase tolerated.
+        std::env::set_var("WUFFAGENT_SEARCH_BACKEND", "Yahoo");
+        assert_eq!(SearchBackend::resolve_with_env(&cfg_ddg), SearchBackend::Yahoo);
+
+        // =searxng + WUFFAGENT_SEARXNG_URL=http://x → SearXNG { "http://x" }.
+        std::env::set_var("WUFFAGENT_SEARCH_BACKEND", "searxng");
+        std::env::set_var("WUFFAGENT_SEARXNG_URL", "http://x");
+        assert_eq!(
+            SearchBackend::resolve_with_env(&cfg_ddg),
+            SearchBackend::SearXNG { base_url: "http://x".into() }
+        );
+
+        // searxng without env URL, config has one → configured URL.
+        std::env::remove_var("WUFFAGENT_SEARXNG_URL");
+        let cfg_searxng = SearchConfig {
+            backend: SearchBackend::SearXNG { base_url: "http://cfg".into() },
+            ..SearchConfig::default()
+        };
+        assert_eq!(
+            SearchBackend::resolve_with_env(&cfg_searxng),
+            SearchBackend::SearXNG { base_url: "http://cfg".into() }
+        );
+
+        // searxng with no URL anywhere → keep configured backend.
+        assert_eq!(
+            SearchBackend::resolve_with_env(&cfg_ddg),
+            SearchBackend::DuckDuckGo
+        );
+
+        // WUFFAGENT_SEARXNG_URL overrides a configured SearXNG backend too.
+        std::env::remove_var("WUFFAGENT_SEARCH_BACKEND");
+        std::env::set_var("WUFFAGENT_SEARXNG_URL", "http://env");
+        assert_eq!(
+            SearchBackend::resolve_with_env(&cfg_searxng),
+            SearchBackend::SearXNG { base_url: "http://env".into() }
+        );
+
+        // Unknown backend value → config value unchanged.
+        std::env::remove_var("WUFFAGENT_SEARXNG_URL");
+        std::env::set_var("WUFFAGENT_SEARCH_BACKEND", "bogus");
+        assert_eq!(SearchBackend::resolve_with_env(&cfg_ddg), SearchBackend::DuckDuckGo);
+
+        std::env::remove_var("WUFFAGENT_SEARCH_BACKEND");
+        std::env::remove_var("WUFFAGENT_SEARXNG_URL");
+    }
+
+    #[test]
+    fn test_legacy_backend_names_still_deserialize() {
+        // Old config files store the plain PascalCase variant names.
+        let b: SearchBackend = serde_json::from_str("\"DuckDuckGo\"").unwrap();
+        assert_eq!(b, SearchBackend::DuckDuckGo);
+        let b: SearchBackend =
+            serde_json::from_str(r#"{"SearXNG": {"base_url": "http://s"}}"#).unwrap();
+        assert_eq!(b, SearchBackend::SearXNG { base_url: "http://s".into() });
+        let b: SearchBackend = serde_json::from_str(r#"{"Brave": {"api_key": "k"}}"#).unwrap();
+        assert_eq!(b, SearchBackend::Brave { api_key: "k".into() });
+        // New variants round-trip.
+        let b: SearchBackend = serde_json::from_str("\"Auto\"").unwrap();
+        assert_eq!(b, SearchBackend::Auto);
+    }
 }
