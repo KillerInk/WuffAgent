@@ -625,9 +625,21 @@ impl ChatApp {
         // single save path.
         if let Some(sid) = self.selected_session_id.clone() {
             if let Some(runtime) = self.session_store.get(&sid) {
-                let mut conv = runtime.client.conversation().lock().unwrap();
-                if index < conv.len() {
-                    conv[index].content = new_content;
+                // The display and the store are SEPARATE arrays that drift apart as
+                // soon as the display gains entries the store does not hold (e.g.
+                // Thinking blocks: one display entry per round, while the store folds
+                // reasoning into the assistant message). A display index is only a
+                // valid store index while the two are the same length; otherwise
+                // `conv[index]` is a different (later) message and the edit would
+                // silently rewrite the wrong entry. When misaligned, the edit applies
+                // to the display only (it is a view; the store stays authoritative).
+                let aligned = runtime.chat_state.messages.len()
+                    == runtime.client.conversation().lock().unwrap().len();
+                if aligned {
+                    let mut conv = runtime.client.conversation().lock().unwrap();
+                    if index < conv.len() {
+                        conv[index].content = new_content;
+                    }
                 }
             }
             if let Err(e) = self.save_session_for(&sid) {
@@ -1118,11 +1130,24 @@ impl ChatApp {
             if let Some(runtime) = self.session_store.get_mut(&sid) {
                 if index < runtime.chat_state.messages.len() {
                     runtime.chat_state.messages.remove(index);
-                }
-                // Also remove from the underlying client conversation
-                let mut conv = runtime.client.conversation().lock().unwrap();
-                if index < conv.len() {
-                    conv.remove(index);
+                    // Also remove from the underlying client conversation — but only
+                    // while the display and the store are the same length. They are
+                    // separate arrays that drift apart as soon as the display gains
+                    // entries the store does not hold (e.g. Thinking blocks: one
+                    // display entry per round, while the store folds reasoning into
+                    // the assistant message); once misaligned, a display index points
+                    // at a DIFFERENT (later) store message, so removing conv[index]
+                    // would silently delete the wrong message. When misaligned the
+                    // delete applies to the display only (it is a view; the store
+                    // stays authoritative and the message returns on reload).
+                    let aligned = runtime.chat_state.messages.len() + 1
+                        == runtime.client.conversation().lock().unwrap().len();
+                    if aligned {
+                        let mut conv = runtime.client.conversation().lock().unwrap();
+                        if index < conv.len() {
+                            conv.remove(index);
+                        }
+                    }
                 }
             }
             if let Err(e) = self.save_session_for(&sid) {
