@@ -17,6 +17,13 @@ const LLM_RATE_LIMIT_DELAY: Duration = Duration::from_millis(500);
 /// Maximum verification attempts before giving up.
 const MAX_VERIFICATION_ATTEMPTS: u32 = 2;
 
+/// Verification retry nudge pushed to the request list on `NEEDS_FIX`.
+///
+/// Request-only: it is never written to the shared store (see `is_storable`),
+/// and the verification request must be captured at loop start rather than
+/// re-extracted after the nudge exists (see `run_llm_loop`).
+const VERIFICATION_NUDGE: &str = "Your previous response did not fully satisfy the request. Improve it based on the tool outputs, or correct your tool calls and try again.";
+
 /// Minimum number of messages required before trimming is attempted.
 #[allow(dead_code)]
 const MIN_MESSAGES_FOR_TRIM: usize = 4;
@@ -371,11 +378,24 @@ impl Agent {
             outcome = next.run_llm_loop(&mut next_messages, cancel_token).await?;
         }
 
-        // Keep a clean copy (store snapshot, no system prompts) for memory
-        // extraction. Assistant/tool messages were already recorded to the store
-        // as they were generated inside run_llm_loop (across every hop), so
-        // there is no sync-back.
-        self.messages = self.client.conversation().lock().unwrap().clone();
+        // Keep a clean copy for memory extraction: only the current turn's
+        // window (from this turn's user message on), not the whole store —
+        // the store grows with the session, so a full clone here would cost
+        // more every turn. Assistant/tool messages were already recorded to
+        // the store as they were generated inside run_llm_loop (across every
+        // hop), so there is no sync-back. The store may have been
+        // reconciled/trimmed mid-turn, so locate the turn's user message by
+        // its last occurrence rather than by a captured index.
+        {
+            let conv = self.client.conversation().lock().unwrap();
+            let turn_idx = conv.iter().rposition(|m| m.role == "user" && m.content == request);
+            self.messages = match turn_idx {
+                Some(i) => conv.iter().skip(i).cloned().collect(),
+                // The turn's user message was trimmed away (extreme context
+                // pressure) — fall back to whatever the store still holds.
+                None => conv.clone(),
+            };
+        }
 
         // Persistence is owned by the UI (it saves on StreamComplete, for both the
         // agent and non-agent paths), so the agent does not write the session file
@@ -446,21 +466,51 @@ impl Agent {
         prompt
     }
 
+    /// Whether a message belongs in the shared store (vs. request-only).
+    ///
+    /// System messages (the per-run system prompt) and the verification retry
+    /// nudge belong only in outgoing requests and are never persisted. Empty
+    /// assistant placeholders (no content, no tool calls) are a streaming
+    /// artifact and are never stored either.
+    ///
+    /// The nudge is recognized by its content AND its empty timestamp: the
+    /// loop pushes it with `timestamp: String::new()`, while real user
+    /// messages always carry `format_timestamp()`. Matching content alone
+    /// would drop a user message that happens to repeat the nudge verbatim.
+    fn is_storable(msg: &Message) -> bool {
+        if msg.role == "system" {
+            return false;
+        }
+        if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
+            return false;
+        }
+        !(msg.role == "user" && msg.content == VERIFICATION_NUDGE && msg.timestamp.is_empty())
+    }
+
+    /// Reconcile the shared store with the per-run request list after a trim.
+    ///
+    /// The store is the single source of truth, but on the agent path only
+    /// the throwaway request list is trimmed — without this, the store (and
+    /// the session file) grows without bound. The request list is the store's
+    /// storable projection plus request-only entries (system prompt, nudge),
+    /// so replacing the store with that projection drops exactly the messages
+    /// the trim removed and keeps store and request list in sync for every
+    /// later turn (including after a session reload).
+    fn reconcile_store(&self, messages: &[Message]) {
+        let projected: Vec<Message> =
+            messages.iter().filter(|m| Self::is_storable(m)).cloned().collect();
+        let conv = self.client.conversation();
+        *conv.lock().unwrap() = projected;
+    }
+
     /// Record a generated message in the shared store, exactly once.
     ///
-    /// System messages (the per-run system prompt and the verification retry
-    /// nudge) belong only in outgoing requests and are never persisted, so they
-    /// are skipped here. This mirrors the client's non-agent path, where the
-    /// user and assistant messages are written to the shared conversation as
-    /// they happen and the system prompt is never stored.
+    /// Request-only messages (system prompt, verification nudge — see
+    /// `is_storable`) are skipped. This mirrors the client's non-agent path,
+    /// where the user and assistant messages are written to the shared
+    /// conversation as they happen and the system prompt is never stored.
     fn record_in_store(&self, msg: &Message) {
-        // System messages are request-only and never persisted.
-        if msg.role == "system" {
-            return;
-        }
-        // Empty assistant placeholders (no content, no tool calls) are a
-        // streaming artifact and are never persisted.
-        if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
+        if !Self::is_storable(msg) {
             return;
         }
         let conv = self.client.conversation();
@@ -515,6 +565,13 @@ impl Agent {
             if defs.is_empty() { None } else { Some(defs) }
         };
 
+        // Capture the turn's original request ONCE, before any verification
+        // nudge is pushed: after a NEEDS_FIX the last user message in
+        // `messages` is the nudge, so re-extracting per verification attempt
+        // would make the judge grade the response against the nudge text
+        // instead of what the user actually asked.
+        let original_request = self.extract_original_request(messages);
+
         loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
@@ -564,9 +621,6 @@ impl Agent {
                     // Target in char units: 50% of n_ctx tokens converted to
                     // chars via the client's calibrated chars-per-token ratio.
                     let target_chars = self.client.trim_target_chars();
-                    // Trim self.messages directly: stream_with_messages_arc writes to a
-                    // throwaway local_conv and never touches self.client.conversation,
-                    // so trimming the client's conversation would be a no-op.
                     let removed = self.trimming
                         .trim_messages(messages, target_chars, &self.config.trim_config);
                     if removed > 0 {
@@ -584,6 +638,13 @@ impl Agent {
                             post_trim_total, target_chars
                         );
                     }
+                    // Reconcile the shared store with the trimmed request list.
+                    // On the agent path nothing else trims the store, so this
+                    // is what keeps it (and the session file) bounded. Runs
+                    // whenever the trim pass ran — in-place summarization
+                    // shrinks message content even when `removed` is 0, and
+                    // the store must mirror that too.
+                    self.reconcile_store(messages);
                 }
             }
 
@@ -719,6 +780,7 @@ impl Agent {
                             let removed = self
                                 .trimming
                                 .trim_messages(messages, target, &self.config.trim_config);
+                            self.reconcile_store(messages);
                             tracing::info!(
                                 "[AGENT] Agent '{}' force-trim removed {} messages (target_chars={})",
                                 self.config.name, removed, target
@@ -1008,7 +1070,6 @@ impl Agent {
             }
             verification_attempts += 1;
 
-            let original_request = self.extract_original_request(messages);
             let verification_result = self.verify_tool_outputs(messages, &original_request, &display_content, cancel_token).await;
             match verification_result {
                 Ok(true) => {
@@ -1032,7 +1093,7 @@ impl Agent {
                     );
                     messages.push(Message {
                         role: "user".to_string(),
-                        content: "Your previous response did not fully satisfy the request. Improve it based on the tool outputs, or correct your tool calls and try again.".to_string(),
+                        content: VERIFICATION_NUDGE.to_string(),
                         timestamp: String::new(),
                         tool_calls: None,
                         tool_call_id: None,
@@ -1060,9 +1121,12 @@ impl Agent {
 
     /// Extract the current turn's user request from the message history.
     ///
-    /// Uses the LAST user message: the request the current turn's response is
-    /// answering. In a multi-turn session the first user message is stale and
-    /// would make the judge grade the current answer against the wrong request.
+    /// Uses the LAST user message. Call it ONCE at the start of the run,
+    /// before any verification nudge is pushed: after a NEEDS_FIX the last
+    /// user message is the nudge, and re-extracting would make the judge
+    /// grade the response against the nudge instead of the real request.
+    /// (In a multi-turn session the first user message is stale for the same
+    /// reason — the last one is the request being answered.)
     fn extract_original_request(&self, messages: &[Message]) -> String {
         messages
             .iter()
@@ -1101,18 +1165,16 @@ impl Agent {
             .iter()
             .skip(turn_start)
             .filter(|m| m.role == "tool")
-            .map(|m| m.content.clone())
+            // Truncate on the &str: the full tool output (potentially 100KB+)
+            // is never needed — only the summary prefix is.
+            .map(|m| m.content.chars().take(TOOL_OUTPUT_SUMMARY_CHARS).collect())
             .collect();
 
         // Skip verification if no tool calls were made this turn.
         if tool_outputs.is_empty() {
             return Ok(true);
         }
-        let recent_tool_summary: String = tool_outputs
-            .iter()
-            .map(|o| o.chars().take(TOOL_OUTPUT_SUMMARY_CHARS).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let recent_tool_summary: String = tool_outputs.join("\n");
 
         let verification_messages = vec![
             Message {
@@ -1868,5 +1930,156 @@ mod tests {
             "judge prompt must still include the tool outputs: {}",
             joined
         );
+    }
+
+    /// Regression (T1): after a trim on the agent path, the shared store must
+    /// be reconciled so it stays bounded instead of growing with the session.
+    #[test]
+    fn test_store_stays_bounded_after_trim_reconciliation() {
+        // A client with a known n_ctx so the trim budgets are concrete:
+        // trigger = 90% of the window, target = 50% (chars via the
+        // uncalibrated chars-per-token default).
+        let client = Arc::new({
+            let c = ChatClient::new("http://localhost:1");
+            c.set_n_ctx(1000);
+            c
+        });
+        let registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test".to_string(),
+                ..Default::default()
+            },
+            Arc::new(NoopLlm),
+            Arc::new(Mutex::new(ToolManager::new(registry))),
+            None,
+            client,
+            None,
+            None,
+        );
+
+        // Fill the store with 30 turns of large replies, then the current
+        // turn's user message, as `execute` would have recorded it.
+        {
+            let mut conv = agent.client.conversation().lock().unwrap();
+            for i in 0..30 {
+                conv.push(test_msg("user", &format!("turn {i} question")));
+                conv.push(test_msg("assistant", &format!("answer {i} {}", "x".repeat(300))));
+            }
+            conv.push(test_msg("user", "the current request"));
+        }
+        let before = agent.client.conversation().lock().unwrap().len();
+        assert_eq!(before, 61);
+
+        // Reproduce run_llm_loop's pre-call trim + store reconciliation.
+        let mut messages = agent.build_initial_messages("the current request");
+        assert!(
+            crate::trimming::message_char_count(&messages) > agent.client.trim_trigger_chars(),
+            "test setup must exceed the trim trigger ({} > {} chars)",
+            crate::trimming::message_char_count(&messages),
+            agent.client.trim_trigger_chars()
+        );
+        agent
+            .trimming
+            .trim_messages(&mut messages, agent.client.trim_target_chars(), &agent.config.trim_config);
+        agent.reconcile_store(&messages);
+
+        let store = agent.client.conversation().lock().unwrap();
+        assert!(
+            store.len() < before,
+            "reconciliation must shrink the store ({} -> {})",
+            before,
+            store.len()
+        );
+        // Invariants: the store never holds request-only entries, and the
+        // current turn's user message survives as the last entry.
+        assert!(!store.iter().any(|m| m.role == "system"));
+        assert!(!store.iter().any(|m| m.content == VERIFICATION_NUDGE));
+        assert_eq!(
+            store.last().map(|m| m.content.as_str()),
+            Some("the current request")
+        );
+    }
+
+    /// Regression (T2): on the second verification attempt the nudge is the
+    /// last user message in the request list. run_llm_loop therefore captures
+    /// the original request once at loop start and passes it through — the
+    /// judge must grade against the real request, not the nudge text.
+    #[tokio::test]
+    async fn test_verify_judges_against_request_captured_before_nudge() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let agent = judge_agent("VERIFIED", seen.clone());
+        let messages = vec![
+            test_msg("user", "list the directory"),
+            test_msg("tool", "a.txt\nb.txt"),
+            test_msg("assistant", "There is one file: a.txt."),
+            test_msg("user", VERIFICATION_NUDGE),
+            test_msg("tool", "a.txt\nb.txt"),
+            test_msg("assistant", "There are two files: a.txt and b.txt."),
+        ];
+        // The pre-fix extraction now returns the nudge, not the request —
+        // which is exactly why the loop captures it before any nudge exists.
+        assert_eq!(agent.extract_original_request(&messages), VERIFICATION_NUDGE);
+
+        // The post-fix call: the request captured at loop start is passed
+        // through, and the judge prompt must contain it (and not the nudge).
+        let original_request = "list the directory".to_string();
+        assert_eq!(
+            agent
+                .verify_tool_outputs(
+                    &messages,
+                    &original_request,
+                    "There are two files: a.txt and b.txt.",
+                    &CancellationToken::new()
+                )
+                .await,
+            Ok(true)
+        );
+        let joined: String = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("list the directory"),
+            "judge prompt must contain the original request: {}",
+            joined
+        );
+        assert!(
+            !joined.contains(VERIFICATION_NUDGE),
+            "judge prompt must not contain the nudge text: {}",
+            joined
+        );
+    }
+
+    /// The nudge is request-only, but a user message that merely repeats the
+    /// nudge text (with a real timestamp) must stay storable.
+    #[test]
+    fn test_is_storable_nudge_vs_user_typed_nudge() {
+        // The verification nudge as the loop pushes it: empty timestamp.
+        let nudge = Message {
+            role: "user".to_string(),
+            content: VERIFICATION_NUDGE.to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        };
+        assert!(!Agent::is_storable(&nudge));
+
+        // A human typing the same sentence: real timestamp, stays in the store.
+        let typed = Message {
+            role: "user".to_string(),
+            content: VERIFICATION_NUDGE.to_string(),
+            timestamp: crate::types::format_timestamp(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        };
+        assert!(Agent::is_storable(&typed));
     }
 }
