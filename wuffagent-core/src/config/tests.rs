@@ -486,3 +486,37 @@ fn test_config_deserialize_unknown_fields_ignored() {
     assert_eq!(cfg.threads, 4);
     assert_eq!(cfg.n_gpu_layers, 33);
 }
+
+#[test]
+fn test_config_old_file_without_mcp_servers_loads() {
+    // A config file written before MCP support (no `mcp_servers` key at all)
+    // must still load, with an empty server list.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(
+        &path,
+        r#"{"server_path":"s","model_path":"m","port":8080,"n_gpu_layers":99,"n_ctx":4096,"threads":8,"remote_url":"","system_prompt":"","theme":"dark","chat_history":[]}"#,
+    )
+    .unwrap();
+    let mut cfg = Config::load(&path).unwrap();
+    assert!(cfg.mcp_servers.is_empty());
+    // And it survives a save/reload roundtrip with the new field present.
+    cfg.mcp_servers.push(crate::config::McpServerConfig {
+        name: "fs".to_string(),
+        transport: crate::config::McpTransport::Stdio {
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+            env: std::collections::HashMap::new(),
+            working_dir: None,
+        },
+        enabled: true,
+        timeout_secs: 60,
+        allowed_tools: Vec::new(),
+    });
+    cfg.file_path = path.clone();
+    cfg.save().unwrap();
+    let loaded = Config::load(&path).unwrap();
+    assert_eq!(loaded.mcp_servers.len(), 1);
+    assert_eq!(loaded.mcp_servers[0].name, "fs");
+    assert_eq!(loaded.mcp_servers[0].timeout_secs, 60);
+}

@@ -5,3 +5,4 @@
 
 pub use crate::agents::config::{AgentConfig, ShellConfig, WorkerConfig};
 pub use crate::memory::types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};
+pub use crate::config::{McpServerConfig, McpTransport};

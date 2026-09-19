@@ -21,11 +21,14 @@ mod chat;
 mod local;
 mod remote;
 mod encryption;
+mod mcp;
 mod paths;
 mod presets;
 mod search;
 #[cfg(test)]
 mod tests;
+
+pub use mcp::{McpServerConfig, McpTransport};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[derive(Default)]
@@ -92,6 +95,11 @@ pub struct Config {
     // Memory system configuration
     #[serde(default)]
     pub memory_config: MemoryConfig,
+
+    // MCP (Model Context Protocol) servers. Old config files without this
+    // field load with an empty list.
+    #[serde(default)]
+    pub mcp_servers: Vec<mcp::McpServerConfig>,
 }
 
 /// Deserialize `agent_config` with migration support.
@@ -170,6 +178,7 @@ impl Default for Config {
             encryption_password: None,
             agent_config: crate::agents::config::AgentConfig::default(),
             memory_config: MemoryConfig::default(),
+            mcp_servers: Vec::new(),
         }
     }
 }

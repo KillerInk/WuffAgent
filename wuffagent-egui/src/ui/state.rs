@@ -92,6 +92,11 @@ pub struct ChatApp {
     /// Wrapped in [`RuntimeOnThread`] so its `Drop` (a blocking wait) never
     /// runs on a thread inside another runtime's async context.
     pub memory_runtime: RuntimeOnThread,
+    /// MCP (Model Context Protocol) manager: owns the dedicated runtime for
+    /// MCP I/O and mirrors connected servers' tools into the shared registry.
+    /// Its own `shutdown()` (called in `Drop`) disconnects all servers and
+    /// drops that runtime on a plain thread.
+    pub mcp_manager: Arc<crate::tools::mcp::McpManager>,
 
     // ── Sessions ─────────────────────────────────────────────────────
     /// Per-session runtime state keyed by session ID.
@@ -113,6 +118,8 @@ pub struct ChatApp {
     /// The memory panel widget (owns its own list/search/edit state).
     /// `show_panel` gates whether the window is drawn.
     pub memory_panel: super::memory_panel::MemoryPanel,
+    /// The MCP panel widget (server list, add/edit, per-tool toggles).
+    pub mcp_panel: super::mcp_panel::McpPanel,
     /// Pending agent improvement suggestions.
     pub improvements_panel: super::improvements::ImprovementsPanel,
 
@@ -157,6 +164,7 @@ impl ChatApp {
         event_rx: mpsc::Receiver<AppEvent>,
         memory_manager: Arc<crate::memory::MemoryManager>,
         memory_runtime: Arc<tokio::runtime::Runtime>,
+        mcp_manager: Arc<crate::tools::mcp::McpManager>,
     ) -> Self {
         let reasoning_effort = config.reasoning_effort;
         // Build the sessions sidebar widget, pre-selecting the active session.
@@ -172,6 +180,7 @@ impl ChatApp {
             agent_engine,
             memory_manager,
             memory_runtime: RuntimeOnThread::new(memory_runtime),
+            mcp_manager,
             connection,
             last_synced_base_url: String::new(),
             session_store,
@@ -184,6 +193,7 @@ impl ChatApp {
             show_agent_config: false,
             agent_config_dialog: None,
             memory_panel: super::memory_panel::MemoryPanel::new(),
+            mcp_panel: super::mcp_panel::McpPanel::new(),
             pending_tx: Some(Arc::new(Mutex::new(event_tx))),
             pending_rx: Some(event_rx),
             reasoning_effort,
@@ -351,5 +361,14 @@ impl ChatApp {
             .as_ref()
             .and_then(|id| self.session_store.get(id))
             .map(|r| &r.client)
+    }
+}
+
+impl Drop for ChatApp {
+    fn drop(&mut self) {
+        // Disconnect all MCP servers (kills child processes) and drop the
+        // MCP runtime on a plain thread — the UI thread is inside the main
+        // runtime's context, where dropping a runtime panics. Non-blocking.
+        self.mcp_manager.shutdown();
     }
 }

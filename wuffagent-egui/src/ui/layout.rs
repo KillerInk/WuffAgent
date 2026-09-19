@@ -51,7 +51,11 @@ impl ChatApp {
                     let theme_btn = egui::Button::new("◐")
                         .fill(theme.surface_light)
                         .corner_radius(4);
-                    if ui.add(theme_btn).clicked() {
+                    if ui
+                        .add(theme_btn)
+                        .on_hover_text("Toggle light/dark theme")
+                        .clicked()
+                    {
                         self.toggle_theme(ui.ctx());
                     }
 
@@ -59,15 +63,35 @@ impl ChatApp {
                     let memory_btn = egui::Button::new("🧠")
                         .fill(theme.surface_light)
                         .corner_radius(4);
-                    if ui.add(memory_btn).clicked() {
+                    if ui
+                        .add(memory_btn)
+                        .on_hover_text("Memory panel")
+                        .clicked()
+                    {
                         self.memory_panel.show_panel = true;
+                    }
+
+                    // MCP servers button
+                    let mcp_btn = egui::Button::new("🔌")
+                        .fill(theme.surface_light)
+                        .corner_radius(4);
+                    if ui
+                        .add(mcp_btn)
+                        .on_hover_text("MCP servers (external tools)")
+                        .clicked()
+                    {
+                        self.mcp_panel.show_panel = true;
                     }
 
                     // Improvements panel button
                     let improvements_btn = egui::Button::new("✨")
                         .fill(theme.surface_light)
                         .corner_radius(4);
-                    if ui.add(improvements_btn).clicked() {
+                    if ui
+                        .add(improvements_btn)
+                        .on_hover_text("Agent improvements (pending suggestions)")
+                        .clicked()
+                    {
                         self.improvements_panel.show_panel = true;
                     }
 
@@ -75,7 +99,11 @@ impl ChatApp {
                     let agent_btn = egui::Button::new("🤖")
                         .fill(theme.surface_light)
                         .corner_radius(4);
-                    if ui.add(agent_btn).clicked() {
+                    if ui
+                        .add(agent_btn)
+                        .on_hover_text("Agent configuration")
+                        .clicked()
+                    {
                         self.show_agent_config = true;
                     }
 
@@ -83,7 +111,11 @@ impl ChatApp {
                     let settings_btn = egui::Button::new("⚙")
                         .fill(theme.surface_light)
                         .corner_radius(4);
-                    if ui.add(settings_btn).clicked() {
+                    if ui
+                        .add(settings_btn)
+                        .on_hover_text("Settings")
+                        .clicked()
+                    {
                         self.show_settings = true;
                     }
                 });
@@ -123,12 +155,22 @@ impl ChatApp {
 
         // Draw memory panel on top (disjoint field borrows).
         self.draw_memory_panel(ctx);
+
+        // Draw MCP panel on top (disjoint field borrows; `&mut self.config`
+        // so the panel can persist server changes).
+        self.draw_mcp_panel(ctx);
     }
 
     fn draw_memory_panel(&mut self, ctx: &egui::Context) {
         // Disjoint field borrows: the panel (mutable) + manager, runtime, config
         // (immutable) are separate struct fields, so they can coexist.
         self.memory_panel.draw(ctx, &self.memory_manager, self.memory_runtime.as_ref(), &self.config);
+    }
+
+    fn draw_mcp_panel(&mut self, ctx: &egui::Context) {
+        // Disjoint field borrows: the panel (mutable) + manager (immutable)
+        // + config (mutable) are separate struct fields, so they can coexist.
+        self.mcp_panel.draw(ctx, &self.mcp_manager, &mut self.config);
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {

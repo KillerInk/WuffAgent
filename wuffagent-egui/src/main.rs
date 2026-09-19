@@ -129,6 +129,7 @@ fn bootstrap() -> (
     Arc<AgentEngine>,
     Arc<ConnectionSettings>,
     Arc<wuffagent_core::memory::MemoryManager>,
+    Arc<wuffagent_core::tools::McpManager>,
 ) {
     // Default to `debug` for app crates, but silence the extremely chatty
     // `naga` WGSL shader compiler (pulled in by wgpu/egui) whose DEBUG-level
@@ -241,6 +242,17 @@ fn bootstrap() -> (
 
     let tool_manager: Arc<ToolManager> = Arc::new(ToolManager::new(registry.clone()));
 
+    // MCP (Model Context Protocol) manager. It owns a DEDICATED 2-worker
+    // tokio runtime on which all MCP I/O runs (the UI thread is inside the
+    // main runtime, where block_on is not allowed). Connected servers' tools
+    // are mirrored into the shared registry as `mcp__<server>__<tool>`, so
+    // ToolManager per-agent rebuilds pick them up automatically.
+    let mcp_manager = Arc::new(wuffagent_core::tools::McpManager::new(registry.clone()));
+    mcp_manager.sync_from_config(&config.mcp_servers);
+    // Auto-connect enabled servers (fire-and-forget on the MCP runtime;
+    // failures are logged and retryable from the MCP panel).
+    mcp_manager.auto_connect_enabled();
+
     let server = ServerManager::new(
         &config.server_path,
         &config.model_path,
@@ -300,12 +312,12 @@ fn bootstrap() -> (
 
     let agent_engine = Arc::new(agent_engine);
 
-    (config, server, tool_manager, agent_engine, connection, memory_manager)
+    (config, server, tool_manager, agent_engine, connection, memory_manager, mcp_manager)
 }
 
 #[tokio::main]
 async fn main() -> eframe::Result {
-    let (config, server, tool_manager, agent_engine, connection, memory_manager) = bootstrap();
+    let (config, server, tool_manager, agent_engine, connection, memory_manager, mcp_manager) = bootstrap();
 
     // Dedicated runtime for UI-triggered async work (memory maintenance).
     // NOTE: the UI thread (main thread) IS inside the `#[tokio::main]` runtime
@@ -377,7 +389,7 @@ async fn main() -> eframe::Result {
             Ok(Box::new(ui::state::ChatApp::new(
                 config, server, tool_manager, agent_engine, connection,
                 session_store, selected_session_id, event_tx, event_rx,
-                memory_manager, memory_runtime,
+                memory_manager, memory_runtime, mcp_manager,
             )))
         }),
     )

@@ -54,6 +54,31 @@ impl ChatApp {
                         "disabled"
                     }
                 ));
+
+            // MCP indicator: connected / total servers.
+            let mcp_servers = self.mcp_manager.snapshot();
+            if !mcp_servers.is_empty() {
+                let (connected, total) = self.mcp_manager.connected_counts();
+                let detail: Vec<String> = mcp_servers
+                    .iter()
+                    .map(|s| {
+                        let tool_count = s.tools.iter().filter(|t| t.enabled).count();
+                        format!("{}: {:?} ({} enabled tools)", s.name, s.status, tool_count)
+                    })
+                    .collect();
+                ui.label(
+                    egui::RichText::new(format!("MCP {connected}/{total}"))
+                        .color(if connected == total {
+                            theme.success
+                        } else if connected == 0 {
+                            theme.text_dim
+                        } else {
+                            theme.warning
+                        })
+                        .size(11.0),
+                )
+                .on_hover_text(detail.join("\n"));
+            }
         });
     }
 
