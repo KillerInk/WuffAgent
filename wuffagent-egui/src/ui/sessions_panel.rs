@@ -318,8 +318,14 @@ impl SessionsPanel {
                     }
                 });
 
-                // Session list
+                // Session list, export/import and creation UI go into a
+                // scrollable area so they stay reachable when there are many
+                // sessions (the scroll area fills the remaining panel space).
                 ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                        .id_salt("sessions_panel_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
 
                 // Collect actions to avoid borrowing self inside the loop
                 for session in &self.sessions {
@@ -418,6 +424,7 @@ impl SessionsPanel {
                         }
                     });
                 }
+                });
             });
 
         // Return the clicked session id (if any) and the pending action for the
