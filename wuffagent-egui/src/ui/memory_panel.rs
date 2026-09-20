@@ -26,6 +26,9 @@ pub struct MemoryPanel {
     edit_content: String,
     /// Editable tags (comma separated) for the selected entry.
     edit_tags: String,
+    /// One-shot: on the next frame, scroll the window so the editor for the
+    /// selected entry is visible (set when the user clicks "Edit" on a row).
+    scroll_to_editor: bool,
     /// Confirmation dialog: pending delete id.
     pending_delete: Option<String>,
     /// Result message shown at the top of the panel (success/error).
@@ -61,6 +64,7 @@ impl MemoryPanel {
             selected_id: None,
             edit_content: String::new(),
             edit_tags: String::new(),
+            scroll_to_editor: false,
             pending_delete: None,
             message: None,
             maintenance_report: None,
@@ -265,6 +269,10 @@ impl MemoryPanel {
                         self.selected_id = Some(entry.id.clone());
                         self.edit_content = content;
                         self.edit_tags = tags;
+                        // The editor is drawn below the entry list and is
+                        // often outside the visible window area — bring it
+                        // into view on the next frame (see `draw_editor`).
+                        self.scroll_to_editor = true;
                     }
                     if ui.add(egui::Button::new("Delete").fill(theme.surface_light)).clicked() {
                         self.pending_delete = Some(entry.id.clone());
@@ -315,42 +323,70 @@ impl MemoryPanel {
     }
 
     /// Inline editor for the selected entry.
+    ///
+    /// Rendered as a permanent (non-collapsible) section: the previous
+    /// `ui.collapsing` wrapper started out CLOSED, so clicking "Edit" on a
+    /// row only revealed a collapsed "Edit memory …" header and the text
+    /// fields were invisible — the panel looked uneditable.
     fn draw_editor(&mut self, ui: &mut egui::Ui, theme: &Theme, memory: &MemoryManager) {
         let Some(id) = self.selected_id.clone() else {
             return;
         };
 
-        ui.collapsing(format!("Edit memory {}", short_id(&id)), |ui| {
-            ui.label("Content:");
-            ui.add(
-                egui::TextEdit::multiline(&mut self.edit_content)
-                    .desired_rows(6)
-                    .desired_width(f32::INFINITY),
-            );
-            ui.label("Tags (comma separated):");
-            ui.add(egui::TextEdit::singleline(&mut self.edit_tags).desired_width(f32::INFINITY));
-            ui.horizontal(|ui| {
-                if ui.add(egui::Button::new("Save").fill(theme.primary)).clicked() {
-                    let tags: Vec<String> = self
-                        .edit_tags
-                        .split(',')
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                    match memory.update(&id, &self.edit_content, Some(tags)) {
-                        Ok(updated) => {
-                            self.message = Some(format!("✓ Updated {}", short_id(&updated.id)));
+        let resp = egui::Frame::new()
+            .fill(theme.surface_light)
+            .corner_radius(4)
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(format!("Edit memory {}", short_id(&id)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✕").clicked() {
+                            self.selected_id = None;
                         }
-                        Err(e) => {
-                            self.message = Some(format!("✗ Update failed: {}", e));
+                    });
+                });
+                ui.label("Content:");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.edit_content)
+                        .desired_rows(6)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.label("Tags (comma separated):");
+                ui.add(egui::TextEdit::singleline(&mut self.edit_tags).desired_width(f32::INFINITY));
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new("Save").fill(theme.primary)).clicked() {
+                        let tags: Vec<String> = self
+                            .edit_tags
+                            .split(',')
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .collect();
+                        match memory.update(&id, &self.edit_content, Some(tags)) {
+                            Ok(updated) => {
+                                self.message = Some(format!("✓ Updated {}", short_id(&updated.id)));
+                                // Close the editor now that the edit is committed
+                                // (Cancel/✕ do this too; Save previously left it open).
+                                self.selected_id = None;
+                            }
+                            Err(e) => {
+                                self.message = Some(format!("✗ Update failed: {}", e));
+                            }
                         }
                     }
-                }
-                if ui.button("Cancel").clicked() {
-                    self.selected_id = None;
-                }
+                    if ui.button("Cancel").clicked() {
+                        self.selected_id = None;
+                    }
+                });
             });
-        });
+
+        // If the user just clicked "Edit", the window may be scrolled such
+        // that the editor (drawn below the entry list) is off-screen. Force
+        // the window's scroll area to include the editor rect, once.
+        if self.scroll_to_editor {
+            ui.scroll_to_rect(resp.response.rect, Some(egui::Align::TOP));
+            self.scroll_to_editor = false;
+        }
     }
 
     /// Memory settings section (edits the live config in place).

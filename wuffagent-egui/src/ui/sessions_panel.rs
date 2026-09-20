@@ -18,6 +18,8 @@ pub struct SessionsPanel {
     rename_input: String,
     creating: bool,
     new_name: String,
+    /// One-shot: request focus for the new-name field once it appears.
+    new_name_focus_pending: bool,
     /// If Some, holds the pending delete confirmation dialog state: (id, name, last_message).
     pending_delete: Option<(String, String, String)>,
     /// Notification message shown briefly after an operation.
@@ -47,6 +49,7 @@ impl SessionsPanel {
             rename_input: String::new(),
             creating: false,
             new_name: String::new(),
+            new_name_focus_pending: false,
             pending_delete: None,
             notification: None,
             notification_start: 0.0,
@@ -248,6 +251,7 @@ impl SessionsPanel {
                 if ui.add(new_btn).clicked() {
                     self.creating = true;
                     self.new_name = String::new();
+                    self.new_name_focus_pending = true;
                 }
 
                 // Delete button
@@ -273,6 +277,37 @@ impl SessionsPanel {
                     } else {
                         self.show_notification("No session selected", false);
                     }
+                }
+
+                // New session name input (shown when creating)
+                if self.creating {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Name:").size(11.0).color(theme.text_secondary));
+                        let resp = ui.text_edit_singleline(&mut self.new_name);
+                        if self.new_name_focus_pending {
+                            resp.request_focus();
+                            self.new_name_focus_pending = false;
+                        }
+                        // Enter confirms while the name field has focus
+                        // (the single-line edit consumes Enter, so the old
+                        // lost_focus() condition never fired).
+                        if resp.has_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            && !self.new_name.trim().is_empty() {
+                            action = Some(PanelAction::Create(self.new_name.clone()));
+                            self.new_name.clear();
+                            self.creating = false;
+                        }
+                        if ui.button("Create").clicked() && !self.new_name.trim().is_empty() {
+                            action = Some(PanelAction::Create(self.new_name.clone()));
+                            self.new_name.clear();
+                            self.creating = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.creating = false;
+                            self.new_name.clear();
+                        }
+                    });
                 }
 
                 ui.add_space(8.0);
@@ -402,28 +437,6 @@ impl SessionsPanel {
                     ui.text_edit_singleline(&mut self.import_path);
                 });
 
-                if self.creating {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Name:").size(11.0).color(theme.text_secondary));
-                        let resp = ui.text_edit_singleline(&mut self.new_name);
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            && !self.new_name.trim().is_empty() {
-                                action = Some(PanelAction::Create(self.new_name.clone()));
-                                self.new_name.clear();
-                                self.creating = false;
-                            }
-                        if ui.button("Create").clicked() && !self.new_name.trim().is_empty() {
-                            action = Some(PanelAction::Create(self.new_name.clone()));
-                            self.new_name.clear();
-                            self.creating = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.creating = false;
-                            self.new_name.clear();
-                        }
-                    });
-                }
                 });
             });
 
