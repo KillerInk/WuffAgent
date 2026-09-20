@@ -447,8 +447,21 @@ impl ImprovementsPanel {
                 // Execute collected actions (file I/O + list mutation) after
                 // the loop so we never mutate while iterating.
                 for i in to_approve.into_iter().rev() {
-                    let outcome = apply_improvement(agents_dirs, agent_manager, &self.pending[i]);
+                    let (outcome, prompt_applied) =
+                        apply_improvement_detailed(agents_dirs, agent_manager, &self.pending[i]);
                     self.message = Some(outcome);
+                    // I5: an approved prompt change gets a marker so the next
+                    // improvement check can weigh the outcomes since it and
+                    // propose a revert. A store failure is surfaced (F5-style)
+                    // but does not undo the approval itself.
+                    if prompt_applied {
+                        if let Err(err) = remember_applied_prompt(memory, &self.pending[i]) {
+                            self.message = Some(format!(
+                                "approved '{}', but remembering the prompt change failed: {}",
+                                self.pending[i].agent_name, err
+                            ));
+                        }
+                    }
                     if !to_remove.contains(&i) {
                         to_remove.push(i);
                     }
@@ -514,14 +527,19 @@ pub fn resolve_agent_dir(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
 
 /// Apply a single pending improvement (F1: uses the user-edited values when
 /// present; F3: writes the profile into the directory it ACTUALLY lives in).
-/// Returns a human-readable result message.
-pub fn apply_improvement(
+/// Returns `(human-readable result message, prompt_applied)` where
+/// `prompt_applied` reports whether a prompt change for the EXISTING agent's
+/// profile was successfully written (I5: the condition for recording the
+/// effect-check marker — field-only approvals and new-agent-only approvals
+/// report `false`).
+pub fn apply_improvement_detailed(
     agents_dirs: &[PathBuf],
     agent_manager: &AgentManager,
     imp: &PendingImprovement,
-) -> String {
+) -> (String, bool) {
     let mut parts: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut prompt_applied = false;
 
     let apply_prompt = imp.apply_prompt
         && imp.edited_prompt.as_deref().or(imp.prompt_change.as_deref()).is_some();
@@ -573,12 +591,18 @@ pub fn apply_improvement(
                             applied.push("timeout".to_string());
                         }
                         match mgr.edit_agent(&imp.agent_name, &config) {
-                            Ok(()) => parts.push(format!(
-                                "updated {} for '{}' in {}",
-                                applied.join(", "),
-                                imp.agent_name,
-                                dir.display()
-                            )),
+                            Ok(()) => {
+                                // I5: a prompt was actually written to the
+                                // profile -> the effect-check marker applies.
+                                prompt_applied =
+                                    prompt_applied || applied.iter().any(|a| a == "prompt");
+                                parts.push(format!(
+                                    "updated {} for '{}' in {}",
+                                    applied.join(", "),
+                                    imp.agent_name,
+                                    dir.display()
+                                ));
+                            }
                             Err(e) => errors.push(format!(
                                 "failed to update '{}': {}",
                                 imp.agent_name, e
@@ -624,7 +648,7 @@ pub fn apply_improvement(
         }
     }
 
-    if parts.is_empty() && errors.is_empty() {
+    let msg = if parts.is_empty() && errors.is_empty() {
         "No changes to apply.".to_string()
     } else {
         let mut msg = parts.join("; ");
@@ -635,7 +659,8 @@ pub fn apply_improvement(
             msg.push_str(&errors.join("; "));
         }
         msg
-    }
+    };
+    (msg, prompt_applied)
 }
 
 /// F5: the lesson entry recording that the user rejected `imp`.
@@ -666,6 +691,47 @@ pub fn rejection_lesson(imp: &PendingImprovement) -> MemoryEntry {
 /// failure (e.g. the memories file could not be written).
 pub fn remember_dismissal(memory: &MemoryManager, imp: &PendingImprovement) -> Result<(), String> {
     memory.add(rejection_lesson(imp)).map(|_| ())
+}
+
+/// I5: the marker entry recording that the user APPROVED a prompt change for
+/// `imp`'s agent.
+///
+/// Typed `Fact` (NOT `Lesson`) so `collect_lessons`'s Lesson filter ignores
+/// it — it is a reference point for the effect check, not evidence. Tagged
+/// `improvement-applied` + `agent:<name>` so `latest_applied_marker`
+/// (improver.rs) can find it. The content names the agent and the approval
+/// date, plus a short excerpt of the applied prompt: the store's fuzzy dedup
+/// gate is token-based, so the date alone would not keep re-approvals of
+/// different prompts distinct.
+pub fn applied_marker(imp: &PendingImprovement) -> MemoryEntry {
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let prompt = imp
+        .edited_prompt
+        .as_deref()
+        .or(imp.prompt_change.as_deref())
+        .unwrap_or_default();
+    let excerpt: String = prompt.chars().take(80).collect();
+    let content = format!(
+        "Prompt for agent '{}' changed via approved improvement on {} (applied prompt starts: '{}')",
+        imp.agent_name, date, excerpt
+    );
+    let agent_tag = format!("agent:{}", imp.agent_name);
+    MemoryEntry::new(
+        MemoryType::Fact,
+        &content,
+        "improvement-review",
+        &["improvement-applied", &agent_tag],
+    )
+}
+
+/// I5: persist the approved prompt change of `imp` through the shared memory
+/// store (same save path as F5's `remember_dismissal`). `Ok(())` on both
+/// insert and duplicate; `Err` only on store failure.
+pub fn remember_applied_prompt(
+    memory: &MemoryManager,
+    imp: &PendingImprovement,
+) -> Result<(), String> {
+    memory.add(applied_marker(imp)).map(|_| ())
 }
 
 /// ChatApp extension: the improvements panel integration.

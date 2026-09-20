@@ -438,3 +438,321 @@ fn test_cap_lessons_respects_budget() {
     assert!(capped.chars().count() <= 401, "{}", capped.chars().count());
     assert!(capped.ends_with('…'));
 }
+
+// ── I4: cost control (evidence gate + state persistence) ──
+
+/// Backdate an entry's timestamp (MemoryEntry::new always stamps `Utc::now()`).
+fn backdate(entry: &mut MemoryEntry, days: i64) {
+    entry.timestamp = Some(chrono::Utc::now() - chrono::Duration::days(days));
+}
+
+#[test]
+fn test_evidence_gate_no_state_and_no_lessons() {
+    let (manager, _dir) = fresh_manager();
+    assert!(
+        !manager.has_new_improvement_evidence(),
+        "no state file + no lessons -> no evidence"
+    );
+}
+
+#[test]
+fn test_evidence_gate_no_state_with_lessons() {
+    let (manager, _dir) = fresh_manager();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "A lesson that counts as evidence",
+            "agent",
+            &[],
+        ))
+        .unwrap();
+    assert!(
+        manager.has_new_improvement_evidence(),
+        "no state file + a lesson -> evidence exists (first check baselines it)"
+    );
+}
+
+#[test]
+fn test_evidence_gate_ignores_non_lesson_entries() {
+    let (manager, _dir) = fresh_manager();
+    manager
+        .add(MemoryEntry::new(MemoryType::Fact, "A fact is not evidence", "agent", &[]))
+        .unwrap();
+    assert!(
+        !manager.has_new_improvement_evidence(),
+        "Facts (e.g. I5 markers) are reference points, not evidence"
+    );
+}
+
+#[test]
+fn test_evidence_gate_old_lessons_then_new_lesson() {
+    let (manager, _dir) = fresh_manager();
+    // A lesson that predates the check.
+    let mut old = MemoryEntry::new(MemoryType::Lesson, "An old lesson", "agent", &[]);
+    backdate(&mut old, 1);
+    manager.add(old).unwrap();
+
+    manager.record_improvement_check();
+    assert!(
+        !manager.has_new_improvement_evidence(),
+        "only pre-check lessons -> no NEW evidence"
+    );
+
+    // A new lesson after the check re-arms the gate.
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "A brand new lesson after the check",
+            "agent",
+            &[],
+        ))
+        .unwrap();
+    assert!(
+        manager.has_new_improvement_evidence(),
+        "post-check lesson -> evidence again"
+    );
+}
+
+#[test]
+fn test_improvement_state_persists_across_restart() {
+    let dir = tempdir().unwrap();
+    let make = || {
+        let config = MemoryConfig {
+            memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        MemoryManager::new(config).unwrap()
+    };
+
+    let first = make();
+    first
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "A lesson before restart",
+            "agent",
+            &[],
+        ))
+        .unwrap();
+    first.record_improvement_check();
+    drop(first);
+
+    // "Restart": a fresh manager on the same dir must see the recorded check,
+    // so the pre-restart lesson is not re-counted as new evidence.
+    let second = make();
+    assert!(
+        !second.has_new_improvement_evidence(),
+        "state file must survive a restart"
+    );
+}
+
+#[test]
+fn test_improvement_state_corrupt_file_tolerated() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("improvement_state.json"), "not json at all").unwrap();
+
+    let config = MemoryConfig {
+        memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let manager = MemoryManager::new(config).unwrap();
+    manager
+        .add(MemoryEntry::new(MemoryType::Lesson, "A lesson", "agent", &[]))
+        .unwrap();
+
+    // Corrupt state -> treated as "no check recorded" -> lessons are evidence.
+    assert!(manager.has_new_improvement_evidence());
+
+    // Recording overwrites the corrupt file with valid JSON.
+    manager.record_improvement_check();
+    let content = std::fs::read_to_string(dir.path().join("improvement_state.json")).unwrap();
+    assert!(content.contains("last_check"), "content: {}", content);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&content).is_ok(),
+        "state file must be valid JSON after recording"
+    );
+}
+
+// ── I5: effect check (approved-change marker + outcomes since) ──
+
+/// Build an approved-change marker (Fact, `improvement-applied` +
+/// `agent:<name>`), backdated `days_ago` days.
+fn marker_for(agent: &str, days_ago: i64) -> MemoryEntry {
+    let mut e = MemoryEntry::new(
+        MemoryType::Fact,
+        &format!("Prompt for agent '{}' changed via approved improvement.", agent),
+        "improvement-review",
+        &["improvement-applied", &format!("agent:{}", agent)],
+    );
+    backdate(&mut e, days_ago);
+    e
+}
+
+#[tokio::test]
+async fn test_effect_check_includes_outcomes_since_marker() {
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+
+    // Marker: approved prompt change 3 days ago.
+    manager.add(marker_for("coder", 3)).unwrap();
+    // Outcomes since the marker (tagged for the agent).
+    let mut o1 = MemoryEntry::new(
+        MemoryType::Lesson,
+        "Verification failed: tests still red after the change",
+        "verification",
+        &["agent:coder", "verification"],
+    );
+    backdate(&mut o1, 1);
+    manager.add(o1).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "User feedback: result rated poorly",
+            "user-feedback",
+            &["agent:coder", "user-feedback"],
+        ))
+        .unwrap();
+
+    let llm = Arc::new(CaptureLlm {
+        response: r#"[{"agent_name": "coder", "prompt_change": "p", "rationale": "r"}]"#.to_string(),
+        prompts: prompts.clone(),
+    });
+    let stats = RunStats { tool_calls: 1, tool_errors: 0, verification_attempts: 0 };
+    let suggestions =
+        suggest_improvements(&manager, &test_agent_config(), "task", "result", &stats, llm.as_ref())
+            .await
+            .unwrap();
+
+    assert_eq!(suggestions.len(), 1);
+    let prompt = &prompts.lock().unwrap()[0];
+    assert!(
+        prompt.contains("was last changed via an approved improvement 3 day(s) ago"),
+        "prompt: {}",
+        prompt
+    );
+    assert!(
+        prompt.contains("Outcomes recorded for this agent since that change:"),
+        "prompt: {}",
+        prompt
+    );
+    assert!(prompt.contains("tests still red after the change"), "prompt: {}", prompt);
+    assert!(prompt.contains("result rated poorly"), "prompt: {}", prompt);
+    assert!(prompt.contains("you may propose reverting the prompt"), "prompt: {}", prompt);
+    // The effect-check input is attached as deterministic evidence.
+    assert!(
+        suggestions[0].evidence.iter().any(|e| e.starts_with("Effect check:")),
+        "evidence: {:?}",
+        suggestions[0].evidence
+    );
+}
+
+#[tokio::test]
+async fn test_effect_check_absent_without_marker() {
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "A plain lesson",
+            "agent",
+            &["agent:coder"],
+        ))
+        .unwrap();
+
+    let llm = Arc::new(CaptureLlm { response: "[]".to_string(), prompts: prompts.clone() });
+    let stats = RunStats { tool_calls: 1, tool_errors: 0, verification_attempts: 0 };
+    let suggestions =
+        suggest_improvements(&manager, &test_agent_config(), "task", "result", &stats, llm.as_ref())
+            .await
+            .unwrap();
+    assert!(suggestions.is_empty());
+
+    let prompt = &prompts.lock().unwrap()[0];
+    assert!(
+        !prompt.contains("was last changed via an approved improvement"),
+        "no marker -> no effect-check section; prompt: {}",
+        prompt
+    );
+    assert!(
+        !prompt.contains("Outcomes recorded for this agent since that change:"),
+        "prompt: {}",
+        prompt
+    );
+}
+
+#[tokio::test]
+async fn test_effect_check_marker_without_outcomes_shows_none_yet() {
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+
+    manager.add(marker_for("coder", 3)).unwrap();
+    // A trigger lesson OLDER than the marker: it still triggers the check
+    // (tag search has no timestamp filter) but is not an outcome "since".
+    let mut old = MemoryEntry::new(
+        MemoryType::Lesson,
+        "A pre-change lesson",
+        "agent",
+        &["agent:coder"],
+    );
+    backdate(&mut old, 5);
+    manager.add(old).unwrap();
+
+    let llm = Arc::new(CaptureLlm { response: "[]".to_string(), prompts: prompts.clone() });
+    let stats = RunStats { tool_calls: 1, tool_errors: 0, verification_attempts: 0 };
+    let suggestions =
+        suggest_improvements(&manager, &test_agent_config(), "task", "result", &stats, llm.as_ref())
+            .await
+            .unwrap();
+    assert!(suggestions.is_empty());
+
+    let prompt = &prompts.lock().unwrap()[0];
+    assert!(
+        prompt.contains("Outcomes recorded for this agent since that change:"),
+        "section must exist when a marker does; prompt: {}",
+        prompt
+    );
+    assert!(prompt.contains("(none yet)"), "prompt: {}", prompt);
+}
+
+#[tokio::test]
+async fn test_effect_check_excludes_outcomes_older_than_marker() {
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+
+    manager.add(marker_for("coder", 3)).unwrap();
+    // A trigger lesson and an outcome, both OLDER than the marker.
+    let mut lesson = MemoryEntry::new(
+        MemoryType::Lesson,
+        "Trigger lesson from before the change",
+        "agent",
+        &["agent:coder"],
+    );
+    backdate(&mut lesson, 5);
+    manager.add(lesson).unwrap();
+    let mut old_outcome = MemoryEntry::new(
+        MemoryType::Lesson,
+        "Stale outcome from before the change",
+        "verification",
+        &["agent:coder", "verification"],
+    );
+    backdate(&mut old_outcome, 4);
+    manager.add(old_outcome).unwrap();
+
+    let llm = Arc::new(CaptureLlm { response: "[]".to_string(), prompts: prompts.clone() });
+    let stats = RunStats { tool_calls: 1, tool_errors: 0, verification_attempts: 0 };
+    let suggestions =
+        suggest_improvements(&manager, &test_agent_config(), "task", "result", &stats, llm.as_ref())
+            .await
+            .unwrap();
+    assert!(suggestions.is_empty());
+
+    let prompt = &prompts.lock().unwrap()[0];
+    // The section exists (marker present) but lists no outcomes — the stale
+    // outcome is older than the marker (it still appears in the lessons
+    // section, which has no timestamp filter).
+    assert!(
+        prompt.contains("Outcomes recorded for this agent since that change:"),
+        "prompt: {}",
+        prompt
+    );
+    assert!(prompt.contains("(none yet)"), "prompt: {}", prompt);
+}

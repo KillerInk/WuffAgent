@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tracing;
 
 use super::manager::MemoryManager;
+use super::types::MemoryEntry;
 use crate::agents::config::{AgentConfig, ShellConfig};
 use crate::agents::RunStats;
 use crate::llm::LlmClient;
@@ -13,6 +14,9 @@ const LESSON_CHAR_BUDGET: usize = 12_000;
 /// I1: hard cap on the total improver prompt (safety net on top of the
 /// lesson budget for large system prompts).
 const TOTAL_PROMPT_CHAR_BUDGET: usize = 24_000;
+/// Newline character (I5 effect-check glue; spelled out to keep the string
+/// literals below readable).
+const NEWLINE: char = '\u{a}';
 
 /// A suggested improvement to an agent's configuration.
 ///
@@ -106,6 +110,74 @@ fn rejected_history(manager: &MemoryManager, agent_name: &str) -> Vec<String> {
         .collect()
 }
 
+/// I5: the most recent "prompt changed via approved improvement" marker for
+/// this agent (recorded by the review panel when the user approves a prompt
+/// change; a Fact entry tagged `improvement-applied` + `agent:<name>`).
+fn latest_applied_marker(manager: &MemoryManager, agent_name: &str) -> Option<MemoryEntry> {
+    manager
+        .get_by_tag("improvement-applied")
+        .into_iter()
+        .filter(|m| m.tags.iter().any(|t| t == &format!("agent:{agent_name}")))
+        .max_by_key(|m| m.timestamp)
+}
+
+/// I5: this agent's recorded outcomes since `since` — Lesson entries tagged
+/// `agent:<name>` (S1 verification verdicts, S2 user feedback, S3 agent
+/// lessons). Facts (e.g. the I5 marker itself) are not outcomes.
+fn outcomes_since(
+    manager: &MemoryManager,
+    agent_name: &str,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Vec<MemoryEntry> {
+    manager
+        .get_by_tag(&format!("agent:{agent_name}"))
+        .into_iter()
+        .filter(|m| m.r#type == crate::memory::MemoryType::Lesson)
+        .filter(|m| m.timestamp.map(|t| t > since).unwrap_or(false))
+        .collect()
+}
+
+/// I5: the "effect check" section of the improver prompt — how long ago the
+/// last approved prompt change happened and which outcomes were recorded for
+/// this agent since it, so the improver can propose a revert when the change
+/// made things worse.
+///
+/// Returns `(prompt section, evidence line)`, or `None` when no approved
+/// change has been recorded for this agent yet (the prompt gets no section).
+fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(String, String)> {
+    let marker = latest_applied_marker(manager, agent_name)?;
+    let since = marker.timestamp?;
+    let days = chrono::Utc::now().signed_duration_since(since).num_days().max(0);
+    let date = since.format("%Y-%m-%d").to_string();
+
+    // Most recent first, capped so the section can't blow the prompt budget.
+    let mut outcomes = outcomes_since(manager, agent_name, since);
+    outcomes.sort_by_key(|m| m.timestamp);
+    let outcomes: Vec<&MemoryEntry> = outcomes.iter().rev().take(10).collect();
+
+    let list = if outcomes.is_empty() {
+        "(none yet)".to_string()
+    } else {
+        let mut list = String::new();
+        for (i, m) in outcomes.iter().enumerate() {
+            if i > 0 {
+                list.push(NEWLINE);
+            }
+            list.push_str(&truncate_for_evidence(&m.content));
+        }
+        list
+    };
+
+    let section = format!(
+        "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).
+Outcomes recorded for this agent since that change:
+{list}
+If the outcomes look worse than before the change, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
+    );
+    let evidence_line = format!("Effect check: prompt last changed via approved improvement {days} day(s) ago ({date}); {} outcome(s) since", outcomes.len());
+    Some((section, evidence_line))
+}
+
 /// I1: one-line trajectory summary fed to the improver (and kept as evidence).
 fn trajectory_line(stats: &RunStats, prompt_len: usize) -> String {
     format!(
@@ -180,6 +252,18 @@ pub async fn suggest_improvements(
     };
     // I1: trajectory line (also reused verbatim as evidence).
     let traj = trajectory_line(stats, prompt.chars().count());
+    // I5: effect check — the last approved prompt change for this agent and
+    // the outcomes recorded since it (None -> no section, prompt unchanged).
+    let effect = effect_check_section(manager, &agent_config.name);
+    let effect_text = match &effect {
+        Some((section, _)) => {
+            let mut t = section.clone();
+            t.push(NEWLINE);
+            t.push(NEWLINE);
+            t
+        }
+        None => String::new(),
+    };
 
     let extraction_prompt = format!(
         "You are reviewing an AI agent's performance to suggest improvements.\n\n\
@@ -246,6 +330,19 @@ pub async fn suggest_improvements(
         agent_config.name,
     );
 
+    // I5: splice the effect-check section in right before the lessons section
+    // (first occurrence) so it counts toward the TOTAL_PROMPT_CHAR_BUDGET
+    // truncation below.
+    let extraction_prompt = if effect_text.is_empty() {
+        extraction_prompt
+    } else {
+        let mut prompt = extraction_prompt;
+        if let Some(idx) = prompt.find("Relevant lesson memories:") {
+            prompt.insert_str(idx, &effect_text);
+        }
+        prompt
+    };
+
     // I1: safety net — even with the lesson budget, a huge system prompt
     // could push the total past the cap; truncate the tail.
     let extraction_prompt: String = if extraction_prompt.len() > TOTAL_PROMPT_CHAR_BUDGET {
@@ -284,7 +381,7 @@ pub async fn suggest_improvements(
 
     // I3: attach the evidence the improver actually saw (deterministic —
     // not the LLM's echo of it) so the review panel can show why.
-    let evidence = vec![
+    let mut evidence = vec![
         traj,
         format!(
             "{} lesson(s) informed this suggestion; first: {}",
@@ -295,6 +392,11 @@ pub async fn suggest_improvements(
                 .unwrap_or_default()
         ),
     ];
+    // I5: the effect-check input is deterministic evidence too, so the panel
+    // shows WHY a revert-style suggestion was made.
+    if let Some((_, line)) = &effect {
+        evidence.push(line.clone());
+    }
     for s in &mut suggestions {
         s.evidence = evidence.clone();
     }

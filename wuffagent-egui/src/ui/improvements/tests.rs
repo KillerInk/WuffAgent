@@ -80,7 +80,7 @@ fn test_apply_improvement_updates_prompt_and_creates_agent() {
         edited_system_prompt: "helper prompt".to_string(),
     });
 
-    let msg = apply_improvement(&[dir.clone()], &manager, &imp);
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
     assert!(msg.contains("updated prompt for 'coder'"), "msg: {}", msg);
     assert!(msg.contains("created new agent 'helper'"), "msg: {}", msg);
 
@@ -111,7 +111,7 @@ fn test_apply_improvement_uses_edited_prompts() {
         edited_system_prompt: "user edited helper prompt".to_string(),
     });
 
-    let msg = apply_improvement(&[dir.clone()], &manager, &imp);
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
     assert!(msg.contains("updated prompt for 'coder'"), "msg: {}", msg);
     assert!(msg.contains("created new agent 'helper'"), "msg: {}", msg);
 
@@ -134,7 +134,7 @@ fn test_apply_improvement_falls_back_to_original_prompt() {
     let mut imp = pending("coder", Some("original only"));
     imp.edited_prompt = None;
 
-    let msg = apply_improvement(&[dir.clone()], &manager, &imp);
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
     assert!(msg.contains("updated prompt for 'coder'"), "msg: {}", msg);
     let coder = manager.get_agent("coder").expect("coder agent");
     assert_eq!(coder.system_prompt, "original only");
@@ -150,7 +150,7 @@ fn test_apply_improvement_missing_profile_clear_error() {
     let dir = temp_agents_dir("missing");
     let manager = AgentManager::new(dir.clone());
 
-    let msg = apply_improvement(&[dir.clone()], &manager, &pending("ghost", Some("p")));
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &pending("ghost", Some("p"))).0;
     assert!(
         msg.contains("profile 'ghost' not found in any agents directory"),
         "msg: {}",
@@ -178,7 +178,7 @@ fn test_apply_improvement_writes_to_actual_profile_dir() {
     manager.add_search_dir(search.clone());
 
     let dirs = vec![primary.clone(), search.clone()];
-    let msg = apply_improvement(&dirs, &manager, &pending("coder", Some("new prompt")));
+    let msg = apply_improvement_detailed(&dirs, &manager, &pending("coder", Some("new prompt"))).0;
     assert!(msg.contains("updated prompt for 'coder'"), "msg: {}", msg);
 
     // The search-dir file was updated in place...
@@ -255,7 +255,7 @@ fn test_apply_improvement_field_only_and_toggles() {
     imp.reasoning_effort = Some(ReasoningEffort::High);
     imp.apply_reasoning_effort = false; // user rejects the reasoning change
 
-    let msg = apply_improvement(&[dir.clone()], &manager, &imp);
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
     assert!(msg.contains("updated tools for 'coder'"), "msg: {}", msg);
 
     let coder = manager.get_agent("coder").expect("coder agent");
@@ -282,7 +282,7 @@ fn test_apply_improvement_prompt_off_fields_on() {
     imp.apply_prompt = false;
     imp.task_timeout_ms = Some(120_000);
 
-    let msg = apply_improvement(&[dir.clone()], &manager, &imp);
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
     assert!(msg.contains("updated timeout for 'coder'"), "msg: {}", msg);
 
     let coder = manager.get_agent("coder").expect("coder agent");
@@ -305,7 +305,7 @@ fn test_apply_improvement_all_toggles_off_is_noop() {
     imp.allowed_tools = Some(vec!["file_io".to_string()]);
     imp.apply_allowed_tools = false;
 
-    let msg = apply_improvement(&[dir.clone()], &manager, &imp);
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
     assert_eq!(msg, "No changes to apply.", "msg: {}", msg);
 
     let coder = manager.get_agent("coder").expect("coder agent");
@@ -419,6 +419,82 @@ fn test_remember_dismissal_saves_and_dedups() {
     let mut other = pending("researcher", Some("p"));
     other.rationale = "simplify the handoff protocol instead".to_string();
     assert!(remember_dismissal(&manager, &other).is_ok());
+    assert_eq!(manager.count(), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// I5: the approval marker must be a Fact entry (NOT a Lesson — so the
+/// `collect_lessons` Lesson filter ignores it: a reference point, not
+/// evidence), carrying the `improvement-applied` + `agent:<name>` tags and
+/// naming the agent and the approval date in its content (the date keeps
+/// re-approvals on different days from being collapsed by the dedup gate).
+#[test]
+fn test_applied_marker_shape() {
+    let imp = pending("coder", Some("new prompt"));
+
+    let entry = applied_marker(&imp);
+    assert!(matches!(entry.r#type, crate::memory::MemoryType::Fact));
+    assert_eq!(entry.source, "improvement-review");
+    assert!(
+        entry.tags.contains(&"improvement-applied".to_string()),
+        "tags: {:?}",
+        entry.tags
+    );
+    assert!(
+        entry.tags.contains(&"agent:coder".to_string()),
+        "tags: {:?}",
+        entry.tags
+    );
+    // Names the agent and the approval date (tolerate a midnight rollover
+    // between building the marker and computing "today").
+    assert!(entry.content.contains("coder"), "content: {}", entry.content);
+    let now = chrono::Utc::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let yesterday = (now - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+    assert!(
+        entry.content.contains(&today) || entry.content.contains(&yesterday),
+        "content: {} (today: {})",
+        entry.content,
+        today
+    );
+}
+
+/// I5: an approval persists through the shared save path (same as F5's
+/// rejection lessons); a same-day re-approval of the same change is collapsed
+/// by the dedup gate, and a different prompt is a distinct entry (the content
+/// includes an excerpt of the applied prompt).
+#[test]
+fn test_remember_applied_prompt_saves_and_dedups() {
+    let dir = std::env::temp_dir().join(format!(
+        "wuffagent-egui-i5-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = crate::memory::MemoryConfig {
+        memories_dir: Some(dir.to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let manager = crate::memory::MemoryManager::new(config).unwrap();
+
+    let imp = pending("coder", Some("new prompt"));
+    assert!(remember_applied_prompt(&manager, &imp).is_ok());
+    // Same change approved again (same day) -> dedup gate, still Ok.
+    assert!(remember_applied_prompt(&manager, &imp).is_ok());
+    assert_eq!(manager.count(), 1, "dedup must collapse same-day repeats");
+
+    // Findable by tag (what the improver's latest_applied_marker does).
+    let markers = manager.get_by_tag("improvement-applied");
+    assert_eq!(markers.len(), 1);
+    assert!(markers[0].tags.contains(&"agent:coder".to_string()));
+
+    // A DIFFERENT prompt for the same agent is a distinct entry.
+    let other = pending(
+        "coder",
+        Some("a completely different prompt with lots of extra unique wording to diverge"),
+    );
+    assert!(remember_applied_prompt(&manager, &other).is_ok());
     assert_eq!(manager.count(), 2);
 
     let _ = std::fs::remove_dir_all(&dir);

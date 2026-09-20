@@ -40,3 +40,25 @@ fn test_legacy_auto_extract_field_ignored() {
     let config: MemoryConfig = serde_json::from_str(json).expect("legacy config should load");
     assert!(config.enabled);
 }
+
+#[test]
+fn test_i4_cooldown_and_auto_improve_defaults() {
+    // I4 flipped auto_improve to ON — the cost control (cooldown + evidence
+    // gate) makes the idle check cheap.
+    let config = MemoryConfig::default();
+    assert!(config.auto_improve, "I4: auto_improve defaults to true");
+    assert_eq!(config.improvement_cooldown_tasks, 5);
+
+    // Old config files predate the cooldown field; they must load with the
+    // new default (schema churn is serde-defaulted, not breaking).
+    let legacy: MemoryConfig =
+        serde_json::from_str(r#"{"enabled": true}"#).expect("old config should load");
+    assert_eq!(legacy.improvement_cooldown_tasks, 5);
+    assert!(legacy.auto_improve, "I4: default flipped even for legacy files");
+
+    // An EXPLICIT "auto_improve": false in an existing config file is
+    // respected (the default only fills in missing values).
+    let explicit: MemoryConfig =
+        serde_json::from_str(r#"{"auto_improve": false}"#).expect("config should load");
+    assert!(!explicit.auto_improve);
+}

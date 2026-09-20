@@ -153,6 +153,71 @@ impl MemoryManager {
         entries
     }
 
+    /// I4 (cost control): whether new improvement evidence has arrived since
+    /// the last improver check.
+    ///
+    /// Evidence is any **Lesson-type** entry — that covers every kind the
+    /// improver learns from (S1 verification outcomes, S2 user feedback,
+    /// S3 agent lessons, F5 rejection lessons). Counted across all agents.
+    ///
+    /// When no check has been recorded yet (missing or corrupt state file),
+    /// evidence exists if ANY lesson exists at all — the first check then
+    /// records the baseline.
+    pub fn has_new_improvement_evidence(&self) -> bool {
+        let last_check = load_improvement_state(&self.improvement_state_path())
+            .last_check
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+        let memories = self.get_all_memories();
+        match last_check {
+            // Some Lesson entry strictly newer than the last check.
+            Some(ts) => memories
+                .iter()
+                .any(|e| e.r#type == MemoryType::Lesson && e.timestamp.map(|t| t > ts).unwrap_or(false)),
+            None => memories.iter().any(|e| e.r#type == MemoryType::Lesson),
+        }
+    }
+
+    /// I4 (cost control): record that an improvement check just ran, so the
+    /// evidence gate stays closed until new Lesson entries arrive.
+    ///
+    /// Best-effort: any failure is only logged — the state file must never
+    /// be able to break task completion.
+    pub fn record_improvement_check(&self) {
+        let path = self.improvement_state_path();
+        let now = chrono::Utc::now();
+        let state = ImprovementState {
+            last_check: Some(now.timestamp()),
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::debug!("[MEMORY] Could not create state dir {:?}: {}", parent, e);
+                return;
+            }
+        }
+        let content = match serde_json::to_string(&state) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("[MEMORY] Could not serialize improvement state: {}", e);
+                return;
+            }
+        };
+        // Atomic write (temp + rename), mirroring `save_memories`.
+        let temp_path = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&temp_path, content).and_then(|_| std::fs::rename(&temp_path, &path)) {
+            let _ = std::fs::remove_file(&temp_path);
+            tracing::debug!("[MEMORY] Could not write improvement state {:?}: {}", path, e);
+        }
+    }
+
+    /// I4: the improvement-check state file, a sibling of the project memory
+    /// file (e.g. `improvement_state.json` next to `default.json`).
+    fn improvement_state_path(&self) -> PathBuf {
+        self.storage_path
+            .parent()
+            .map(|p| p.join("improvement_state.json"))
+            .unwrap_or_else(|| PathBuf::from("improvement_state.json"))
+    }
+
     /// Add a new memory entry.
     ///
     /// Runs a deduplication gate first: if a strong near-duplicate already
@@ -988,6 +1053,28 @@ fn clean_stale_entries(entries: &mut Vec<MemoryEntry>) -> usize {
         e.confidence >= 0.3
     });
     original_count - entries.len()
+}
+
+/// I4: persisted state of the last auto-improvement check (unix seconds).
+/// Private: only `record_improvement_check` / `has_new_improvement_evidence`
+/// touch it.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Copy, Debug, PartialEq)]
+struct ImprovementState {
+    /// Unix timestamp (seconds) of the last improvement check, if any.
+    #[serde(default)]
+    last_check: Option<i64>,
+}
+
+/// Load the improvement-check state, tolerating a missing or corrupt file
+/// (both mean "no check recorded yet").
+fn load_improvement_state(path: &std::path::Path) -> ImprovementState {
+    if !path.exists() {
+        return ImprovementState::default();
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

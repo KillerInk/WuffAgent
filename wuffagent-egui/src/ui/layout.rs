@@ -164,7 +164,17 @@ impl ChatApp {
     fn draw_memory_panel(&mut self, ctx: &egui::Context) {
         // Disjoint field borrows: the panel (mutable) + manager, runtime, config
         // (immutable) are separate struct fields, so they can coexist.
-        self.memory_panel.draw(ctx, &self.memory_manager, self.memory_runtime.as_ref(), &self.config);
+        let updated = self
+            .memory_panel
+            .draw(ctx, &self.memory_manager, self.memory_runtime.as_ref(), &self.config);
+        if let Some(mconfig) = updated {
+            // I4: persist memory settings — before this they were runtime-only
+            // (set_config) and reverted on restart.
+            self.config.memory_config = mconfig;
+            if let Err(e) = self.save_config() {
+                eprintln!("Failed to save memory settings: {}", e);
+            }
+        }
     }
 
     fn draw_mcp_panel(&mut self, ctx: &egui::Context) {

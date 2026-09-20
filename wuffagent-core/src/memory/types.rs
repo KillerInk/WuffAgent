@@ -160,11 +160,20 @@ pub struct MemoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memories_dir: Option<String>,
     /// Whether to auto-suggest agent prompt improvements.
+    ///
+    /// I4: on by default — the check is cost-controlled by
+    /// `improvement_cooldown_tasks` and the "new evidence since last check"
+    /// gate, so it is cheap when idle.
     #[serde(default = "default_auto_improve")]
     pub auto_improve: bool,
     /// Minimum number of relevant lessons to trigger improvement check.
     #[serde(default = "default_improvement_trigger_lessons")]
     pub improvement_trigger_lessons: usize,
+    /// I4: run the auto-improvement check at most once every N completed
+    /// tasks (mirrors the maintenance cooldown). A value of 0 is treated as
+    /// 1 at the use site.
+    #[serde(default = "default_improvement_cooldown_tasks")]
+    pub improvement_cooldown_tasks: usize,
     /// Whether the LLM memory-maintenance pass is enabled (opt-in).
     #[serde(default = "default_memory_maintenance")]
     pub memory_maintenance: bool,
@@ -189,8 +198,9 @@ fn default_max_entries() -> usize { 100 }
 fn default_injection_max_entries() -> usize { 5 }
 fn default_injection_max_chars() -> usize { 1000 }
 fn default_project() -> String { "default".to_string() }
-fn default_auto_improve() -> bool { false }
+fn default_auto_improve() -> bool { true }
 fn default_improvement_trigger_lessons() -> usize { 1 }
+fn default_improvement_cooldown_tasks() -> usize { 5 }
 fn default_memory_maintenance() -> bool { false }
 fn default_memory_maintenance_threshold() -> usize { 40 }
 fn default_memory_maintenance_timeout_secs() -> u64 { 600 }
@@ -207,8 +217,9 @@ impl Default for MemoryConfig {
             injection_mode: InjectionMode::Smart,
             project: "default".to_string(),
             memories_dir: None,
-            auto_improve: false,
+            auto_improve: true,
             improvement_trigger_lessons: 1,
+            improvement_cooldown_tasks: 5,
             memory_maintenance: false,
             memory_maintenance_threshold: 40,
             memory_maintenance_timeout_secs: 600,

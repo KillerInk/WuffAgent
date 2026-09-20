@@ -38,6 +38,13 @@ pub struct AgentEngine {
 /// progress on the oldest entries of the store.
 const MAINTENANCE_TASK_COOLDOWN: usize = 3;
 
+/// I4 (cost control): whether the auto-improvement check is due on the task
+/// completion numbered `completed` (1-based), given the configured cooldown
+/// (one check at most every N completions). `.max(1)` guards a cooldown of 0.
+fn improvement_due(completed: usize, improvement_cooldown_tasks: usize) -> bool {
+    completed % improvement_cooldown_tasks.max(1) == 0
+}
+
 impl AgentEngine {
     /// Create a new AgentEngine.
     pub fn new(
@@ -219,7 +226,14 @@ impl AgentEngine {
             }
         }
 
-        if memory.config().auto_improve {
+        // I4 (cost control): `auto_improve` defaults ON, but the LLM call only
+        // runs on a cooldown boundary AND when new lesson/outcome/feedback
+        // evidence has arrived since the last check — cheap when idle.
+        let mconfig = memory.config();
+        if mconfig.auto_improve
+            && improvement_due(completed, mconfig.improvement_cooldown_tasks)
+            && memory.has_new_improvement_evidence()
+        {
             match crate::memory::suggest_improvements(
                 &memory,
                 agent_config,
@@ -242,6 +256,12 @@ impl AgentEngine {
                 Ok(_) => {}
                 Err(e) => tracing::warn!("[AGENT] Improvement check failed: {}", e),
             }
+            // Record the check after the attempt (even on Err/empty result):
+            // new evidence since this timestamp re-arms the next check.
+            memory.record_improvement_check();
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

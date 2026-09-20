@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::memory::{InjectionMode, MaintenanceProgress, MaintenanceReport, MemoryEntry, MemoryManager};
+use crate::memory::{
+    InjectionMode, MaintenanceProgress, MaintenanceReport, MemoryConfig, MemoryEntry, MemoryManager,
+};
 use super::theme::Theme;
 
 /// Floor for the maintenance timeout so a misconfigured 0 can't cancel the
@@ -72,18 +74,22 @@ impl MemoryPanel {
         }
     }
 
-    /// Draw the memory panel window. No-op when not shown.
+    /// Draw the memory panel window. No-op (returns `None`) when not shown.
     ///
     /// Takes disjoint references into app state (manager, runtime, config) so
     /// the panel — which is itself a field of `ChatApp` — can be borrowed
     /// mutably while the app's other fields are read.
+    ///
+    /// Returns the new memory config if the user changed a setting in the
+    /// Settings section, so the caller can persist it (I4 — before, memory
+    /// settings were runtime-only and reverted on restart).
     pub fn draw(
         &mut self,
         ctx: &egui::Context,
         memory: &Arc<MemoryManager>,
         runtime: &Arc<tokio::runtime::Runtime>,
         config: &Config,
-    ) {
+    ) -> Option<MemoryConfig> {
         // Collect a finished maintenance pass (even while the window is
         // closed) so the result is ready the next time the panel is shown.
         if let Some(job) = &mut self.maintenance {
@@ -107,9 +113,10 @@ impl MemoryPanel {
         }
 
         if !self.show_panel {
-            return;
+            return None;
         }
         let theme = Theme::from_name(&config.theme);
+        let mut updated_mconfig: Option<MemoryConfig> = None;
 
         egui::Window::new("Memory")
             .collapsible(true)
@@ -131,7 +138,7 @@ impl MemoryPanel {
                 ui.separator();
 
                 // Settings section (edits the live memory config).
-                self.draw_settings(ui, memory);
+                updated_mconfig = self.draw_settings(ui, memory);
                 ui.separator();
 
                 // Status / result message
@@ -201,6 +208,7 @@ impl MemoryPanel {
                     self.show_panel = false;
                 }
             });
+        updated_mconfig
     }
 
     /// A single list row: type badge, tags, age, id, preview + actions.
@@ -390,7 +398,10 @@ impl MemoryPanel {
     }
 
     /// Memory settings section (edits the live config in place).
-    fn draw_settings(&mut self, ui: &mut egui::Ui, memory: &MemoryManager) {
+    ///
+    /// Returns the new config if the user changed anything — the caller
+    /// (ChatApp) persists it via the centralized `save_config()` (I4).
+    fn draw_settings(&mut self, ui: &mut egui::Ui, memory: &MemoryManager) -> Option<MemoryConfig> {
         let mut mconfig = memory.config();
 
         ui.collapsing("Settings", |ui| {
@@ -451,13 +462,25 @@ impl MemoryPanel {
                         .suffix(" s step timeout"),
                 )
                 .changed();
-            let auto_changed = ui.add(egui::Checkbox::new(&mut mconfig.auto_improve, "Auto-improve prompts (off by default)")).changed();
+            let auto_changed = ui.add(egui::Checkbox::new(&mut mconfig.auto_improve, "Auto-improve prompts (gated: cooldown + new evidence)")).changed();
+            let cooldown_changed = ui
+                .add(
+                    egui::DragValue::new(&mut mconfig.improvement_cooldown_tasks)
+                        .range(1..=1000)
+                        .suffix(" tasks cooldown"),
+                )
+                .changed();
 
-            if enabled || max_changed || inj_changed || maint_changed || thresh_changed || batch_changed || timeout_changed || auto_changed {
+            if enabled || max_changed || inj_changed || maint_changed || thresh_changed || batch_changed || timeout_changed || auto_changed || cooldown_changed {
                 memory.set_config(mconfig.clone());
                 self.message = Some("✓ Memory settings updated".to_string());
+                Some(mconfig)
+            } else {
+                None
             }
-        });
+        })
+        .body_returned
+        .flatten()
     }
 
     /// Maintenance controls + report.
