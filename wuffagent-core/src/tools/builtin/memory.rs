@@ -51,7 +51,9 @@ impl Tool for SaveMemoryTool {
                     }),
                     ("tags".to_string(), FieldSchema {
                         type_name: "array".to_string(),
-                        description: "Tags for categorization (optional)".to_string(),
+                        description: "Tags for categorization (optional). Tag lessons with your \
+                                      agent name (e.g. \"agent:coder\") so per-agent improvement \
+                                      checks can find them".to_string(),
                         nullable: true,
                     }),
                 ])),

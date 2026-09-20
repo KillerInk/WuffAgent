@@ -1,8 +1,10 @@
 ﻿use eframe::egui;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::agents::config::{AgentConfig, AgentManager};
 use crate::tools::ToolManager;
+use super::agent_history;
 use super::theme::Theme;
 
 /// UI dialog for adding/editing/removing agent configurations.
@@ -133,20 +135,13 @@ impl AgentConfigDialog {
                                     if self.agents.is_empty() {
                                         ui.label("No agents configured.");
                                     } else {
-                                        // Pre-collect agent data to avoid borrowing self mutably inside the loop
+                                        // Pre-collect agent data to avoid borrowing self mutably inside the loop.
+                                        // (Display data + index only: selecting an agent copies
+                                        // fields via `select_agent`, which reads `self.agents`.)
                                         struct AgentButtonData {
                                             label: String,
                                             bg: egui::Color32,
                                             idx: usize,
-                                            name: String,
-                                            desc: String,
-                                            prompt: String,
-                                            enabled: bool,
-                                            allowed: Vec<String>,
-                                            effort: crate::types::ReasoningEffort,
-                                            shell: wuffagent_core::agents::config::ShellConfig,
-                                            handoff_enabled: bool,
-                                            handoff_targets: Vec<String>,
                                         }
                                         let button_data: Vec<AgentButtonData> = self.agents.iter().enumerate().map(|(i, agent)| {
                                             let selected = i as isize == self.selected_index;
@@ -154,34 +149,11 @@ impl AgentConfigDialog {
                                                 label: format!("[{}] {}", if agent.enabled { "x" } else { " " }, agent.name),
                                                 bg: if selected { egui::Color32::from_rgb(0x33, 0x66, 0xCC) } else { egui::Color32::from_rgb(0x33, 0x33, 0x33) },
                                                 idx: i,
-                                                name: agent.name.clone(),
-                                                desc: agent.description.clone(),
-                                                prompt: agent.system_prompt.clone(),
-                                                enabled: agent.enabled,
-                                                allowed: agent.allowed_tools.clone(),
-                                                effort: agent.reasoning_effort,
-                                                shell: agent.shell_config.clone(),
-                                                handoff_enabled: agent.handoff_enabled,
-                                                handoff_targets: agent.handoff_targets.clone(),
                                             }
                                         }).collect();
                                         for bd in &button_data {
                                             if ui.add(egui::Button::new(&bd.label).fill(bd.bg)).clicked() {
-                                                self.selected_index = bd.idx as isize;
-                                                self.is_new = false;
-                                                self.name = bd.name.clone();
-                                                self.description = bd.desc.clone();
-                                                self.system_prompt = bd.prompt.clone();
-                                                self.enabled = bd.enabled;
-                                                self.reasoning_effort = bd.effort;
-                                                self.shell_enabled = bd.shell.shell_enabled;
-                                                self.shell_type = bd.shell.shell_type.clone();
-                                                self.shell_timeout_ms = bd.shell.shell_timeout_ms as u32;
-                                                self.shell_allowed_commands = bd.shell.allowed_commands.join(", ");
-                                                self.handoff_enabled = bd.handoff_enabled;
-                                                self.handoff_targets = bd.handoff_targets.join(", ");
-                                                self.sync_tools_from_agent(&bd.allowed);
-                                                self.message = None;
+                                                self.select_agent(bd.idx);
                                             }
                                         }
                                     }
@@ -215,6 +187,31 @@ impl AgentConfigDialog {
                                     ui.separator();
 
                                     if self.is_new || self.selected_index >= 0 {
+                                        // F4: prompt history of the selected EXISTING agent —
+                                        // snapshots from every directory the manager can see
+                                        // (primary + search dirs; a profile's snapshots live
+                                        // next to its file, see F3).
+                                        let history_agent: Option<String> = if !self.is_new {
+                                            self.selected_index()
+                                                .filter(|&idx| idx < self.agents.len())
+                                                .map(|idx| self.agents[idx].name.clone())
+                                        } else {
+                                            None
+                                        };
+                                        let history_entries: Option<Vec<agent_history::HistoryEntry>> =
+                                            history_agent.as_ref().and_then(|name| {
+                                                agent_manager.lock().ok().map(|m| {
+                                                    let mut dirs: Vec<PathBuf> = vec![m.agents_dir().clone()];
+                                                    for d in m.search_dirs() {
+                                                        if !dirs.contains(d) {
+                                                            dirs.push(d.clone());
+                                                        }
+                                                    }
+                                                    agent_history::list_history(&dirs, name)
+                                                })
+                                            });
+                                        let mut revert_target: Option<agent_history::HistoryEntry> = None;
+
                                         // Agent fields
                                         ui.vertical(|ui| {
                                             ui.label("Name:");
@@ -277,6 +274,55 @@ impl AgentConfigDialog {
                                                 ui.checkbox(&mut self.tool_checkboxes[i], tool);
                                             }
 
+                                            // F4: prompt history + per-version Revert.
+                                            if history_agent.is_some() {
+                                                ui.separator();
+                                                ui.group(|ui| {
+                                                    ui.label(egui::RichText::new("Prompt history (newest first):").strong());
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            "A snapshot is saved before every edit. Revert restores the selected version; the current state is snapshotted first, so a revert is itself reversible.",
+                                                        )
+                                                        .weak(),
+                                                    );
+                                                    match &history_entries {
+                                                        None => {
+                                                            ui.label(
+                                                                egui::RichText::new("(could not read prompt history)")
+                                                                    .weak(),
+                                                            );
+                                                        }
+                                                        Some(entries) if entries.is_empty() => {
+                                                            ui.label(
+                                                                egui::RichText::new("No prompt history yet.")
+                                                                    .weak(),
+                                                            );
+                                                        }
+                                                        Some(entries) => {
+                                                            for e in entries.iter() {
+                                                                ui.horizontal(|ui| {
+                                                                    let mut ts_label = agent_history::format_ts(e.ts);
+                                                                    if e.seq > 0 {
+                                                                        ts_label.push_str(&format!("#{}", e.seq));
+                                                                    }
+                                                                    ui.label(ts_label);
+                                                                    ui.label(
+                                                                        egui::RichText::new(
+                                                                            agent_history::prompt_preview(&e.path),
+                                                                        )
+                                                                        .weak()
+                                                                        .monospace(),
+                                                                    );
+                                                                    if ui.small_button("Revert").clicked() {
+                                                                        revert_target = Some(e.clone());
+                                                                    }
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            }
+
                                             ui.separator();
                                             ui.horizontal(|ui| {
                                                 if ui.add(
@@ -300,6 +346,35 @@ impl AgentConfigDialog {
                                                 self.message = None;
                                             }
                                         });
+
+                                        // F4: execute a requested revert (file I/O + list
+                                        // refresh), outside the drawing closure.
+                                        if let (Some(name), Some(entry)) = (&history_agent, revert_target) {
+                                            match agent_history::revert(&entry.dir, name, &entry) {
+                                                Ok(config) => {
+                                                    if let Ok(m) = agent_manager.lock() {
+                                                        self.agents = m.reload().unwrap_or_default();
+                                                    }
+                                                    if let Some(pos) =
+                                                        self.agents.iter().position(|a| a.name == config.name)
+                                                    {
+                                                        self.selected_index = pos as isize;
+                                                    }
+                                                    self.load_into_form(&config);
+                                                    self.message = Some(format!(
+                                                        "Reverted '{}' to {}.",
+                                                        config.name,
+                                                        agent_history::format_ts(entry.ts)
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    self.message = Some(format!(
+                                                        "Error: revert of '{}' failed: {}",
+                                                        name, e
+                                                    ));
+                                                }
+                                            }
+                                        }
                                     } else {
                                         // No agent selected Ã¢â‚¬â€ show info
                                         ui.vertical_centered(|ui| {
@@ -414,31 +489,31 @@ impl AgentConfigDialog {
 
     fn select_agent(&mut self, idx: usize) {
         self.selected_index = idx as isize;
+        if idx < self.agents.len() {
+            // Clone out first: `load_into_form` takes `&mut self`, so we
+            // cannot pass `&self.agents[idx]` directly.
+            let agent = self.agents[idx].clone();
+            self.load_into_form(&agent);
+        }
+    }
+
+    /// Load an externally-sourced config into the form fields (e.g. the one
+    /// `revert_agent` returns after a F4 revert restored a historical
+    /// version).
+    fn load_into_form(&mut self, agent: &AgentConfig) {
         self.is_new = false;
-        // Clone needed fields before dropping the borrow
-        let agent_name = self.agents[idx].name.clone();
-        let agent_desc = self.agents[idx].description.clone();
-        let agent_prompt = self.agents[idx].system_prompt.clone();
-        let agent_enabled = self.agents[idx].enabled;
-        let agent_allowed = self.agents[idx].allowed_tools.clone();
-        let agent_effort = self.agents[idx].reasoning_effort;
-        let agent_shell = self.agents[idx].shell_config.clone();
-        let agent_handoff_enabled = self.agents[idx].handoff_enabled;
-        let agent_handoff_targets = self.agents[idx].handoff_targets.clone();
-
-        self.name = agent_name;
-        self.description = agent_desc;
-        self.system_prompt = agent_prompt;
-        self.enabled = agent_enabled;
-        self.reasoning_effort = agent_effort;
-        self.shell_enabled = agent_shell.shell_enabled;
-        self.shell_type = agent_shell.shell_type.clone();
-        self.shell_timeout_ms = agent_shell.shell_timeout_ms as u32;
-        self.shell_allowed_commands = agent_shell.allowed_commands.join(", ");
-        self.handoff_enabled = agent_handoff_enabled;
-        self.handoff_targets = agent_handoff_targets.join(", ");
-
-        self.sync_tools_from_agent(&agent_allowed);
+        self.name = agent.name.clone();
+        self.description = agent.description.clone();
+        self.system_prompt = agent.system_prompt.clone();
+        self.enabled = agent.enabled;
+        self.reasoning_effort = agent.reasoning_effort;
+        self.shell_enabled = agent.shell_config.shell_enabled;
+        self.shell_type = agent.shell_config.shell_type.clone();
+        self.shell_timeout_ms = agent.shell_config.shell_timeout_ms as u32;
+        self.shell_allowed_commands = agent.shell_config.allowed_commands.join(", ");
+        self.handoff_enabled = agent.handoff_enabled;
+        self.handoff_targets = agent.handoff_targets.join(", ");
+        self.sync_tools_from_agent(&agent.allowed_tools);
         self.message = None;
     }
 
@@ -447,13 +522,6 @@ impl AgentConfigDialog {
         // set afterwards or the editor panel never appears.
         self.clear_form();
         self.is_new = true;
-    }
-
-    fn start_edit(&mut self, agent: AgentConfig) {
-        self.is_new = false;
-        if let Some(idx) = self.agents.iter().position(|a| a.name == agent.name) {
-            self.select_agent(idx);
-        }
     }
 
     fn clear_form(&mut self) {

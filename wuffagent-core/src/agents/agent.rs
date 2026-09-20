@@ -7,6 +7,7 @@ use tracing;
 use super::config::AgentConfig;
 use super::LlmClient;
 use crate::client::ChatClient;
+use crate::memory::{MemoryEntry, MemoryManager, MemoryType};
 use crate::tools::ToolManager;
 use crate::types::Message;
 use crate::trimming::ContextTrimming;
@@ -38,6 +39,62 @@ const REQUEST_TRUNCATION_CHARS: usize = 500;
 /// prompts. The response is model-generated (not user-controlled), so a
 /// generous budget is safe — this only bounds the judge call's prompt size.
 const RESPONSE_TRUNCATION_CHARS: usize = 2000;
+
+/// S1: max characters of the judge's reason / the task snippet stored in a
+/// verification-outcome lesson memory (keeps the entry compact).
+const VERIFICATION_OUTCOME_REASON_CHARS: usize = 300;
+const VERIFICATION_OUTCOME_TASK_CHARS: usize = 200;
+
+/// S1: persist a verification outcome that did NOT pass on the first try.
+///
+/// `verdict` is `"verified_after_retry"` (the judge failed the first attempt,
+/// the nudged retry passed) or `"gave_up"` (the nudge loop was exhausted).
+/// Stored as a `lesson` memory (tags `agent:<name>` + `verification`, source
+/// `verification`) through the shared save path — the dedup gate collapses
+/// repeated identical outcomes. Returns `Ok(true)` when an entry was saved,
+/// `Ok(false)` when skipped (memory disabled), `Err` on store failure.
+pub fn record_verification_outcome(
+    memory: &MemoryManager,
+    agent_name: &str,
+    verdict: &str,
+    attempts: u32,
+    judge_reason: &str,
+    task: &str,
+) -> Result<bool, String> {
+    if !memory.config().enabled {
+        return Ok(false);
+    }
+    let agent_tag = format!("agent:{agent_name}");
+    let reason = if judge_reason.trim().is_empty() {
+        "(no reason given)".to_string()
+    } else {
+        truncate_chars(judge_reason, VERIFICATION_OUTCOME_REASON_CHARS)
+    };
+    let entry = MemoryEntry::new(
+        MemoryType::Lesson,
+        &format!(
+            "Verification outcome for agent '{}': {} after {} verification attempt(s). Judge: {}. Task: {}",
+            agent_name,
+            verdict,
+            attempts,
+            reason,
+            truncate_chars(task, VERIFICATION_OUTCOME_TASK_CHARS)
+        ),
+        "verification",
+        &[agent_tag.as_str(), "verification"],
+    );
+    memory.add(entry).map(|_| true)
+}
+
+/// Character-aware truncation for S1 outcome content.
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
 
 /// System prompt for response verification.
 ///
@@ -74,6 +131,31 @@ enum RunOutcome {
     Restart(crate::agents::types::RestartRequest),
 }
 
+/// I1: tool-use trajectory stats for one agent run, fed to the improver so
+/// it can weigh HOW the agent worked (tool churn, errors, verification
+/// retries), not just the final text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunStats {
+    /// Total tool calls executed this run (across all LLM rounds).
+    pub tool_calls: usize,
+    /// Tool calls that returned an error ("Error: ..." tool output).
+    pub tool_errors: usize,
+    /// Verification judge attempts used (0 = no tool outputs / shortcut).
+    pub verification_attempts: u32,
+}
+
+/// The verification judge's verdict on the assistant's final response for
+/// the current turn (returned by `verify_tool_outputs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationVerdict {
+    /// Whether the judge (or the no-tool-outputs shortcut) accepts the
+    /// response.
+    pub verified: bool,
+    /// The judge's raw response text — empty for the no-tool-outputs
+    /// shortcut. Kept for logging and as S1 outcome evidence.
+    pub judge_reason: String,
+}
+
 /// A configurable agent that runs an LLM loop with tool calls.
 ///
 /// Each agent has its own system prompt, allowed tools, and shell config.
@@ -103,6 +185,8 @@ pub struct Agent {
     /// The `restart` tool writes a request here; `run_llm_loop` picks it up
     /// before the next LLM round.
     restart_mailbox: Option<Arc<Mutex<Option<crate::agents::types::RestartRequest>>>>,
+    /// I1: trajectory stats of the last completed `run_llm_loop`.
+    run_stats: RunStats,
 }
 
 impl Agent {
@@ -186,6 +270,7 @@ impl Agent {
             trimming: ContextTrimming::new(),
             handoff_mailbox,
             restart_mailbox,
+            run_stats: RunStats::default(),
         }
     }
 
@@ -279,6 +364,12 @@ impl Agent {
     /// Get the messages from the last execution for memory extraction.
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// I1: trajectory stats (tool calls, tool errors, verification attempts)
+    /// of the last completed `run_llm_loop` — fed to the improver.
+    pub fn run_stats(&self) -> RunStats {
+        self.run_stats
     }
 
     /// Execute a request with this agent.
@@ -482,11 +573,13 @@ impl Agent {
         prompt.push_str("- update_memory: Refine an existing entry (by ID) instead of re-adding similar information\n");
         prompt.push_str("- consolidate_memories: Merge related entries (by IDs) into one comprehensive entry\n");
         prompt.push_str("- delete_memory: Remove entries that turn out to be stale or wrong\n");
-        prompt.push_str(
+        prompt.push_str(&format!(
             "Tool responses include entry IDs - use them for updates, consolidation, and deletion. \
              Only save information that is persistent and useful across sessions; don't save routine \
-             operations or temporary information.",
-        );
+             operations or temporary information. When saving a lesson, tag it with your agent name \
+             (tags: [\"agent:{}\", ...]) so per-agent improvement checks can find it.",
+            self.config.name
+        ));
 
         // Handoff guidance: only when the agent actually has the tool.
         if self.config.handoff_enabled {
@@ -604,6 +697,8 @@ impl Agent {
         cancel_token: &CancellationToken,
     ) -> Result<RunOutcome, String> {
         let mut verification_attempts = 0u32;
+        // S1: the last NEEDS_FIX reason seen this run, for the outcome memory.
+        let mut last_failed_judge_reason = String::new();
         let start = Instant::now();
 
         // Per-agent tool manager, filtered by `allowed_tools`. An empty list
@@ -647,7 +742,10 @@ impl Agent {
         // instead of what the user actually asked.
         let original_request = self.extract_original_request(messages);
 
-        loop {
+        // I1: mark where THIS run's messages start, so trajectory stats can
+        // be counted without including earlier turns of the conversation.
+        let run_start_len = messages.len();
+        let outcome: RunOutcome = loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
             }
@@ -1144,6 +1242,14 @@ impl Agent {
 
             // ── No more tool calls ──────────────────────────────────────
             if verification_attempts >= MAX_VERIFICATION_ATTEMPTS {
+                // S1: the nudge loop was exhausted without a passing verdict —
+                // record it as negative evidence.
+                self.store_verification_outcome(
+                    "gave_up",
+                    verification_attempts,
+                    &last_failed_judge_reason,
+                    &original_request,
+                );
                 tracing::info!(
                     "[AGENT] Agent '{}' completed ({} verification attempts)",
                     self.config.name,
@@ -1154,13 +1260,24 @@ impl Agent {
                     usage: usage.clone(),
                     session_id: self.session_id(),
                 });
-                return Ok(RunOutcome::Completed(display_content));
+                break RunOutcome::Completed(display_content);
             }
             verification_attempts += 1;
 
             let verification_result = self.verify_tool_outputs(messages, &original_request, &display_content, cancel_token).await;
             match verification_result {
-                Ok(true) => {
+                Ok(verdict) if verdict.verified => {
+                    // S1: a pass that needed a retry is negative evidence for
+                    // the first attempt (a first-try pass stays unrecorded —
+                    // no noise).
+                    if verification_attempts > 1 {
+                        self.store_verification_outcome(
+                            "verified_after_retry",
+                            verification_attempts,
+                            &last_failed_judge_reason,
+                            &original_request,
+                        );
+                    }
                     tracing::info!(
                         "[AGENT] Agent '{}' completed (verified)",
                         self.config.name
@@ -1170,14 +1287,18 @@ impl Agent {
                         usage: usage.clone(),
                         session_id: self.session_id(),
                     });
-                    return Ok(RunOutcome::Completed(display_content));
+                    break RunOutcome::Completed(display_content);
                 }
-                Ok(false) => {
+                Ok(verdict) => {
+                    if !verdict.judge_reason.trim().is_empty() {
+                        last_failed_judge_reason = verdict.judge_reason.clone();
+                    }
                     tracing::warn!(
-                        "[AGENT] Agent '{}' verification failed (attempt {}/{}), feeding feedback to LLM",
+                        "[AGENT] Agent '{}' verification failed (attempt {}/{}): {}, feeding feedback to LLM",
                         self.config.name,
                         verification_attempts,
-                        MAX_VERIFICATION_ATTEMPTS
+                        MAX_VERIFICATION_ATTEMPTS,
+                        truncate_chars(&verdict.judge_reason, 200)
                     );
                     messages.push(Message {
                         role: "user".to_string(),
@@ -1201,9 +1322,39 @@ impl Agent {
                         usage: usage.clone(),
                         session_id: self.session_id(),
                     });
-                    return Ok(RunOutcome::Completed(display_content));
+                    break RunOutcome::Completed(display_content);
                 }
             }
+        };
+
+        // I1: record this run's tool-use trajectory for the improver.
+        self.run_stats =
+            Self::run_stats_since(messages, run_start_len, verification_attempts);
+        Ok(outcome)
+    }
+
+    /// I1: count tool calls and errors in `messages[from..]` (this run's
+    /// portion only — earlier turns of a multi-turn conversation are excluded)
+    /// and combine with the verification attempts into `RunStats`.
+    ///
+    /// Tool errors are detected by the "Error: " prefix the loop writes into
+    /// failed tool results; a successful tool output that merely STARTS with
+    /// that text (rare) is over-counted — acceptable for advisory evidence.
+    fn run_stats_since(messages: &[Message], from: usize, verification_attempts: u32) -> RunStats {
+        let mut tool_calls = 0usize;
+        let mut tool_errors = 0usize;
+        for m in messages.iter().skip(from) {
+            if let Some(calls) = &m.tool_calls {
+                tool_calls += calls.len();
+            }
+            if m.role == "tool" && m.content.starts_with("Error: ") {
+                tool_errors += 1;
+            }
+        }
+        RunStats {
+            tool_calls,
+            tool_errors,
+            verification_attempts,
         }
     }
 
@@ -1238,7 +1389,7 @@ impl Agent {
         original_request: &str,
         final_response: &str,
         cancel_token: &CancellationToken,
-    ) -> Result<bool, String> {
+    ) -> Result<VerificationVerdict, String> {
         // Scope the evidence to the current turn: only tool outputs produced
         // after the most recent user message count as evidence for this
         // turn's response. In a multi-turn session the full history holds stale
@@ -1260,7 +1411,10 @@ impl Agent {
 
         // Skip verification if no tool calls were made this turn.
         if tool_outputs.is_empty() {
-            return Ok(true);
+            return Ok(VerificationVerdict {
+                verified: true,
+                judge_reason: String::new(),
+            });
         }
         let recent_tool_summary: String = tool_outputs.join("\n");
 
@@ -1335,15 +1489,40 @@ impl Agent {
             || response_upper.contains("INCORRECT")
             || response_upper.contains("INCOMPLETE")
         {
-            Ok(false)
-        } else if response_upper.trim() == "VERIFIED"
-            || response_upper.contains("VERIFIED")
-        {
-            Ok(true)
+            Ok(VerificationVerdict {
+                verified: false,
+                judge_reason: response,
+            })
         } else {
-            // Default to verified if unclear — better to continue than to
-            // abort a successful execution on an ambiguous LLM response.
-            Ok(true)
+            // VERIFIED, or unclear — default to verified (better to continue
+            // than to abort a successful execution on an ambiguous LLM
+            // response). The judge text is kept either way for S1 evidence.
+            Ok(VerificationVerdict {
+                verified: true,
+                judge_reason: response,
+            })
+        }
+    }
+
+    /// S1: store a non-first-try verification outcome as a lesson memory.
+    /// No-op when the agent has no memory manager; store failures are logged,
+    /// never fatal to the run.
+    fn store_verification_outcome(&self, verdict: &str, attempts: u32, judge_reason: &str, task: &str) {
+        let Some(memory) = &self.memory else {
+            return;
+        };
+        match record_verification_outcome(memory, &self.config.name, verdict, attempts, judge_reason, task) {
+            Ok(true) => tracing::debug!(
+                "[AGENT] Stored verification outcome for '{}' ({})",
+                self.config.name,
+                verdict
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "[AGENT] Failed to store verification outcome for '{}': {}",
+                self.config.name,
+                e
+            ),
         }
     }
 

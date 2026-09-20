@@ -558,6 +558,11 @@ impl ChatApp {
                             ));
                         }
 
+                        // S2: feedback (👍/👎) under assistant answers only.
+                        if !is_user && !is_editing && message.kind == MessageKind::Normal {
+                            self.draw_feedback_row(ui, index, theme);
+                        }
+
                         // Hover reveal: copy button in the top-right corner.
                         // Placed (not laid out) so it never shifts the message flow.
                         //
@@ -1120,6 +1125,117 @@ impl ChatApp {
     }
 
 
+    /// S2: 👍/👎 feedback row under an assistant answer.
+    ///
+    /// 👍 saves immediately; 👎 opens a one-line optional comment with
+    /// save (✓) / cancel (✕). A rated message shows the chosen button
+    /// highlighted with both buttons disabled (no double-save).
+    fn draw_feedback_row(&mut self, ui: &mut egui::Ui, index: usize, theme: &Theme) {
+        let Some(sid) = self.selected_session_id.clone() else {
+            return;
+        };
+        let (rated, comment_open, mut comment) = match self.session_store.get(&sid) {
+            Some(rt) => (
+                rt.chat_state.message_ratings.get(&index).cloned(),
+                rt.chat_state.feedback_comment_for == Some(index),
+                rt.chat_state.feedback_comment.clone(),
+            ),
+            None => return,
+        };
+
+        ui.add_space(2.0);
+        let mut save_good = false;
+        let mut open_bad = false;
+        let mut save_bad = false;
+        let mut cancel = false;
+
+        ui.horizontal(|ui| {
+            ui.set_height(16.0);
+            let is_good = rated.as_deref() == Some("good");
+            let is_bad = rated.as_deref() == Some("bad");
+
+            if ui
+                .add_enabled(
+                    rated.is_none(),
+                    egui::Button::new(egui::RichText::new("👍").size(if is_good { 13.0 } else { 11.0 }))
+                        .fill(if is_good { theme.primary } else { theme.hover_bg })
+                        .corner_radius(4),
+                )
+                .clicked()
+            {
+                save_good = true;
+            }
+            if ui
+                .add_enabled(
+                    rated.is_none(),
+                    egui::Button::new(egui::RichText::new("👎").size(if is_bad { 13.0 } else { 11.0 }))
+                        .fill(if is_bad { theme.primary } else { theme.hover_bg })
+                        .corner_radius(4),
+                )
+                .clicked()
+            {
+                open_bad = true;
+            }
+            if rated.is_some() {
+                ui.label(egui::RichText::new("rated").color(theme.text_dim).size(9.5));
+            }
+            if comment_open {
+                ui.add(
+                    egui::TextEdit::singleline(&mut comment)
+                        .desired_width(220.0)
+                        .hint_text("Optional comment…"),
+                );
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("✓").color(theme.text_dim).size(11.0))
+                            .fill(theme.success)
+                            .corner_radius(4),
+                    )
+                    .clicked()
+                {
+                    save_bad = true;
+                }
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("✕").color(theme.text_dim).size(11.0))
+                            .fill(theme.hover_bg)
+                            .corner_radius(4),
+                    )
+                    .clicked()
+                {
+                    cancel = true;
+                }
+            }
+        });
+
+        // Persist the typed comment back to the session state (the field edits
+        // a per-frame copy).
+        if cancel {
+            if let Some(rt) = self.session_store.get_mut(&sid) {
+                rt.chat_state.feedback_comment_for = None;
+                rt.chat_state.feedback_comment.clear();
+            }
+        }
+        if save_good {
+            self.save_message_feedback(index, true, "");
+        } else if save_bad {
+            self.save_message_feedback(index, false, &comment);
+        } else if open_bad {
+            if let Some(rt) = self.session_store.get_mut(&sid) {
+                rt.chat_state.feedback_comment_for = Some(index);
+                rt.chat_state.feedback_comment.clear();
+            }
+        } else if comment_open {
+            // Field still open after this frame (no save/cancel): persist the
+            // typed comment. On a failed save the field stays open for retry.
+            if let Some(rt) = self.session_store.get_mut(&sid) {
+                if rt.chat_state.feedback_comment_for == Some(index) {
+                    rt.chat_state.feedback_comment = comment;
+                }
+            }
+        }
+    }
+
     /// Render a plain (non-JSON) tool result as a monospace code block.
     fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, theme: &Theme) {
         Self::code_block(ui, theme, |ui| {
@@ -1147,6 +1263,18 @@ impl ChatApp {
             if let Some(runtime) = self.session_store.get_mut(&sid) {
                 if index < runtime.chat_state.messages.len() {
                     runtime.chat_state.messages.remove(index);
+                    // S2: keep the feedback state index-aligned after deletion
+                    // (keys below stay, the deleted one drops, higher ones shift).
+                    runtime.chat_state.message_ratings = std::mem::take(&mut runtime.chat_state.message_ratings)
+                        .into_iter()
+                        .map(|(k, v)| (if k > index { k - 1 } else { k }, v))
+                        .collect();
+                    runtime.chat_state.feedback_comment_for =
+                        match runtime.chat_state.feedback_comment_for {
+                            Some(f) if f == index => None,
+                            Some(f) if f > index => Some(f - 1),
+                            other => other,
+                        };
                     // Also remove from the underlying client conversation — but only
                     // while the display and the store are the same length. They are
                     // separate arrays that drift apart as soon as the display gains

@@ -82,12 +82,13 @@ impl MemoryManager {
         agent_config: &crate::agents::config::AgentConfig,
         task: &str,
         result: &str,
+        stats: &crate::agents::RunStats,
     ) -> Result<Vec<super::improver::ImprovementSuggestion>, String> {
         let llm = match &self.llm_client {
             Some(c) => c.clone(),
             None => return Ok(Vec::new()),
         };
-        suggest_improvements(self, agent_config, task, result, llm.as_ref()).await
+        suggest_improvements(self, agent_config, task, result, stats, llm.as_ref()).await
     }
 
     /// Search for relevant memories.
@@ -100,6 +101,25 @@ impl MemoryManager {
 
         let entries = self.entries.lock().unwrap();
         search_memories(&*entries, query, &config).into_iter().map(|e| (*e).clone()).collect()
+    }
+
+    /// Get all active (non-expired, non-superseded) memories carrying the
+    /// exact `tag`. Case-insensitive on the tag value; order is store order.
+    /// Releases the mutex before copying.
+    pub fn get_by_tag(&self, tag: &str) -> Vec<MemoryEntry> {
+        if !self.config().enabled {
+            return Vec::new();
+        }
+
+        let tag_lower = tag.to_lowercase();
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| !e.is_expired() && e.supersedes.is_none())
+            .filter(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag_lower)))
+            .cloned()
+            .collect()
     }
 
     /// Get recent memories (for fallback).

@@ -180,7 +180,7 @@ impl AgentEngine {
 
         // Post-task: throttled LLM memory maintenance + optional self-improvement
         // suggestions. Both are opt-in via MemoryConfig and never fail the task.
-        self.post_task_maintenance(&maintenance_config, request, &result).await;
+        self.post_task_maintenance(&maintenance_config, request, &result, agent.run_stats()).await;
 
         result
     }
@@ -194,6 +194,7 @@ impl AgentEngine {
         agent_config: &AgentConfig,
         task: &str,
         result: &std::result::Result<String, String>,
+        stats: crate::agents::RunStats,
     ) {
         let memory = match &self.memory {
             Some(m) => m.clone(),
@@ -224,6 +225,7 @@ impl AgentEngine {
                 agent_config,
                 task,
                 &task_result,
+                &stats,
                 &*self.llm_client,
             )
             .await

@@ -1,6 +1,7 @@
 pub mod window;
 pub mod settings;
 pub mod chat_area;
+pub mod chat_feedback;
 pub mod input;
 pub mod status;
 pub mod sessions_panel;
@@ -12,6 +13,7 @@ pub mod event_handler;
 pub mod layout;
 pub mod presets_dialog;
 pub mod agent_config;
+pub mod agent_history;
 pub mod improvements;
 pub mod mcp_panel;
 pub mod memory_panel;

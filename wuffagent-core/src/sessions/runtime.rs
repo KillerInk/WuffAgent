@@ -34,6 +34,14 @@ pub struct ChatAreaState {
     pub editing_message_index: Option<usize>,
     pub editing_message_content: String,
     pub expanded_messages: Vec<usize>,
+    /// S2: the message index whose 👎 feedback comment field is open (None = closed).
+    pub feedback_comment_for: Option<usize>,
+    /// S2: the comment being typed for the open feedback field.
+    pub feedback_comment: String,
+    /// S2: ratings already recorded in this session (display index -> "good"/"bad").
+    /// Index-aligned with `messages` (shifted on delete); used to highlight the
+    /// chosen button and prevent double-saving a rating.
+    pub message_ratings: std::collections::HashMap<usize, String>,
     pub context_used: f32,
     pub token_count: usize,
     pub pending_image: Option<egui::ImageSource<'static>>,
@@ -59,6 +67,9 @@ impl Default for ChatAreaState {
             editing_message_index: None,
             editing_message_content: String::new(),
             expanded_messages: Vec::new(),
+            feedback_comment_for: None,
+            feedback_comment: String::new(),
+            message_ratings: std::collections::HashMap::new(),
             context_used: 0.0,
             token_count: 0,
             pending_image: None,

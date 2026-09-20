@@ -2,11 +2,23 @@ use serde::{Deserialize, Serialize};
 use tracing;
 
 use super::manager::MemoryManager;
-use crate::agents::config::AgentConfig;
+use crate::agents::config::{AgentConfig, ShellConfig};
+use crate::agents::RunStats;
 use crate::llm::LlmClient;
-use crate::types::Message;
+use crate::types::{Message, ReasoningEffort};
+
+/// I1: per-lesson character budget inside the improver prompt (keeps a
+/// chatty lesson store from blowing out the analysis call).
+const LESSON_CHAR_BUDGET: usize = 12_000;
+/// I1: hard cap on the total improver prompt (safety net on top of the
+/// lesson budget for large system prompts).
+const TOTAL_PROMPT_CHAR_BUDGET: usize = 24_000;
 
 /// A suggested improvement to an agent's configuration.
+///
+/// I2: beyond the prompt, the improver may now propose changes to any other
+/// profile field. All new fields are optional and serde-defaulted, so old
+/// suggestion JSON (and LLM responses that omit them) still parse.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImprovementSuggestion {
     pub agent_name: String,
@@ -14,8 +26,29 @@ pub struct ImprovementSuggestion {
     pub prompt_change: Option<String>,
     /// Explanation for why this improvement is suggested.
     pub rationale: String,
-    /// Proposals for new specialized agents.
+    /// Proposals for new specialized agents (LLMs commonly omit it when empty).
+    #[serde(default)]
     pub new_agents: Vec<NewAgentProposal>,
+    /// I2: replace the agent's tool allowlist (None = no change).
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// I2: change the agent's reasoning effort (None = no change).
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// I2: change the agent's shell configuration (None = no change).
+    #[serde(default)]
+    pub shell_config: Option<ShellConfig>,
+    /// I2: change the agent's handoff target allowlist (None = no change).
+    #[serde(default)]
+    pub handoff_targets: Option<Vec<String>>,
+    /// I2: change the per-task timeout in ms (None = no change).
+    #[serde(default)]
+    pub task_timeout_ms: Option<u64>,
+    /// I3: the evidence the improver saw (trajectory line + lesson excerpts).
+    /// Filled deterministically by `suggest_improvements`, not the LLM, so
+    /// the review panel can show WHY the suggestion was made.
+    #[serde(default)]
+    pub evidence: Vec<String>,
 }
 
 /// A proposal to create a new agent.
@@ -30,18 +63,27 @@ pub struct NewAgentProposal {
 
 /// Gather relevant lesson memories for an improvement check.
 ///
-/// Lessons live in the global memory store and are NOT tagged with the agent
-/// name (memory tools save with source "agent"), so searching by agent name
-/// alone almost never matches. Instead, relevance to the current task is the
-/// primary signal: search by agent name + task text, and fall back to the
-/// most recent lessons when the keyword search finds nothing.
+/// Tag first (S3): lessons saved with the `agent:<name>` tag (the convention
+/// the memory tool description and system-prompt hints ask for) are the
+/// strongest per-agent signal. Fall back to the previous behavior — search by
+/// agent name + task text, then the most recent lessons — when the tag search
+/// finds nothing (backward compatible: old entries simply don't match the
+/// tag).
 fn collect_lessons(manager: &MemoryManager, agent_name: &str, task: &str) -> Vec<String> {
-    let from_search = manager.search(&format!("{} {}", agent_name, task));
-    let mut lessons: Vec<String> = from_search
+    let from_tag = manager.get_by_tag(&format!("agent:{agent_name}"));
+    let mut lessons: Vec<String> = from_tag
         .iter()
         .filter(|m| matches!(m.r#type, crate::memory::MemoryType::Lesson))
         .map(|m| m.content.clone())
         .collect();
+    if lessons.is_empty() {
+        let from_search = manager.search(&format!("{} {}", agent_name, task));
+        lessons = from_search
+            .iter()
+            .filter(|m| matches!(m.r#type, crate::memory::MemoryType::Lesson))
+            .map(|m| m.content.clone())
+            .collect();
+    }
     if lessons.is_empty() {
         lessons = manager
             .get_recent(10)
@@ -53,14 +95,61 @@ fn collect_lessons(manager: &MemoryManager, agent_name: &str, task: &str) -> Vec
     lessons
 }
 
+/// I1: previously rejected improvement suggestions for this agent (F5
+/// dismissal lessons, tagged `improvement-rejected` + `agent:<name>`).
+fn rejected_history(manager: &MemoryManager, agent_name: &str) -> Vec<String> {
+    manager
+        .get_by_tag("improvement-rejected")
+        .into_iter()
+        .filter(|m| m.tags.iter().any(|t| t == &format!("agent:{agent_name}")))
+        .map(|m| m.content)
+        .collect()
+}
+
+/// I1: one-line trajectory summary fed to the improver (and kept as evidence).
+fn trajectory_line(stats: &RunStats, prompt_len: usize) -> String {
+    format!(
+        "Trajectory: {} tool calls ({} errors), {} verification attempt(s), \
+         current system prompt {} chars.",
+        stats.tool_calls, stats.tool_errors, stats.verification_attempts, prompt_len
+    )
+}
+
+/// I1: cap the lessons section to `LESSON_CHAR_BUDGET` so a busy lesson store
+/// can't blow out the analysis prompt. Truncates per-lesson first, then
+/// drops whole lessons once the budget is spent.
+fn cap_lessons(lessons: &[String]) -> String {
+    let mut out = String::new();
+    for lesson in lessons {
+        let clipped: String = if lesson.chars().count() > 400 {
+            let mut t: String = lesson.chars().take(400).collect();
+            t.push('…');
+            t
+        } else {
+            lesson.clone()
+        };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        if out.len() + clipped.len() > LESSON_CHAR_BUDGET {
+            break;
+        }
+        out.push_str(&clipped);
+    }
+    out
+}
+
 /// Suggest improvements for an agent based on its memory and recent task result.
 ///
 /// Returns a list of suggestions. Empty list means no improvements needed.
+/// I1: also takes the run's `RunStats` (trajectory) so the improver weighs
+/// HOW the agent worked, not just the final text.
 pub async fn suggest_improvements(
     manager: &MemoryManager,
     agent_config: &AgentConfig,
     task: &str,
     result: &str,
+    stats: &RunStats,
     llm_client: &dyn LlmClient,
 ) -> Result<Vec<ImprovementSuggestion>, String> {
     if !manager.config().auto_improve {
@@ -80,8 +169,17 @@ pub async fn suggest_improvements(
 
     tracing::info!("[MEMORY] Improvement check for agent '{}': found {} relevant lesson(s), triggering LLM analysis", agent_config.name, lessons.len());
 
-    let memories_text = lessons.join("\n");
+    let memories_text = cap_lessons(&lessons);
     let prompt = agent_config.system_prompt.clone();
+    // I1: previously rejected suggestions (F5) as explicit negative evidence.
+    let rejected = rejected_history(manager, &agent_config.name);
+    let rejected_text = if rejected.is_empty() {
+        "(none)".to_string()
+    } else {
+        rejected.join("\n")
+    };
+    // I1: trajectory line (also reused verbatim as evidence).
+    let traj = trajectory_line(stats, prompt.chars().count());
 
     let extraction_prompt = format!(
         "You are reviewing an AI agent's performance to suggest improvements.\n\n\
@@ -92,13 +190,28 @@ pub async fn suggest_improvements(
          Recent task: {}\n\
          Result: {}\n\
          \n\
+         {}\n\
+         \n\
+         Previously rejected suggestions (do NOT re-suggest these):\n{}\n\
+         \n\
          Relevant lesson memories:\n{}\n\
          \n\
-         Analyze whether the agent's system prompt should be improved.\n\
+         Analyze whether the agent's configuration should be improved.\n\
          Consider:\n\
          - What went well? What went wrong?\n\
          - Are there patterns in the lessons that suggest the prompt needs adjustment?\n\
+         - Do the tool-call/error/verification numbers suggest a capability or\
+         configuration problem (too many retries, repeated tool errors)?\n\
          - Is there a capability gap that would require a new specialized agent?\n\
+         \n\
+         You may change the system prompt AND/OR any of these profile fields \
+         (omit a field entirely when it needs no change):\n\
+         - prompt_change (string or null)\n\
+         - allowed_tools (array of tool names, or null)\n\
+         - reasoning_effort (\"off\" | \"low\" | \"medium\" | \"high\", or null)\n\
+         - shell_config ({{\"shell_enabled\": bool, \"allowed_commands\": [..], \"shell_timeout_ms\": number}}, or null)\n\
+         - handoff_targets (array of agent names, or null)\n\
+         - task_timeout_ms (number, or null)\n\
          \n\
          Return a JSON array of suggestions (empty [] if nothing to improve):\n\
          [\n\
@@ -106,6 +219,11 @@ pub async fn suggest_improvements(
              \"agent_name\": \"{}\",\n\
              \"prompt_change\": \"new prompt text or null if no change needed\",\n\
              \"rationale\": \"why this change is needed\",\n\
+             \"allowed_tools\": null,\n\
+             \"reasoning_effort\": null,\n\
+             \"shell_config\": null,\n\
+             \"handoff_targets\": null,\n\
+             \"task_timeout_ms\": null,\n\
              \"new_agents\": [\n\
                {{\"name\": \"agent_name\", \"description\": \"...\", \"system_prompt\": \"...\", \"allowed_tools\": [\"tool1\", \"tool2\"]}}\n\
              ]\n\
@@ -122,9 +240,21 @@ pub async fn suggest_improvements(
         },
         task,
         result,
+        traj,
+        rejected_text,
         memories_text,
         agent_config.name,
     );
+
+    // I1: safety net — even with the lesson budget, a huge system prompt
+    // could push the total past the cap; truncate the tail.
+    let extraction_prompt: String = if extraction_prompt.len() > TOTAL_PROMPT_CHAR_BUDGET {
+        let mut t: String = extraction_prompt.chars().take(TOTAL_PROMPT_CHAR_BUDGET).collect();
+        t.push_str(" [truncated]");
+        t
+    } else {
+        extraction_prompt
+    };
 
     let messages = vec![Message {
         role: "user".to_string(),
@@ -140,7 +270,7 @@ pub async fn suggest_improvements(
 
     // Parse JSON response
     let trimmed = response.trim();
-    let suggestions = if trimmed.starts_with('[') {
+    let mut suggestions = if trimmed.starts_with('[') {
         serde_json::from_str::<Vec<ImprovementSuggestion>>(trimmed)
             .map_err(|e| format!("Failed to parse improvement suggestions: {}", e))?
     } else {
@@ -151,6 +281,23 @@ pub async fn suggest_improvements(
         serde_json::from_str::<Vec<ImprovementSuggestion>>(json)
             .map_err(|e| format!("Failed to parse improvement suggestions: {}", e))?
     };
+
+    // I3: attach the evidence the improver actually saw (deterministic —
+    // not the LLM's echo of it) so the review panel can show why.
+    let evidence = vec![
+        traj,
+        format!(
+            "{} lesson(s) informed this suggestion; first: {}",
+            lessons.len(),
+            lessons
+                .first()
+                .map(|l| truncate_for_evidence(l))
+                .unwrap_or_default()
+        ),
+    ];
+    for s in &mut suggestions {
+        s.evidence = evidence.clone();
+    }
 
     if suggestions.is_empty() {
         tracing::debug!("No improvements suggested for agent '{}'", agent_config.name);
@@ -163,6 +310,17 @@ pub async fn suggest_improvements(
     }
 
     Ok(suggestions)
+}
+
+/// I3: keep evidence strings short (they are displayed in the review panel).
+fn truncate_for_evidence(s: &str) -> String {
+    if s.chars().count() > 300 {
+        let mut t: String = s.chars().take(300).collect();
+        t.push('…');
+        t
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]

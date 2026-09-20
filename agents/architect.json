@@ -9,6 +9,7 @@
         "search_content",
         "file_info",
         "web_search",
+        "fetch_url",
         "calculation",
         "time",
         "save_memory",

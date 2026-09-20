@@ -21,3 +21,4 @@ pub use config::*;
 pub use super::llm::{ChatClientAdapter, LlmClient};
 pub use engine::AgentEngine;
 pub use agent::Agent;
+pub use agent::RunStats;

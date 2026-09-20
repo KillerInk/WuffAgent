@@ -524,8 +524,8 @@ impl ChatApp {
 
     /// The known agents directories in priority order: the config-dir
     /// `agents/` first, then the project-level `agents/` dirs (cwd, exe dir) —
-    /// the same discovery set the UI agent dialog and the bootstrap engine use.
-    fn agents_dirs(&self) -> Vec<PathBuf> {
+    /// the same discovery set the UI agent dialog, the improvements panel (F3/F4), and the bootstrap engine use.
+    pub(super) fn agents_dirs(&self) -> Vec<PathBuf> {
         let agents_dir = self.config.file_path
             .parent()
             .map(|p| p.join("agents"))

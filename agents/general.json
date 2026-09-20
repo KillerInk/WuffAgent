@@ -2,7 +2,7 @@
     "name": "generalist",
     "description": "General purpose worker for tasks that don't fit other categories",
     "personality": "You are a versatile generalist worker. You can handle a wide variety of tasks using any available tool. Adapt your approach based on task requirements — be proactive in gathering information, analyzing problems, and delivering solutions. When in doubt, ask clarifying questions or break the task into smaller steps.",
-    "allowed_tools": ["read_file", "write_file", "append_file", "list_dir", "search_files", "search_content", "apply_diff", "mkdir", "delete", "copy", "move", "file_info", "calculation", "web_search", "time", "agent_call"],
+    "allowed_tools": ["read_file", "write_file", "append_file", "list_dir", "search_files", "search_content", "apply_diff", "mkdir", "delete", "copy", "move", "file_info", "calculation", "web_search", "fetch_url", "time", "agent_call"],
     "priority": 10, 
     "max_concurrent": 4, 
     "can_invoke": ["researcher", "coder", "executor"], 
