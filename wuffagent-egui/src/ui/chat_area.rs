@@ -560,24 +560,41 @@ impl ChatApp {
 
                         // Hover reveal: copy button in the top-right corner.
                         // Placed (not laid out) so it never shifts the message flow.
-                        if inner.response.hovered() && !is_editing {
+                        //
+                        // Gate visibility on the raw pointer position, NOT on
+                        // `inner.response.hovered()`: the button is placed on top
+                        // of the bubble, and while the pointer is over it, the
+                        // bubble frame (a hover-only widget) stops reporting
+                        // `hovered` because the click-sensitive button covers it.
+                        // Gating on the frame's hover made the button vanish the
+                        // instant the pointer touched it — a per-frame show/hide
+                        // flicker — and egui drops the pending click when the
+                        // widget disappears, so the click never registered and
+                        // nothing was copied. The button rect lies inside the
+                        // frame rect, so "pointer over the bubble" covers both.
+                        if !is_editing
+                            && ui
+                                .ctx()
+                                .pointer_hover_pos()
+                                .is_some_and(|pos| inner.response.rect.contains(pos))
+                        {
                             let btn_size = egui::vec2(16.0, 16.0);
-                        let btn_rect = egui::Rect::from_min_size(
-                            inner.response.rect.right_top() - egui::vec2(btn_size.x + 3.0, 3.0),
-                            btn_size,
-                        );
-                        let copy_resp = ui.put(
-                            btn_rect,
-                            egui::Button::new(
-                                egui::RichText::new("⧉").color(theme.text_dim).size(11.0),
-                            )
-                            .fill(theme.hover_bg)
-                            .corner_radius(4),
-                        );
-                        if copy_resp.clicked() {
-                            ui.ctx().copy_text(message.content.clone());
+                            let btn_rect = egui::Rect::from_min_size(
+                                inner.response.rect.right_top() - egui::vec2(btn_size.x + 3.0, 3.0),
+                                btn_size,
+                            );
+                            let copy_resp = ui.put(
+                                btn_rect,
+                                egui::Button::new(
+                                    egui::RichText::new("⧉").color(theme.text_dim).size(11.0),
+                                )
+                                .fill(theme.hover_bg)
+                                .corner_radius(4),
+                            );
+                            if copy_resp.clicked() {
+                                ui.ctx().copy_text(message.content.clone());
+                            }
                         }
-                    }
                 });
             });
         });
