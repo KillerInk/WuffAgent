@@ -23,6 +23,7 @@ impl ChatApp {
             | AppEvent::NCtxUpdated { session_id, .. }
             | AppEvent::ImprovementSuggested { session_id, .. }
             | AppEvent::AgentHandoff { session_id, .. }
+            | AppEvent::RestartRequested { session_id, .. }
             => session_id.clone(),
         };
         match event {
@@ -179,6 +180,23 @@ impl ChatApp {
             AppEvent::ImprovementSuggested { agent_name, suggestions, session_id: _ } => {
                 tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");
                 self.improvements_panel.handle_improvement_suggested(&agent_name, suggestions);
+            }
+            AppEvent::RestartRequested { reason, exe_path, .. } => {
+                tracing::info!(reason, "Restart requested");
+                // Persist the transcript so nothing is lost across the relaunch,
+                // show a banner, then relaunch the (optionally newly built)
+                // binary — the marker + auto-resume pick the work back up.
+                if let Err(e) = self.save_session_for(&sid) {
+                    tracing::warn!("Failed to save session before restart: {}", e);
+                }
+                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                    runtime.chat_state.push_message(
+                        MessageKind::Normal,
+                        "system",
+                        &format!("🔁 Restart: {}", reason),
+                    );
+                }
+                self.perform_restart(reason, exe_path);
             }
         }
     }

@@ -353,6 +353,9 @@ impl AgentConfigDialog {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            // The agent editor has no restart toggle yet; keep the default
+            // (enabled) so created/edited profiles can restart WuffAgent.
+            restart_enabled: true,
         };
 
         // Ensure the directory exists before saving

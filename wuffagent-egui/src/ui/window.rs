@@ -160,6 +160,32 @@ impl ChatApp {
         }
     }
 
+    /// Auto-resume after a restart: when `main` found a restart marker, send the
+    /// continue turn (carrying the agent's restart reason) on the first frame
+    /// where the resumed session's runtime exists and is idle.
+    fn maybe_auto_resume(&mut self) {
+        if !self.pending_auto_resume {
+            return;
+        }
+        let Some(sid) = self.selected_session_id.clone() else {
+            return; // the resumed session isn't selected yet
+        };
+        let Some(runtime) = self.session_store.get(&sid) else {
+            return; // its runtime isn't created yet
+        };
+        if runtime.chat_state.is_generating {
+            return; // still working; try next frame
+        }
+        let note = match self.auto_resume_reason.as_deref() {
+            Some(r) if !r.trim().is_empty() => {
+                format!("WuffAgent was just restarted to load your changes (reason: {r}). Continue the work from where it left off.")
+            }
+            _ => "Continue from where you left off.".to_string(),
+        };
+        self.pending_auto_resume = false;
+        self.continue_generation_note(&note);
+    }
+
     pub fn update_save_failure_notification(&mut self) {
         // Update save failure notification state for the active session
         if let Some(id) = &self.selected_session_id {
@@ -310,6 +336,16 @@ impl eframe::App for ChatApp {
 
         // Process any pending async results first
         self.process_pending_events();
+        // A `restart` tool run requested a relaunch (marker written + new process
+        // spawned): close this window; the spawned process takes over and
+        // auto-resumes the session.
+        if self.pending_restart {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        // Auto-resume after a restart: send the continue turn on the first frame
+        // where the resumed session's runtime exists and is idle.
+        self.maybe_auto_resume();
         // Defensive sweep: if a session is still flagged as generating but its
         // pipeline task is already done, a terminal event was lost (e.g. the
         // task was aborted by a new `start()` before it could emit

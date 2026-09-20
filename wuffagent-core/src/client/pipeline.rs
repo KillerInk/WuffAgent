@@ -29,6 +29,9 @@ pub struct ChatToolPolicy {
     pub handoff_enabled: bool,
     /// Agent names the profile may hand off to (empty = any enabled agent).
     pub handoff_targets: Vec<String>,
+    /// Whether the chat agent may restart WuffAgent via the `restart` tool
+    /// (the profile's `restart_enabled` flag).
+    pub restart_enabled: bool,
     /// The profile's reasoning effort (Off = inherit the global toggle).
     pub reasoning_effort: ReasoningEffort,
     /// The profile's context-trimming configuration.
@@ -52,6 +55,8 @@ impl ChatToolPolicy {
             // even though every other tool is unrestricted.
             handoff_enabled: true,
             handoff_targets: Vec::new(),
+            // Permissive = may restart (and rebuild) too.
+            restart_enabled: true,
             reasoning_effort: ReasoningEffort::default(),
             trim_config: crate::trimming::config::TrimConfig::default(),
         }

@@ -317,7 +317,28 @@ fn bootstrap() -> (
 
 #[tokio::main]
 async fn main() -> eframe::Result {
-    let (config, server, tool_manager, agent_engine, connection, memory_manager, mcp_manager) = bootstrap();
+    let (mut config, server, tool_manager, agent_engine, connection, memory_manager, mcp_manager) = bootstrap();
+
+    // Auto-resume after a restart: if a restart marker exists (written by the UI
+    // just before relaunching), resume that session automatically. Point the
+    // active session at the marker's session (before the store is built below),
+    // capture the reason for the continue turn, and delete the marker so it only
+    // fires once.
+    let auto_resume_reason: Option<String> = {
+        let marker_path = wuffagent_core::config::get_restart_marker_path();
+        let marker = std::fs::read_to_string(&marker_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<wuffagent_core::config::RestartMarker>(&s).ok());
+        match marker {
+            Some(m) => {
+                config.session_id = Some(m.session_id.clone());
+                let _ = std::fs::remove_file(&marker_path);
+                tracing::info!("Restart marker found; auto-resuming session {}", m.session_id);
+                Some(m.reason)
+            }
+            None => None,
+        }
+    };
 
     // Dedicated runtime for UI-triggered async work (memory maintenance).
     // NOTE: the UI thread (main thread) IS inside the `#[tokio::main]` runtime
@@ -390,6 +411,7 @@ async fn main() -> eframe::Result {
                 config, server, tool_manager, agent_engine, connection,
                 session_store, selected_session_id, event_tx, event_rx,
                 memory_manager, memory_runtime, mcp_manager,
+                auto_resume_reason,
             )))
         }),
     )

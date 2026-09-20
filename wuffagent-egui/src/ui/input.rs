@@ -428,6 +428,13 @@ impl ChatApp {
     /// on the preserved conversation store with a "continue" turn. No checkpoint
     /// machinery â€” the pipeline simply resumes on the existing messages.
     pub(super) fn continue_generation(&mut self) {
+        self.continue_generation_note("Continue from where you left off.");
+    }
+
+    /// Like [`Self::continue_generation`] but with an explicit resume note — used
+    /// by the post-restart auto-resume, which carries the reason the agent gave
+    /// for restarting so the (newly reloaded) agent picks the work back up.
+    pub(super) fn continue_generation_note(&mut self, note: &str) {
         let sid = match self.selected_session_id.clone() {
             Some(sid) => sid,
             None => return,
@@ -443,10 +450,9 @@ impl ChatApp {
             .and_then(|sid| self.session_store.get(sid))
             .and_then(|r| r.selected_agent.clone())
             .unwrap_or_default();
-        let text = "Continue from where you left off.".to_string();
         let agent_prompt = self.resolve_agent_prompt(&agent);
         let tool_policy = self.resolve_tool_policy(&agent);
-        self.start_pipeline_for_session(&sid, &text, None, agent_prompt, tool_policy, false);
+        self.start_pipeline_for_session(&sid, note, None, agent_prompt, tool_policy, false);
     }
 
     /// Snapshot the selected session's input text (empty string if no session).
@@ -508,6 +514,7 @@ impl ChatApp {
                 agent_name: cfg.name,
                 handoff_enabled: cfg.handoff_enabled,
                 handoff_targets: cfg.handoff_targets,
+                restart_enabled: cfg.restart_enabled,
                 reasoning_effort: cfg.reasoning_effort,
                 trim_config: cfg.trim_config,
             },

@@ -149,6 +149,16 @@ pub struct ChatApp {
     pub snapshot_len: usize,
     /// Set on in-place message edits (which keep the count unchanged) to force a rebuild.
     pub display_dirty: bool,
+
+    // ── Restart / auto-resume ─────────────────────────────────────────
+    /// Set when a `restart` tool run requested a relaunch (marker written + new
+    /// process spawned); the window closes on the next frame.
+    pub pending_restart: bool,
+    /// Set once by `main` when a restart marker was found at startup; the first
+    /// frame where the resumed session's runtime exists auto-sends the resume turn.
+    pub pending_auto_resume: bool,
+    /// Reason captured from the restart marker, used to build the resume turn.
+    pub auto_resume_reason: Option<String>,
 }
 
 impl ChatApp {
@@ -165,6 +175,7 @@ impl ChatApp {
         memory_manager: Arc<crate::memory::MemoryManager>,
         memory_runtime: Arc<tokio::runtime::Runtime>,
         mcp_manager: Arc<crate::tools::mcp::McpManager>,
+        auto_resume_reason: Option<String>,
     ) -> Self {
         let reasoning_effort = config.reasoning_effort;
         // Build the sessions sidebar widget, pre-selecting the active session.
@@ -205,6 +216,9 @@ impl ChatApp {
             remote_n_ctx: 0,
             remote_n_ctx_handle: None,
             remote_n_ctx_arc: None,
+            pending_restart: false,
+            pending_auto_resume: auto_resume_reason.is_some(),
+            auto_resume_reason,
         }
     }
 
@@ -361,6 +375,40 @@ impl ChatApp {
             .as_ref()
             .and_then(|id| self.session_store.get(id))
             .map(|r| &r.client)
+    }
+
+    /// Relaunch WuffAgent: persist the restart marker (so the new process resumes
+    /// the current session) and spawn the (optionally newly built) executable with
+    /// the current CLI args. Sets `pending_restart` so the window closes next frame.
+    pub fn perform_restart(&mut self, reason: String, exe_path: Option<String>) {
+        let session_id = self.selected_session_id.clone().unwrap_or_default();
+        let marker_path = wuffagent_core::config::get_restart_marker_path();
+        let marker = wuffagent_core::config::RestartMarker { session_id, reason };
+        match serde_json::to_string_pretty(&marker) {
+            Ok(json) => {
+                if let Some(parent) = marker_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::write(&marker_path, json) {
+                    eprintln!("Failed to write restart marker: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Failed to serialize restart marker: {}", e),
+        }
+        // Spawn the new process with the current CLI args (minus the program name).
+        // On Windows the running exe is locked, so a self-build should point
+        // `exe_path` at the freshly built copy (see the restart tool's guidance).
+        let exe = match exe_path {
+            Some(p) if !p.is_empty() => p,
+            _ => std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        match std::process::Command::new(&exe).args(&args).spawn() {
+            Ok(_) => self.pending_restart = true,
+            Err(e) => eprintln!("Failed to relaunch WuffAgent ({:?}): {}", exe, e),
+        }
     }
 }
 

@@ -156,6 +156,7 @@ impl AgentEngine {
         // agents dir is where target profiles are resolved from.
         chat_config.handoff_enabled = tool_policy.handoff_enabled;
         chat_config.handoff_targets = tool_policy.handoff_targets.clone();
+        chat_config.restart_enabled = tool_policy.restart_enabled;
         chat_config.agents_dir = self
             .agents_dir
             .clone()

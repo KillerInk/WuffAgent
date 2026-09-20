@@ -68,6 +68,10 @@ enum RunOutcome {
     /// The `handoff` tool was called; `execute` switches to the target agent
     /// on the same conversation store.
     Handoff(crate::agents::types::HandoffRequest),
+    /// The `restart` tool was called; `execute` emits `RestartRequested` so
+    /// the UI can relaunch the (optionally newly built) binary and resume
+    /// this session automatically.
+    Restart(crate::agents::types::RestartRequest),
 }
 
 /// A configurable agent that runs an LLM loop with tool calls.
@@ -95,6 +99,10 @@ pub struct Agent {
     /// The `handoff` tool writes a request here; `run_llm_loop` picks it up
     /// before the next LLM round.
     handoff_mailbox: Option<Arc<Mutex<Option<crate::agents::types::HandoffRequest>>>>,
+    /// Per-execution restart mailbox, present only when `restart_enabled`.
+    /// The `restart` tool writes a request here; `run_llm_loop` picks it up
+    /// before the next LLM round.
+    restart_mailbox: Option<Arc<Mutex<Option<crate::agents::types::RestartRequest>>>>,
 }
 
 impl Agent {
@@ -123,7 +131,7 @@ impl Agent {
         // allow-all shell. All other tools are shared. This is what makes an
         // agent's `shell` respect its per-agent restrictions on both the chat and
         // /plan paths.
-        let (tool_manager, handoff_mailbox) = {
+        let (tool_manager, handoff_mailbox, restart_mailbox) = {
             let shared = tool_manager.lock().unwrap();
             // The shell tool is advertised only when the agent's
             // `shell_enabled` is true. A disabled shell is removed from the
@@ -152,7 +160,18 @@ impl Agent {
                 // handoff chain (the shared base manager may carry one).
                 (tm.without_handoff(), None)
             };
-            (Arc::new(Mutex::new(tm)), handoff_mailbox)
+            // The restart tool is advertised only when `restart_enabled` —
+            // same flag-gated, per-execution injection as handoff/shell.
+            let (tm, restart_mailbox) = if config.restart_enabled {
+                let mailbox = Arc::new(Mutex::new(None));
+                let tool = crate::tools::builtin::restart::RestartTool::new(mailbox.clone());
+                (tm.with_restart_tool(tool), Some(mailbox))
+            } else {
+                // Drop any restart tool inherited from a previous agent in a
+                // handoff chain (the shared base manager may carry one).
+                (tm.without_restart(), None)
+            };
+            (Arc::new(Mutex::new(tm)), handoff_mailbox, restart_mailbox)
         };
         Self {
             config,
@@ -166,6 +185,7 @@ impl Agent {
             agent_session_id,
             trimming: ContextTrimming::new(),
             handoff_mailbox,
+            restart_mailbox,
         }
     }
 
@@ -249,6 +269,13 @@ impl Agent {
             .and_then(|m| m.lock().unwrap().take())
     }
 
+    /// Take a pending restart request written by the `restart` tool (if any).
+    fn take_pending_restart(&self) -> Option<crate::agents::types::RestartRequest> {
+        self.restart_mailbox
+            .as_ref()
+            .and_then(|m| m.lock().unwrap().take())
+    }
+
     /// Get the messages from the last execution for memory extraction.
     pub fn messages(&self) -> &[Message] {
         &self.messages
@@ -308,6 +335,9 @@ impl Agent {
         loop {
             let mut req = match outcome {
                 RunOutcome::Completed(_) => break,
+                // A restart request ends the run (handled in the final match
+                // below); `_` keeps `outcome` un-moved like the Completed arm.
+                RunOutcome::Restart(_) => break,
                 RunOutcome::Handoff(req) => req,
             };
             hops += 1;
@@ -406,6 +436,31 @@ impl Agent {
             RunOutcome::Handoff(_) => {
                 unreachable!("handoff outcomes are consumed by the chain loop")
             }
+            // A restart request ends the turn: record a marker so the session
+            // shows the transition, then notify the UI to relaunch the
+            // (optionally newly built) binary. The marker file + auto-resume
+            // pick the work back up after the process restarts, so report
+            // success — the return value is not meaningful here.
+            RunOutcome::Restart(req) => {
+                let reason = req.reason.clone();
+                let marker = Message {
+                    role: "user".to_string(),
+                    content: format!("[Restart requested] {}", reason),
+                    timestamp: crate::types::format_timestamp(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    image: None,
+                };
+                self.record_in_store(&marker);
+                self.send_event(crate::types::AppEvent::RestartRequested {
+                    reason,
+                    build_cmd: req.build_cmd,
+                    exe_path: req.exe_path,
+                    session_id: self.session_id(),
+                });
+                Ok("Restart requested".to_string())
+            }
         }
     }
 
@@ -450,6 +505,23 @@ impl Agent {
                     self.config.handoff_targets.join(", ")
                 ));
             }
+        }
+        // Restart guidance: only when the agent actually has the tool. Emphasize
+        // the Windows `--target-dir` self-build pattern (dogfooding WuffAgent's
+        // own source: edit → build → restart to load the new code → resume).
+        if self.config.restart_enabled {
+            prompt.push_str(
+                "\n\n## RESTART\\\n\
+                 You can restart WuffAgent — then resume this session automatically — by calling the `restart` tool with:\\n\\\n\
+                 - `reason` (required): what you changed and why you are restarting; shown to the user and used to resume the work\\n\\\n\
+                 - `build_cmd` (optional): a command to run FIRST (e.g. a rebuild); if it fails the restart is skipped so you can fix it\\n\\\n\
+                 - `exe_path` (optional): the binary to launch; omit to relaunch the current executable\\n\\\n\
+                 Use it after making changes that require a rebuild. Most useful when editing WuffAgent's own source: build it, \\\n\
+                 then restart to load the new code and pick the work back up. On Windows you cannot relink the running exe, \\\n\
+                 so for WuffAgent itself use build_cmd=\"cargo build --target-dir target/relaunch\" and \\\n\
+                 exe_path=\"target/relaunch/debug/wuffagent-egui.exe\". Your turn ends when you call it; WuffAgent closes and \\\n\
+                 reopens, then continues the same work.",
+            );
         }
 
         // Inject memories relevant to the current request (query-aware)
@@ -555,6 +627,9 @@ impl Agent {
                 if self.config.handoff_enabled && !allowlist.iter().any(|t| t == "handoff") {
                     allowlist.push("handoff".to_string());
                 }
+                if self.config.restart_enabled && !allowlist.iter().any(|t| t == "restart") {
+                    allowlist.push("restart".to_string());
+                }
                 manager.with_allowlist(&allowlist)
             }
         };
@@ -586,6 +661,19 @@ impl Agent {
                     req.agent
                 );
                 return Ok(RunOutcome::Handoff(req));
+            }
+
+            // A pending restart (written by the `restart` tool this turn, its
+            // build already finished) ends this agent's run: `execute` emits
+            // RestartRequested so the UI can relaunch the (optionally newly
+            // built) binary and resume the session automatically.
+            if let Some(req) = self.take_pending_restart() {
+                tracing::info!(
+                    "[AGENT] Agent '{}' restart requested via the restart tool; ending this agent's turn (reason='{}')",
+                    self.config.name,
+                    req.reason
+                );
+                return Ok(RunOutcome::Restart(req));
             }
 
             // Rate-limit LLM calls to avoid hitting API rate limits.

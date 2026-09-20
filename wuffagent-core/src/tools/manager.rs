@@ -151,6 +151,39 @@ impl ToolManager {
         }
     }
 
+    /// Create a new ToolManager whose `restart` entry is replaced by the
+    /// provided per-execution tool (same rebuild pattern as
+    /// [`Self::with_handoff_tool`]). Used by `Agent::new` to give
+    /// `restart_enabled` agents a restart tool wired to their own mailbox.
+    pub fn with_restart_tool(&self, tool: crate::tools::builtin::restart::RestartTool) -> Self {
+        let mut entries = self.registry.list();
+        let meta = entries
+            .iter()
+            .find(|e| e.metadata.name == "restart")
+            .map(|e| e.metadata.clone())
+            .unwrap_or_else(|| crate::tools::types::ToolMetadata {
+                name: "restart".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Restart WuffAgent (optionally after a build) and resume the session".to_string(),
+                dependencies: vec![],
+            });
+        entries.retain(|e| e.metadata.name != "restart");
+        entries.push(crate::tools::registry::ToolEntry {
+            tool: std::sync::Arc::new(tool),
+            metadata: meta,
+            loaded_at: std::time::Instant::now(),
+        });
+        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+        }
+    }
+
     /// Create a new ToolManager where the `handoff` tool is removed from the
     /// schema entirely. Used for agents whose `handoff_enabled` is false —
     /// including target agents in a handoff chain built on top of a manager
@@ -158,6 +191,22 @@ impl ToolManager {
     pub fn without_handoff(&self) -> Self {
         let mut entries = self.registry.list();
         entries.retain(|e| e.metadata.name != "handoff");
+        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+        }
+    }
+
+    /// Create a new ToolManager where the `restart` tool is removed from the
+    /// schema entirely. Used for agents whose `restart_enabled` is false.
+    pub fn without_restart(&self) -> Self {
+        let mut entries = self.registry.list();
+        entries.retain(|e| e.metadata.name != "restart");
         let registry = ToolRegistry::new(vec![], self.logger.clone());
         for entry in entries {
             let _ = registry.register(entry);

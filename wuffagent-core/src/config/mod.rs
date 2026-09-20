@@ -13,7 +13,7 @@ pub use self::remote::RemoteConfig;
 pub use self::encryption::EncryptionSettings;
 pub use self::presets::{get_presets_path, LocalPreset, Preset, PresetError, PresetStore, RemotePreset};
 pub use self::search::{SearchConfig, SearchBackend, SearchRegion, TimeRange};
-pub use paths::{get_config_path, get_wuffagent_home};
+pub use paths::{get_config_path, get_restart_marker_path, get_wuffagent_home, RestartMarker};
 pub use crate::agents::config::{AgentConfig, ShellConfig, WorkerConfig};
 pub use crate::memory::types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};
 

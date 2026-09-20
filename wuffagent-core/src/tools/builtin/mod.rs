@@ -8,6 +8,7 @@ pub mod memory;
 pub mod time;
 pub mod shell;
 pub mod handoff;
+pub mod restart;
 
 pub use calculation::CalculationTool;
 pub use file_io::{
@@ -24,6 +25,10 @@ pub use shell::{ShellTool, ShellConfig};
 // per-execution (own mailbox / agents dir / allowlist) and is injected by
 // `Agent::new` for agents with `handoff_enabled`, like the per-agent shell.
 pub use handoff::HandoffTool;
+// NOTE: RestartTool is also per-execution (own mailbox) — injected by
+// `Agent::new` for agents with `restart_enabled`, not registered in
+// `register_builtins`.
+pub use restart::RestartTool;
 
 use crate::tools::types::{Tool, ToolMetadata};
 use crate::tools::registry::ToolEntry;

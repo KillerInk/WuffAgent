@@ -252,6 +252,7 @@ impl AgentManager {
                             trim_config: crate::trimming::config::TrimConfig::default(),
                             handoff_enabled: legacy.handoff_enabled,
                             handoff_targets: legacy.can_invoke,
+                            restart_enabled: true,
                         };
                         if seen.insert(config.name.clone(), ()).is_none() {
                             tracing::info!(
@@ -397,9 +398,16 @@ pub struct AgentConfig {
     /// Also accepts the legacy `can_invoke` key.
     #[serde(default, alias = "can_invoke")]
     pub handoff_targets: Vec<String>,
+    /// Whether this agent may restart WuffAgent via the `restart` tool (most
+    /// useful for dogfooding: edit WuffAgent's own source, rebuild, restart to
+    /// load it, then resume). Defaults to true so it can be turned off per
+    /// profile.
+    #[serde(default = "default_true")]
+    pub restart_enabled: bool,
 }
 
 fn default_enabled_agent() -> bool { true }
+fn default_true() -> bool { true }
 fn default_task_timeout_ms() -> u64 { 60_000 }
 pub fn default_agents_dir() -> PathBuf {
     dirs::config_dir()
@@ -425,6 +433,7 @@ impl Default for AgentConfig {
             trim_config: crate::trimming::config::TrimConfig::default(),
             handoff_enabled: false,
             handoff_targets: Vec::new(),
+            restart_enabled: true,
         }
     }
 }
@@ -481,6 +490,7 @@ pub fn load_agent_from_dir(dir: &Path, name: &str) -> Option<AgentConfig> {
                     trim_config: crate::trimming::config::TrimConfig::default(),
                     handoff_enabled: legacy.handoff_enabled,
                     handoff_targets: legacy.can_invoke,
+                    restart_enabled: true,
                 });
             }
         }
@@ -624,6 +634,7 @@ impl AgentConfig {
                             trim_config: crate::trimming::config::TrimConfig::default(),
                             handoff_enabled: legacy.handoff_enabled,
                             handoff_targets: legacy.can_invoke,
+                            restart_enabled: true,
                         };
                         agents.push(config);
                     } else {

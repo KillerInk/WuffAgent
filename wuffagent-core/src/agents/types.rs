@@ -17,6 +17,27 @@ pub struct HandoffRequest {
     pub task: String,
 }
 
+/// A pending request to restart the WuffAgent process (written by the
+/// `restart` tool into the per-execution mailbox).
+///
+/// The agent loop picks it up after the tool round and returns
+/// `RunOutcome::Restart`; `Agent::execute` emits an
+/// [`crate::types::AppEvent::RestartRequested`], the UI relaunches the
+/// (optionally newly built) binary and closes the window, and a marker file
+/// lets the new process resume this session automatically.
+#[derive(Clone, Debug)]
+pub struct RestartRequest {
+    /// Why the agent is restarting (shown in the UI and used to build the
+    /// auto-resume turn).
+    pub reason: String,
+    /// The build command that was run before restarting (if any), for logging.
+    pub build_cmd: Option<String>,
+    /// Path to the binary the UI should launch (None = relaunch the current
+    /// executable). On Windows this typically points into a `--target-dir` so
+    /// the running exe is not relinked while the app is still up.
+    pub exe_path: Option<String>,
+}
+
 /// Unique identifier for an agent instance.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(pub String);

@@ -281,6 +281,16 @@ pub enum AppEvent {
         task: String,
         session_id: String,
     },
+    /// The agent asked to restart the WuffAgent process (optionally after a
+    /// build). The UI saves the session, writes a restart marker, relaunches
+    /// the (optionally newly built) binary, and closes the window; the new
+    /// process resumes this session automatically.
+    RestartRequested {
+        reason: String,
+        build_cmd: Option<String>,
+        exe_path: Option<String>,
+        session_id: String,
+    },
 }
 
 /// Format the current time as a human-readable timestamp string.
