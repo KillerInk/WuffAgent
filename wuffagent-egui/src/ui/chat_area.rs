@@ -13,6 +13,19 @@ fn layout_dbg_enabled() -> bool {
 }
 // ────────────────────────────────────────────────────────────────────────
 
+/// Parsed fields of a persisted tool message (for the collapsed card).
+struct ToolCardInfo {
+    name: String,
+    /// One-line preview of the call's arguments (new-format calls);
+    /// empty for legacy calls.
+    args: String,
+    /// One-line result summary (success) or error text (failure).
+    summary: String,
+    is_error: bool,
+    duration_ms: Option<u64>,
+    raw_result: String,
+}
+
 impl ChatApp {
     /// Threshold in pixels to consider the user as "at bottom"
     const SCROLL_BOTTOM_THRESHOLD: f32 = 10.0;
@@ -88,6 +101,15 @@ impl ChatApp {
             })
             .unwrap_or_default();
 
+        // Live tool cards (small: name + args preview + output tail) — snapshotted
+        // for the same reason as the streaming state above.
+        let active_tools: Vec<crate::sessions::ActiveTool> = self
+            .selected_session_id
+            .as_ref()
+            .and_then(|sid| self.session_store.get(sid))
+            .map(|r| r.chat_state.active_tools.clone())
+            .unwrap_or_default();
+
         // Stick to bottom when the user is already there or forced the button.
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("chat_scroll")
@@ -133,6 +155,10 @@ impl ChatApp {
                             // empty-buffer branch would draw a stray "AI:" + spinner.
                             if is_streaming {
                                 self.draw_streaming_line(ui, &theme, &streaming);
+                            }
+                            // Live tool cards for calls that are executing right now.
+                            for tool in &active_tools {
+                                self.draw_active_tool_card(ui, tool, &theme);
                             }
                         });
                         ui.add_space(12.0);
@@ -367,6 +393,117 @@ impl ChatApp {
                 });
             });
         });
+    }
+
+    /// Live tool card shown while a tool call is executing.
+    ///
+    /// Shows the tool icon + name, its args preview (what it's doing), a live
+    /// elapsed readout, and — for tools that stream (the shell) — a live tail
+    /// of the output so long commands are visible while they run. The card
+    /// carries the same indent as a committed tool card, so the transcript
+    /// doesn't jump when the live card is replaced by the persisted result.
+    fn draw_active_tool_card(&mut self, ui: &mut egui::Ui, tool: &crate::sessions::ActiveTool, theme: &Theme) {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            // Same indent as a committed tool card (28px avatar + 8px gap).
+            ui.add_space(36.0);
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                // Pulsing border while running (accent, breathing alpha).
+                let t = ui.ctx().input(|i| i.time) as f32;
+                let pulse = 0.5 + 0.5 * (t * 2.2).sin();
+                let alpha = ((0.35 + 0.5 * pulse) * 255.0) as u8;
+                let border = egui::Color32::from_rgba_premultiplied(
+                    theme.accent.r(),
+                    theme.accent.g(),
+                    theme.accent.b(),
+                    alpha,
+                );
+                egui::Frame::NONE
+                    .fill(theme.surface)
+                    .stroke(egui::Stroke::new(1.0, border))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        // Header row: spinner + icon+name + args + elapsed.
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.spinner();
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new(format!("{} {}", Self::tool_icon(&tool.tool_name), tool.tool_name))
+                                .color(theme.accent)
+                                .strong()
+                                .size(11.5));
+                            if !tool.args_preview.is_empty() {
+                                ui.add(Self::breaking_label(
+                                    &tool.args_preview,
+                                    egui::FontId::monospace(10.5),
+                                    theme.text_dim,
+                                    false,
+                                ));
+                            }
+                            let elapsed = tool.started_at.elapsed();
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(egui::RichText::new(format!("running · {}", Self::format_duration(elapsed.as_millis() as u64)))
+                                    .color(theme.text_dim)
+                                    .size(9.5));
+                            });
+                        });
+                        // Live output tail (shell). Latest lines only.
+                        if !tool.live_output.is_empty() {
+                            ui.add_space(4.0);
+                            Self::code_block(ui, theme, |ui| {
+                                ui.vertical(|ui| {
+                                    let lines: Vec<&str> = tool.live_output.lines().collect();
+                                    // Show at most the last 6 lines (latest tail).
+                                    let start = lines.len().saturating_sub(6);
+                                    for line in &lines[start..] {
+                                        ui.add(Self::breaking_label(
+                                            line,
+                                            egui::FontId::monospace(11.0),
+                                            theme.code_text,
+                                            false,
+                                        ));
+                                    }
+                                });
+                            });
+                        }
+                    });
+            });
+        });
+    }
+
+    /// Small per-tool glyph for the tool card headers.
+    fn tool_icon(name: &str) -> &'static str {
+        match name {
+            "shell" => "⚡",
+            "read_file" => "📄",
+            "write_file" | "append_file" | "apply_diff" => "✏️",
+            "list_dir" | "mkdir" => "📁",
+            "search_files" | "search_content" => "🔍",
+            "copy" | "move" | "delete" | "file_info" => "📦",
+            "web_search" => "🌐",
+            "fetch_url" => "🔗",
+            "calculation" => "🧮",
+            "time" => "🕐",
+            "save_memory" | "update_memory" | "search_memory"
+            | "consolidate_memories" | "delete_memory" => "🧠",
+            "handoff" => "🔀",
+            "restart" => "🔁",
+            _ => "🔧",
+        }
+    }
+
+    /// Compact duration for chips: `42ms`, `1.3s`, `2m 05s`.
+    fn format_duration(ms: u64) -> String {
+        if ms < 1000 {
+            format!("{}ms", ms)
+        } else if ms < 60_000 {
+            format!("{:.1}s", ms as f64 / 1000.0)
+        } else {
+            let m = ms / 60_000;
+            let s = (ms % 60_000) / 1000;
+            format!("{}m {:02}s", m, s)
+        }
     }
 
     /// Check if the scroll area is at the bottom using ScrollAreaOutput after render.
@@ -683,11 +820,12 @@ impl ChatApp {
 
     /// Compact collapsible tool card.
     ///
-    /// By default the card only shows the tool name plus a one-line summary
-    /// of the result; clicking the header row expands the full detail
-    /// (right-click opens the delete menu). The card is indented to sit under
-    /// the AI message column and has no avatar, keeping tool chatter visually
-    /// quiet compared to normal messages.
+    /// Collapsed row: status icon, tool icon + name, the call's args preview
+    /// (what it did), a result/error summary, a duration chip, and the time.
+    /// Clicking the header row expands the full result detail (right-click
+    /// opens the delete menu). The card is indented to sit under the AI
+    /// message column and has no avatar, keeping tool chatter visually quiet
+    /// compared to normal messages.
     fn draw_tool_card(&mut self, ui: &mut egui::Ui, message: &ChatMessage, index: usize, theme: &Theme) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -704,12 +842,15 @@ impl ChatApp {
                     self.session_store.get(sid).map(|r| r.chat_state.expanded_messages.contains(&index)).unwrap_or(false)
                 }).unwrap_or(false);
 
-                // Content is "header||call_id||result" — or a bare result for
-                // messages loaded from older sessions.
-                let parts: Vec<&str> = message.content.splitn(3, "||").collect();
-                let header = parts.first().copied().unwrap_or("");
-                let raw_result: &str = if parts.len() > 2 { parts[2] } else { message.content.as_str() };
-                let (name, summary, is_error) = Self::tool_card_label(header, raw_result, parts.len() >= 2);
+                // Content is "header||call_id||result[||duration_ms]" — or a
+                // bare result for messages loaded from older sessions.
+                let card = Self::parse_tool_card(&message.content);
+                let name = card.name.clone();
+                let summary = card.summary.clone();
+                let is_error = card.is_error;
+                let raw_result = card.raw_result.clone();
+                let args = card.args.clone();
+                let duration_ms = card.duration_ms;
                 let ts = crate::types::timestamp_time(&message.timestamp);
 
                 egui::Frame::NONE
@@ -718,26 +859,55 @@ impl ChatApp {
                     .corner_radius(8)
                     .inner_margin(egui::Margin::symmetric(10, 6))
                     .show(ui, |ui| {
-                        // Header row: chevron + tool name + summary + timestamp.
-                        // The whole row is clickable (expand/collapse) and
+                        // Header row: chevron + tool icon+name + args preview +
+                        // result/error summary + duration + timestamp. The whole
+                        // row is clickable (expand/collapse) and
                         // right-clickable (delete).
                         let row = ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             let chev = if is_expanded { "▾" } else { "▸" };
                             ui.label(egui::RichText::new(chev)
                                 .color(theme.text_dim).size(9.0).monospace());
-                            ui.label(egui::RichText::new(&name)
+                            ui.label(egui::RichText::new(format!("{} {}", Self::tool_icon(&name), name))
                                 .color(if is_error { theme.warning } else { theme.accent })
                                 .strong()
                                 .size(11.5));
-                            ui.label(egui::RichText::new(&summary)
-                                .color(theme.text_dim).size(10.5));
-                            if !ts.is_empty() {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(egui::RichText::new(ts)
-                                        .color(theme.text_dim).size(9.5));
+                            // What the call did (new-format calls); legacy calls
+                            // have no args preview and just show the summary.
+                            // A wrapping label in a horizontal row claims all
+                            // remaining width, so cap it — reserving room for
+                            // the summary and the duration/timestamp cluster.
+                            if !args.is_empty() {
+                                let avail = ui.available_width();
+                                let args_max = (avail - 160.0).clamp(80.0, 420.0);
+                                ui.scope(|ui| {
+                                    ui.set_max_width(args_max);
+                                    ui.add(Self::breaking_label(
+                                        &args,
+                                        egui::FontId::monospace(10.5),
+                                        theme.text_dim,
+                                        false,
+                                    ));
                                 });
                             }
+                            let summary_color = if is_error { theme.warning } else { theme.text_dim };
+                            ui.label(egui::RichText::new(if is_error && !summary.is_empty() {
+                                format!("✗ {}", summary)
+                            } else {
+                                summary.clone()
+                            })
+                            .color(summary_color).size(10.5));
+                            // Right cluster: duration chip + timestamp.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if let Some(ms) = duration_ms {
+                                    ui.label(egui::RichText::new(format!("· {}", Self::format_duration(ms)))
+                                        .color(theme.text_dim).size(9.5));
+                                }
+                                if !ts.is_empty() {
+                                    ui.label(egui::RichText::new(ts)
+                                        .color(theme.text_dim).size(9.5));
+                                }
+                            });
                         });
                         // The layout's own response only tracks hover, so
                         // register an explicit click interaction over the row.
@@ -787,10 +957,10 @@ impl ChatApp {
                             if raw_result.trim().is_empty() {
                                 ui.label(egui::RichText::new("(no output)")
                                     .color(theme.text_dim).italics().size(11.0));
-                            } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_result) {
-                                self.draw_tool_json_result(ui, &json, raw_result, theme);
+                            } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_result.as_str()) {
+                                self.draw_tool_json_result(ui, &json, raw_result.as_str(), theme);
                             } else {
-                                self.draw_tool_plain_result(ui, raw_result, theme);
+                                self.draw_tool_plain_result(ui, raw_result.as_str(), theme);
                             }
                         }
                     });
@@ -798,24 +968,60 @@ impl ChatApp {
         });
     }
 
-    /// (tool name, one-line summary, is_error) for a collapsed tool card.
-    fn tool_card_label(header: &str, raw_result: &str, has_header: bool) -> (String, String, bool) {
-        let header = header.trim();
-        // ToolCallError header: `Tool '<name>' error: <msg>`.
+    /// Parse a tool message's content into card fields.
+    ///
+    /// New format: `header||call_id||result||duration_ms` where header is
+    /// `🔧 <name>: <args>` (success) or `✗ <name>: <args> — <error>` (failure).
+    /// Legacy format: `🔧 <name>: <result preview>||call_id||result` or
+    /// `Tool '<name>' error: <msg>||call_id||`, or a bare result.
+    fn parse_tool_card(content: &str) -> ToolCardInfo {
+        let parts: Vec<&str> = content.splitn(4, "||").collect();
+        let header = parts.first().copied().unwrap_or("").trim();
+        let raw_result: &str = if parts.len() >= 3 { parts[2] } else { content };
+        let duration_ms = parts.get(3).and_then(|d| d.trim().parse::<u64>().ok());
+
+        // Legacy error header: `Tool '<name>' error: <msg>`.
         if let Some(stripped) = header.strip_prefix("Tool '") {
             if let Some((name, rest)) = stripped.split_once('\'') {
                 let err = rest
                     .trim()
                     .strip_prefix("error:")
                     .map(|e| e.trim())
-                    .unwrap_or(rest.trim());
-                return (name.to_string(), format!("✗ {}", err), true);
+                    .unwrap_or(rest.trim())
+                    .to_string();
+                return ToolCardInfo {
+                    name: name.to_string(),
+                    args: String::new(),
+                    summary: err,
+                    is_error: true,
+                    duration_ms,
+                    raw_result: raw_result.trim().to_string(),
+                };
             }
         }
+        // New error header: `✗ <name>: <args> — <error>`.
+        if let Some(tail) = header.strip_prefix('✗') {
+            let tail = tail.trim();
+            if let Some((name, rest)) = tail.split_once(": ") {
+                let (args, err) = match rest.rsplit_once(" — ") {
+                    Some((a, e)) if !e.is_empty() => (a.trim(), e.trim()),
+                    _ => (rest.trim(), ""),
+                };
+                return ToolCardInfo {
+                    name: name.trim().to_string(),
+                    args: args.to_string(),
+                    summary: err.to_string(),
+                    is_error: true,
+                    duration_ms,
+                    raw_result: raw_result.trim().to_string(),
+                };
+            }
+        }
+        // Success header: `🔧 <name>: <tail>`. For new-format calls the tail is
+        // the ARGS preview; for legacy calls it's a result preview (ignored —
+        // the summary comes from the result itself, as before).
+        let has_header = parts.len() >= 2 && !header.is_empty();
         let name = if has_header {
-            // Normal header: "🔧 tool_name: <result preview>" (older sessions
-            // may use "🔍 tool_name(args)"). Strip the emoji and keep only the
-            // tool name.
             let tail = header
                 .find(|c: char| c.is_alphanumeric())
                 .map(|i| &header[i..])
@@ -824,11 +1030,31 @@ impl ChatApp {
                 .chars()
                 .take_while(|c| !matches!(c, ':' | '(' | ' '))
                 .collect();
-            if n.is_empty() { "Tool".to_string() } else { n }
+            if n.is_empty() {
+                "Tool".to_string()
+            } else {
+                n
+            }
         } else {
             "Tool".to_string()
         };
-        (name, Self::tool_result_summary(raw_result), false)
+        // New-format success header tail = args preview (after "name: ").
+        let args = if duration_ms.is_some() {
+            header
+                .find(&format!("{}: ", name))
+                .map(|i| header[i + name.len() + 2..].trim().to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        ToolCardInfo {
+            name,
+            args,
+            summary: Self::tool_result_summary(raw_result),
+            is_error: false,
+            duration_ms,
+            raw_result: raw_result.trim().to_string(),
+        }
     }
 
     /// One-line summary of a tool result shown in the collapsed tool card.
@@ -838,6 +1064,29 @@ impl ChatApp {
             return "(no output)".to_string();
         }
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            // Shell output: exit status + output volume.
+            if let Some(code) = json.get("exit_code").and_then(|v| v.as_u64()) {
+                let lines_part = |key: &str| -> Option<String> {
+                    let n = json.get(key).and_then(|v| v.as_str()).map(|s| s.lines().count())?;
+                    if n == 0 {
+                        None
+                    } else {
+                        Some(format!("{} {} line{}", n, key, if n == 1 { "" } else { "s" }))
+                    }
+                };
+                let mut detail = lines_part("stdout");
+                if let Some(e) = lines_part("stderr") {
+                    detail = Some(match detail {
+                        Some(d) => format!("{} · {}", d, e),
+                        None => e,
+                    });
+                }
+                let detail = detail.map(|d| format!(" · {}", d)).unwrap_or_default();
+                if code == 0 {
+                    return format!("✓ exit 0{}", detail);
+                }
+                return format!("✗ exit {}{}", code, detail);
+            }
             if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
                 if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
                     return format!("{} · {} entries", path, entries.len());
@@ -890,6 +1139,81 @@ impl ChatApp {
     /// Called only with the tool card already expanded, so long content
     /// (e.g. file reads) is shown directly in a height-capped scroll area.
     fn draw_tool_json_result(&self, ui: &mut egui::Ui, json: &serde_json::Value, raw: &str, theme: &Theme) {
+        // Shell output: {exit_code, stdout, stderr, duration_ms, truncated} —
+        // render a status line plus stdout/stderr as line-by-line code blocks
+        // (one giant wrapped label is unreadable for command output).
+        if json.get("exit_code").is_some() {
+            let exit_code = json.get("exit_code").and_then(|v| v.as_u64()).unwrap_or(0);
+            let dur = json.get("duration_ms").and_then(|v| v.as_u64());
+            let truncated = json.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+            ui.horizontal(|ui| {
+                if exit_code == 0 {
+                    ui.colored_label(theme.success, "✓");
+                } else {
+                    ui.colored_label(theme.warning, "✗");
+                }
+                ui.label(egui::RichText::new(format!("exit code {}", exit_code))
+                    .color(if exit_code == 0 { theme.text_dim } else { theme.warning })
+                    .size(11.0));
+                if let Some(d) = dur {
+                    ui.label(egui::RichText::new(format!("· {}", Self::format_duration(d)))
+                        .color(theme.text_dim)
+                        .size(10.5));
+                }
+                if truncated {
+                    ui.label(egui::RichText::new("· output truncated")
+                        .color(theme.text_dim)
+                        .size(10.5));
+                }
+            });
+            let stream_block = |ui: &mut egui::Ui, title: &str, value: &str, color: egui::Color32| {
+                if value.trim().is_empty() {
+                    return;
+                }
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(title)
+                    .color(theme.text_dim)
+                    .size(10.0)
+                    .monospace());
+                ui.add_space(2.0);
+                Self::code_block(ui, theme, |ui| {
+                    let lines: Vec<&str> = value.lines().collect();
+                    const MAX_LINES: usize = 300;
+                    ui.vertical(|ui| {
+                        for line in &lines[..lines.len().min(MAX_LINES)] {
+                            ui.add(Self::breaking_label(
+                                line,
+                                egui::FontId::monospace(11.5),
+                                color,
+                                false,
+                            ));
+                        }
+                        if lines.len() > MAX_LINES {
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new(format!(
+                                "… ({} more lines)",
+                                lines.len() - MAX_LINES
+                            ))
+                            .color(theme.text_dim)
+                            .size(10.5));
+                        }
+                    });
+                });
+            };
+            stream_block(
+                ui,
+                "stdout",
+                json.get("stdout").and_then(|v| v.as_str()).unwrap_or(""),
+                theme.code_text,
+            );
+            stream_block(
+                ui,
+                "stderr",
+                json.get("stderr").and_then(|v| v.as_str()).unwrap_or(""),
+                theme.warning,
+            );
+            return;
+        }
         // Check for common structured patterns
         if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
             // Has a path field — likely a file operation result

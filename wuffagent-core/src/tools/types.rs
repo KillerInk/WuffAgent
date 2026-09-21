@@ -119,6 +119,37 @@ impl ToolOutput {
     }
 }
 
+/// Progress sink passed to tools while they execute.
+///
+/// Tools with incremental output (the shell streams command output lines)
+/// override [`Tool::execute_with_progress`] and call [`ToolProgress::report`]
+/// as work happens. The agent relays each report to the UI, which updates
+/// the live tool card, so the user watches long-running commands instead of
+/// a frozen "running" label.
+///
+/// Reports use "latest tail" semantics: the UI REPLACES its displayed text
+/// with each report, so tools should send a small rolling window (a few
+/// lines), never the full transcript.
+#[derive(Clone, Default)]
+pub struct ToolProgress {
+    pub on_progress: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+}
+
+impl ToolProgress {
+    /// A progress sink that swallows all reports (for callers that don't
+    /// care about live output).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Report a progress text snapshot (no-op when there is no sink).
+    pub fn report(&self, text: &str) {
+        if let Some(f) = &self.on_progress {
+            f(text);
+        }
+    }
+}
+
 // ─── Tool Metadata ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -143,6 +174,21 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the given parameters.
     fn execute(&self, params: ToolParams) -> ToolResult<ToolOutput>;
+
+    /// Execute the tool with the given parameters, optionally reporting
+    /// incremental progress (e.g. the shell streams output lines).
+    ///
+    /// Default implementation ignores the sink and delegates to
+    /// [`Tool::execute`]; only tools with live output (the shell) override
+    /// this.
+    fn execute_with_progress(
+        &self,
+        params: ToolParams,
+        progress: &ToolProgress,
+    ) -> ToolResult<ToolOutput> {
+        let _ = progress;
+        self.execute(params)
+    }
 }
 
 // ─── FFI Plugin ABI ─────────────────────────────────────────────────────────

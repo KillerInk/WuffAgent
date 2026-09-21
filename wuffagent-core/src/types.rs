@@ -288,7 +288,9 @@ pub enum MessageKind {
     Normal,
     /// Model reasoning/thinking (rendered dim + italic).
     Thinking,
-    /// Tool call result; content is "header||call_id||result_json" or a bare result.
+    /// Tool call result; content is "header||call_id||result_json"
+    /// (plus an optional "||duration_ms" fourth part for calls made while
+    /// the live tool-card UI is active) or a bare result.
     Tool,
 }
 
@@ -308,7 +310,25 @@ pub enum AppEvent {
     StreamComplete { content: String, usage: Option<Usage>, session_id: String },
     StreamError { error: String, session_id: String },
     ToolCallWarning { tool_name: String, message: String, session_id: String },
-    ToolCallStart { tool_name: String, call_id: String, session_id: String },
+    /// A tool call began. `args_preview` is a one-line human-readable
+    /// summary of the arguments (what the tool is doing), for the live
+    /// tool card in the chat area.
+    ToolCallStart {
+        tool_name: String,
+        call_id: String,
+        args_preview: String,
+        session_id: String,
+    },
+    /// Incremental progress for a running tool (e.g. the shell streams
+    /// output lines). `text` is the LATEST tail of the output so far —
+    /// the UI replaces (not appends) its display on each event. Throttled
+    /// to a few events per second per tool.
+    ToolCallProgress {
+        tool_name: String,
+        call_id: String,
+        text: String,
+        session_id: String,
+    },
     ToolCallComplete { tool_name: String, call_id: String, result: String, session_id: String },
     ToolCallError { tool_name: String, call_id: String, error: String, session_id: String },
     // Thinking output events (e.g. Claude-style reasoning)
@@ -375,6 +395,79 @@ pub fn timestamp_time(ts: &str) -> &str {
 /// Format a tool call header for display.
 pub fn tool_call_header(name: &str, result: &str) -> String {
     format!("🔧 {}: {}", name, result.chars().take(80).collect::<String>())
+}
+
+/// One-line human-readable preview of a tool call's arguments, for the live
+/// tool cards in the UI ("what is the tool doing right now?").
+///
+/// Picks the most descriptive argument field per tool; falls back to a
+/// compact JSON dump. Empty string for empty / unknown argument shapes.
+pub fn tool_args_summary(name: &str, arguments: &str) -> String {
+    const MAX: usize = 120;
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() || trimmed == "{}" {
+        return String::new();
+    }
+    let flat = |s: &str| -> String {
+        let one_line: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut out: String = one_line.chars().take(MAX).collect();
+        if one_line.chars().count() > MAX {
+            out.push('…');
+        }
+        out
+    };
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        // Preferred argument fields per tool (first present field wins).
+        let fields: &[&str] = match name {
+            "shell" => &["command"],
+            "read_file"
+            | "append_file"
+            | "apply_diff"
+            | "write_file"
+            | "delete"
+            | "file_info"
+            | "mkdir"
+            | "list_dir" => &["path"],
+            "copy" | "move" => &["dest"],
+            "search_files" => &["pattern"],
+            "search_content" => &["pattern", "path"],
+            "web_search" | "search_memory" => &["query"],
+            "fetch_url" => &["url"],
+            "calculation" => &["expression"],
+            "save_memory" | "update_memory" | "consolidate_memories" => &["content"],
+            "handoff" => &["task"],
+            "restart" => &["reason"],
+            _ => &[
+                "command",
+                "path",
+                "query",
+                "url",
+                "pattern",
+                "expression",
+                "content",
+                "reason",
+                "task",
+            ],
+        };
+        for f in fields {
+            if let Some(s) = v.get(f).and_then(|x| x.as_str()) {
+                if s.trim().is_empty() {
+                    continue;
+                }
+                // search_content: show "pattern in path" when both are given.
+                if name == "search_content" && *f == "pattern" {
+                    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                        if !p.trim().is_empty() {
+                            return flat(&format!("{} in {}", s, p));
+                        }
+                    }
+                }
+                return flat(s);
+            }
+        }
+        return flat(&v.to_string());
+    }
+    flat(trimmed)
 }
 
 #[cfg(test)]

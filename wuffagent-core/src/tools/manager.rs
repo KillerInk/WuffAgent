@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::tools::types::{
-    ToolError, ToolLogger, ToolOutput, ToolParams, ToolResult, TracingToolLogger,
+    ToolError, ToolLogger, ToolOutput, ToolParams, ToolProgress, ToolResult, TracingToolLogger,
 };
 use crate::tools::registry::ToolRegistry;
 
@@ -236,10 +236,24 @@ impl ToolManager {
     }
 
     /// Execute a tool by name with the given parameters.
+    ///
+    /// Delegates to [`Self::execute_with_progress`] with a no-op sink.
     pub async fn execute(
         &self,
         tool_name: &str,
         params: ToolParams,
+    ) -> ToolResult<ToolOutput> {
+        self.execute_with_progress(tool_name, params, &ToolProgress::none())
+            .await
+    }
+
+    /// Execute a tool by name, forwarding incremental progress reports
+    /// (e.g. live shell output) to the given sink.
+    pub async fn execute_with_progress(
+        &self,
+        tool_name: &str,
+        params: ToolParams,
+        progress: &ToolProgress,
     ) -> ToolResult<ToolOutput> {
         // Check allowlist first
         if let Some(ref allowlist) = self.allowlist {
@@ -256,8 +270,10 @@ impl ToolManager {
 
         self.logger.log_tool_call(tool_name, &params);
 
+        // Clone the sink so it can be moved into the blocking task.
+        let progress = progress.clone();
         // Execute on the blocking thread to avoid holding the main runtime.
-        let result = tokio::task::spawn_blocking(move || tool.execute(params))
+        let result = tokio::task::spawn_blocking(move || tool.execute_with_progress(params, &progress))
             .await
             .map_err(|e| ToolError::Execution(format!("Join error: {}", e)))?;
 

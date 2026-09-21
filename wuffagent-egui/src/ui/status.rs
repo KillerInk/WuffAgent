@@ -35,6 +35,26 @@ impl ChatApp {
             if chat.is_generating {
                 ui.label(egui::RichText::new("Streaming").color(theme.accent).size(11.0));
             }
+
+            // Tools executing right now (live cards are in the chat area; this
+            // keeps them visible even when scrolled out of view).
+            if !chat.active_tools.is_empty() {
+                let names: Vec<&str> = chat
+                    .active_tools
+                    .iter()
+                    .map(|t| t.tool_name.as_str())
+                    .collect();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "🔧 {} tool{} running",
+                        names.len(),
+                        if names.len() == 1 { "" } else { "s" }
+                    ))
+                    .color(theme.accent)
+                    .size(11.0),
+                )
+                .on_hover_text(names.join("\n"));
+            }
              
             ui.separator();
             ui.label(egui::RichText::new(format!("Messages: {}", chat.messages.len())).color(theme.text_secondary).size(11.0));

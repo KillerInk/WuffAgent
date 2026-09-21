@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 
-use crate::tools::types::{Tool, ToolError, ToolOutput, ToolParams, ToolSchema};
+use crate::tools::types::{Tool, ToolError, ToolOutput, ToolParams, ToolProgress, ToolSchema};
 
 /// Maximum command string length to prevent oversized injection.
 const MAX_COMMAND_LEN: usize = 10_000;
@@ -192,12 +193,19 @@ impl ShellTool {
         }
     }
 
-    /// Execute a command synchronously with timeout using a separate thread.
+    /// Execute a command synchronously with a timeout, streaming output lines
+    /// to `progress` (throttled to ~10/s) while it runs.
+    ///
+    /// The child is spawned with piped stdout/stderr; two reader threads push
+    /// chunks over a channel while this loop accumulates the full (capped)
+    /// output and keeps a rolling window of recent lines for the progress
+    /// display. Semantics of the returned `Output` match `cmd.output()`.
     fn run_command(
         shell_cmd: &str,
         shell_args: &[String],
         working_dir: Option<&str>,
         timeout_ms: u64,
+        progress: Option<&(dyn Fn(&str) + Send + Sync)>,
     ) -> Result<std::process::Output, ToolError> {
         let mut cmd = StdCommand::new(shell_cmd);
         cmd.args(shell_args);
@@ -210,39 +218,167 @@ impl ShellTool {
 
         let timeout_duration = Duration::from_millis(timeout_ms);
         let start = Instant::now();
+        let mut child = cmd.spawn().map_err(|e| {
+            ToolError::Execution(format!("Command execution failed: {}", e))
+        })?;
 
-        // Spawn a thread to run the command
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = tx.send(cmd.output());
-        });
+        let stdout_pipe = child.stdout.take().expect("stdout is piped");
+        let stderr_pipe = child.stderr.take().expect("stderr is piped");
 
-        // Wait for the result or timeout, using recv_timeout to avoid busy-wait.
+        // (stream id: 0 = stdout, 1 = stderr, chunk bytes)
+        let (tx, rx) = mpsc::channel::<(u8, Vec<u8>)>();
+        fn spawn_reader<R: Read + Send + 'static>(
+            pipe: R,
+            id: u8,
+            tx: mpsc::Sender<(u8, Vec<u8>)>,
+        ) -> thread::JoinHandle<()> {
+            thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(pipe);
+                let mut buf = [0u8; 4096];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            if tx.send((id, buf[..n].to_vec())).is_err() {
+                                break; // main loop gone (timeout) — stop reading
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+        }
+        let out_handle = spawn_reader(stdout_pipe, 0, tx.clone());
+        let err_handle = spawn_reader(stderr_pipe, 1, tx);
+
+        let mut state = PipeState::default();
+        let mut last_report = Instant::now();
+        const REPORT_INTERVAL: Duration = Duration::from_millis(100);
+
         loop {
             if start.elapsed() >= timeout_duration {
+                let _ = child.kill();
+                let _ = child.wait();
                 return Err(ToolError::Execution(format!(
                     "Command timed out after {}ms", timeout_ms
                 )));
             }
 
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Ok(output)) => return Ok(output),
-                Ok(Err(e)) => {
+            // Drain everything available right now.
+            loop {
+                match rx.try_recv() {
+                    Ok((id, chunk)) => state.feed(id, &chunk),
+                    Err(_) => break, // Empty or Disconnected
+                }
+            }
+
+            // Report the latest tail (throttled) so the UI tool card can
+            // show live output while the command runs.
+            if let Some(report) = progress {
+                if last_report.elapsed() >= REPORT_INTERVAL {
+                    if let Some(tail) = state.take_tail(6) {
+                        report(&tail);
+                    }
+                    last_report = Instant::now();
+                }
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Child exited: drain the remaining output (reader threads
+                    // reach EOF because the pipe write ends are closed).
+                    for (id, chunk) in rx {
+                        state.feed(id, &chunk);
+                    }
+                    let _ = out_handle.join();
+                    let _ = err_handle.join();
+                    return Ok(std::process::Output {
+                        status,
+                        stdout: state.stdout,
+                        stderr: state.stderr,
+                    });
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+                Err(e) => {
+                    let _ = child.kill();
                     return Err(ToolError::Execution(format!(
-                        "Command execution failed: {}", e
+                        "Failed to wait for command: {}",
+                        e
                     )));
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Still running — check timeout again
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(ToolError::Execution(
-                        "Command thread panicked".to_string(),
-                    ));
                 }
             }
         }
+    }
+}
+
+/// Accumulated command output plus a rolling window of recent output lines
+/// for live progress display (latest-tail semantics).
+#[derive(Default)]
+struct PipeState {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    /// Partial last line per stream (line splitting across chunk boundaries).
+    stdout_line: Vec<u8>,
+    stderr_line: Vec<u8>,
+    /// Most recent non-empty output lines (shared by both streams).
+    recent: std::collections::VecDeque<String>,
+}
+
+impl PipeState {
+    const RECENT_CAP: usize = 12;
+    const LINE_CAP: usize = 400;
+
+    fn feed(&mut self, stream: u8, chunk: &[u8]) {
+        if stream == 0 {
+            Self::append(&mut self.stdout, &mut self.stdout_line, chunk, &mut self.recent);
+        } else {
+            Self::append(&mut self.stderr, &mut self.stderr_line, chunk, &mut self.recent);
+        }
+    }
+
+    fn append(
+        buf: &mut Vec<u8>,
+        line: &mut Vec<u8>,
+        chunk: &[u8],
+        recent: &mut std::collections::VecDeque<String>,
+    ) {
+        // Stop accumulating past the cap, but still drain the reader so the
+        // child never blocks on a full pipe buffer.
+        let room = MAX_OUTPUT_SIZE.saturating_sub(buf.len());
+        let take = chunk.len().min(room);
+        for &b in &chunk[..take] {
+            if b == b'\n' {
+                let s = String::from_utf8_lossy(line).trim_end_matches('\r').to_string();
+                let s = s.trim_end().to_string();
+                if !s.trim().is_empty() {
+                    let s: String = s.chars().take(Self::LINE_CAP).collect();
+                    recent.push_back(s);
+                    while recent.len() > Self::RECENT_CAP {
+                        recent.pop_front();
+                    }
+                }
+                line.clear();
+            } else {
+                line.push(b);
+            }
+        }
+        buf.extend_from_slice(&chunk[..take]);
+    }
+
+    /// The last `max_lines` recent lines (or fewer), oldest first.
+    fn take_tail(&mut self, max_lines: usize) -> Option<String> {
+        let n = max_lines.min(self.recent.len());
+        if n == 0 {
+            return None;
+        }
+        let lines: Vec<&str> = self
+            .recent
+            .iter()
+            .rev()
+            .take(n)
+            .map(String::as_str)
+            .collect();
+        Some(lines.into_iter().rev().collect::<Vec<_>>().join("\n"))
     }
 }
 
@@ -295,6 +431,16 @@ impl Tool for ShellTool {
     }
 
     fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        self.execute_with_progress(params, &ToolProgress::none())
+    }
+
+    /// Run the command, streaming output lines to the progress sink so the
+    /// UI tool card shows live command output while it runs.
+    fn execute_with_progress(
+        &self,
+        params: ToolParams,
+        progress: &ToolProgress,
+    ) -> crate::tools::types::ToolResult<ToolOutput> {
         let command: String = params
             .get("command")
             .ok_or_else(|| ToolError::InvalidParams("command is required".to_string()))?;
@@ -315,12 +461,14 @@ impl Tool for ShellTool {
         let (shell_cmd, shell_args) = self.get_shell_command(&command);
         let start = Instant::now();
 
-        // Execute
+        // Execute, forwarding output lines to the progress sink (if any).
+        let fp: Option<&(dyn Fn(&str) + Send + Sync)> = progress.on_progress.as_deref();
         let result = Self::run_command(
             &shell_cmd,
             &shell_args,
             working_dir.as_deref().or(self.config.working_dir.as_deref()),
             timeout_ms,
+            fp,
         );
 
         match result {

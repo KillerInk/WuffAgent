@@ -17,6 +17,7 @@ impl ChatApp {
             | AppEvent::StreamError { session_id, .. }
             | AppEvent::ToolCallWarning { session_id, .. }
             | AppEvent::ToolCallStart { session_id, .. }
+            | AppEvent::ToolCallProgress { session_id, .. }
             | AppEvent::ToolCallComplete { session_id, .. }
             | AppEvent::ToolCallError { session_id, .. }
             | AppEvent::StreamThinkingChunk { session_id, .. }
@@ -102,6 +103,9 @@ impl ChatApp {
                     runtime.chat_state.prompt_progress = None;
                     runtime.chat_state.is_generating = false;
                     runtime.chat_state.current_thinking.clear();
+                    // The run ended: any live tool card still open (e.g. a tool
+                    // aborted before it emitted its completion) is stale now.
+                    runtime.chat_state.active_tools.clear();
                     if is_selected {
                         self.status = AppStatus::Ready;
                     }
@@ -137,6 +141,9 @@ impl ChatApp {
                     runtime.chat_state.commit_stream();
                     runtime.chat_state.prompt_progress = None;
                     runtime.chat_state.is_generating = false;
+                    // Aborted tools never emit their completion — drop their
+                    // live cards so the transcript doesn't spin forever.
+                    runtime.chat_state.active_tools.clear();
                     if is_selected {
                         self.status = AppStatus::Error(error.clone());
                     }
@@ -161,29 +168,114 @@ impl ChatApp {
             AppEvent::ToolCallWarning { tool_name, message, .. } => {
                 tracing::warn!(tool_name, message, "Tool call warning");
             }
-            AppEvent::ToolCallStart { tool_name, call_id, .. } => {
+            AppEvent::ToolCallStart { tool_name, call_id, args_preview, .. } => {
                 tracing::debug!(tool_name, call_id, "Tool call started");
+                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                    // Open a live card for this call.
+                    if !runtime
+                        .chat_state
+                        .active_tools
+                        .iter()
+                        .any(|t| t.call_id == call_id)
+                    {
+                        runtime.chat_state.active_tools.push(crate::sessions::ActiveTool {
+                            tool_name: tool_name.clone(),
+                            call_id: call_id.clone(),
+                            args_preview,
+                            started_at: std::time::Instant::now(),
+                            live_output: String::new(),
+                        });
+                    }
+                }
+            }
+            AppEvent::ToolCallProgress { tool_name, call_id, text, .. } => {
+                // Live output tail for the running tool card (latest-tail:
+                // replace, don't append).
+                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                    if let Some(active) = runtime
+                        .chat_state
+                        .active_tools
+                        .iter_mut()
+                        .find(|t| t.call_id == call_id)
+                    {
+                        active.live_output = text;
+                    }
+                    let _ = tool_name;
+                }
             }
             AppEvent::ToolCallComplete { tool_name, call_id, result, .. } => {
                 tracing::debug!(tool_name, result, "Tool call complete");
-                let header = crate::types::tool_call_header(&tool_name, &result);
+                // Close the live card, capturing the args preview and duration
+                // so the persisted message can show both.
+                let (args_preview, duration_ms) = self
+                    .session_store
+                    .get(&sid)
+                    .and_then(|r| {
+                        r.chat_state
+                            .active_tools
+                            .iter()
+                            .find(|t| t.call_id == call_id)
+                            .map(|t| {
+                                (
+                                    t.args_preview.clone(),
+                                    t.started_at.elapsed().as_millis() as u64,
+                                )
+                            })
+                    })
+                    .unwrap_or_default();
                 if let Some(runtime) = self.session_store.get_mut(&sid) {
-                    runtime.chat_state.push_message(
-                        MessageKind::Tool,
-                        "tool",
-                        &format!("{}||{}||{}", header, call_id, result),
-                    );
+                    runtime
+                        .chat_state
+                        .active_tools
+                        .retain(|t| t.call_id != call_id);
+                    let header = if args_preview.is_empty() {
+                        crate::types::tool_call_header(&tool_name, &result)
+                    } else {
+                        format!("🔧 {}: {}", tool_name, args_preview)
+                    };
+                    let content = if duration_ms > 0 {
+                        format!("{}||{}||{}||{}", header, call_id, result, duration_ms)
+                    } else {
+                        format!("{}||{}||{}", header, call_id, result)
+                    };
+                    runtime.chat_state.push_message(MessageKind::Tool, "tool", &content);
                 }
             }
             AppEvent::ToolCallError { tool_name, call_id, error, .. } => {
                 tracing::warn!(tool_name, error, "Tool call error");
-                let header = format!("Tool '{}' error: {}", tool_name, error);
+                // Close the live card for errors too (duration + args preview).
+                let (args_preview, duration_ms) = self
+                    .session_store
+                    .get(&sid)
+                    .and_then(|r| {
+                        r.chat_state
+                            .active_tools
+                            .iter()
+                            .find(|t| t.call_id == call_id)
+                            .map(|t| {
+                                (
+                                    t.args_preview.clone(),
+                                    t.started_at.elapsed().as_millis() as u64,
+                                )
+                            })
+                    })
+                    .unwrap_or_default();
                 if let Some(runtime) = self.session_store.get_mut(&sid) {
-                    runtime.chat_state.push_message(
-                        MessageKind::Tool,
-                        "tool",
-                        &format!("{}||{}||", header, call_id),
-                    );
+                    runtime
+                        .chat_state
+                        .active_tools
+                        .retain(|t| t.call_id != call_id);
+                    let header = if args_preview.is_empty() {
+                        format!("Tool '{}' error: {}", tool_name, error)
+                    } else {
+                        format!("✗ {}: {} — {}", tool_name, args_preview, error)
+                    };
+                    let content = if duration_ms > 0 {
+                        format!("{}||{}||{}||{}", header, call_id, error, duration_ms)
+                    } else {
+                        format!("{}||{}||{}||", header, call_id, error)
+                    };
+                    runtime.chat_state.push_message(MessageKind::Tool, "tool", &content);
                 }
             }
             AppEvent::StreamThinkingChunk { content, .. } => {

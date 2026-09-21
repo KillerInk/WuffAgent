@@ -18,6 +18,22 @@ pub struct QueuedMessage {
     pub tool_policy: crate::client::pipeline::ChatToolPolicy,
 }
 
+/// A tool call currently executing, shown as a live card at the end of the
+/// transcript (spinner + args + live output tail) until its completion event
+/// turns it into a persisted `MessageKind::Tool` message.
+#[derive(Clone)]
+pub struct ActiveTool {
+    pub tool_name: String,
+    pub call_id: String,
+    /// One-line preview of the call's arguments ("what is it doing").
+    pub args_preview: String,
+    /// When the call started (drives the live elapsed-time readout).
+    pub started_at: std::time::Instant,
+    /// Latest tail of live output reported by the tool (e.g. shell output
+    /// lines). Replaced, not appended, on every progress event.
+    pub live_output: String,
+}
+
 /// State for the chat area (per-session UI display state).
 #[derive(Clone)]
 pub struct ChatAreaState {
@@ -68,6 +84,10 @@ pub struct ChatAreaState {
     pub status: crate::types::AppStatus,
     /// Messages queued while this session's run was still active.
     pub queued_messages: Vec<QueuedMessage>,
+    /// Tool calls currently executing (live cards). Populated on
+    /// `ToolCallStart`, updated by `ToolCallProgress`, drained on
+    /// `ToolCallComplete`/`ToolCallError` (or when the run ends).
+    pub active_tools: Vec<ActiveTool>,
 }
 
 impl Default for ChatAreaState {
@@ -99,6 +119,7 @@ impl Default for ChatAreaState {
             pending_image: None,
             status: crate::types::AppStatus::Stopped,
             queued_messages: Vec::new(),
+            active_tools: Vec::new(),
         }
     }
 }

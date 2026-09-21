@@ -346,6 +346,34 @@ impl Agent {
         }
     }
 
+    /// Build a progress sink for a running tool call. Reports arrive as
+    /// `ToolCallProgress` events (latest-tail semantics) which the UI renders
+    /// in the live tool card. Returns a no-op sink when no UI channel is
+    /// attached (tests, headless runs).
+    fn tool_progress_for(&self, tool_name: &str, call_id: &str) -> crate::tools::types::ToolProgress {
+        match &self.event_tx {
+            Some(tx) => {
+                let tx = std::sync::Arc::clone(tx);
+                let name = tool_name.to_string();
+                let id = call_id.to_string();
+                let sid = self.session_id();
+                crate::tools::types::ToolProgress {
+                    on_progress: Some(std::sync::Arc::new(move |text: &str| {
+                        if let Ok(g) = tx.lock() {
+                            let _ = g.send(crate::types::AppEvent::ToolCallProgress {
+                                tool_name: name.clone(),
+                                call_id: id.clone(),
+                                text: text.to_string(),
+                                session_id: sid.clone(),
+                            });
+                        }
+                    })),
+                }
+            }
+            None => crate::tools::types::ToolProgress::none(),
+        }
+    }
+
     /// The session ID to stamp on events (falls back to empty when unset).
     fn session_id(&self) -> String {
         self.agent_session_id.clone().unwrap_or_default()
@@ -907,15 +935,39 @@ impl Agent {
                                 "[AGENT] Early-starting tool '{}' (id={}) while model is still streaming",
                                 name, id
                             );
+                            // Live tool card: args preview + progress sink.
+                            let args_preview = crate::types::tool_args_summary(&name, &args);
                             if let Some(ref tx) = ready_tx {
                                 if let Ok(g) = tx.lock() {
                                     let _ = g.send(crate::types::AppEvent::ToolCallStart {
                                         tool_name: name.clone(),
                                         call_id: id.clone(),
+                                        args_preview,
                                         session_id: ready_sid.clone(),
                                     });
                                 }
                             }
+                            let progress = match &ready_tx {
+                                Some(tx) => {
+                                    let tx = std::sync::Arc::clone(tx);
+                                    let p_name = name.clone();
+                                    let p_id = id.clone();
+                                    let p_sid = ready_sid.clone();
+                                    crate::tools::types::ToolProgress {
+                                        on_progress: Some(std::sync::Arc::new(move |text: &str| {
+                                            if let Ok(g) = tx.lock() {
+                                                let _ = g.send(crate::types::AppEvent::ToolCallProgress {
+                                                    tool_name: p_name.clone(),
+                                                    call_id: p_id.clone(),
+                                                    text: text.to_string(),
+                                                    session_id: p_sid.clone(),
+                                                });
+                                            }
+                                        })),
+                                    }
+                                }
+                                None => crate::tools::types::ToolProgress::none(),
+                            };
                             let tool_mgr = ready_manager.clone();
                             let token = ready_cancel.clone();
                             let handle = tokio::spawn(async move {
@@ -924,7 +976,7 @@ impl Agent {
                                     Err(e) => return Err(e),
                                 };
                                 let result = tokio::select! {
-                                    r = tool_mgr.execute(&name, params) => r,
+                                    r = tool_mgr.execute_with_progress(&name, params, &progress) => r,
                                     _ = token.cancelled() => {
                                         return Ok(format!(
                                             "Error: Cancelled (tool '{}' aborted)",
@@ -1110,6 +1162,10 @@ impl Agent {
                                 self.send_event(crate::types::AppEvent::ToolCallStart {
                                     tool_name: call.function.name.clone(),
                                     call_id: call.id.clone(),
+                                    args_preview: crate::types::tool_args_summary(
+                                        &call.function.name,
+                                        &call.function.arguments,
+                                    ),
                                     session_id: self.session_id(),
                                 });
                                 let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
@@ -1137,7 +1193,10 @@ impl Agent {
                                     }
                                 };
                                 let manager = tool_manager.clone();
-                                let tool_result = manager.execute(&call.function.name, params).await;
+                                let progress = self.tool_progress_for(&call.function.name, &call.id);
+                                let tool_result = manager
+                                    .execute_with_progress(&call.function.name, params, &progress)
+                                    .await;
                                 // Tools must always return *something*: an empty result
                                 // string becomes an empty `role: "tool"` message, which
                                 // the model/server rejects.
@@ -1197,6 +1256,10 @@ impl Agent {
                         self.send_event(crate::types::AppEvent::ToolCallStart {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
+                            args_preview: crate::types::tool_args_summary(
+                                &call.function.name,
+                                &call.function.arguments,
+                            ),
                             session_id: self.session_id(),
                         });
                         let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
@@ -1212,7 +1275,10 @@ impl Agent {
                             }
                         };
                         let manager = tool_manager.clone();
-                        let tool_result = manager.execute(&call.function.name, params).await;
+                        let progress = self.tool_progress_for(&call.function.name, &call.id);
+                        let tool_result = manager
+                            .execute_with_progress(&call.function.name, params, &progress)
+                            .await;
                         let result_str = match tool_result {
                             Ok(output) => {
                                 let s = format!("{}", output);

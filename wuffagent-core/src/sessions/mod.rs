@@ -1,7 +1,7 @@
 pub mod model;
 pub mod runtime;
 pub use model::{Session, SessionStatus};
-pub use runtime::{ChatAreaState, QueuedMessage, SessionRuntime};
+pub use runtime::{ActiveTool, ChatAreaState, QueuedMessage, SessionRuntime};
 
 use std::fs;
 use std::path::{Path, PathBuf};
