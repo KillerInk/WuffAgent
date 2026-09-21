@@ -5,7 +5,7 @@ use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::types::{Message, ToolCall, Usage};
+use crate::types::{Message, PromptProgress, ToolCall, Usage};
 use super::Error;
 
 /// Tracks, across one stream, which tool call is currently receiving deltas.
@@ -98,6 +98,7 @@ pub async fn process_sse_line(
     callback: &mut impl FnMut(String, bool) -> Result<(), Error>,
     conversation: &Arc<Mutex<Vec<Message>>>,
     on_tool_call_ready: &mut impl FnMut(ToolCall),
+    on_prompt_progress: &mut impl FnMut(PromptProgress),
     tracker: &mut ToolCallTracker,
 ) -> Result<Option<Usage>, Error> {
     // Callers pass lines including the trailing newline (stream_message slices
@@ -139,6 +140,17 @@ pub async fn process_sse_line(
             return Ok(None);
         }
     };
+
+    // llama.cpp live prompt-processing progress (`return_progress: true`):
+    // sent per server tick while the prompt is being processed, before the
+    // first token. Forward it to the caller (status bar live PP speed).
+    // Tolerant parse — backends that don't send it are simply unaffected.
+    if let Some(pp) = chunk
+        .get("prompt_progress")
+        .and_then(|p| serde_json::from_value::<PromptProgress>(p.clone()).ok())
+    {
+        on_prompt_progress(pp);
+    }
 
     // ── Early tool-call detection ────────────────────────────────────────
     // A tool call is ready to execute as soon as the stream moves PAST it:
@@ -411,6 +423,7 @@ pub async fn stream_message(
     conversation: &Arc<Mutex<Vec<Message>>>,
     callback: &mut (impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static),
     on_tool_call_ready: &mut (impl FnMut(ToolCall) + Send + Sync + 'static),
+    on_prompt_progress: &mut (impl FnMut(PromptProgress) + Send + Sync + 'static),
     tracker: &mut ToolCallTracker,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<(Option<Usage>, Option<String>), Error> {
@@ -435,8 +448,15 @@ pub async fn stream_message(
                         if model.is_none() {
                             model = extract_model(&line);
                         }
-                        if let Some(usage) =
-                            process_sse_line(&line, callback, conversation, on_tool_call_ready, tracker).await?
+                        if let Some(usage) = process_sse_line(
+                            &line,
+                            callback,
+                            conversation,
+                            on_tool_call_ready,
+                            on_prompt_progress,
+                            tracker,
+                        )
+                        .await?
                         {
                             last_usage = Some(usage);
                         }
@@ -460,8 +480,15 @@ pub async fn stream_message(
                 if model.is_none() {
                     model = extract_model(&line);
                 }
-                if let Some(usage) =
-                    process_sse_line(&line, callback, conversation, on_tool_call_ready, tracker).await?
+                if let Some(usage) = process_sse_line(
+                    &line,
+                    callback,
+                    conversation,
+                    on_tool_call_ready,
+                    on_prompt_progress,
+                    tracker,
+                )
+                .await?
                 {
                     last_usage = Some(usage);
                 }

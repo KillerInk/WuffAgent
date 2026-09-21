@@ -65,6 +65,7 @@ impl LlmClient for ChatClientAdapter {
                 Ok(())
             },
             move |_| {},
+            move |_| {}, // prompt progress: not needed for summarization
             None,
         )
         .await
@@ -124,6 +125,7 @@ impl LlmClient for ToolLlmClient {
                 Ok(())
             },
             move |_| {},
+            move |_| {}, // prompt progress: not needed for summarization
             None,
         )
         .await

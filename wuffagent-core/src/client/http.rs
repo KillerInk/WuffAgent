@@ -18,6 +18,10 @@ pub struct ChatRequest {
     /// Request options for streaming (e.g. include_usage).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
+    /// llama.cpp extension: request live prompt-processing progress
+    /// (`prompt_progress` chunks) in stream mode. Ignored by other backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_progress: Option<bool>,
 }
 
 #[derive(Serialize, Debug)]
@@ -121,6 +125,8 @@ pub fn build_request(
         tools: tools.map(|t| t.to_vec()),
         reasoning_effort: reasoning_effort.as_wire_value().map(|s| s.to_string()),
         stream_options: Some(StreamOptions { include_usage: true }),
+        // Live prompt-processing progress is only meaningful for streams.
+        return_progress: if stream { Some(true) } else { None },
     }
 }
 

@@ -702,6 +702,7 @@ impl ChatClient {
             tools: tools.map(|t| t.to_vec()),
             reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
             stream_options: Some(http::StreamOptions { include_usage: true }),
+            return_progress: None,
         };
         self.note_prompt_chars(message_char_count(&msgs));
         let result = send_message(
@@ -731,6 +732,7 @@ impl ChatClient {
                         tools: tools.map(|t| t.to_vec()),
                         reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
                         stream_options: Some(http::StreamOptions { include_usage: true }),
+                        return_progress: None,
                     };
                     self.note_prompt_chars(message_char_count(&msgs));
                     match send_message(
@@ -892,12 +894,17 @@ impl ChatClient {
     /// complete enough to execute — the model has moved past it (text or the
     /// next tool call) and its arguments look like complete JSON. Agents use
     /// this to start executing tools while the model keeps reasoning.
+    ///
+    /// `on_prompt_progress` fires per server tick with llama.cpp's live
+    /// prompt-processing progress (the request sets `return_progress: true`;
+    /// other backends simply never invoke it).
     pub async fn stream_with_messages_arc(
         client: &Arc<Self>,
         messages: &[Message],
         tools: Option<&[crate::tools::ToolDefinition]>,
         callback: impl FnMut(String, bool) -> Result<(), Error> + Send + Sync + 'static,
         on_tool_call_ready: impl FnMut(ToolCall) + Send + Sync + 'static,
+        on_prompt_progress: impl FnMut(crate::types::PromptProgress) + Send + Sync + 'static,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<(Message, Option<Usage>), Error> {
         let http_client = client.stream_http_client.clone();
@@ -911,6 +918,8 @@ impl ChatClient {
             tools: tools.map(|t| t.to_vec()),
             reasoning_effort: client.reasoning_effort.as_wire_value().map(|s| s.to_string()),
             stream_options: Some(http::StreamOptions { include_usage: true }),
+            // Ask llama.cpp for live prompt-processing progress chunks.
+            return_progress: Some(true),
         };
         let body = serde_json::to_string(&request)?;
 
@@ -947,8 +956,9 @@ impl ChatClient {
 
         let mut boxed_cb = Box::new(callback);
         let mut boxed_ready = Box::new(on_tool_call_ready);
+        let mut boxed_pp = Box::new(on_prompt_progress);
         let mut ready_tracker = ToolCallTracker::default();
-        let (usage, model) = sse::stream_message(resp, &local_conv, &mut boxed_cb, &mut boxed_ready, &mut ready_tracker, cancel_token).await?;
+        let (usage, model) = sse::stream_message(resp, &local_conv, &mut boxed_cb, &mut boxed_ready, &mut boxed_pp, &mut ready_tracker, cancel_token).await?;
 
         let msg = local_conv.lock().unwrap().pop().unwrap_or_else(|| Message {
             role: "assistant".to_string(),

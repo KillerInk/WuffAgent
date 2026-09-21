@@ -11,6 +11,7 @@ impl ChatApp {
         // Extract sid via a helper to avoid borrow conflicts with the match.
         let sid: String = match &event {
             AppEvent::StreamChunk { session_id, .. }
+            | AppEvent::StreamPromptProgress { session_id, .. }
             | AppEvent::StreamRoundComplete { session_id, .. }
             | AppEvent::StreamComplete { session_id, .. }
             | AppEvent::StreamError { session_id, .. }
@@ -30,6 +31,34 @@ impl ChatApp {
             AppEvent::StreamChunk { content, .. } => {
                 if let Some(runtime) = self.session_store.get_mut(&sid) {
                     runtime.chat_state.stream_chunk(&content);
+                    // Live status-bar estimates while generating: the context
+                    // grows with the estimated generated tokens and TG speed
+                    // tracks the in-progress segment. These snap to the
+                    // server-reported values on round/complete.
+                    if runtime.chat_state.is_generating {
+                        let live_tokens = runtime.chat_state.live_gen_tokens();
+                        runtime.chat_state.token_count =
+                            (runtime.chat_state.token_count as f64 + live_tokens) as usize;
+                        if n_ctx > 0 {
+                            runtime.chat_state.context_used =
+                                (runtime.chat_state.token_count as f64 / n_ctx as f64 * 100.0) as f32;
+                        }
+                        if let Some(tps) = runtime.chat_state.live_gen_tps() {
+                            runtime.chat_state.gen_tps = Some(tps);
+                        }
+                    }
+                }
+            }
+            AppEvent::StreamPromptProgress { progress, .. } => {
+                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                    // Live PP progress + speed while the server processes the
+                    // prompt (llama.cpp `prompt_progress`; counts only
+                    // non-cached tokens). Replaced by the server-reported
+                    // final value when the round completes.
+                    runtime.chat_state.prompt_progress = Some(progress);
+                    if let Some(tps) = progress.prompt_tps() {
+                        runtime.chat_state.prompt_tps = Some(tps);
+                    }
                 }
             }
             AppEvent::StreamRoundComplete { content: _, usage, .. } => {
@@ -37,6 +66,9 @@ impl ChatApp {
                 // so the next round's chunks keep rendering live.
                 if let Some(runtime) = self.session_store.get_mut(&sid) {
                     runtime.chat_state.commit_stream();
+                    // This round's prompt processing is done — drop the live
+                    // progress pill (the next round may start a new one).
+                    runtime.chat_state.prompt_progress = None;
                     // Gauge: prefer the server's exact usage (input+output tokens of
                     // this round); fall back to the exact char counter of the
                     // stored conversation when the backend omits usage.
@@ -67,6 +99,7 @@ impl ChatApp {
                     } else {
                         runtime.chat_state.commit_stream();
                     }
+                    runtime.chat_state.prompt_progress = None;
                     runtime.chat_state.is_generating = false;
                     runtime.chat_state.current_thinking.clear();
                     if is_selected {
@@ -102,6 +135,7 @@ impl ChatApp {
                 if let Some(runtime) = self.session_store.get_mut(&sid) {
                     runtime.chat_state.stream_chunk(&format!("\n\nStream error: {}", error));
                     runtime.chat_state.commit_stream();
+                    runtime.chat_state.prompt_progress = None;
                     runtime.chat_state.is_generating = false;
                     if is_selected {
                         self.status = AppStatus::Error(error.clone());

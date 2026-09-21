@@ -116,12 +116,22 @@ impl ChatApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
              
-            // Token count pill
+            // Token count pill (counts up live while generating; snaps to the
+            // server-reported total when a round completes)
             ui.add(egui::Label::new(
                 egui::RichText::new(format!("Tokens: {}", chat.token_count))
                     .color(theme.text_secondary)
                     .size(11.0)
-            ).wrap());
+            ).wrap())
+            .on_hover_text(format!(
+                "Total context tokens for this chat (prompt + all messages)\n\
+                 Counts up live while generating (estimated ~3.5 chars/token);\n\
+                 snaps to the server-reported total when a round completes.\n\
+                 Use \u{21e9} to reset the context\n\n\
+                 Context window: {} tokens\nUsage: {:.1}%",
+                n_ctx,
+                chat.context_used
+            ));
              
             // Context usage pill with color coding
             let context_color = if chat.context_used > 80.0 {
@@ -137,23 +147,50 @@ impl ChatApp {
                     .size(11.0)
             ).wrap());
 
-            // llama.cpp server-reported speeds from the last completed round.
-            // Only shown when the backend reports them (llama.cpp server does;
-            // OpenAI and most other backends don't).
-            let mut speeds: Vec<String> = Vec::new();
-            if let Some(pp) = chat.prompt_tps {
-                speeds.push(format!("PP {:.1} t/s", pp));
-            }
-            if let Some(tg) = chat.gen_tps {
-                speeds.push(format!("TG {:.1} t/s", tg));
-            }
-            if !speeds.is_empty() {
+            // Live prompt-processing progress (llama.cpp `prompt_progress`):
+            // shown while the server works through the prompt, before the
+            // first token. Percentage + count are over NON-cached tokens
+            // (the "timed" progress per the llama.cpp docs) — cached tokens
+            // are near-free and would otherwise make it hit 100% instantly.
+            if let Some(pp) = &chat.prompt_progress {
+                let total_new = pp.total.saturating_sub(pp.cache);
+                let done_new = pp.processed.saturating_sub(pp.cache);
+                let pct = if total_new > 0 {
+                    done_new as f32 / total_new as f32 * 100.0
+                } else {
+                    100.0
+                };
                 ui.add(egui::Label::new(
-                    egui::RichText::new(speeds.join(" · ")).color(theme.accent).size(11.0)
+                    egui::RichText::new(format!("PP {:.0}% ({}/{})", pct, done_new, total_new))
+                        .color(egui::Color32::from_rgb(255, 176, 64))
+                        .size(11.0)
                 ).wrap())
-                .on_hover_text(
-                    "llama.cpp server-reported speeds from the last completed round:\nPP = prompt processing (tokens/s)\nTG = token generation (tokens/s)"
-                );
+                .on_hover_text(format!(
+                    "Prompt processing progress (llama.cpp)\n{}/{} uncached tokens processed ({} cached, {} total)\nSpeed in the PP t/s readout beside it",
+                    done_new, total_new, pp.cache, pp.total
+                ));
+            }
+
+            // llama.cpp speeds: shown only while a run is in progress (the
+            // user doesn't want stale numbers lingering when idle). Only
+            // backends that report them get readouts (llama.cpp does; OpenAI
+            // and most others don't).
+            if chat.is_generating {
+                let mut speeds: Vec<String> = Vec::new();
+                if let Some(pp) = chat.prompt_tps {
+                    speeds.push(format!("PP {:.1} t/s", pp));
+                }
+                if let Some(tg) = chat.gen_tps {
+                    speeds.push(format!("TG {:.1} t/s", tg));
+                }
+                if !speeds.is_empty() {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(speeds.join(" · ")).color(theme.accent).size(11.0)
+                    ).wrap())
+                    .on_hover_text(
+                        "PP = prompt processing (tokens/s) — live from llama.cpp `prompt_progress`\nwhile the prompt is processed (non-cached tokens), final server value on complete\nTG = token generation (tokens/s) — live estimate while generating,\nserver-reported value once a round completes (llama.cpp backends)"
+                    );
+                }
             }
 
             ui.separator();

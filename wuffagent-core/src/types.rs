@@ -217,6 +217,34 @@ pub struct Usage {
     pub timings: Option<LlamaTimings>,
 }
 
+/// Live prompt-processing progress from the llama.cpp server: a
+/// `prompt_progress` object in stream chunks (requested via
+/// `return_progress: true` in the request body). Sent per server main-loop
+/// tick while the prompt is being processed.
+#[derive(Deserialize, Clone, Copy, Debug)]
+pub struct PromptProgress {
+    /// Total prompt tokens for this call.
+    pub total: u32,
+    /// Tokens served from the KV cache (processed nearly for free).
+    pub cache: u32,
+    /// Tokens processed so far (including cached ones).
+    pub processed: u32,
+    /// Milliseconds elapsed since prompt processing started.
+    pub time_ms: f64,
+}
+
+impl PromptProgress {
+    /// Effective prompt-processing speed (tokens/s) counting only
+    /// non-cached tokens. `None` while nothing new has been processed.
+    pub fn prompt_tps(&self) -> Option<f64> {
+        let new = f64::from(self.processed) - f64::from(self.cache);
+        if self.time_ms < 1.0 || new < 1.0 {
+            return None;
+        }
+        Some(new / (self.time_ms / 1000.0))
+    }
+}
+
 /// llama.cpp server-reported per-stage speeds for one completed call.
 #[derive(Deserialize, Debug, Clone)]
 pub struct LlamaTimings {
@@ -272,6 +300,9 @@ pub enum MessageKind {
 #[derive(Clone, Debug)]
 pub enum AppEvent {
     StreamChunk { content: String, session_id: String },
+    /// Live prompt-processing progress (llama.cpp `prompt_progress` chunks,
+    /// sent while the server processes the prompt before the first token).
+    StreamPromptProgress { progress: PromptProgress, session_id: String },
     /// An intermediate tool round finished (text committed, generation continues).
     StreamRoundComplete { content: String, usage: Option<Usage>, session_id: String },
     StreamComplete { content: String, usage: Option<Usage>, session_id: String },

@@ -48,8 +48,21 @@ pub struct ChatAreaState {
     /// prompt processing (tokens/s). `None` until a backend that reports
     /// timings has completed a round (or cleared by a backend that doesn't).
     pub prompt_tps: Option<f64>,
-    /// Token generation (tokens/s) — llama.cpp "predicted" speed.
+    /// Token generation (tokens/s). While a round is generating this is the
+    /// LIVE estimate of the in-progress segment; on round/complete it snaps
+    /// to the llama.cpp "predicted" speed from the server's `timings`
+    /// (or None if the backend doesn't report them).
     pub gen_tps: Option<f64>,
+    /// Content characters streamed in the current (in-progress) generation
+    /// segment — the status bar's live token/speed estimate. Reset by
+    /// `commit_stream`.
+    pub live_gen_chars: u32,
+    /// Latest llama.cpp `prompt_progress` for the in-flight round (the
+    /// prompt is being processed — no tokens have streamed yet). Cleared
+    /// when the round completes or errors.
+    pub prompt_progress: Option<crate::types::PromptProgress>,
+    /// When the current generation segment started (live speed estimate).
+    pub live_gen_started: Option<std::time::Instant>,
     pub pending_image: Option<egui::ImageSource<'static>>,
     /// Status shown in the status bar for this session.
     pub status: crate::types::AppStatus,
@@ -80,6 +93,9 @@ impl Default for ChatAreaState {
             token_count: 0,
             prompt_tps: None,
             gen_tps: None,
+            live_gen_chars: 0,
+            live_gen_started: None,
+            prompt_progress: None,
             pending_image: None,
             status: crate::types::AppStatus::Stopped,
             queued_messages: Vec::new(),
@@ -104,6 +120,12 @@ impl ChatAreaState {
 
     pub fn stream_chunk(&mut self, chunk: &str) {
         self.stream_buffer.push_str(chunk);
+        self.live_gen_chars = self
+            .live_gen_chars
+            .saturating_add(chunk.chars().count() as u32);
+        if self.live_gen_started.is_none() {
+            self.live_gen_started = Some(std::time::Instant::now());
+        }
     }
 
     pub fn commit_stream(&mut self) {
@@ -111,6 +133,25 @@ impl ChatAreaState {
         if !buffer.is_empty() {
             self.append_message("assistant", &buffer);
         }
+        // The generation segment ended (round commit, completion, error or
+        // cancellation) — clear the live estimate so the next round starts
+        // from a clean slate.
+        self.live_gen_chars = 0;
+        self.live_gen_started = None;
+    }
+
+    /// Estimated tokens generated so far in the current segment
+    /// (~3.5 characters per token).
+    pub fn live_gen_tokens(&self) -> f64 {
+        self.live_gen_chars as f64 / 3.5
+    }
+
+    /// Live token-generation speed (tokens/s) for the current segment,
+    /// once enough time has elapsed to be meaningful.
+    pub fn live_gen_tps(&self) -> Option<f64> {
+        let started = self.live_gen_started?;
+        let elapsed = started.elapsed().as_secs_f64();
+        (elapsed >= 0.5).then(|| self.live_gen_tokens() / elapsed)
     }
 
     /// Show a brief notification message (stored as a temporary system message).

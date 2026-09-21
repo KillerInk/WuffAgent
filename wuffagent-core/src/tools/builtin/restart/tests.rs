@@ -111,6 +111,44 @@ fn test_restart_build_success_queues_restart() {
 }
 
 #[test]
+fn test_is_relaunch_build_detects_target_pair() {
+    assert!(is_relaunch_build(
+        std::path::Path::new("M:/repos/WuffAgent/target/relaunch/debug/wuffagent-egui.exe")
+    ));
+    assert!(!is_relaunch_build(
+        std::path::Path::new("M:/repos/WuffAgent/target/debug/wuffagent-egui.exe")
+    ));
+    // A bare `relaunch` component (without `target/` before it) is not the
+    // secondary build dir.
+    assert!(!is_relaunch_build(std::path::Path::new("C:/other/relaunch/x.exe")));
+}
+
+#[test]
+fn test_plan_self_restart_requires_wuffagent_exe() {
+    // A non-WuffAgent binary (e.g. a test harness) never gets an auto-plan.
+    assert!(plan_self_restart(std::path::Path::new("target/debug/some-test-harness.exe")).is_none());
+}
+
+#[test]
+fn test_plan_self_restart_switches_between_two_builds() {
+    // Test cwd is the crate root (which has a Cargo.toml), so the walk-up from
+    // a relative path finds a repo root. Only assert on the build command and
+    // the target half of the exe path, which are environment-independent.
+    let on_relaunch = plan_self_restart(std::path::Path::new("target/relaunch/debug/wuffagent-egui"))
+        .expect("plan for a WuffAgent exe running the secondary build");
+    assert_eq!(on_relaunch.build_cmd, "cargo build");
+    let exe = on_relaunch.exe_path.to_string_lossy().replace('\\', "/");
+    assert!(exe.contains("/debug/"), "default build target: {}", exe);
+    assert!(!exe.contains("/relaunch/"), "must NOT target the relaunch dir: {}", exe);
+
+    let on_default = plan_self_restart(std::path::Path::new("target/debug/wuffagent-egui"))
+        .expect("plan for a WuffAgent exe running the default build");
+    assert_eq!(on_default.build_cmd, "cargo build --target-dir target/relaunch");
+    let exe = on_default.exe_path.to_string_lossy().replace('\\', "/");
+    assert!(exe.contains("/relaunch/debug/"), "secondary build target: {}", exe);
+}
+
+#[test]
 fn test_restart_schema_shape() {
     let (t, _) = tool();
     let schema = t.parameters_schema();

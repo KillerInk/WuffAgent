@@ -613,11 +613,12 @@ impl Agent {
                  - `reason` (required): what you changed and why you are restarting; shown to the user and used to resume the work\\n\\\n\
                  - `build_cmd` (optional): a command to run FIRST (e.g. a rebuild); if it fails the restart is skipped so you can fix it\\n\\\n\
                  - `exe_path` (optional): the binary to launch; omit to relaunch the current executable\\n\\\n\
-                 Use it after making changes that require a rebuild. Most useful when editing WuffAgent's own source: build it, \\\n\
-                 then restart to load the new code and pick the work back up. On Windows you cannot relink the running exe, \\\n\
-                 so for WuffAgent itself use build_cmd=\"cargo build --target-dir target/relaunch\" and \\\n\
-                 exe_path=\"target/relaunch/debug/wuffagent-egui.exe\". Your turn ends when you call it; WuffAgent closes and \\\n\
-                 reopens, then continues the same work.",
+                 Use it after making changes that require a rebuild. Most useful when editing WuffAgent's own source. \
+                 For WuffAgent itself, OMIT build_cmd and exe_path: the tool then builds and launches the OTHER of \
+                 WuffAgent's two standard builds — the default `cargo build` output (target/debug) and a second copy \
+                 (target/relaunch) — alternating between them on every restart, since on Windows the running exe \
+                 cannot be relinked in place. Your turn ends when you call it; WuffAgent closes and reopens, then \
+                 continues the same work.",
             );
         }
 
@@ -864,6 +865,8 @@ impl Agent {
                     let rt_attempt = round_thinking.clone();
                     let ready_tx = self.event_tx.clone();
                     let ready_sid = self.session_id();
+                    let pp_tx = self.event_tx.clone();
+                    let pp_sid = self.session_id();
                     let ready_pending = Arc::clone(&pending_tool_runs);
                     let ready_manager = tool_manager.clone();
                     let ready_cancel = cancel_token.clone();
@@ -942,6 +945,20 @@ impl Agent {
                                 })
                             });
                             ready_pending.lock().unwrap().insert(id, handle);
+                        },
+                        move |pp: crate::types::PromptProgress| {
+                            // Live prompt-processing progress (llama.cpp):
+                            // forward to the UI for the status bar PP speed.
+                            if let Some(ref tx) = pp_tx {
+                                if let Ok(g) = tx.lock() {
+                                    let _ = g.send(
+                                        crate::types::AppEvent::StreamPromptProgress {
+                                            progress: pp,
+                                            session_id: pp_sid.clone(),
+                                        },
+                                    );
+                                }
+                            }
                         },
                         Some(cancel_token),
                     )
