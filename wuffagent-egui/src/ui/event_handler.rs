@@ -45,6 +45,12 @@ impl ChatApp {
                         if n_ctx > 0 {
                             runtime.chat_state.context_used = u.total_tokens as f32 / n_ctx as f32 * 100.0;
                         }
+                        // Server speeds (llama.cpp `timings`); None when the
+                        // backend doesn't report them — that clears stale
+                        // values from a previous, different backend.
+                        let t = u.timings.as_ref();
+                        runtime.chat_state.prompt_tps = t.and_then(|t| t.prompt_per_second);
+                        runtime.chat_state.gen_tps = t.and_then(|t| t.predicted_per_second);
                     } else {
                         runtime.refresh_token_gauge(n_ctx);
                     }
@@ -72,6 +78,11 @@ impl ChatApp {
                         if n_ctx > 0 {
                             runtime.chat_state.context_used = usage.total_tokens as f32 / n_ctx as f32 * 100.0;
                         }
+                        // Server speeds (llama.cpp `timings`); None when the
+                        // backend doesn't report them.
+                        let t = usage.timings.as_ref();
+                        runtime.chat_state.prompt_tps = t.and_then(|t| t.prompt_per_second);
+                        runtime.chat_state.gen_tps = t.and_then(|t| t.predicted_per_second);
                     } else {
                         runtime.refresh_token_gauge(n_ctx);
                     }

@@ -33,6 +33,10 @@ pub struct Response {
     pub model: Option<String>,
     pub choices: Vec<Choice>,
     pub usage: Option<Usage>,
+    /// llama.cpp extension: per-stage speeds (sibling of `usage` on the
+    /// wire). Folded into `usage.timings` by `send_message`.
+    #[serde(default)]
+    pub timings: Option<crate::types::LlamaTimings>,
 }
 
 /// Everything a completed non-streaming call knows about itself, for the
@@ -165,7 +169,14 @@ pub async fn send_message(
 
     let msg = &response.choices[0].message;
     let content = msg.content.clone();
-    let usage = response.usage.clone();
+    // llama.cpp reports speeds in a `timings` field SIBLING to `usage`;
+    // fold it into the Usage so the UI can show tokens/sec.
+    let mut usage = response.usage.clone();
+    if let (Some(u), Some(t)) = (usage.as_mut(), response.timings.clone()) {
+        if u.timings.is_none() {
+            u.timings = Some(t);
+        }
+    }
     let model = response.model.clone();
     let tool_calls = msg.tool_calls.as_ref().map(|t| t.len() as u32).unwrap_or(0);
     let thinking_chars = msg

@@ -44,6 +44,12 @@ pub struct ChatAreaState {
     pub message_ratings: std::collections::HashMap<usize, String>,
     pub context_used: f32,
     pub token_count: usize,
+    /// llama.cpp server-reported speeds from the last completed round:
+    /// prompt processing (tokens/s). `None` until a backend that reports
+    /// timings has completed a round (or cleared by a backend that doesn't).
+    pub prompt_tps: Option<f64>,
+    /// Token generation (tokens/s) — llama.cpp "predicted" speed.
+    pub gen_tps: Option<f64>,
     pub pending_image: Option<egui::ImageSource<'static>>,
     /// Status shown in the status bar for this session.
     pub status: crate::types::AppStatus,
@@ -72,6 +78,8 @@ impl Default for ChatAreaState {
             message_ratings: std::collections::HashMap::new(),
             context_used: 0.0,
             token_count: 0,
+            prompt_tps: None,
+            gen_tps: None,
             pending_image: None,
             status: crate::types::AppStatus::Stopped,
             queued_messages: Vec::new(),

@@ -136,7 +136,26 @@ impl ChatApp {
                     .color(context_color)
                     .size(11.0)
             ).wrap());
-            
+
+            // llama.cpp server-reported speeds from the last completed round.
+            // Only shown when the backend reports them (llama.cpp server does;
+            // OpenAI and most other backends don't).
+            let mut speeds: Vec<String> = Vec::new();
+            if let Some(pp) = chat.prompt_tps {
+                speeds.push(format!("PP {:.1} t/s", pp));
+            }
+            if let Some(tg) = chat.gen_tps {
+                speeds.push(format!("TG {:.1} t/s", tg));
+            }
+            if !speeds.is_empty() {
+                ui.add(egui::Label::new(
+                    egui::RichText::new(speeds.join(" · ")).color(theme.accent).size(11.0)
+                ).wrap())
+                .on_hover_text(
+                    "llama.cpp server-reported speeds from the last completed round:\nPP = prompt processing (tokens/s)\nTG = token generation (tokens/s)"
+                );
+            }
+
             ui.separator();
             
             // Server specs. In remote mode before /props has been fetched,

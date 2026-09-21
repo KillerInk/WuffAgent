@@ -208,6 +208,24 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// llama.cpp extension: server-reported per-stage speeds for the
+    /// completed call. The server sends these in a `timings` field that is a
+    /// SIBLING of `usage` on the wire; the client folds them in here (see
+    /// `http.rs` / `sse.rs`) so the UI can show tokens/sec. `None` for
+    /// backends that don't report timings.
+    #[serde(default)]
+    pub timings: Option<LlamaTimings>,
+}
+
+/// llama.cpp server-reported per-stage speeds for one completed call.
+#[derive(Deserialize, Debug, Clone)]
+pub struct LlamaTimings {
+    /// Prompt processing speed (tokens/second).
+    #[serde(default)]
+    pub prompt_per_second: Option<f64>,
+    /// Token generation (llama.cpp "predicted") speed (tokens/second).
+    #[serde(default)]
+    pub predicted_per_second: Option<f64>,
 }
 
 /// UI application status indicator.

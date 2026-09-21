@@ -362,8 +362,17 @@ pub async fn process_sse_line(
     }
 
     // Extract usage from the final chunk (when choices has no delta but has usage)
-    if let Some(usage) = chunk.get("usage").and_then(|u| serde_json::from_value(u.clone()).ok()) {
-        return Ok(Some(usage));
+    if let Some(usage_val) = chunk.get("usage") {
+        if let Some(mut usage) = serde_json::from_value::<Usage>(usage_val.clone()).ok() {
+            // llama.cpp reports speeds in a `timings` field SIBLING to
+            // `usage` in the final chunk; fold it into the Usage.
+            if usage.timings.is_none() {
+                usage.timings = chunk
+                    .get("timings")
+                    .and_then(|t| serde_json::from_value(t.clone()).ok());
+            }
+            return Ok(Some(usage));
+        }
     }
 
     Ok(None)

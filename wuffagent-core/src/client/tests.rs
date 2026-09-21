@@ -67,6 +67,7 @@ fn test_calibrate_from_usage() {
         prompt_tokens: 3000,
         completion_tokens: 100,
         total_tokens: 3100,
+        timings: None,
     }));
     assert_eq!(client.chars_per_token_x100(), 333);
 
@@ -76,6 +77,7 @@ fn test_calibrate_from_usage() {
         prompt_tokens: 500,
         completion_tokens: 10,
         total_tokens: 510,
+        timings: None,
     }));
     assert_eq!(client.chars_per_token_x100(), 100);
 
@@ -86,6 +88,7 @@ fn test_calibrate_from_usage() {
         prompt_tokens: 0,
         completion_tokens: 0,
         total_tokens: 0,
+        timings: None,
     }));
     assert_eq!(client.chars_per_token_x100(), 100);
 
@@ -95,6 +98,7 @@ fn test_calibrate_from_usage() {
         prompt_tokens: 1,
         completion_tokens: 0,
         total_tokens: 1,
+        timings: None,
     }));
     assert_eq!(client.chars_per_token_x100(), 1000);
 }
@@ -115,6 +119,7 @@ fn test_trim_trigger_and_target_chars_use_calibrated_ratio() {
         prompt_tokens: 10_000,
         completion_tokens: 0,
         total_tokens: 10_000,
+        timings: None,
     }));
     assert_eq!(client.trim_trigger_chars(), (100_096u64 * 90 * 300 / 10_000) as usize);
     assert_eq!(client.trim_target_chars(), (100_096u64 * 50 * 300 / 10_000) as usize);
@@ -136,6 +141,7 @@ fn test_estimate_tokens_from_chars_over_estimates() {
         prompt_tokens: 500,
         completion_tokens: 0,
         total_tokens: 500,
+        timings: None,
     }));
     assert_eq!(client.estimate_tokens_from_chars(1234), 1234);
 }
@@ -746,7 +752,7 @@ async fn test_completed_call_logs_one_usage_line() {
         // so the usage line must carry tool_calls=2 and the thinking length.
         let thinking = "thinking hard";
         let body: Vec<u8> = format!(
-            r#"{{"model":"mock-model","choices":[{{"message":{{"role":"assistant","content":"hello back","reasoning_content":"{thinking}","tool_calls":[{{"id":"tc1","type":"function","function":{{"name":"shell","arguments":"{{}}"}}}},{{"id":"tc2","type":"function","function":{{"name":"read_file","arguments":"{{}}"}}}}]}},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154}}}}"#
+            r#"{{"model":"mock-model","choices":[{{"message":{{"role":"assistant","content":"hello back","reasoning_content":"{thinking}","tool_calls":[{{"id":"tc1","type":"function","function":{{"name":"shell","arguments":"{{}}"}}}},{{"id":"tc2","type":"function","function":{{"name":"read_file","arguments":"{{}}"}}}}]}},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154}},"timings":{{"prompt_n":120,"prompt_ms":972.1,"prompt_per_second":123.45,"predicted_n":34,"predicted_ms":501.5,"predicted_per_second":67.89}}}}"#
         )
         .into_bytes();
         let resp_head = format!(
@@ -768,7 +774,12 @@ async fn test_completed_call_logs_one_usage_line() {
     server.join().unwrap();
 
     assert_eq!(content, "hello back");
-    assert_eq!(usage.as_ref().unwrap().total_tokens, 154);
+    let u = usage.as_ref().unwrap();
+    assert_eq!(u.total_tokens, 154);
+    // llama.cpp-style `timings` (sibling of `usage`) must be folded in.
+    let t = u.timings.as_ref().unwrap();
+    assert!((t.prompt_per_second.unwrap() - 123.45).abs() < 1e-9);
+    assert!((t.predicted_per_second.unwrap() - 67.89).abs() < 1e-9);
 
     let (entries, skipped) = crate::usage::stats::load_entries(&log_path);
     assert_eq!(skipped, 0);
