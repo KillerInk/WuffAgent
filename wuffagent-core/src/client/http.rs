@@ -35,6 +35,22 @@ pub struct Response {
     pub usage: Option<Usage>,
 }
 
+/// Everything a completed non-streaming call knows about itself, for the
+/// usage log and callers alike.
+#[derive(Debug, Clone)]
+pub struct NonStreamResult {
+    /// The assistant's text content.
+    pub content: String,
+    /// Server-reported token counts (None when the backend omitted them).
+    pub usage: Option<Usage>,
+    /// Model name the server reported (for the usage log).
+    pub model: Option<String>,
+    /// Number of tool calls the assistant issued in this call.
+    pub tool_calls: u32,
+    /// Character count of the model's thinking/reasoning text.
+    pub thinking_chars: u64,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct Choice {
     pub message: Message,
@@ -104,17 +120,15 @@ pub fn build_request(
     }
 }
 
-/// Send a non-streaming HTTP request and return the response content.
-///
-/// Returns `(content, usage, model)`, where `model` is the model name the
-/// server reported (for the usage log) and `usage` is the server-reported
-/// token counts (see [`crate::types::Usage`]).
+/// Send a non-streaming HTTP request and return the completed call's
+/// results (content, server-reported usage + model, tool-call count and
+/// thinking-character count — see [`NonStreamResult`]).
 pub async fn send_message(
     http_client: &reqwest::Client,
     base_url: &str,
     api_key: Option<&str>,
     request: &ChatRequest,
-) -> Result<(String, Option<Usage>, Option<String>), Error> {
+) -> Result<NonStreamResult, Error> {
     let body = serde_json::to_string(request)?;
 
     let mut builder = http_client
@@ -149,18 +163,33 @@ pub async fn send_message(
         return Err(Error::Stream("Empty response".to_string()));
     }
 
-    let content = response.choices[0].message.content.clone();
+    let msg = &response.choices[0].message;
+    let content = msg.content.clone();
     let usage = response.usage.clone();
     let model = response.model.clone();
+    let tool_calls = msg.tool_calls.as_ref().map(|t| t.len() as u32).unwrap_or(0);
+    let thinking_chars = msg
+        .reasoning_content
+        .as_ref()
+        .map(|r| r.chars().count() as u64)
+        .unwrap_or(0);
     let finish_reason = response.choices[0].finish_reason.clone();
     tracing::debug!(
-        "send_message (non-stream) assistant content (len={}) finish_reason={:?}: {:?}",
+        "send_message (non-stream) assistant content (len={}) finish_reason={:?} tool_calls={} thinking_chars={}: {:?}",
         content.len(),
         finish_reason,
+        tool_calls,
+        thinking_chars,
         content.chars().take(200).collect::<String>()
     );
 
-    Ok((content, usage, model))
+    Ok(NonStreamResult {
+        content,
+        usage,
+        model,
+        tool_calls,
+        thinking_chars,
+    })
 }
 
 /// Build the HTTP request builder for a streaming call.

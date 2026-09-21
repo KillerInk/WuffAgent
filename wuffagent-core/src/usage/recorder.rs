@@ -2,8 +2,11 @@
 //!
 //! One line per call:
 //! ```json
-//! {"ts":"2026-09-21T12:34:56.789Z","session_id":"…","agent":"general","model":"deepseek-chat","prompt_tokens":12345,"completion_tokens":678,"total_tokens":13023}
+//! {"ts":"2026-09-21T12:34:56.789Z","session_id":"…","agent":"general","model":"deepseek-chat","prompt_tokens":12345,"completion_tokens":678,"total_tokens":13023,"tool_calls":2,"thinking_chars":1543}
 //! ```
+//!
+//! `tool_calls` / `thinking_chars` are absent in lines written before they
+//! existed; deserialization defaults them to 0.
 //!
 //! Writes are best-effort: serialization or I/O failures are reported via
 //! `tracing::warn!` (at most once per failure mode, then `debug!`) and never
@@ -35,6 +38,14 @@ pub struct UsageEntry {
     pub completion_tokens: u32,
     /// Total tokens (server-reported).
     pub total_tokens: u32,
+    /// Number of tool calls the assistant issued in this call (0 = none).
+    /// Absent in pre-existing log lines (serde default 0).
+    #[serde(default)]
+    pub tool_calls: u32,
+    /// Character count of the model's thinking/reasoning text in this call
+    /// (0 = none). Absent in pre-existing log lines (serde default 0).
+    #[serde(default)]
+    pub thinking_chars: u64,
 }
 
 /// Appends [`UsageEntry`] lines to a JSONL file.
@@ -169,6 +180,9 @@ mod tests {
             prompt_tokens: total.saturating_sub(total / 10),
             completion_tokens: total / 10,
             total_tokens: total,
+            // Non-zero so the round-trip test actually covers the fields.
+            tool_calls: (total / 100).max(1),
+            thinking_chars: (total as u64) * 7,
         }
     }
 

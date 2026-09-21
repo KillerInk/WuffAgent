@@ -113,14 +113,17 @@ impl UsagePanel {
             .open(&mut open)
             .collapsible(true)
             .resizable(true)
-            .default_size([560.0, 420.0])
-            .min_size([380.0, 260.0])
+            .default_size([620.0, 460.0])
+            .min_size([420.0, 340.0])
             .show(ctx, |ui| {
                 ui.visuals_mut().panel_fill = theme.surface;
 
+                // Header: title left, window range right.
                 ui.horizontal(|ui| {
                     ui.heading("Token Usage");
-                    ui.label(egui::RichText::new(range.window_label()).weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(range.window_label()).weak());
+                    });
                 });
 
                 // Range selector.
@@ -146,9 +149,40 @@ impl UsagePanel {
                         }
                     }
                 });
-                ui.separator();
-
                 let window = bucketize(&self.entries, range.granularity(), chrono::Utc::now());
+
+                // Stat cards above the chart: window totals, calls, tool
+                // calls and thinking volume.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(2.0);
+                    stat_card(ui, "input", window.total_prompt_tokens, theme.primary, theme);
+                    stat_card(ui, "output", window.total_completion_tokens, theme.accent, theme);
+                    stat_card(ui, "total", window.total_tokens, theme.warning, theme);
+                    stat_card(
+                        ui,
+                        "calls",
+                        window.calls as u64,
+                        theme.text_primary,
+                        theme,
+                    );
+                    stat_card(
+                        ui,
+                        "tools",
+                        window.total_tool_calls as u64,
+                        theme.success,
+                        theme,
+                    );
+                    stat_card(
+                        ui,
+                        "thinking",
+                        window.total_thinking_chars,
+                        theme.text_secondary,
+                        theme,
+                    );
+                    ui.add_space(2.0);
+                });
+                ui.add_space(10.0);
 
                 if window.calls == 0 {
                     // Empty state.
@@ -179,34 +213,48 @@ impl UsagePanel {
                     let buckets = &window.buckets;
                     let gran = range.granularity();
 
-                    let plot_resp = Plot::new("usage_plot")
-                        .min_size(egui::vec2(0.0, 170.0))
-                        .legend(Legend::default())
-                        .allow_zoom(false)
-                        .allow_drag(false)
-                        .x_axis_formatter(move |mark: GridMark, _bounds: &std::ops::RangeInclusive<f64>| {
-                            let i = (mark.value.round()).clamp(0.0, (n - 1) as f64) as usize;
-                            buckets[i].start.format("%H:%M").to_string()
-                        })
-                        .y_axis_formatter(|mark: GridMark, _bounds: &std::ops::RangeInclusive<f64>| {
-                            fmt_tokens(mark.value.max(0.0) as u64)
-                        })
-                        .show(ui, |pui| {
-                            pui.line(Line::new("input", input_pts).color(theme.primary).width(1.5));
-                            pui.line(
-                                Line::new("output", output_pts)
-                                    .color(theme.accent)
-                                    .width(1.5),
-                            );
-                            pui.line(
-                                Line::new("total", total_pts)
-                                    .color(theme.warning)
-                                    .width(2.0),
-                            );
-                            if let Some(p) = pui.pointer_coordinate() {
-                                hovered_x = Some(p.x);
-                            }
-                        });
+                    // Cap the chart's height: a Plot greedily takes every
+                    // remaining pixel, which would push the hover-details
+                    // line and footnote off the bottom of the window.
+                    // Reserve ~40px for those (two short text lines).
+                    let plot_h = (ui.available_height() - 36.0).max(120.0);
+                    let plot_resp = ui.scope(|ui| {
+                        ui.set_max_height(plot_h);
+                        Plot::new("usage_plot")
+                            .min_size(egui::vec2(0.0, 120.0))
+                            .legend(Legend::default().position(egui_plot::Corner::LeftTop))
+                            .allow_zoom(false)
+                            .allow_drag(false)
+                            .x_axis_formatter(
+                                move |mark: GridMark, _bounds: &std::ops::RangeInclusive<f64>| {
+                                    let i = (mark.value.round()).clamp(0.0, (n - 1) as f64) as usize;
+                                    buckets[i].start.format("%H:%M").to_string()
+                                },
+                            )
+                            .y_axis_formatter(|mark: GridMark, _bounds: &std::ops::RangeInclusive<f64>| {
+                                fmt_tokens(mark.value.max(0.0) as u64)
+                            })
+                            .show(ui, |pui| {
+                                pui.line(
+                                    Line::new("input", input_pts)
+                                        .color(theme.primary)
+                                        .width(1.5),
+                                );
+                                pui.line(
+                                    Line::new("output", output_pts)
+                                        .color(theme.accent)
+                                        .width(1.5),
+                                );
+                                pui.line(
+                                    Line::new("total", total_pts)
+                                        .color(theme.warning)
+                                        .width(2.0),
+                                );
+                                if let Some(p) = pui.pointer_coordinate() {
+                                    hovered_x = Some(p.x);
+                                }
+                            })
+                    });
 
                     // Hover tooltip: details for the bucket under the pointer.
                     if plot_resp.response.hovered() {
@@ -220,13 +268,16 @@ impl UsagePanel {
                             };
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "{} — in {} · out {} · total {} · {} call{}",
+                                    "{} — in {} · out {} · total {} · {} call{} · {} tool call{} · {} thinking",
                                     stamp,
                                     fmt_tokens(b.prompt_tokens),
                                     fmt_tokens(b.completion_tokens),
                                     fmt_tokens(b.total_tokens),
                                     b.calls,
                                     if b.calls == 1 { "" } else { "s" },
+                                    b.tool_calls,
+                                    if b.tool_calls == 1 { "" } else { "s" },
+                                    fmt_tokens(b.thinking_chars),
                                 ))
                                 .color(theme.text_primary),
                             );
@@ -236,25 +287,8 @@ impl UsagePanel {
                     }
                 }
 
-                ui.separator();
-
-                // Summary line.
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} in · {} out · {} total · {} call{}",
-                            fmt_tokens(window.total_prompt_tokens),
-                            fmt_tokens(window.total_completion_tokens),
-                            fmt_tokens(window.total_tokens),
-                            window.calls,
-                            if window.calls == 1 { "" } else { "s" },
-                        ))
-                        .strong(),
-                    );
-                    ui.label(egui::RichText::new(range.window_label()).weak());
-                });
-
                 // Footnote: what a token roughly is.
+                ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new("1 token ≈ 4 characters of text (server-reported counts)")
                         .weak(),
@@ -264,6 +298,33 @@ impl UsagePanel {
         // The ✕ in the title bar (egui's `open`) may have cleared the flag.
         self.show_panel = open;
     }
+}
+
+/// A rounded stat card: small label, big colored value.
+fn stat_card(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: u64,
+    value_color: egui::Color32,
+    theme: &Theme,
+) {
+    egui::Frame::new()
+        .fill(theme.surface_light)
+        .stroke(egui::Stroke::new(1.0, theme.border))
+        .corner_radius(7.0)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(78.0);
+            ui.label(egui::RichText::new(label).weak().size(10.5));
+            ui.add_space(1.0);
+            ui.label(
+                egui::RichText::new(fmt_tokens(value))
+                    .strong()
+                    .size(16.0)
+                    .color(value_color),
+            );
+        });
+    ui.add_space(7.0);
 }
 
 /// Build one chart series: x = bucket index, y = `get(bucket)`.

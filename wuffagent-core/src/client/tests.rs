@@ -742,13 +742,19 @@ async fn test_completed_call_logs_one_usage_line() {
                 break;
             }
         }
-        let body = br#"{"model":"mock-model","choices":[{"message":{"role":"assistant","content":"hello back"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154}}"#;
+        // The mock assistant issues two tool calls and some reasoning text,
+        // so the usage line must carry tool_calls=2 and the thinking length.
+        let thinking = "thinking hard";
+        let body: Vec<u8> = format!(
+            r#"{{"model":"mock-model","choices":[{{"message":{{"role":"assistant","content":"hello back","reasoning_content":"{thinking}","tool_calls":[{{"id":"tc1","type":"function","function":{{"name":"shell","arguments":"{{}}"}}}},{{"id":"tc2","type":"function","function":{{"name":"read_file","arguments":"{{}}"}}}}]}},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154}}}}"#
+        )
+        .into_bytes();
         let resp_head = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             body.len()
         );
         stream.write_all(resp_head.as_bytes()).unwrap();
-        stream.write_all(body).unwrap();
+        stream.write_all(&body).unwrap();
     });
 
     let mut client =
@@ -773,6 +779,8 @@ async fn test_completed_call_logs_one_usage_line() {
     assert_eq!(e.prompt_tokens, 120);
     assert_eq!(e.completion_tokens, 34);
     assert_eq!(e.total_tokens, 154);
+    assert_eq!(e.tool_calls, 2);
+    assert_eq!(e.thinking_chars, "thinking hard".chars().count() as u64);
     // The line must be valid standalone JSONL with a UTC timestamp.
     let raw = std::fs::read_to_string(&log_path).unwrap();
     let lines: Vec<&str> = raw.lines().collect();

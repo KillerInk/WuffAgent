@@ -100,6 +100,10 @@ pub struct Bucket {
     pub total_tokens: u64,
     /// Number of LLM calls.
     pub calls: u32,
+    /// Number of tool calls issued across the bucket's calls.
+    pub tool_calls: u32,
+    /// Character count of thinking/reasoning text across the bucket.
+    pub thinking_chars: u64,
 }
 
 /// A zero-filled usage window: `buckets.len() == granularity.bucket_count()`.
@@ -113,6 +117,10 @@ pub struct UsageWindow {
     pub total_completion_tokens: u64,
     pub total_tokens: u64,
     pub calls: u32,
+    /// Tool calls issued across the window.
+    pub total_tool_calls: u32,
+    /// Thinking/reasoning characters across the window.
+    pub total_thinking_chars: u64,
 }
 
 /// Parse one JSONL line into an entry; `None` for empty or malformed lines.
@@ -165,11 +173,15 @@ pub fn bucketize(
             completion_tokens: 0,
             total_tokens: 0,
             calls: 0,
+            tool_calls: 0,
+            thinking_chars: 0,
         })
         .collect();
 
     let mut totals = [0u64; 3];
     let mut calls: u32 = 0;
+    let mut tool_calls: u32 = 0;
+    let mut thinking_chars: u64 = 0;
     for e in entries {
         let nd = e.ts.with_timezone(&Local).naive_local();
         let Some(i) = granularity.bucket_index(nd, window_start) else {
@@ -180,10 +192,14 @@ pub fn bucketize(
         b.completion_tokens += e.completion_tokens as u64;
         b.total_tokens += e.total_tokens as u64;
         b.calls += 1;
+        b.tool_calls += e.tool_calls;
+        b.thinking_chars += e.thinking_chars;
         totals[0] += e.prompt_tokens as u64;
         totals[1] += e.completion_tokens as u64;
         totals[2] += e.total_tokens as u64;
         calls += 1;
+        tool_calls += e.tool_calls;
+        thinking_chars += e.thinking_chars;
     }
 
     UsageWindow {
@@ -193,6 +209,8 @@ pub fn bucketize(
         total_completion_tokens: totals[1],
         total_tokens: totals[2],
         calls,
+        total_tool_calls: tool_calls,
+        total_thinking_chars: thinking_chars,
     }
 }
 
@@ -339,6 +357,8 @@ mod tests {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: prompt + completion,
+            tool_calls: 0,
+            thinking_chars: 0,
         }
     }
 
@@ -515,6 +535,46 @@ mod tests {
         // (23:00), b in bucket 22 (00:00) — adjacent wall-clock hours.
         assert_eq!(w.buckets[21].total_tokens, 1);
         assert_eq!(w.buckets[22].total_tokens, 1);
+    }
+
+    // ── tool calls / thinking aggregation ─────────────────────────────────
+
+    #[test]
+    fn bucketize_aggregates_tool_calls_and_thinking() {
+        let now = local(2026, 9, 21, 15, 0);
+        let a = local(2026, 9, 21, 14, 10); // bucket 22
+        let b = local(2026, 9, 21, 15, 10); // bucket 23
+        let mut ea = entry(a, 100, 10);
+        ea.tool_calls = 3;
+        ea.thinking_chars = 1200;
+        let mut eb = entry(b, 200, 20);
+        eb.tool_calls = 1;
+        eb.thinking_chars = 50;
+        let w = bucketize(&[ea, eb], Granularity::Hour, now);
+        assert_eq!(w.buckets[22].tool_calls, 3);
+        assert_eq!(w.buckets[22].thinking_chars, 1200);
+        assert_eq!(w.buckets[23].tool_calls, 1);
+        assert_eq!(w.total_tool_calls, 4);
+        assert_eq!(w.total_thinking_chars, 1250);
+    }
+
+    #[test]
+    fn parse_line_defaults_missing_tool_and_thinking_fields() {
+        // Pre-existing lines (written before the fields existed) must parse
+        // with zeroed tool_calls / thinking_chars.
+        let e = parse_line(
+            r#"{"ts":"2026-09-21T12:00:00Z","session_id":"s","agent":"a","model":"m","prompt_tokens":1,"completion_tokens":2,"total_tokens":3}"#,
+        )
+        .unwrap();
+        assert_eq!(e.tool_calls, 0);
+        assert_eq!(e.thinking_chars, 0);
+        // …and lines that carry them round-trip.
+        let e2 = parse_line(
+            r#"{"ts":"2026-09-21T12:00:00Z","session_id":"s","agent":"a","model":"m","prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"tool_calls":2,"thinking_chars":100}"#,
+        )
+        .unwrap();
+        assert_eq!(e2.tool_calls, 2);
+        assert_eq!(e2.thinking_chars, 100);
     }
 
     // ── incremental reader ────────────────────────────────────────────────

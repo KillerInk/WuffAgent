@@ -51,7 +51,9 @@ impl ConnectionSettings {
 }
 
 // Re-export key types so the public API surface is unchanged
-pub use http::{build_request, send_message, build_stream_request, ChatRequest, Response, Choice};
+pub use http::{
+    build_request, send_message, build_stream_request, ChatRequest, NonStreamResult, Response, Choice,
+};
 pub use sse::{process_sse_line, stream_message, add_streaming_messages, ToolCallTracker, looks_like_complete_json};
 pub use session::{
     save_session, load_session,
@@ -350,7 +352,16 @@ impl ChatClient {
     /// failure must never break the chat (the recorder degrades to a
     /// `tracing` log). `None` usage (backend reported nothing) means there is
     /// no server-reported count to store, so nothing is logged.
-    fn record_usage(&self, usage: Option<&Usage>, model: Option<&str>) {
+    ///
+    /// `tool_calls` is how many tool calls the assistant issued in this call;
+    /// `thinking_chars` is the character count of its thinking/reasoning text.
+    fn record_usage(
+        &self,
+        usage: Option<&Usage>,
+        model: Option<&str>,
+        tool_calls: u32,
+        thinking_chars: u64,
+    ) {
         let Some(usage) = usage else {
             return;
         };
@@ -364,6 +375,8 @@ impl ChatClient {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            tool_calls,
+            thinking_chars,
         });
     }
 
@@ -728,10 +741,10 @@ impl ChatClient {
                     )
                     .await
                     {
-                        // Full 3-tuple flows to the common tail below, where
+                        // Full result flows to the common tail below, where
                         // the usage is logged and the ratio calibrated.
                         Ok(ok) => {
-                            self.calibrate_from_usage(ok.1.as_ref());
+                            self.calibrate_from_usage(ok.usage.as_ref());
                             Ok(ok)
                         }
                         Err(re) => Err(re),
@@ -743,10 +756,10 @@ impl ChatClient {
             other => other,
         };
 
-        let (content, usage, model) = result?;
-        self.record_usage(usage.as_ref(), model.as_deref());
-        self.calibrate_from_usage(usage.as_ref());
-        Ok((content, usage))
+        let r = result?;
+        self.record_usage(r.usage.as_ref(), r.model.as_deref(), r.tool_calls, r.thinking_chars);
+        self.calibrate_from_usage(r.usage.as_ref());
+        Ok((r.content, r.usage))
     }
 
     pub async fn send_message_with_tools(
@@ -803,10 +816,10 @@ impl ChatClient {
                     )
                     .await;
                     match retry {
-                        // Full 3-tuple flows to the common tail below, where
+                        // Full result flows to the common tail below, where
                         // the usage is logged and the ratio calibrated.
                         Ok(ok) => {
-                            self.calibrate_from_usage(ok.1.as_ref());
+                            self.calibrate_from_usage(ok.usage.as_ref());
                             Ok(ok)
                         }
                         Err(re) => Err(re),
@@ -817,8 +830,9 @@ impl ChatClient {
             }
             other => other,
         };
-        let (content, usage, model) = result?;
-        self.record_usage(usage.as_ref(), model.as_deref());
+        let r = result?;
+        self.record_usage(r.usage.as_ref(), r.model.as_deref(), r.tool_calls, r.thinking_chars);
+        let (content, usage) = (r.content, r.usage);
 
         // Update conversation history
         let mut conv = self.conversation.lock().unwrap();
@@ -946,7 +960,15 @@ impl ChatClient {
             image: None,
         });
 
-        client.record_usage(usage.as_ref(), model.as_deref());
+        // The accumulated message carries what the SSE layer saw: the
+        // assistant's tool calls and its thinking text.
+        let tool_calls = msg.tool_calls.as_ref().map(|t| t.len() as u32).unwrap_or(0);
+        let thinking_chars = msg
+            .reasoning_content
+            .as_ref()
+            .map(|r| r.chars().count() as u64)
+            .unwrap_or(0);
+        client.record_usage(usage.as_ref(), model.as_deref(), tool_calls, thinking_chars);
         Ok((msg, usage))
     }
 
