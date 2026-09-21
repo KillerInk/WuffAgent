@@ -27,6 +27,10 @@ pub struct StreamOptions {
 
 #[derive(Deserialize, Debug)]
 pub struct Response {
+    /// Model the server actually used (echoed by OpenAI-compatible APIs).
+    /// Requests hardcode `"local"`, so this is the only real model name.
+    #[serde(default)]
+    pub model: Option<String>,
     pub choices: Vec<Choice>,
     pub usage: Option<Usage>,
 }
@@ -101,12 +105,16 @@ pub fn build_request(
 }
 
 /// Send a non-streaming HTTP request and return the response content.
+///
+/// Returns `(content, usage, model)`, where `model` is the model name the
+/// server reported (for the usage log) and `usage` is the server-reported
+/// token counts (see [`crate::types::Usage`]).
 pub async fn send_message(
     http_client: &reqwest::Client,
     base_url: &str,
     api_key: Option<&str>,
     request: &ChatRequest,
-) -> Result<(String, Option<Usage>), Error> {
+) -> Result<(String, Option<Usage>, Option<String>), Error> {
     let body = serde_json::to_string(request)?;
 
     let mut builder = http_client
@@ -143,6 +151,7 @@ pub async fn send_message(
 
     let content = response.choices[0].message.content.clone();
     let usage = response.usage.clone();
+    let model = response.model.clone();
     let finish_reason = response.choices[0].finish_reason.clone();
     tracing::debug!(
         "send_message (non-stream) assistant content (len={}) finish_reason={:?}: {:?}",
@@ -151,7 +160,7 @@ pub async fn send_message(
         content.chars().take(200).collect::<String>()
     );
 
-    Ok((content, usage))
+    Ok((content, usage, model))
 }
 
 /// Build the HTTP request builder for a streaming call.

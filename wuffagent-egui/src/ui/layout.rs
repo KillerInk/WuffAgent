@@ -71,6 +71,18 @@ impl ChatApp {
                         self.memory_panel.show_panel = true;
                     }
 
+                    // Token usage panel button
+                    let usage_btn = egui::Button::new("📊")
+                        .fill(theme.surface_light)
+                        .corner_radius(4);
+                    if ui
+                        .add(usage_btn)
+                        .on_hover_text("Token usage")
+                        .clicked()
+                    {
+                        self.usage_panel.show_panel = true;
+                    }
+
                     // MCP servers button
                     let mcp_btn = egui::Button::new("🔌")
                         .fill(theme.surface_light)
@@ -155,6 +167,9 @@ impl ChatApp {
 
         // Draw memory panel on top (disjoint field borrows).
         self.draw_memory_panel(ctx);
+
+        // Draw token-usage panel on top.
+        self.usage_panel.draw(ctx, &Theme::from_name(&self.config.theme));
 
         // Draw MCP panel on top (disjoint field borrows; `&mut self.config`
         // so the panel can persist server changes).

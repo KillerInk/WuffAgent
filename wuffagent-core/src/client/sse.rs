@@ -369,6 +369,22 @@ pub async fn process_sse_line(
     Ok(None)
 }
 
+/// Extract the `model` field from a raw SSE line (e.g.
+/// `data: {"model":"deepseek-chat",...}`). Returns `None` for non-data
+/// lines, `[DONE]`, or chunks without a model name.
+pub fn extract_model(line: &str) -> Option<String> {
+    let data = line.trim().strip_prefix("data:")?.trim();
+    if data == "[DONE]" {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()?
+        .get("model")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 /// Stream a message and process SSE lines.
 /// `on_tool_call_ready` is invoked (mid-stream) the moment a tool call is
 /// complete and the model has moved past it, so the caller can start
@@ -377,6 +393,10 @@ pub async fn process_sse_line(
 /// `conversation` is updated in place with the new messages.
 /// `cancel_token` can be used to abort the stream early (e.g. user cancellation).
 /// Pass `None` to disable cancellation for this stream.
+///
+/// Returns `(usage, model)`: the server-reported usage (when the backend
+/// sends it) and the model name from the first chunk that carried one
+/// (for the usage log).
 pub async fn stream_message(
     resp: reqwest::Response,
     conversation: &Arc<Mutex<Vec<Message>>>,
@@ -384,10 +404,11 @@ pub async fn stream_message(
     on_tool_call_ready: &mut (impl FnMut(ToolCall) + Send + Sync + 'static),
     tracker: &mut ToolCallTracker,
     cancel_token: Option<&CancellationToken>,
-) -> Result<Option<Usage>, Error> {
+) -> Result<(Option<Usage>, Option<String>), Error> {
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut last_usage: Option<Usage> = None;
+    let mut model: Option<String> = None;
 
     if let Some(cancel_token) = cancel_token {
         return tokio::select! {
@@ -400,6 +421,11 @@ pub async fn stream_message(
                     while let Some(newline_pos) = buffer.find('\n') {
                         let line = buffer[..=newline_pos].to_string();
                         buffer.drain(..=newline_pos);
+                        // Capture the model once (usually from the very
+                        // first chunk); skip the extra JSON parse after that.
+                        if model.is_none() {
+                            model = extract_model(&line);
+                        }
                         if let Some(usage) =
                             process_sse_line(&line, callback, conversation, on_tool_call_ready, tracker).await?
                         {
@@ -407,7 +433,7 @@ pub async fn stream_message(
                         }
                     }
                 }
-                Ok::<_, Error>(last_usage)
+                Ok::<_, Error>((last_usage, model))
             } => result,
             _ = cancel_token.cancelled() => {
                 Err(Error::Cancelled)
@@ -422,6 +448,9 @@ pub async fn stream_message(
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..=newline_pos].to_string();
                 buffer.drain(..=newline_pos);
+                if model.is_none() {
+                    model = extract_model(&line);
+                }
                 if let Some(usage) =
                     process_sse_line(&line, callback, conversation, on_tool_call_ready, tracker).await?
                 {
@@ -431,7 +460,7 @@ pub async fn stream_message(
         }
     }
 
-    Ok(last_usage)
+    Ok((last_usage, model))
 }
 
 /// Add user and empty assistant messages to the conversation.

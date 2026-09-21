@@ -118,6 +118,10 @@ pub struct ChatApp {
     /// The memory panel widget (owns its own list/search/edit state).
     /// `show_panel` gates whether the window is drawn.
     pub memory_panel: super::memory_panel::MemoryPanel,
+    /// The token-usage panel (floating window with an LLM token chart).
+    /// `show_panel` gates whether the window is drawn; stream completions
+    /// mark it dirty so the next frame picks up newly logged calls.
+    pub usage_panel: super::usage_panel::UsagePanel,
     /// The MCP panel widget (server list, add/edit, per-tool toggles).
     pub mcp_panel: super::mcp_panel::McpPanel,
     /// Pending agent improvement suggestions.
@@ -204,6 +208,7 @@ impl ChatApp {
             show_agent_config: false,
             agent_config_dialog: None,
             memory_panel: super::memory_panel::MemoryPanel::new(),
+            usage_panel: super::usage_panel::UsagePanel::new(),
             mcp_panel: super::mcp_panel::McpPanel::new(),
             pending_tx: Some(Arc::new(Mutex::new(event_tx))),
             pending_rx: Some(event_rx),

@@ -7,6 +7,7 @@ edition = "2021"
 wuffagent-core = { path = "../wuffagent-core" }
 eframe = "0.36"
 egui = "0.36"
+egui_plot = "0.37"
 epaint_default_fonts = "0.36"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io"] }

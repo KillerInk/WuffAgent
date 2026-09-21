@@ -17,3 +17,4 @@ pub mod agent_history;
 pub mod improvements;
 pub mod mcp_panel;
 pub mod memory_panel;
+pub mod usage_panel;

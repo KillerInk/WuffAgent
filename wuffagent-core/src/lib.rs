@@ -20,6 +20,7 @@
 //! │   └── dynamic
 //! ├── sessions       (Session model)
 //! ├── memory         (MemoryManager) → uses llm, types
+//! ├── usage          (token-usage log + aggregation) → uses config, types
 //! └── trimming       (conversation trimming)
 //!     ├── classifier
 //!     ├── config
@@ -33,6 +34,8 @@
 //! - `config_types` mirrors `config` re-exports for backward compatibility.
 //! - `agents` depends on `llm`, `client`, `tools`, `types`, `sessions`, and `memory`.
 //! - `memory` depends on `llm` and `types`.
+//! - `client` depends on `usage` (one log line per completed LLM call);
+//!   `usage` depends only on `config`/`types`, so no cycle.
 //! - No circular dependencies exist between top-level modules.
 
 pub mod types;
@@ -46,6 +49,7 @@ pub mod agents;
 pub mod memory;
 pub mod trimming;
 pub mod llm;
+pub mod usage;
 
 // Common UI-facing types re-exported for convenient access from egui consumers.
 pub use types::{AppEvent, AppStatus, ChatMessage, MessageKind, ReasoningEffort};

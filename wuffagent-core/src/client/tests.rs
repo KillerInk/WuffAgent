@@ -713,3 +713,70 @@ fn test_looks_like_complete_json() {
     assert!(!looks_like_complete_json(""));
     assert!(!looks_like_complete_json("not json"));
 }
+
+/// End-to-end choke-point test: one completed (non-stream) LLM call against a
+/// mock OpenAI-compatible server appends exactly one usage.jsonl line with the
+/// server-reported usage, the response's model name, and the agent stamp.
+#[tokio::test]
+async fn test_completed_call_logs_one_usage_line() {
+    use std::io::{Read, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("usage.jsonl");
+
+    // Mock server: one TCP connection, read the request head, reply with a
+    // canned chat completion, close.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let mut head = Vec::new();
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&buf[..n]);
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = br#"{"model":"mock-model","choices":[{"message":{"role":"assistant","content":"hello back"},"finish_reason":"stop"}],"usage":{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154}}"#;
+        let resp_head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(resp_head.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let mut client =
+        ChatClient::new(&format!("http://127.0.0.1:{port}/chat/completions"));
+    client.set_usage_recorder(std::sync::Arc::new(
+        crate::usage::recorder::UsageRecorder::new(log_path.clone()),
+    ));
+    client.set_agent_name("coder");
+
+    let (content, usage) = client.send_message("hi").await.unwrap();
+    server.join().unwrap();
+
+    assert_eq!(content, "hello back");
+    assert_eq!(usage.as_ref().unwrap().total_tokens, 154);
+
+    let (entries, skipped) = crate::usage::stats::load_entries(&log_path);
+    assert_eq!(skipped, 0);
+    assert_eq!(entries.len(), 1);
+    let e = &entries[0];
+    assert_eq!(e.agent, "coder");
+    assert_eq!(e.model, "mock-model");
+    assert_eq!(e.prompt_tokens, 120);
+    assert_eq!(e.completion_tokens, 34);
+    assert_eq!(e.total_tokens, 154);
+    // The line must be valid standalone JSONL with a UTC timestamp.
+    let raw = std::fs::read_to_string(&log_path).unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains(r#""ts":"#));
+    assert!(lines[0].ends_with('}'));
+}

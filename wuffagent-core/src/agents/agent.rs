@@ -210,6 +210,10 @@ impl Agent {
         } else {
             client
         };
+        // Token tracker: stamp this agent's name on the usage-log lines this
+        // client writes. Agents within a session run sequentially, so the
+        // shared client's name is always current at request time.
+        client.set_agent_name(&config.name);
         // Give this agent its own tool manager whose `shell` honors the agent's
         // shell config (allowlist/enabled/timeout), instead of sharing the global
         // allow-all shell. All other tools are shared. This is what makes an

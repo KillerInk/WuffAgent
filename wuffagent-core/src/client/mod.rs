@@ -182,6 +182,17 @@ pub struct ChatClient {
     encryption_key: Option<[u8; 32]>,
     /// Channel to send tool execution events to the UI.
     tool_event_tx: Arc<Mutex<Option<mpsc::Sender<crate::types::AppEvent>>>>,
+    /// Token-usage recorder: appends one JSONL line per completed LLM call
+    /// (default `~/.wuffagent/usage.jsonl`; tests may inject a temp-path
+    /// recorder via `set_usage_recorder`). Writing is best-effort — a log
+    /// failure must never break the chat.
+    usage_recorder: Arc<crate::usage::recorder::UsageRecorder>,
+    /// Name of the agent about to make LLM calls on this client. Set by
+    /// `Agent::new` before each agent run; agents within a session run
+    /// sequentially, so the stamp is current at request time. Shared
+    /// interior-mutable like the other per-client fields, since the client
+    /// handle is cloned and shared.
+    agent_name: Arc<Mutex<String>>,
 }
 
 /// Strip think tags and their contents from model output (for display).
@@ -294,6 +305,8 @@ impl ChatClient {
             save_failed: Arc::new(Mutex::new(false)),
             encryption_key: None,
             tool_event_tx: Arc::new(Mutex::new(None)),
+            usage_recorder: Arc::new(crate::usage::recorder::UsageRecorder::default_recorder()),
+            agent_name: Arc::new(Mutex::new("chat".to_string())),
         }
     }
 
@@ -318,6 +331,40 @@ impl ChatClient {
 
     pub fn set_tool_event_sender(&self, tx: mpsc::Sender<crate::types::AppEvent>) {
         *self.tool_event_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Stamp the agent name on usage-log lines written by this client.
+    /// Called by `Agent::new` before each agent run (agents within a session
+    /// run sequentially, so the name is current when the LLM call happens).
+    pub fn set_agent_name(&self, name: &str) {
+        *self.agent_name.lock().unwrap() = name.to_string();
+    }
+
+    /// Inject a custom usage recorder (mainly for tests: point the log at a
+    /// temp file instead of `~/.wuffagent/usage.jsonl`).
+    pub fn set_usage_recorder(&mut self, recorder: Arc<crate::usage::recorder::UsageRecorder>) {
+        self.usage_recorder = recorder;
+    }
+
+    /// Append one completed LLM call to the usage log. Best-effort: a log
+    /// failure must never break the chat (the recorder degrades to a
+    /// `tracing` log). `None` usage (backend reported nothing) means there is
+    /// no server-reported count to store, so nothing is logged.
+    fn record_usage(&self, usage: Option<&Usage>, model: Option<&str>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let agent = self.agent_name.lock().unwrap().clone();
+        self.usage_recorder.record(&crate::usage::recorder::UsageEntry {
+            ts: chrono::Utc::now(),
+            session_id,
+            agent,
+            model: model.unwrap_or("unknown").to_string(),
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+        });
     }
 
     pub fn set_max_messages(&mut self, max_messages: usize) {
@@ -681,6 +728,8 @@ impl ChatClient {
                     )
                     .await
                     {
+                        // Full 3-tuple flows to the common tail below, where
+                        // the usage is logged and the ratio calibrated.
                         Ok(ok) => {
                             self.calibrate_from_usage(ok.1.as_ref());
                             Ok(ok)
@@ -694,7 +743,8 @@ impl ChatClient {
             other => other,
         };
 
-        let (content, usage) = result?;
+        let (content, usage, model) = result?;
+        self.record_usage(usage.as_ref(), model.as_deref());
         self.calibrate_from_usage(usage.as_ref());
         Ok((content, usage))
     }
@@ -753,6 +803,8 @@ impl ChatClient {
                     )
                     .await;
                     match retry {
+                        // Full 3-tuple flows to the common tail below, where
+                        // the usage is logged and the ratio calibrated.
                         Ok(ok) => {
                             self.calibrate_from_usage(ok.1.as_ref());
                             Ok(ok)
@@ -765,7 +817,8 @@ impl ChatClient {
             }
             other => other,
         };
-        let (content, usage) = result?;
+        let (content, usage, model) = result?;
+        self.record_usage(usage.as_ref(), model.as_deref());
 
         // Update conversation history
         let mut conv = self.conversation.lock().unwrap();
@@ -881,7 +934,7 @@ impl ChatClient {
         let mut boxed_cb = Box::new(callback);
         let mut boxed_ready = Box::new(on_tool_call_ready);
         let mut ready_tracker = ToolCallTracker::default();
-        let usage = sse::stream_message(resp, &local_conv, &mut boxed_cb, &mut boxed_ready, &mut ready_tracker, cancel_token).await?;
+        let (usage, model) = sse::stream_message(resp, &local_conv, &mut boxed_cb, &mut boxed_ready, &mut ready_tracker, cancel_token).await?;
 
         let msg = local_conv.lock().unwrap().pop().unwrap_or_else(|| Message {
             role: "assistant".to_string(),
@@ -893,6 +946,7 @@ impl ChatClient {
             image: None,
         });
 
+        client.record_usage(usage.as_ref(), model.as_deref());
         Ok((msg, usage))
     }
 

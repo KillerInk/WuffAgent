@@ -49,6 +49,8 @@ impl ChatApp {
                         runtime.refresh_token_gauge(n_ctx);
                     }
                 }
+                // Token tracker: a round just finished and was logged.
+                self.usage_panel.mark_dirty();
             }
             AppEvent::StreamComplete { content, usage, .. } => {
                 let is_selected = self.selected_session_id.as_deref() == Some(sid.as_str());
@@ -80,6 +82,8 @@ impl ChatApp {
                 }
                 // Start the next queued message (sent while this run was active).
                 self.drain_next_queued_message(&sid);
+                // Token tracker: the run finished and its final round was logged.
+                self.usage_panel.mark_dirty();
             }
             AppEvent::StreamError { error, .. } => {
                 let cancelled = error == "Cancelled";
