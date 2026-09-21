@@ -94,6 +94,9 @@ fn search_file(
         return Ok(ScanResult::Skipped);
     }
     let content = String::from_utf8_lossy(&bytes);
+    // Strip a UTF-8 BOM so line-anchored patterns (^needle) match on the
+    // first line and the returned text is clean (consistent with read_file).
+    let content = crate::tools::builtin::file_io::strip_utf8_bom(&content);
     let lines: Vec<&str> = content.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         if !matcher(line) {

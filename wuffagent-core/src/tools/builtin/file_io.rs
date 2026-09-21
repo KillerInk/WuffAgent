@@ -52,6 +52,105 @@ fn is_sensitive_path(p: &str) -> bool {
         || p.starts_with("c:/program files")
 }
 
+// ─── Encoding / line-ending helpers ─────────────────────────────────────────
+
+/// UTF-8 byte-order mark, in decoded text form.
+pub(crate) const UTF8_BOM: char = '\u{feff}';
+/// UTF-8 BOM as raw bytes.
+pub(crate) const UTF8_BOM_BYTES: &[u8] = b"\xEF\xBB\xBF";
+
+/// Strip a leading UTF-8 BOM from decoded text (no-op if absent).
+pub(crate) fn strip_utf8_bom(s: &str) -> &str {
+    s.strip_prefix(UTF8_BOM).unwrap_or(s)
+}
+
+/// Dominant line ending of a file or text payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Eol {
+    Lf,
+    Crlf,
+}
+
+impl Eol {
+    fn as_str(self) -> &'static str {
+        match self {
+            Eol::Lf => "\n",
+            Eol::Crlf => "\r\n",
+        }
+    }
+}
+
+/// Detect the dominant line ending by counting CRLF vs standalone LF, so a
+/// single stray CRLF in an otherwise-LF file does not flip the result.
+/// Text without any line break reports Lf (any conversion is a no-op then).
+fn detect_eol(bytes: &[u8]) -> Eol {
+    let crlf = bytes.windows(2).filter(|w| *w == b"\r\n").count();
+    let lone_lf = bytes.iter().filter(|&&b| b == b'\n').count().saturating_sub(crlf);
+    if crlf > lone_lf {
+        Eol::Crlf
+    } else {
+        Eol::Lf
+    }
+}
+
+/// Rewrite a payload's line endings to `target` when the payload uses a
+/// single uniform ending different from the target. Mixed payloads and
+/// payloads without line breaks are returned unchanged.
+fn normalize_eol(payload: &str, target: Eol) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match target {
+        Eol::Lf if payload.contains("\r\n") => Cow::Owned(payload.replace("\r\n", "\n")),
+        Eol::Crlf if !payload.contains("\r\n") && payload.contains('\n') => {
+            Cow::Owned(payload.replace('\n', "\r\n"))
+        }
+        _ => Cow::Borrowed(payload),
+    }
+}
+
+/// Read up to the first 8 KB of an existing file, for BOM / line-ending
+/// sniffing. Returns None if the file cannot be opened.
+fn sniff_head(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 8 * 1024];
+    let n = file.read(&mut buf).ok()?;
+    buf.truncate(n);
+    Some(buf)
+}
+
+/// Last byte of a file, if the file exists and is non-empty.
+fn last_byte(path: &Path) -> Option<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() == 0 {
+        return None;
+    }
+    file.seek(SeekFrom::End(-1)).ok()?;
+    let mut b = [0u8; 1];
+    file.read_exact(&mut b).ok()?;
+    Some(b[0])
+}
+
+/// Read a UTF-8 text file with clear errors: a UTF-16 BOM yields a specific
+/// message (a non-UTF-8 BOM almost always means UTF-16), and invalid UTF-8
+/// no longer surfaces as the cryptic "stream did not contain valid UTF-8".
+fn read_text_file(path: &str) -> Result<String, ToolError> {
+    let bytes = fs::read(path)
+        .map_err(|e| ToolError::Execution(format!("Failed to read '{}': {}", path, e)))?;
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        return Err(ToolError::Execution(format!(
+            "File '{}' appears to be UTF-16 encoded (BOM detected); only UTF-8 files are supported",
+            path
+        )));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        ToolError::Execution(format!(
+            "File '{}' is not valid UTF-8; only UTF-8 text files are supported",
+            path
+        ))
+    })
+}
+
 // ─── File operation functions ───────────────────────────────────────────────
 
 /// Read a text file, optionally limited to a line range (1-based, inclusive).
@@ -64,6 +163,11 @@ fn is_sensitive_path(p: &str) -> bool {
 /// result carries `truncated: true` so the model can page with
 /// `start_line`/`end_line`. `total_lines` always reports the full file
 /// line count, so the model knows how far the file continues.
+///
+/// A UTF-8 BOM is stripped from the first line (so the model sees clean
+/// text and can copy it into `apply_diff` SEARCH blocks) and reported in
+/// the `bom` output flag. CRLF files are returned as LF lines — `write_file`
+/// and `apply_diff` restore the file's original line ending on save.
 fn read_file(
     path: &str,
     start_line: Option<usize>,
@@ -82,7 +186,17 @@ fn read_file(
     let file = fs::File::open(path).map_err(|e| {
         ToolError::Execution(format!("Failed to open '{}': {}", path, e))
     })?;
-    let reader = std::io::BufReader::new(file);
+    let mut reader = std::io::BufReader::new(file);
+    // Fail early with a clear message on UTF-16 files (BOM sniff) instead of
+    // erroring mid-iteration with "stream did not contain valid UTF-8".
+    if let Ok(buf) = reader.fill_buf() {
+        if buf.starts_with(&[0xFF, 0xFE]) || buf.starts_with(&[0xFE, 0xFF]) {
+            return Err(ToolError::Execution(format!(
+                "File '{}' appears to be UTF-16 encoded (BOM detected); only UTF-8 files are supported",
+                path
+            )));
+        }
+    }
 
     // Params are 1-based; convert to 0-based internally.
     let start = start_line.map(|n| n - 1).unwrap_or(0);
@@ -93,10 +207,19 @@ fn read_file(
     let mut total_lines = 0usize;
     let mut truncated = false;
 
+    let mut had_bom = false;
     for line in reader.lines() {
-        let line = line.map_err(|e| {
+        let raw = line.map_err(|e| {
             ToolError::Execution(format!("Failed to read line {}: {}", line_idx + 1, e))
         })?;
+        // A UTF-8 BOM only ever occurs at the very start of the file; strip
+        // it so the model sees (and can re-use) clean text.
+        let line: &str = if line_idx == 0 {
+            had_bom = raw.starts_with(UTF8_BOM);
+            strip_utf8_bom(&raw)
+        } else {
+            &raw
+        };
         // Keep counting every line so total_lines reflects the whole file,
         // even past the requested range or the content caps.
         total_lines += 1;
@@ -126,7 +249,7 @@ fn read_file(
             }
             format!("{}…", &line[..cut])
         } else {
-            line
+            line.to_string()
         };
 
         let rendered = if line_numbers {
@@ -151,6 +274,7 @@ fn read_file(
         "lines_returned": lines_returned,
         "truncated": truncated,
         "line_numbers": line_numbers,
+        "bom": had_bom,
     })))
 }
 
@@ -178,6 +302,11 @@ fn replace_over_existing(tmp: &Path, target: &Path) -> std::io::Result<()> {
 /// atomic: content is first fully written (and synced) to a temporary
 /// file in the same directory, then renamed over the target — a crash
 /// mid-write never leaves a truncated file at the target path.
+///
+/// When overwriting an existing file, its BOM and dominant line ending
+/// are preserved: the model only ever emits LF (that is what `read_file`
+/// shows), so without this a read → edit → write cycle would silently
+/// convert CRLF files to LF and drop UTF-8 BOMs.
 fn write_file(path: &str, content: &str) -> crate::tools::types::ToolResult<ToolOutput> {
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -194,6 +323,19 @@ fn write_file(path: &str, content: &str) -> crate::tools::types::ToolResult<Tool
             })?;
         }
     }
+
+    // Preserve the existing target's BOM and dominant line ending (see
+    // function docs). New files are written verbatim.
+    let content = match sniff_head(target) {
+        Some(head) => {
+            let mut out = normalize_eol(content, detect_eol(&head)).into_owned();
+            if head.starts_with(UTF8_BOM_BYTES) && !out.starts_with(UTF8_BOM) {
+                out.insert(0, UTF8_BOM);
+            }
+            out
+        }
+        None => content.to_string(),
+    };
 
     // Temp file next to the target (same volume keeps the rename atomic).
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -263,7 +405,25 @@ fn list_dir(path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
 }
 
 /// Append content to the end of a file.
+///
+/// The existing file's dominant line ending is applied to the appended
+/// payload (so a CRLF file does not gain LF lines), and when the existing
+/// file does not end with a line break one is inserted first (in the file's
+/// line ending) so the appended content starts on its own line instead of
+/// concatenating mid-line.
 fn append_file(path: &str, content: &str) -> crate::tools::types::ToolResult<ToolOutput> {
+    let target = Path::new(path);
+    let payload = match sniff_head(target) {
+        Some(head) => {
+            let eol = detect_eol(&head);
+            let mut out = normalize_eol(content, eol).into_owned();
+            if !out.is_empty() && matches!(last_byte(target), Some(b) if b != b'\n') {
+                out.insert_str(0, eol.as_str());
+            }
+            out
+        }
+        None => content.to_string(),
+    };
     fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -271,13 +431,13 @@ fn append_file(path: &str, content: &str) -> crate::tools::types::ToolResult<Too
         .map_err(|e| {
             ToolError::Execution(format!("Failed to open '{}' for appending: {}", path, e))
         })?
-        .write_all(content.as_bytes())
+        .write_all(payload.as_bytes())
         .map_err(|e| {
             ToolError::Execution(format!("Failed to append to '{}': {}", path, e))
         })?;
     Ok(ToolOutput::Success(serde_json::json!({
         "path": path,
-        "bytes_appended": content.len(),
+        "bytes_appended": payload.len(),
         "success": true,
     })))
 }
@@ -352,12 +512,19 @@ fn search_files(
 /// Line endings: SEARCH/REPLACE payloads are matched against a
 /// line-ending-normalized copy of the file (SEARCH text is always
 /// LF-normalized, but files on Windows are typically CRLF). The file's
-/// original line ending is restored before writing, so editing a CRLF file
-/// never rewrites it as LF.
+/// dominant line ending (CRLF vs LF decided by majority, so one stray CRLF
+/// in an LF file does not flip the result) is restored before writing, so
+/// editing a CRLF file never rewrites it as LF.
+///
+/// BOM: a UTF-8 BOM (in the file or at the start of the diff payload) is
+/// bookkeeping, not content — it is stripped before matching and restored
+/// on write, so SEARCH text for the first line does not need to (and
+/// cannot) contain the invisible BOM character.
 fn apply_diff(path: &str, diff: &str) -> crate::tools::types::ToolResult<ToolOutput> {
-    let content = fs::read_to_string(path).map_err(|e| {
-        ToolError::Execution(format!("Failed to read '{}' for apply_diff: {}", path, e))
-    })?;
+    let raw = read_text_file(path)?;
+    let had_bom = raw.starts_with(UTF8_BOM);
+    let content = strip_utf8_bom(&raw);
+    let diff = strip_utf8_bom(diff);
 
     let blocks = parse_search_replace_blocks(diff).map_err(|e| {
         ToolError::Execution(format!("Malformed search/replace blocks for '{}': {}", path, e))
@@ -369,11 +536,11 @@ fn apply_diff(path: &str, diff: &str) -> crate::tools::types::ToolResult<ToolOut
     }
 
     // Match on a line-ending-normalized copy (see function docs).
-    let file_is_crlf = content.contains("\r\n");
-    let mut current: String = if file_is_crlf {
+    let eol = detect_eol(content.as_bytes());
+    let mut current: String = if eol == Eol::Crlf {
         content.replace("\r\n", "\n")
     } else {
-        content
+        content.to_string()
     };
 
     let mut applied: u32 = 0;
@@ -394,8 +561,11 @@ fn apply_diff(path: &str, diff: &str) -> crate::tools::types::ToolResult<ToolOut
         applied += 1;
     }
 
-    if file_is_crlf {
+    if eol == Eol::Crlf {
         current = current.replace('\n', "\r\n");
+    }
+    if had_bom {
+        current.insert(0, UTF8_BOM);
     }
     fs::write(path, &current).map_err(|e| {
         ToolError::Execution(format!("Failed to write patched file '{}': {}", path, e))
@@ -673,7 +843,7 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a text file, optionally limited to a line range. Returns the file content; large files are truncated with a `truncated` flag and `total_lines` for paging."
+        "Read a text file, optionally limited to a line range. Returns the file content; large files are truncated with a `truncated` flag and `total_lines` for paging. A UTF-8 BOM is stripped from the first line (reported in the `bom` flag); CRLF files are shown as LF lines."
     }
     fn parameters_schema(&self) -> ToolSchema {
         build_schema(
@@ -714,7 +884,7 @@ impl Tool for WriteFileTool {
         "write_file"
     }
     fn description(&self) -> &str {
-        "Write (overwrite) a text file. The full content must be provided. Parent directories are created if missing; the write is atomic (temp file + rename), so a failure never leaves a truncated file."
+        "Write (overwrite) a text file. The full content must be provided. Parent directories are created if missing; the write is atomic (temp file + rename), so a failure never leaves a truncated file. When overwriting an existing file, its BOM and dominant line ending (CRLF/LF) are preserved, so LF content rewrites a CRLF file as CRLF."
     }
     fn parameters_schema(&self) -> ToolSchema {
         build_schema(
@@ -751,7 +921,7 @@ impl Tool for AppendFileTool {
         "append_file"
     }
     fn description(&self) -> &str {
-        "Append content to the end of a file (creates the file if it does not exist)."
+        "Append content to the end of a file (creates the file if it does not exist). Line endings are matched to the existing file, and a missing trailing line break in the existing file is added before the appended content."
     }
     fn parameters_schema(&self) -> ToolSchema {
         build_schema(
@@ -857,7 +1027,8 @@ impl Tool for ApplyDiffTool {
     fn description(&self) -> &str {
         "Apply targeted edits to an existing file using SEARCH/REPLACE blocks. \
          Each block's SEARCH text must match exactly one place in the file. \
-         Use read_file first to copy the exact current text."
+         Use read_file first to copy the exact current text. \
+         The file's line ending (CRLF/LF) and UTF-8 BOM are preserved."
     }
     fn parameters_schema(&self) -> ToolSchema {
         build_schema(

@@ -291,3 +291,53 @@ fn test_search_content_tool_requires_pattern() {
         .unwrap_err();
     assert!(matches!(err, ToolError::InvalidParams(_)));
 }
+
+
+// ─── CRLF / BOM handling ────────────────────────────────────────────────────
+
+#[test]
+fn test_search_bom_file_line_anchored() {
+    let dir = temp_dir("bom");
+    let p = dir.join("b.txt");
+    fs::write(&p, "\u{feff}needle here\nother needle\n").unwrap();
+    // ^-anchored regex must match on line 1 despite the BOM.
+    let json = success_json(
+        search_content("^needle", p.to_str().unwrap(), None, true, true, 0, 100).unwrap(),
+    );
+    assert_eq!(json["total_matches"].as_u64().unwrap(), 1);
+    assert_eq!(json["matches"][0]["line"].as_u64().unwrap(), 1);
+    let text = json["matches"][0]["text"].as_str().unwrap();
+    assert_eq!(text, "needle here");
+    assert!(!text.starts_with('\u{feff}'), "BOM leaked into output: {text:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_search_bom_file_substring_first_line() {
+    let dir = temp_dir("bomsub");
+    let p = dir.join("s.txt");
+    fs::write(&p, "\u{feff}unique_token\nrest\n").unwrap();
+    let json = success_json(
+        search_content("unique_token", p.to_str().unwrap(), None, false, true, 0, 100).unwrap(),
+    );
+    assert_eq!(json["total_matches"].as_u64().unwrap(), 1);
+    assert_eq!(json["matches"][0]["text"].as_str().unwrap(), "unique_token");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_search_crlf_file_clean_output() {
+    let dir = temp_dir("crlfsearch");
+    let p = dir.join("c.txt");
+    fs::write(&p, "alpha\r\nbeta alpha\r\ngamma\r\n").unwrap();
+    let json = success_json(
+        search_content("alpha", p.to_str().unwrap(), None, false, true, 0, 100).unwrap(),
+    );
+    assert_eq!(json["total_matches"].as_u64().unwrap(), 2);
+    for m in json["matches"].as_array().unwrap() {
+        let text = m["text"].as_str().unwrap();
+        assert!(!text.contains('\r'), "CR leaked into output: {text:?}");
+    }
+    assert_eq!(json["matches"][1]["line"].as_u64().unwrap(), 2);
+    let _ = fs::remove_dir_all(&dir);
+}
