@@ -1,6 +1,9 @@
 //! Unit tests for the `agent` module (see `super`).
 
 use super::*;
+use super::verify::record_verification_outcome;
+use tokio_util::sync::CancellationToken;
+use crate::memory::MemoryType;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::types::TracingToolLogger;
 
