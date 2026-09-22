@@ -8,13 +8,16 @@
 //! Module dependency: `memory` uses `llm` for improvement,
 //! but `llm` does not depend on `memory`.
 
-pub mod improver;
 pub mod manager;
 pub mod search;
 pub mod storage;
 pub mod types;
 
-pub use improver::{suggest_improvements, ImprovementSuggestion, NewAgentProposal};
+// The suggestion LLM call lives in the agents brick; re-exported so the
+// crate::memory:: paths stay stable (memory keeps the trigger in
+// MemoryManager::suggest_improvements, which calls into it).
+pub use crate::agents::improvement::suggest_improvements;
+pub use crate::types::{ImprovementSuggestion, NewAgentProposal};
 pub use manager::{MaintenanceProgress, MaintenanceReport, MemoryAddResult, MemoryManager};
 pub use storage::{get_memories_path, load_memories, save_memories};
 pub use types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};

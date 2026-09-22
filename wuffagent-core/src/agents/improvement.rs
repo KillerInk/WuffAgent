@@ -1,10 +1,15 @@
+//! Improvement suggestions: analyze an agent's lessons + run trajectory and
+//! propose prompt/config changes (or new agents). Lives in the agents brick
+//! because its output types are the agents' profile fields; it reads the
+//! memory store through `MemoryManager` (the memory brick keeps the trigger).
+
 use tracing;
 
-use super::manager::MemoryManager;
-use super::types::MemoryEntry;
-use crate::agents::config::AgentConfig;
-use crate::agents::RunStats;
+use super::config::AgentConfig;
+use super::RunStats;
 use crate::llm::LlmClient;
+use crate::memory::manager::MemoryManager;
+use crate::memory::types::MemoryEntry;
 use crate::types::Message;
 
 /// I1: per-lesson character budget inside the improver prompt (keeps a
@@ -19,7 +24,7 @@ const NEWLINE: char = '\u{a}';
 
 // ImprovementSuggestion / NewAgentProposal live in the types brick (types
 // embeds them in AppEvent::ImprovementSuggested); re-exported here so the
-// crate::memory:: paths stay stable.
+// crate::agents:: and crate::memory:: paths stay stable.
 pub use crate::types::{ImprovementSuggestion, NewAgentProposal};
 
 /// Gather relevant lesson memories for an improvement check.

@@ -6,7 +6,7 @@ use tracing;
 
 use crate::types::Message;
 
-use super::improver::suggest_improvements;
+use crate::agents::improvement::suggest_improvements;
 use super::search::get_recent_memories;
 use super::search::search_memories;
 use super::storage::{count_active_memories, get_memories_path, load_memories, save_memories};
@@ -86,7 +86,7 @@ impl MemoryManager {
         task: &str,
         result: &str,
         stats: &crate::agents::RunStats,
-    ) -> Result<Vec<super::improver::ImprovementSuggestion>, String> {
+    ) -> Result<Vec<crate::types::ImprovementSuggestion>, String> {
         let llm = match &self.llm_client {
             Some(c) => c.clone(),
             None => return Ok(Vec::new()),

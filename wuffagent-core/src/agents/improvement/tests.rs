@@ -1,4 +1,4 @@
-//! Unit tests for the `improver` module (see `super`).
+//! Unit tests for the `improvement` module (see `super`).
 
 use super::*;
 use crate::memory::{MemoryConfig, MemoryEntry, MemoryType};

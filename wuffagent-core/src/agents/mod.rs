@@ -12,6 +12,7 @@
 pub mod agent;
 pub mod config;
 pub mod engine;
+pub mod improvement;
 pub mod traits;
 pub mod types;
 
@@ -20,5 +21,6 @@ pub use agent::Agent;
 pub use agent::RunStats;
 pub use config::*;
 pub use engine::AgentEngine;
+pub use improvement::suggest_improvements;
 pub use traits::*;
 pub use types::*;
