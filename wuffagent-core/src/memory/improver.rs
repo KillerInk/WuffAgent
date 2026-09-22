@@ -1,12 +1,11 @@
-use serde::{Deserialize, Serialize};
 use tracing;
 
 use super::manager::MemoryManager;
 use super::types::MemoryEntry;
-use crate::agents::config::{AgentConfig, ShellConfig};
+use crate::agents::config::AgentConfig;
 use crate::agents::RunStats;
 use crate::llm::LlmClient;
-use crate::types::{Message, ReasoningEffort};
+use crate::types::Message;
 
 /// I1: per-lesson character budget inside the improver prompt (keeps a
 /// chatty lesson store from blowing out the analysis call).
@@ -18,52 +17,10 @@ const TOTAL_PROMPT_CHAR_BUDGET: usize = 24_000;
 /// literals below readable).
 const NEWLINE: char = '\u{a}';
 
-/// A suggested improvement to an agent's configuration.
-///
-/// I2: beyond the prompt, the improver may now propose changes to any other
-/// profile field. All new fields are optional and serde-defaulted, so old
-/// suggestion JSON (and LLM responses that omit them) still parse.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ImprovementSuggestion {
-    pub agent_name: String,
-    /// New prompt text, or None if no prompt change suggested.
-    pub prompt_change: Option<String>,
-    /// Explanation for why this improvement is suggested.
-    pub rationale: String,
-    /// Proposals for new specialized agents (LLMs commonly omit it when empty).
-    #[serde(default)]
-    pub new_agents: Vec<NewAgentProposal>,
-    /// I2: replace the agent's tool allowlist (None = no change).
-    #[serde(default)]
-    pub allowed_tools: Option<Vec<String>>,
-    /// I2: change the agent's reasoning effort (None = no change).
-    #[serde(default)]
-    pub reasoning_effort: Option<ReasoningEffort>,
-    /// I2: change the agent's shell configuration (None = no change).
-    #[serde(default)]
-    pub shell_config: Option<ShellConfig>,
-    /// I2: change the agent's handoff target allowlist (None = no change).
-    #[serde(default)]
-    pub handoff_targets: Option<Vec<String>>,
-    /// I2: change the per-task timeout in ms (None = no change).
-    #[serde(default)]
-    pub task_timeout_ms: Option<u64>,
-    /// I3: the evidence the improver saw (trajectory line + lesson excerpts).
-    /// Filled deterministically by `suggest_improvements`, not the LLM, so
-    /// the review panel can show WHY the suggestion was made.
-    #[serde(default)]
-    pub evidence: Vec<String>,
-}
-
-/// A proposal to create a new agent.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NewAgentProposal {
-    pub name: String,
-    pub description: String,
-    pub system_prompt: String,
-    #[serde(default)]
-    pub allowed_tools: Vec<String>,
-}
+// ImprovementSuggestion / NewAgentProposal live in the types brick (types
+// embeds them in AppEvent::ImprovementSuggested); re-exported here so the
+// crate::memory:: paths stay stable.
+pub use crate::types::{ImprovementSuggestion, NewAgentProposal};
 
 /// Gather relevant lesson memories for an improvement check.
 ///

@@ -295,6 +295,95 @@ pub enum MessageKind {
     Tool,
 }
 
+/// Shell configuration for an agent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShellConfig {
+    /// Allowed command patterns (regex). Empty means allow all (except dangerous).
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    /// Shell type: "powershell", "cmd", or "bash".
+    #[serde(default = "default_shell_type")]
+    pub shell_type: String,
+    /// Default timeout in milliseconds.
+    #[serde(default = "default_shell_timeout")]
+    pub shell_timeout_ms: u64,
+    /// Whether shell commands are enabled.
+    #[serde(default = "default_shell_enabled")]
+    pub shell_enabled: bool,
+    /// Working directory restriction (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            allowed_commands: Vec::new(),
+            shell_type: "powershell".to_string(),
+            shell_timeout_ms: 300_000,
+            shell_enabled: false,
+            working_dir: None,
+        }
+    }
+}
+
+fn default_shell_type() -> String {
+    "powershell".to_string()
+}
+fn default_shell_timeout() -> u64 {
+    300_000
+}
+fn default_shell_enabled() -> bool {
+    false
+}
+
+/// A suggested improvement to an agent's configuration.
+///
+/// I2: beyond the prompt, the improver may now propose changes to any other
+/// profile field. All new fields are optional and serde-defaulted, so old
+/// suggestion JSON (and LLM responses that omit them) still parse.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImprovementSuggestion {
+    pub agent_name: String,
+    /// New prompt text, or None if no prompt change suggested.
+    pub prompt_change: Option<String>,
+    /// Explanation for why this improvement is suggested.
+    pub rationale: String,
+    /// Proposals for new specialized agents (LLMs commonly omit it when empty).
+    #[serde(default)]
+    pub new_agents: Vec<NewAgentProposal>,
+    /// I2: replace the agent's tool allowlist (None = no change).
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// I2: change the agent's reasoning effort (None = no change).
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// I2: change the agent's shell configuration (None = no change).
+    #[serde(default)]
+    pub shell_config: Option<ShellConfig>,
+    /// I2: change the agent's handoff target allowlist (None = no change).
+    #[serde(default)]
+    pub handoff_targets: Option<Vec<String>>,
+    /// I2: change the per-task timeout in ms (None = no change).
+    #[serde(default)]
+    pub task_timeout_ms: Option<u64>,
+    /// I3: the evidence the improver saw (trajectory line + lesson excerpts).
+    /// Filled deterministically by `suggest_improvements`, not the LLM, so
+    /// the review panel can show WHY the suggestion was made.
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+/// A proposal to create a new agent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NewAgentProposal {
+    pub name: String,
+    pub description: String,
+    pub system_prompt: String,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+}
+
 /// Events that flow from the client engine to the UI.
 ///
 /// Each event carries a `session_id` so the UI can route it to the correct
@@ -380,7 +469,7 @@ pub enum AppEvent {
     /// Agent self-improvement suggestions generated.
     ImprovementSuggested {
         agent_name: String,
-        suggestions: Vec<crate::memory::ImprovementSuggestion>,
+        suggestions: Vec<ImprovementSuggestion>,
         session_id: String,
     },
     /// The session switched agents: the running agent called the `handoff`

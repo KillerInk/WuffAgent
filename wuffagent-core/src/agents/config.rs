@@ -4,47 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
 
-/// Shell configuration for an agent.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ShellConfig {
-    /// Allowed command patterns (regex). Empty means allow all (except dangerous).
-    #[serde(default)]
-    pub allowed_commands: Vec<String>,
-    /// Shell type: "powershell", "cmd", or "bash".
-    #[serde(default = "default_shell_type")]
-    pub shell_type: String,
-    /// Default timeout in milliseconds.
-    #[serde(default = "default_shell_timeout")]
-    pub shell_timeout_ms: u64,
-    /// Whether shell commands are enabled.
-    #[serde(default = "default_shell_enabled")]
-    pub shell_enabled: bool,
-    /// Working directory restriction (optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<String>,
-}
-
-impl Default for ShellConfig {
-    fn default() -> Self {
-        Self {
-            allowed_commands: Vec::new(),
-            shell_type: "powershell".to_string(),
-            shell_timeout_ms: 300_000,
-            shell_enabled: false,
-            working_dir: None,
-        }
-    }
-}
-
-fn default_shell_type() -> String {
-    "powershell".to_string()
-}
-fn default_shell_timeout() -> u64 {
-    300_000
-}
-fn default_shell_enabled() -> bool {
-    false
-}
+// ShellConfig lives in the types brick (it is a shared pure-data DTO used by
+// agents, tools, client, memory and the UI); re-exported here so the
+// crate::agents::config::ShellConfig path stays stable.
+pub use crate::types::ShellConfig;
 
 /// Legacy configuration for a single worker, loaded from a JSON file.
 /// Kept for backward compatibility with existing agent JSON files.
