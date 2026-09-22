@@ -25,6 +25,7 @@
 pub mod classifier;
 pub mod config;
 pub mod filestate;
+pub mod overflow;
 pub mod summarizer;
 
 pub use classifier::classify_content;
@@ -33,6 +34,7 @@ pub use filestate::{
     build_file_state_index, call_map, invalidate_stale_reads, is_read_file_result, normalize_path,
     remove_stale_read_pairs, FileStateIndex,
 };
+pub use overflow::{parse_context_overflow_msg, ContextOverflow};
 pub use summarizer::ContextTrimming;
 
 // Re-export helper functions for backward compatibility

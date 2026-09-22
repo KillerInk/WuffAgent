@@ -61,7 +61,10 @@ pub use sse::{
     ToolCallTracker,
 };
 // Re-export trimming helpers for backward compatibility
-pub use crate::trimming::{estimate_tokens, message_char_count, ContextTrimming};
+pub use crate::trimming::{
+    estimate_tokens, message_char_count, ContextOverflow, ContextTrimming,
+};
+pub use http::{parse_props_n_ctx, strip_think_tags};
 
 /// Backward-compat wrapper: delegates to `ContextTrimming::trim_to_token_budget`.
 pub fn trim_to_token_budget(
@@ -90,15 +93,6 @@ pub fn estimate_conversation_tokens(
     message_char_count(&conversation.lock().unwrap())
 }
 
-/// Details from a server `exceed_context_size_error` (HTTP 400): the prompt
-/// size that was sent and the server's actual context window. Lets the caller
-/// derive the true chars/token ratio from the failing request and force-trim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContextOverflow {
-    pub n_prompt: u32,
-    pub n_ctx: u32,
-}
-
 /// Parse a server `exceed_context_size_error` (HTTP 400) into the reported
 /// prompt size and context window, so the caller can force-trim to fit and
 /// retry. Returns `None` for any other error.
@@ -106,40 +100,7 @@ pub fn parse_context_overflow(err: &Error) -> Option<ContextOverflow> {
     let Error::Http(msg) = err else {
         return None;
     };
-    // Error format: "Server returned 400 Bad Request: {json body}[trailing text]"
-    let body_start = msg.find('{')?;
-    let body_end = msg.rfind('}')?;
-    if body_end <= body_start {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(&msg[body_start..=body_end]).ok()?;
-    let e = v.get("error")?;
-    if e.get("type").and_then(|t| t.as_str()) != Some("exceed_context_size_error") {
-        return None;
-    }
-    let n_prompt = e.get("n_prompt_tokens")?.as_u64()? as u32;
-    let n_ctx = e
-        .get("n_ctx")
-        .and_then(|t| t.as_u64())
-        .unwrap_or(n_prompt as u64) as u32;
-    Some(ContextOverflow { n_prompt, n_ctx })
-}
-
-/// Extract the server's `n_ctx` from a llama.cpp `/props` response body.
-///
-/// Servers report it under `default_generation_settings.n_ctx`; some builds or
-/// proxies also expose it at the top level. The nested path wins, then
-/// top-level. Returns `None` when the body is not JSON or neither field is a
-/// number — callers treat that as "limit unknown" (trimming disabled) rather
-/// than guessing a fallback.
-pub fn parse_props_n_ctx(body: &str) -> Option<u32> {
-    let props: serde_json::Value = serde_json::from_str(body).ok()?;
-    props
-        .get("default_generation_settings")
-        .and_then(|s| s.get("n_ctx"))
-        .or_else(|| props.get("n_ctx"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
+    crate::trimming::parse_context_overflow_msg(msg)
 }
 
 #[derive(Clone)]
@@ -204,50 +165,6 @@ pub struct ChatClient {
     /// interior-mutable like the other per-client fields, since the client
     /// handle is cloned and shared.
     agent_name: Arc<Mutex<String>>,
-}
-
-/// Strip think tags and their contents from model output (for display).
-/// The content between the tags is kept, prefixed with a thinking marker.
-/// Tag literals are assembled via `concat!` so the raw sequence is not
-/// spelled out in source.
-pub fn strip_think_tags(text: &str) -> String {
-    const OPEN: &str = concat!("<", "think>");
-    const CLOSE: &str = concat!("<", "/think>");
-    let mut out = String::new();
-    let mut rest = text;
-    loop {
-        match rest.find(OPEN) {
-            Some(o) => {
-                out.push_str(&rest[..o]);
-                let after_open = &rest[o + OPEN.len()..];
-                match after_open.find(CLOSE) {
-                    Some(c) => {
-                        let inner = &after_open[..c];
-                        rest = &after_open[c + CLOSE.len()..];
-                        let trimmed = inner.trim();
-                        if !trimmed.is_empty() {
-                            if !out.is_empty() {
-                                out.push('\n');
-                            }
-                            out.push_str("💭 ");
-                            out.push_str(trimmed);
-                            out.push('\n');
-                        }
-                    }
-                    None => {
-                        // Unclosed tag: keep the remainder as-is
-                        out.push_str(&rest[o..]);
-                        break;
-                    }
-                }
-            }
-            None => {
-                out.push_str(rest);
-                break;
-            }
-        }
-    }
-    out
 }
 
 impl ChatClient {
