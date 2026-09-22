@@ -18,7 +18,6 @@ pub mod types;
 
 pub use super::llm::{ChatClientAdapter, LlmClient};
 pub use agent::Agent;
-pub use agent::RunStats;
 pub use config::*;
 pub use engine::AgentEngine;
 pub use improvement::suggest_improvements;

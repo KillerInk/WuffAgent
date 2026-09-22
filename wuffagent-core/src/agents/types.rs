@@ -38,6 +38,19 @@ pub struct RestartRequest {
     pub exe_path: Option<String>,
 }
 
+/// I1: tool-use trajectory stats for one agent run, fed to the improver so
+/// it can weigh HOW the agent worked (tool churn, errors, verification
+/// retries), not just the final text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunStats {
+    /// Total tool calls executed this run (across all LLM rounds).
+    pub tool_calls: usize,
+    /// Tool calls that returned an error ("Error: ..." tool output).
+    pub tool_errors: usize,
+    /// Verification judge attempts used (0 = no tool outputs / shortcut).
+    pub verification_attempts: u32,
+}
+
 /// Unique identifier for an agent instance.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(pub String);

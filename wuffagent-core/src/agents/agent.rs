@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing;
 
 use super::config::AgentConfig;
+use super::types::RunStats;
 use super::LlmClient;
 use crate::client::ChatClient;
 use crate::memory::{MemoryEntry, MemoryManager, MemoryType};
@@ -129,19 +130,6 @@ enum RunOutcome {
     /// the UI can relaunch the (optionally newly built) binary and resume
     /// this session automatically.
     Restart(crate::agents::types::RestartRequest),
-}
-
-/// I1: tool-use trajectory stats for one agent run, fed to the improver so
-/// it can weigh HOW the agent worked (tool churn, errors, verification
-/// retries), not just the final text.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RunStats {
-    /// Total tool calls executed this run (across all LLM rounds).
-    pub tool_calls: usize,
-    /// Tool calls that returned an error ("Error: ..." tool output).
-    pub tool_errors: usize,
-    /// Verification judge attempts used (0 = no tool outputs / shortcut).
-    pub verification_attempts: u32,
 }
 
 /// The verification judge's verdict on the assistant's final response for
