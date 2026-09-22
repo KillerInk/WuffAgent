@@ -1,7 +1,7 @@
 //! Unit tests for the `summarizer` module (see `super`).
 
-use super::*;
 use super::super::config::TrimConfig;
+use super::*;
 
 fn make_config() -> TrimConfig {
     TrimConfig {
@@ -262,7 +262,10 @@ fn test_fresh_tool_result_untouched_by_trim() {
     // The tool result of the current round (after the last assistant
     // tool call) must come back byte-identical, even when the older part
     // of the conversation is far over budget.
-    let big = (0..500).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
+    let big = (0..500)
+        .map(|i| format!("old line {}", i))
+        .collect::<Vec<_>>()
+        .join("\n");
     let fresh = "FRESH-RESULT-EXACTLY-AS-IS";
     let mut messages = vec![
         user_msg("q"),
@@ -287,7 +290,10 @@ fn test_old_tool_pair_removed_as_unit_when_over_budget() {
     // (assistant-with-tool-calls + its tool results together), so pairing
     // stays intact and no orphaned tool result / dangling call remains.
     // The current round (last tool call + its fresh result) is protected.
-    let big = (0..500).map(|i| format!("old line {}", i)).collect::<Vec<_>>().join("\n");
+    let big = (0..500)
+        .map(|i| format!("old line {}", i))
+        .collect::<Vec<_>>()
+        .join("\n");
     let fresh = "fresh";
     let mut messages = vec![
         user_msg("q"),
@@ -305,8 +311,14 @@ fn test_old_tool_pair_removed_as_unit_when_over_budget() {
     // Pairing intact: no tool result without its call, no call without its result.
     assert_pairs_intact(&messages);
     // The old pair is gone; the current round's fresh result is intact.
-    assert!(!messages.iter().any(|m| m.tool_call_id.as_deref() == Some("c1")));
-    assert!(messages.iter().any(|m| m.role == "assistant" && m.tool_calls.as_ref().map(|t| t.iter().any(|tc| tc.id == "c2")).unwrap_or(false)));
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
+    assert!(messages.iter().any(|m| m.role == "assistant"
+        && m.tool_calls
+            .as_ref()
+            .map(|t| t.iter().any(|tc| tc.id == "c2"))
+            .unwrap_or(false)));
     assert_eq!(messages.last().unwrap().content, fresh);
 }
 
@@ -319,7 +331,10 @@ fn test_tool_heavy_history_is_trimmed_under_budget() {
     let mut messages = vec![user_msg("do the thing")];
     for i in 0..40 {
         let cid = format!("call_{i}");
-        let body = (0..200).map(|l| format!("tool output line {l} for {i}")).collect::<Vec<_>>().join("\n");
+        let body = (0..200)
+            .map(|l| format!("tool output line {l} for {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         messages.push(assistant_tool_call(&cid, "{\"k\":\"v\"}"));
         messages.push(tool_result(&cid, &body));
     }
@@ -329,7 +344,10 @@ fn test_tool_heavy_history_is_trimmed_under_budget() {
 
     let initial = ContextTrimming::message_char_count(&messages);
     let target = 5000usize;
-    assert!(initial > target, "precondition: must start over budget (got {initial})");
+    assert!(
+        initial > target,
+        "precondition: must start over budget (got {initial})"
+    );
 
     let trimming = ContextTrimming::new();
     let removed = trimming.trim_messages(&mut messages, target, &make_config());
@@ -402,17 +420,22 @@ fn tool_content_at<'a>(messages: &'a [Message], call_id: &str) -> &'a str {
 // ── Freshness pass (stale/superseded read_file eviction) ─────────────────
 
 #[test]
-fn test_stale_read_evicted_before_age_removal() {
-    // read A → write A → next turn: the old read is stale and must be
-    // collapsed to a marker while the write pair and the tail stay intact.
-    // Target is above the post-marker total, so the age-based loop must NOT
-    // run — proving the marker alone brought the list under budget.
+fn test_stale_read_pair_removed_wholesale() {
+    // read A → write A → next turn: the stale read's WHOLE tool pair
+    // (assistant call + result) is removed — no marker, no partial content —
+    // while the write pair and the tail stay intact. Target is above the
+    // post-removal total, so the age-based loop must NOT run — proving the
+    // pair removal alone brought the list under budget.
     let big = "L".repeat(5000);
     let mut messages = vec![
         user_msg("q1"),
         assistant_call_named("c1", "read_file", "{\"path\":\"src/a.rs\"}"),
         tool_result("c1", &big),
-        assistant_call_named("c2", "write_file", "{\"path\":\"src/a.rs\",\"content\":\"x\"}"),
+        assistant_call_named(
+            "c2",
+            "write_file",
+            "{\"path\":\"src/a.rs\",\"content\":\"x\"}",
+        ),
         tool_result("c2", "ok"),
         user_msg("q2"),
     ];
@@ -420,11 +443,55 @@ fn test_stale_read_evicted_before_age_removal() {
     let trimming = ContextTrimming::new();
     let removed = trimming.trim_messages(&mut messages, 300, &make_config());
 
-    assert_eq!(removed, 0, "marker alone must bring the list under budget");
-    assert!(tool_content_at(&messages, "c1").contains("stale: file modified"));
-    assert!(tool_content_at(&messages, "c1").starts_with("[read_file of src/a.rs"));
-    assert_eq!(tool_content_at(&messages, "c2"), "ok", "write pair must be intact");
+    assert_eq!(
+        removed, 2,
+        "stale read pair (assistant + tool) must be removed"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("c1")),
+        "stale read result must be gone"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.content.starts_with("[read_file of ")),
+        "no marker may remain — the pair is removed, not marked"
+    );
+    assert_eq!(
+        tool_content_at(&messages, "c2"),
+        "ok",
+        "write pair must be intact"
+    );
     assert!(messages.iter().any(|m| m.content == "q2"), "tail untouched");
+    assert_pairs_intact(&messages);
+}
+
+#[test]
+fn test_marker_pair_removed_on_next_trim() {
+    // A persisted session may already contain a one-line marker (legacy
+    // marker form). The next trim must drop that pair entirely instead of
+    // keeping the stub around forever.
+    let marker =
+        "[read_file of a.rs — stale: file modified after this read; re-read before relying on it]";
+    let mut messages = vec![
+        user_msg("q1"),
+        assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", marker),
+        assistant_call_named("c2", "write_file", "{\"path\":\"a.rs\",\"content\":\"x\"}"),
+        tool_result("c2", "ok"),
+        user_msg("q2"),
+    ];
+
+    let trimming = ContextTrimming::new();
+    let removed = trimming.trim_messages(&mut messages, 300, &make_config());
+
+    assert_eq!(removed, 2, "marker pair must be removed");
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
+    assert_eq!(tool_content_at(&messages, "c2"), "ok");
     assert_pairs_intact(&messages);
 }
 
@@ -446,9 +513,15 @@ fn test_superseded_read_evicted() {
     let trimming = ContextTrimming::new();
     let removed = trimming.trim_messages(&mut messages, 4000, &make_config());
 
-    assert_eq!(removed, 0);
-    assert!(tool_content_at(&messages, "c1").contains("superseded by a newer read"));
-    assert_eq!(tool_content_at(&messages, "c2"), big2, "newest read stays in full");
+    assert_eq!(removed, 2, "superseded read pair must be removed");
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
+    assert_eq!(
+        tool_content_at(&messages, "c2"),
+        big2,
+        "newest read stays in full"
+    );
     assert_pairs_intact(&messages);
 }
 
@@ -471,10 +544,16 @@ fn test_read_write_reread_keeps_latest_snapshot() {
     let trimming = ContextTrimming::new();
     let removed = trimming.trim_messages(&mut messages, 2000, &make_config());
 
-    assert_eq!(removed, 0);
-    assert!(tool_content_at(&messages, "c1").contains("stale: file modified"));
+    assert_eq!(removed, 2, "stale first read pair must be removed");
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
     assert_eq!(tool_content_at(&messages, "c2"), "ok");
-    assert_eq!(tool_content_at(&messages, "c3"), r2, "post-mutation read is current");
+    assert_eq!(
+        tool_content_at(&messages, "c3"),
+        r2,
+        "post-mutation read is current"
+    );
 }
 
 #[test]
@@ -496,9 +575,15 @@ fn test_stale_read_in_protected_tail_untouched() {
     let trimming = ContextTrimming::new();
     let removed = trimming.trim_messages(&mut messages, 2000, &make_config());
 
-    assert_eq!(removed, 0);
-    assert!(tool_content_at(&messages, "c1").contains("stale: file modified"));
-    assert_eq!(tool_content_at(&messages, "c3"), r2, "protected read must be untouched");
+    assert_eq!(removed, 2, "stale pre-tail read pair must be removed");
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
+    assert_eq!(
+        tool_content_at(&messages, "c3"),
+        r2,
+        "protected read must be untouched"
+    );
 }
 
 #[test]
@@ -519,7 +604,11 @@ fn test_failed_mutation_does_not_invalidate_read() {
     let removed = trimming.trim_messages(&mut messages, 2000, &make_config());
 
     assert_eq!(removed, 0);
-    assert_eq!(tool_content_at(&messages, "c1"), r1, "read must stay current");
+    assert_eq!(
+        tool_content_at(&messages, "c1"),
+        r1,
+        "read must stay current"
+    );
 }
 
 #[test]
@@ -541,9 +630,15 @@ fn test_copy_only_invalidates_dest() {
     let trimming = ContextTrimming::new();
     let removed = trimming.trim_messages(&mut messages, 2000, &make_config());
 
-    assert_eq!(removed, 0);
-    assert_eq!(tool_content_at(&messages, "c1"), ra, "src read must stay current");
-    assert!(tool_content_at(&messages, "c2").contains("stale: file modified"));
+    assert_eq!(removed, 2, "stale dest read pair must be removed");
+    assert_eq!(
+        tool_content_at(&messages, "c1"),
+        ra,
+        "src read must stay current"
+    );
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c2")));
 }
 
 #[test]
@@ -561,7 +656,9 @@ fn test_plain_chat_no_tool_messages_noop() {
 
     assert_eq!(removed, 2, "age-based removal must still run");
     assert!(
-        !messages.iter().any(|m| m.content.starts_with("[read_file of ")),
+        !messages
+            .iter()
+            .any(|m| m.content.starts_with("[read_file of ")),
         "no markers may appear without tool messages"
     );
     assert_eq!(messages.last().unwrap().content, "q2");
@@ -576,7 +673,11 @@ fn test_flag_off_keeps_legacy_behavior() {
         user_msg("q1"),
         assistant_call_named("c1", "read_file", "{\"path\":\"src/a.rs\"}"),
         tool_result("c1", &big),
-        assistant_call_named("c2", "write_file", "{\"path\":\"src/a.rs\",\"content\":\"x\"}"),
+        assistant_call_named(
+            "c2",
+            "write_file",
+            "{\"path\":\"src/a.rs\",\"content\":\"x\"}",
+        ),
         tool_result("c2", "ok"),
         user_msg("q2"),
     ];
@@ -589,7 +690,17 @@ fn test_flag_off_keeps_legacy_behavior() {
     let removed = trimming.trim_messages(&mut messages, 6000, &config);
 
     assert_eq!(removed, 0);
-    assert_eq!(tool_content_at(&messages, "c1"), big, "legacy: stale read stays in full");
+    assert_eq!(
+        tool_content_at(&messages, "c1"),
+        big,
+        "legacy: stale read stays in full"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.content.starts_with("[read_file of ")),
+        "legacy mode must not produce markers either"
+    );
 }
 
 #[test]
@@ -600,15 +711,25 @@ fn test_trim_messages_idempotent_second_call_noop() {
         user_msg("q1"),
         assistant_call_named("c1", "read_file", "{\"path\":\"src/a.rs\"}"),
         tool_result("c1", &big),
-        assistant_call_named("c2", "write_file", "{\"path\":\"src/a.rs\",\"content\":\"x\"}"),
+        assistant_call_named(
+            "c2",
+            "write_file",
+            "{\"path\":\"src/a.rs\",\"content\":\"x\"}",
+        ),
         tool_result("c2", "ok"),
         user_msg("q2"),
     ];
 
     let trimming = ContextTrimming::new();
-    assert_eq!(trimming.trim_messages(&mut messages, 300, &make_config()), 0);
-    let marked = tool_content_at(&messages, "c1").to_string();
-    assert!(marked.contains("stale: file modified"));
+    // First trim: the stale read pair is removed wholesale.
+    assert_eq!(
+        trimming.trim_messages(&mut messages, 300, &make_config()),
+        2,
+        "stale read pair must be removed on the first trim"
+    );
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
 
     let before: Vec<(String, String)> = messages
         .iter()
@@ -622,4 +743,162 @@ fn test_trim_messages_idempotent_second_call_noop() {
 
     assert_eq!(removed, 0, "second trim must remove nothing");
     assert_eq!(before, after, "second trim must not modify the list");
+}
+
+// ── Never leave a partial file snapshot ────────────────────────────────────
+
+#[test]
+fn test_summarize_skips_read_file_results_when_flag_on() {
+    // With freshness eviction on, an over-budget pre-tail read_file result is
+    // NEVER summarized in place (a partial, line-numbered snapshot invites the
+    // model to hallucinate line contents it no longer has) — other tool
+    // results in the same list still are.
+    let big = (0..100)
+        .map(|i| format!("{:4} | let x{i} = {i};", i))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut messages = vec![
+        user_msg("q"),
+        assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", &big),
+        assistant_call_named("c2", "shell", "{\"command\":\"cargo build\"}"),
+        tool_result("c2", &big),
+        user_msg("q2"),
+    ];
+    // c1 is a current read (no mutation, no newer read) → survives the
+    // freshness pass; the tail starts at the last user message (index 5).
+    let trimming = ContextTrimming::new();
+    trimming.summarize_old_tool_messages(&mut messages, 5, 100, &make_config(), true);
+
+    assert_eq!(
+        tool_content_at(&messages, "c1"),
+        big,
+        "read_file result must stay in full"
+    );
+    assert_ne!(
+        tool_content_at(&messages, "c2"),
+        big,
+        "shell result must still be summarized"
+    );
+}
+
+#[test]
+fn test_summarize_still_shrinks_reads_when_flag_off() {
+    // Legacy mode: the in-place summarizer applies to read_file results too.
+    let big = (0..100)
+        .map(|i| format!("{:4} | let x{i} = {i};", i))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut messages = vec![
+        user_msg("q"),
+        assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", &big),
+        user_msg("q2"),
+    ];
+    let trimming = ContextTrimming::new();
+    trimming.summarize_old_tool_messages(&mut messages, 3, 100, &make_config(), false);
+
+    assert_ne!(
+        tool_content_at(&messages, "c1"),
+        big,
+        "legacy: read result must be summarized"
+    );
+}
+
+#[test]
+fn test_truncate_never_halves_read_file_result_when_flag_on() {
+    // The last-resort halver must skip read_file results (flag on) so file
+    // content is either fully present or fully absent — while other messages
+    // are still halved down to the placeholder floor.
+    let big = (0..100)
+        .map(|i| format!("{:4} | let x{i} = {i};", i))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prose = "y".repeat(4000);
+    let mut messages = vec![
+        user_msg(&prose),
+        assistant_call_named("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", &big),
+        user_msg("q2"),
+    ];
+    // Tail starts at the last user message (index 3).
+    let did = ContextTrimming::truncate_largest_message(&mut messages, 100, 3, true);
+
+    assert!(did, "something must have been truncated");
+    assert_eq!(
+        tool_content_at(&messages, "c1"),
+        big,
+        "read_file result must not be halved"
+    );
+    assert!(
+        messages[0].content.len() < prose.len(),
+        "the oversized non-read message must be shrunk"
+    );
+}
+
+#[test]
+fn test_current_read_pair_removed_by_age_loop_stays_wholesale() {
+    // End-to-end: a long tool-heavy history where the reads are CURRENT
+    // (no writes). Age-based removal must drop whole read pairs — after the
+    // trim, no read_file result in the list may be a partial snapshot:
+    // surviving reads are byte-identical to what was produced.
+    let mut messages = vec![user_msg("do the thing")];
+    let snapshots: Vec<String> = (0..20)
+        .map(|i| {
+            (0..120)
+                .map(|l| format!("{:4} | code line {l} of file {i}", i))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect();
+    for (i, snap) in snapshots.iter().enumerate() {
+        let cid = format!("call_{i}");
+        messages.push(assistant_call_named(
+            &cid,
+            "read_file",
+            &format!("{{\"path\":\"f{}.rs\"}}", i),
+        ));
+        messages.push(tool_result(&cid, snap));
+    }
+    // The current round: a fresh read + its result (protected tail).
+    messages.push(assistant_call_named(
+        "call_fresh",
+        "read_file",
+        "{\"path\":\"fresh.rs\"}",
+    ));
+    messages.push(tool_result("call_fresh", "FRESH-CONTENT"));
+
+    let target = 5000usize;
+    assert!(
+        ContextTrimming::message_char_count(&messages) > target,
+        "precondition: must start over budget"
+    );
+
+    let trimming = ContextTrimming::new();
+    trimming.trim_messages(&mut messages, target, &make_config());
+
+    assert_pairs_intact(&messages);
+    assert!(
+        ContextTrimming::message_char_count(&messages) <= target,
+        "after trim must be under budget"
+    );
+    // No marker stubs and no truncated (mid-line cut) snapshots either:
+    // a surviving read either equals its original snapshot or is gone.
+    for m in messages.iter().filter(|m| m.role == "tool") {
+        if m.tool_call_id.as_deref() == Some("call_fresh") {
+            continue;
+        }
+        let Some(i) = m
+            .tool_call_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("call_"))
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        assert_eq!(
+            m.content, snapshots[i],
+            "surviving read snapshot must be byte-identical, never partial"
+        );
+    }
 }

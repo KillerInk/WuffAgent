@@ -62,8 +62,12 @@ fn test_normalize_path_case_fold_on_windows() {
 
 #[test]
 fn test_is_file_marker() {
-    assert!(is_file_marker("[read_file of a.rs — stale: file modified after this read; re-read before relying on it]"));
-    assert!(is_file_marker("[read_file of a.rs — superseded by a newer read of the same file]"));
+    assert!(is_file_marker(
+        "[read_file of a.rs — stale: file modified after this read; re-read before relying on it]"
+    ));
+    assert!(is_file_marker(
+        "[read_file of a.rs — superseded by a newer read of the same file]"
+    ));
     assert!(!is_file_marker("file contents here"));
     assert!(!is_file_marker(""));
 }
@@ -74,7 +78,11 @@ fn test_index_reads_and_mutations() {
         msg("user", "q"),
         assistant_call("c1", "read_file", "{\"path\":\"./src/a.rs\"}"),
         tool_result("c1", "content-a"),
-        assistant_call("c2", "write_file", "{\"path\":\"src\\\\a.rs\",\"content\":\"x\"}"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"src\\\\a.rs\",\"content\":\"x\"}",
+        ),
         tool_result("c2", "ok"),
         assistant_call("c3", "read_file", "{\"path\":\"src/a.rs\"}"),
         tool_result("c3", "content-a2"),
@@ -129,7 +137,11 @@ fn test_index_shell_and_search_ignored() {
     let messages = vec![
         assistant_call("c1", "shell", "{\"command\":\"cargo build\"}"),
         tool_result("c1", "ok"),
-        assistant_call("c2", "search_content", "{\"pattern\":\"x\",\"path\":\"a.rs\"}"),
+        assistant_call(
+            "c2",
+            "search_content",
+            "{\"pattern\":\"x\",\"path\":\"a.rs\"}",
+        ),
         tool_result("c2", "hits"),
     ];
     let index = build_file_state_index(&messages);
@@ -157,7 +169,11 @@ fn test_invalidate_stale_and_superseded() {
         msg("user", "q"),
         assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
         tool_result("c1", "old-content"),
-        assistant_call("c2", "write_file", "{\"path\":\"a.rs\",\"content\":\"new\"}"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
         tool_result("c2", "ok"),
         assistant_call("c3", "read_file", "{\"path\":\"a.rs\"}"),
         tool_result("c3", "new-content"),
@@ -197,7 +213,11 @@ fn test_invalidate_respects_protect_from() {
         msg("user", "q"),
         assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
         tool_result("c1", "old"),
-        assistant_call("c2", "write_file", "{\"path\":\"a.rs\",\"content\":\"new\"}"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
         tool_result("c2", "ok"),
         assistant_call("c3", "read_file", "{\"path\":\"a.rs\"}"),
         tool_result("c3", "fresh"),
@@ -207,7 +227,10 @@ fn test_invalidate_respects_protect_from() {
     let applied = invalidate_stale_reads(&mut messages, 5, &index);
     assert_eq!(applied, 1);
     assert!(messages[2].content.contains("stale: file modified"));
-    assert_eq!(messages[6].content, "fresh", "protected read must be untouched");
+    assert_eq!(
+        messages[6].content, "fresh",
+        "protected read must be untouched"
+    );
 }
 
 #[test]
@@ -216,7 +239,11 @@ fn test_invalidate_failed_mutation_keeps_read() {
         msg("user", "q"),
         assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
         tool_result("c1", "old"),
-        assistant_call("c2", "write_file", "{\"path\":\"a.rs\",\"content\":\"new\"}"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
         tool_result("c2", "Error: disk full"),
         msg("user", "q2"),
     ];
@@ -233,7 +260,11 @@ fn test_invalidate_path_form_mismatch_still_matches() {
         msg("user", "q"),
         assistant_call("c1", "read_file", "{\"path\":\"./src/a.rs\"}"),
         tool_result("c1", "old"),
-        assistant_call("c2", "write_file", "{\"path\":\"src\\\\a.rs\",\"content\":\"new\"}"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"src\\\\a.rs\",\"content\":\"new\"}",
+        ),
         tool_result("c2", "ok"),
         msg("user", "q2"),
     ];
@@ -249,7 +280,11 @@ fn test_invalidate_idempotent() {
         msg("user", "q"),
         assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
         tool_result("c1", "old"),
-        assistant_call("c2", "write_file", "{\"path\":\"a.rs\",\"content\":\"new\"}"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
         tool_result("c2", "ok"),
         msg("user", "q2"),
     ];
@@ -267,4 +302,266 @@ fn test_invalidate_no_tool_messages_noop() {
     let index = build_file_state_index(&messages);
     let applied = invalidate_stale_reads(&mut messages, 3, &index);
     assert_eq!(applied, 0);
+}
+
+// ── remove_stale_read_pairs (wholesale pair removal) ───────────────────────
+
+/// Every assistant tool-call id must have all of its results present, and
+/// every tool result's id must match a present call.
+fn assert_pairs_intact(messages: &[Message]) {
+    let call_ids: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+        .map(|tc| tc.id.as_str())
+        .collect();
+    for m in messages.iter().filter(|m| m.role == "tool") {
+        let id = m.tool_call_id.as_deref().unwrap_or("");
+        assert!(
+            call_ids.contains(id),
+            "tool result {id} present without its paired tool call"
+        );
+    }
+    for m in messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+    {
+        assert!(
+            messages
+                .iter()
+                .any(|t| t.tool_call_id.as_deref() == Some(m.id.as_str())),
+            "tool call {} present without its result",
+            m.id
+        );
+    }
+}
+
+#[test]
+fn test_remove_stale_read_pairs_wholesale() {
+    // read A → write A → read A: the stale first read's WHOLE pair
+    // (assistant + result) is removed; the write and the current read stay.
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", "old-content"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
+        tool_result("c2", "ok"),
+        assistant_call("c3", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c3", "new-content"),
+        msg("user", "q2"),
+    ];
+    let index = build_file_state_index(&messages);
+    let removed = remove_stale_read_pairs(&mut messages, 7, &index);
+
+    assert_eq!(
+        removed, 2,
+        "assistant + tool result of the stale read must go"
+    );
+    assert_eq!(messages.len(), 6);
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
+    assert!(!messages
+        .iter()
+        .any(|m| m.content.starts_with(MARKER_PREFIX)));
+    assert_eq!(
+        messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c3"))
+            .map(|m| m.content.as_str()),
+        Some("new-content"),
+        "current read must stay in full"
+    );
+    assert_pairs_intact(&messages);
+}
+
+#[test]
+fn test_remove_superseded_read_pairs() {
+    // read A → read A: the older read's pair is removed.
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", "first"),
+        assistant_call("c2", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c2", "second"),
+        msg("user", "q2"),
+    ];
+    let index = build_file_state_index(&messages);
+    let removed = remove_stale_read_pairs(&mut messages, 5, &index);
+
+    assert_eq!(removed, 2);
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
+    assert_eq!(
+        messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c2"))
+            .map(|m| m.content.as_str()),
+        Some("second")
+    );
+    assert_pairs_intact(&messages);
+}
+
+#[test]
+fn test_remove_current_reads_untouched() {
+    // A read with no later mutation or newer read is current: not removed.
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", "current"),
+        msg("user", "q2"),
+    ];
+    let index = build_file_state_index(&messages);
+    let removed = remove_stale_read_pairs(&mut messages, 3, &index);
+
+    assert_eq!(removed, 0);
+    assert_eq!(messages.len(), 4);
+    assert_pairs_intact(&messages);
+}
+
+#[test]
+fn test_remove_respects_protect_from() {
+    // A stale read at/after protect_from is untouched.
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", "old"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
+        tool_result("c2", "ok"),
+        assistant_call("c3", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c3", "fresh"),
+    ];
+    let index = build_file_state_index(&messages);
+    // Tail starts at the last assistant tool call (index 5).
+    let removed = remove_stale_read_pairs(&mut messages, 5, &index);
+
+    assert_eq!(removed, 2, "stale pre-tail pair must go");
+    assert!(!messages
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some("c1")));
+    assert_eq!(
+        messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c3"))
+            .map(|m| m.content.as_str()),
+        Some("fresh"),
+        "protected read must be untouched"
+    );
+    assert_pairs_intact(&messages);
+}
+
+#[test]
+fn test_remove_drops_marker_pairs() {
+    // A marker left over from an older (marker-style) trim is dropped too —
+    // the stub does not stay in context forever.
+    let marker =
+        "[read_file of a.rs — stale: file modified after this read; re-read before relying on it]";
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", marker),
+        msg("user", "q2"),
+    ];
+    let index = build_file_state_index(&messages);
+    let removed = remove_stale_read_pairs(&mut messages, 3, &index);
+
+    assert_eq!(removed, 2);
+    assert_eq!(messages.len(), 2);
+    assert_pairs_intact(&messages);
+}
+
+#[test]
+fn test_remove_idempotent() {
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", "old"),
+        assistant_call(
+            "c2",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
+        tool_result("c2", "ok"),
+        msg("user", "q2"),
+    ];
+    let index = build_file_state_index(&messages);
+    assert_eq!(remove_stale_read_pairs(&mut messages, 5, &index), 2);
+    // Re-deriving on the current list: nothing left to remove.
+    let index2 = build_file_state_index(&messages);
+    assert_eq!(remove_stale_read_pairs(&mut messages, 5, &index2), 0);
+    assert_eq!(messages.len(), 4);
+}
+
+/// Assistant message carrying several tool calls in one round.
+fn assistant_calls(calls: &[(&str, &str, &str)]) -> Message {
+    Message {
+        role: "assistant".into(),
+        content: String::new(),
+        timestamp: String::new(),
+        tool_calls: Some(
+            calls
+                .iter()
+                .map(|(id, name, args)| crate::types::ToolCall {
+                    id: (*id).into(),
+                    call_type: "function".into(),
+                    function: crate::types::ToolFunction {
+                        name: (*name).into(),
+                        arguments: (*args).into(),
+                    },
+                })
+                .collect(),
+        ),
+        tool_call_id: None,
+        reasoning_content: None,
+        image: None,
+    }
+}
+
+#[test]
+fn test_remove_same_round_two_stale_reads_one_span() {
+    // One assistant round with two read_file calls, both stale: the round is
+    // removed once (merged span), not twice.
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_calls(&[
+            ("c1", "read_file", "{\"path\":\"a.rs\"}"),
+            ("c2", "read_file", "{\"path\":\"b.rs\"}"),
+        ]),
+        tool_result("c1", "old-a"),
+        tool_result("c2", "old-b"),
+        assistant_call(
+            "c3",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
+        tool_result("c3", "ok"),
+        assistant_call(
+            "c4",
+            "write_file",
+            "{\"path\":\"b.rs\",\"content\":\"new\"}",
+        ),
+        tool_result("c4", "ok"),
+        msg("user", "q2"),
+    ];
+    let index = build_file_state_index(&messages);
+    let removed = remove_stale_read_pairs(&mut messages, 7, &index);
+
+    assert_eq!(
+        removed, 3,
+        "the shared round (assistant + both results) goes once, as a unit"
+    );
+    assert_eq!(messages.len(), 6);
+    assert_pairs_intact(&messages);
 }

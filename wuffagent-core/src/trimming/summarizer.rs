@@ -2,7 +2,6 @@
 ///
 /// Each summarizer knows how to compress a particular content type
 /// while preserving key information (paths, error messages, line counts).
-
 use super::classifier::{classify_content, ContentType};
 use super::config::TrimConfig;
 use super::filestate;
@@ -78,7 +77,10 @@ impl ContentSummarizer for BuildLogSummarizer {
 
         let mut result: Vec<String> = Vec::new();
         result.extend(lines.iter().take(keep_each).cloned());
-        result.push(format!("<{} lines omitted>", total.saturating_sub(keep_each * 2)));
+        result.push(format!(
+            "<{} lines omitted>",
+            total.saturating_sub(keep_each * 2)
+        ));
         result.extend(lines.iter().skip(total.saturating_sub(keep_each)).cloned());
 
         result.join("\n")
@@ -105,7 +107,10 @@ impl ContentSummarizer for CodeSummarizer {
 
         let mut result: Vec<String> = Vec::new();
         result.extend(lines.iter().take(keep_each).cloned());
-        result.push(format!("// ... <{} lines omitted> ...", total.saturating_sub(keep_each * 2)));
+        result.push(format!(
+            "// ... <{} lines omitted> ...",
+            total.saturating_sub(keep_each * 2)
+        ));
         result.extend(lines.iter().skip(total.saturating_sub(keep_each)).cloned());
 
         result.join("\n")
@@ -145,9 +150,24 @@ impl ContentSummarizer for ListSummarizer {
         let keep_back = max_keep - keep_front;
 
         let mut result: Vec<String> = Vec::new();
-        result.extend(items.iter().copied().map(|s| s.to_string()).take(keep_front));
-        result.push(format!("// ... <{} items omitted> ...", total.saturating_sub(keep_front + keep_back)));
-        result.extend(items.iter().copied().map(|s| s.to_string()).skip(total.saturating_sub(keep_back)));
+        result.extend(
+            items
+                .iter()
+                .copied()
+                .map(|s| s.to_string())
+                .take(keep_front),
+        );
+        result.push(format!(
+            "// ... <{} items omitted> ...",
+            total.saturating_sub(keep_front + keep_back)
+        ));
+        result.extend(
+            items
+                .iter()
+                .copied()
+                .map(|s| s.to_string())
+                .skip(total.saturating_sub(keep_back)),
+        );
 
         result.join("\n")
     }
@@ -288,7 +308,12 @@ impl ContextTrimming {
     /// Returns the content unchanged if it already fits within the budget.
     /// Dispatches to the type-specific summarizer, with a final generic
     /// hard cap as a fallback.
-    pub fn summarize_to_budget(&self, content: &str, budget_chars: usize, config: &TrimConfig) -> String {
+    pub fn summarize_to_budget(
+        &self,
+        content: &str,
+        budget_chars: usize,
+        config: &TrimConfig,
+    ) -> String {
         // Hard cap: always enforce the max.
         if content.len() <= budget_chars {
             return content.to_string();
@@ -305,7 +330,9 @@ impl ContextTrimming {
             ContentType::BuildLog => BuildLogSummarizer.summarize(content, budget_chars, config),
             ContentType::SourceCode => CodeSummarizer.summarize(content, budget_chars, config),
             ContentType::FileList => ListSummarizer.summarize(content, budget_chars, config),
-            ContentType::SearchResults => SearchResultsSummarizer.summarize(content, budget_chars, config),
+            ContentType::SearchResults => {
+                SearchResultsSummarizer.summarize(content, budget_chars, config)
+            }
             ContentType::ToolError => ErrorSummarizer.summarize(content, budget_chars, config),
             ContentType::JsonWrapper | ContentType::FreeText => {
                 GenericSummarizer.summarize(content, budget_chars, config)
@@ -404,8 +431,14 @@ impl ContextTrimming {
         messages: &mut [Message],
         target_tokens: usize,
         protect_from: usize,
+        never_shrink_reads: bool,
     ) -> bool {
         let leading_system = messages.first().map(|m| m.role.as_str()) == Some("system");
+        let read_calls = if never_shrink_reads {
+            Some(filestate::call_map(messages))
+        } else {
+            None
+        };
         let mut truncated = false;
         loop {
             if Self::message_char_count(messages) <= target_tokens {
@@ -419,6 +452,16 @@ impl ContextTrimming {
                 .filter(|&i| i < protect_from)
                 .filter(|&i| !messages[i].content.is_empty())
                 .filter(|&i| messages[i].content != TRUNCATED_PLACEHOLDER)
+                // A halved file snapshot invites the model to hallucinate
+                // line contents it no longer has — file content is either
+                // fully present or fully absent.
+                .filter(|&i| {
+                    !never_shrink_reads
+                        || read_calls
+                            .as_ref()
+                            .map(|c| !filestate::is_read_file_result(c, &messages[i]))
+                            .unwrap_or(true)
+                })
                 .max_by_key(|&i| Self::message_tokens(&messages[i]));
             let Some(idx) = best else { break };
             let current_chars = messages[idx].content.chars().count();
@@ -462,14 +505,29 @@ impl ContextTrimming {
         protect_from: usize,
         budget_chars: usize,
         config: &TrimConfig,
+        never_shrink_reads: bool,
     ) {
         let budget = budget_chars.max(MIN_TRUNCATED_CONTENT_CHARS * 4);
+        // With freshness eviction on, `read_file` results are skipped: a
+        // partially summarized file snapshot invites the model to hallucinate
+        // line contents it no longer has, so file content is either fully
+        // present or fully absent.
+        let read_calls = if never_shrink_reads {
+            Some(filestate::call_map(messages))
+        } else {
+            None
+        };
         // Single pass over the pre-tail messages, largest first: each tool
         // result is summarized at most once (bounded, no re-selection of a
         // message that could not be shrunk), so this always terminates.
         let mut candidates: Vec<usize> = (0..protect_from)
+            .filter(|&i| messages[i].role == "tool" && messages[i].content.len() > budget)
             .filter(|&i| {
-                messages[i].role == "tool" && messages[i].content.len() > budget
+                !never_shrink_reads
+                    || read_calls
+                        .as_ref()
+                        .map(|c| !filestate::is_read_file_result(c, &messages[i]))
+                        .unwrap_or(true)
             })
             .collect();
         candidates.sort_by_key(|&i| std::cmp::Reverse(Self::message_tokens(&messages[i])));
@@ -507,25 +565,35 @@ impl ContextTrimming {
             return 0;
         }
 
-        // ── Freshness pass: evict stale/superseded file reads ───────────────
-        // Runs BEFORE the age-based removal so old file snapshots — content
-        // the model can no longer trust (the file was modified after the read,
-        // or a newer read supersedes it) — are collapsed to one-line markers
-        // first, preserving budget for still-relevant context. Pre-tail only.
+        let mut removed = 0;
+
+        // ── Freshness pass: fully remove stale/superseded file-read pairs ──
+        // Runs BEFORE the age-based removal. A stale file snapshot (the file
+        // was modified after the read, or a newer read supersedes it) is
+        // content the model can no longer trust — kept even as a one-line
+        // marker it invites the model to hallucinate line contents it no
+        // longer has, so the WHOLE tool pair (assistant call + tool result)
+        // is removed. If the file still matters, the model re-reads it.
+        // Pre-tail only.
         if config.stale_file_invalidation {
             let index = filestate::build_file_state_index(messages);
             if !index.last_read.is_empty() {
                 let protect_from = Self::protected_tail_start(messages);
-                let marked = filestate::invalidate_stale_reads(messages, protect_from, &index);
-                if marked > 0 {
+                let dropped = filestate::remove_stale_read_pairs(messages, protect_from, &index);
+                if dropped > 0 {
+                    removed += dropped;
                     tracing::info!(
-                        "[TRIM] freshness pass: marked {marked} stale/superseded read_file result(s)"
+                        "[TRIM] freshness pass: removed {dropped} message(s) from stale/superseded read_file pair(s)"
                     );
                 }
             }
         }
 
-        let mut keep_from = if messages.first().map(|m| m.role.as_str()) == Some("system") { 1 } else { 0 };
+        let mut keep_from = if messages.first().map(|m| m.role.as_str()) == Some("system") {
+            1
+        } else {
+            0
+        };
 
         if keep_from >= messages.len() {
             return 0;
@@ -567,7 +635,6 @@ impl ContextTrimming {
             false
         }
 
-        let mut removed = 0;
         loop {
             let prompt_len = Self::message_char_count(messages);
             if prompt_len <= target_chars {
@@ -613,12 +680,22 @@ impl ContextTrimming {
 
         // Second pass: compress already-consumed tool rounds in place
         // (summarization keeps paths/errors/line counts and never empties).
+        // With freshness eviction on, `read_file` results are excluded: a
+        // partially summarized/halved file snapshot is worse than none, so
+        // file content is either fully present or fully absent.
         let protect_from = Self::protected_tail_start(messages);
-        self.summarize_old_tool_messages(messages, protect_from, target_chars, config);
+        let never_shrink_reads = config.stale_file_invalidation;
+        self.summarize_old_tool_messages(
+            messages,
+            protect_from,
+            target_chars,
+            config,
+            never_shrink_reads,
+        );
 
         // Fallback: if still over budget, truncate the largest shrinkable
         // message (protected tail excluded) to force it under.
-        Self::truncate_largest_message(messages, target_chars, protect_from);
+        Self::truncate_largest_message(messages, target_chars, protect_from, never_shrink_reads);
 
         let final_count = messages.len();
         let final_chars = Self::message_char_count(messages);

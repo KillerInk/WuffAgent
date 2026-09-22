@@ -20,9 +20,15 @@
 //!
 //! | Condition | Verdict |
 //! |---|---|
-//! | a successful mutation of `P` at an index `> i` | **stale** marker |
-//! | else a newer read of `P` (by construction no mutation lies between them) | **superseded** marker |
+//! | a successful mutation of `P` at an index `> i` | **stale** — pair removed |
+//! | else a newer read of `P` (by construction no mutation lies between them) | **superseded** — pair removed |
 //! | else | **current** — newest snapshot, nothing mutated since; kept in full |
+//!
+//! Stale/superseded reads are removed WHOLESALE (the assistant tool call and
+//! its tool results go together) rather than being replaced by a one-line
+//! marker: even a marker keeps the model believing it has seen the file, and
+//! it then hallucinates line contents it no longer has. Removal makes the
+//! absence explicit — if the file matters, the model re-reads it.
 
 use std::collections::HashMap;
 
@@ -118,7 +124,7 @@ fn mutated_paths(name: &str, params: &ToolParams) -> Vec<String> {
 /// `role: "tool"` results carry only the id; the tool name + argument JSON
 /// live on the paired assistant message. Built owned (not by reference) so the
 /// caller may hold it across a mutable pass over the list.
-fn call_map(messages: &[Message]) -> HashMap<String, (String, String)> {
+pub fn call_map(messages: &[Message]) -> HashMap<String, (String, String)> {
     let mut calls = HashMap::new();
     for m in messages.iter().filter(|m| m.role == "assistant") {
         if let Some(tcs) = &m.tool_calls {
@@ -172,11 +178,29 @@ pub fn build_file_state_index(messages: &[Message]) -> FileStateIndex {
     index
 }
 
+/// True if `m` is a `read_file` tool result — a raw snapshot or an already-
+/// collapsed freshness marker. `calls` must come from [`call_map`] over the
+/// same message list.
+pub fn is_read_file_result(calls: &HashMap<String, (String, String)>, m: &Message) -> bool {
+    if m.role != "tool" {
+        return false;
+    }
+    if is_file_marker(&m.content) {
+        return true;
+    }
+    m.tool_call_id
+        .as_deref()
+        .and_then(|id| calls.get(id))
+        .is_some_and(|(name, _)| name == "read_file")
+}
+
 /// Shrink stale/superseded pre-tail `read_file` results to one-line markers.
 ///
-/// In-place content replacement only: `tool_call_id` pairing stays intact and
-/// no tool message ever ends up empty. Messages at/after `protect_from` (the
-/// protected tail) are never touched. Returns the number of markers applied.
+/// Legacy marker form of [`remove_stale_read_pairs`] (kept for compatibility
+/// and tests): in-place content replacement only, `tool_call_id` pairing
+/// stays intact and no tool message ever ends up empty. Messages at/after
+/// `protect_from` (the protected tail) are never touched. Returns the number
+/// of markers applied.
 pub fn invalidate_stale_reads(
     messages: &mut [Message],
     protect_from: usize,
@@ -212,10 +236,7 @@ pub fn invalidate_stale_reads(
         };
         let key = normalize_path(&path);
 
-        let is_stale = index
-            .last_mutate
-            .get(&key)
-            .is_some_and(|&mi| mi > i);
+        let is_stale = index.last_mutate.get(&key).is_some_and(|&mi| mi > i);
         let is_superseded = index.last_read.get(&key).is_some_and(|&ri| ri > i);
 
         let marker = if is_stale {
@@ -230,6 +251,97 @@ pub fn invalidate_stale_reads(
     }
 
     applied
+}
+
+/// Remove the full tool pairs for every pre-tail `read_file` result that is
+/// stale, superseded, or already collapsed to a freshness marker (a marker
+/// left over from an older persisted session).
+///
+/// The span removed for a tool result at index `i` is its whole round: the
+/// contiguous run of `role: "tool"` messages containing `i`, plus the
+/// `assistant` message immediately before the run that issued the calls.
+/// Removing the pair as a unit keeps call/result pairing intact (no orphaned
+/// `tool_call_id`, no dangling call). Messages at/after `protect_from` (the
+/// protected tail) are never touched. Returns the number of messages removed.
+pub fn remove_stale_read_pairs(
+    messages: &mut Vec<Message>,
+    protect_from: usize,
+    index: &FileStateIndex,
+) -> usize {
+    let calls = call_map(messages);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+
+    for i in 0..protect_from.min(messages.len()) {
+        let m = &messages[i];
+        if m.role != "tool" {
+            continue;
+        }
+        let Some(call_id) = m.tool_call_id.as_deref() else {
+            continue;
+        };
+        let Some((name, args)) = calls.get(call_id) else {
+            continue;
+        };
+        if name != "read_file" {
+            continue;
+        }
+        // Markers are dropped unconditionally; raw snapshots need the
+        // freshness verdict.
+        let drop = if is_file_marker(&m.content) {
+            true
+        } else {
+            let Ok(params) = parse_tool_args(args) else {
+                continue;
+            };
+            let Some(path) = params.get::<String>("path") else {
+                continue;
+            };
+            let key = normalize_path(&path);
+            let is_stale = index.last_mutate.get(&key).is_some_and(|&mi| mi > i);
+            let is_superseded = index.last_read.get(&key).is_some_and(|&ri| ri > i);
+            is_stale || is_superseded
+        };
+        if !drop {
+            continue;
+        }
+        // Span = the full round: walk back over the contiguous tool run to
+        // its start, then include the assistant message that issued it.
+        let mut start = i;
+        while start > 0 && messages[start - 1].role == "tool" {
+            start -= 1;
+        }
+        if start > 0
+            && messages[start - 1].role == "assistant"
+            && messages[start - 1].tool_calls.is_some()
+        {
+            start -= 1;
+        }
+        let mut end = i + 1;
+        while end < protect_from && messages[end].role == "tool" {
+            end += 1;
+        }
+        spans.push((start, end));
+    }
+
+    if spans.is_empty() {
+        return 0;
+    }
+    // Merge overlapping spans (two stale reads in the same round) and remove
+    // from the end so earlier spans' indices stay valid.
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in spans {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    let mut removed = 0;
+    for (s, e) in merged.iter().rev() {
+        messages.drain(*s..*e);
+        removed += e - s;
+    }
+    removed
 }
 
 #[cfg(test)]

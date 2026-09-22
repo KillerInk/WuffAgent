@@ -3,7 +3,6 @@
 /// Controls thresholds and behavior for the trimming pipeline that
 /// summarizes tool results, build logs, and other verbose outputs
 /// to reduce context bloat.
-
 use serde::{Deserialize, Serialize};
 
 /// Configuration for intelligent context trimming.
@@ -37,19 +36,38 @@ pub struct TrimConfig {
     #[serde(default = "default_list_max_items")]
     pub list_max_items: usize,
 
-    /// Enable freshness-aware invalidation of stale/superseded `read_file`
-    /// results at trim time (see `filestate`). Off = legacy size/age-only trim.
+    /// Enable freshness-aware eviction of stale/superseded `read_file`
+    /// results at trim time (see `filestate`): the whole tool pair is removed
+    /// (no marker, no partial content), and no in-place shrink
+    /// (summarize/halve) is ever applied to a `read_file` result, so the model
+    /// never sees a partial file snapshot it could hallucinate lines from.
+    /// Off = legacy behavior (one-line stale markers, size-based in-place
+    /// summarization).
     #[serde(default = "default_true")]
     pub stale_file_invalidation: bool,
 }
 
-fn default_enabled() -> bool { true }
-fn default_max_tool_result_chars() -> usize { 1000 }
-fn default_max_chain_entries() -> usize { 50 }
-fn default_code_max_lines() -> usize { 30 }
-fn default_log_max_lines() -> usize { 15 }
-fn default_list_max_items() -> usize { 20 }
-fn default_true() -> bool { true }
+fn default_enabled() -> bool {
+    true
+}
+fn default_max_tool_result_chars() -> usize {
+    1000
+}
+fn default_max_chain_entries() -> usize {
+    50
+}
+fn default_code_max_lines() -> usize {
+    30
+}
+fn default_log_max_lines() -> usize {
+    15
+}
+fn default_list_max_items() -> usize {
+    20
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Default for TrimConfig {
     fn default() -> Self {
