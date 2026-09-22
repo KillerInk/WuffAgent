@@ -8,7 +8,9 @@
 //! Module dependency: `memory` uses `llm` for improvement,
 //! but `llm` does not depend on `memory`.
 
+pub mod context;
 pub mod manager;
+pub mod maintenance;
 pub mod search;
 pub mod storage;
 pub mod types;
@@ -18,6 +20,7 @@ pub mod types;
 // MemoryManager::suggest_improvements, which calls into it).
 pub use crate::agents::improvement::suggest_improvements;
 pub use crate::types::{ImprovementSuggestion, NewAgentProposal};
-pub use manager::{MaintenanceProgress, MaintenanceReport, MemoryAddResult, MemoryManager};
+pub use maintenance::{MaintenanceProgress, MaintenanceReport};
+pub use manager::{MemoryAddResult, MemoryManager};
 pub use storage::{get_memories_path, load_memories, save_memories};
 pub use types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};

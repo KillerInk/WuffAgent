@@ -1,5 +1,7 @@
 //! Unit tests for the `manager` module (see `super`).
 
+use crate::types::Message;
+
 use super::*;
 use tempfile::tempdir;
 
