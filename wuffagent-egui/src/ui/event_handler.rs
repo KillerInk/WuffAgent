@@ -33,22 +33,9 @@ impl ChatApp {
             AppEvent::StreamChunk { content, .. } => {
                 if let Some(runtime) = self.session_store.get_mut(&sid) {
                     runtime.chat_state.stream_chunk(&content);
-                    // Live status-bar estimates while generating: the context
-                    // grows with the estimated generated tokens and TG speed
-                    // tracks the in-progress segment. These snap to the
-                    // server-reported values on round/complete.
-                    if runtime.chat_state.is_generating {
-                        let live_tokens = runtime.chat_state.live_gen_tokens();
-                        runtime.chat_state.token_count =
-                            (runtime.chat_state.token_count as f64 + live_tokens) as usize;
-                        if n_ctx > 0 {
-                            runtime.chat_state.context_used =
-                                (runtime.chat_state.token_count as f64 / n_ctx as f64 * 100.0) as f32;
-                        }
-                        if let Some(tps) = runtime.chat_state.live_gen_tps() {
-                            runtime.chat_state.gen_tps = Some(tps);
-                        }
-                    }
+                    // Live status-bar estimates while generating (content and
+                    // thinking chunks alike): see `update_live_estimates`.
+                    runtime.chat_state.update_live_estimates(n_ctx);
                 }
             }
             AppEvent::StreamPromptProgress { progress, .. } => {
@@ -281,9 +268,13 @@ impl ChatApp {
             }
             AppEvent::StreamThinkingChunk { content, .. } => {
                 tracing::trace!("UI: StreamThinkingChunk received, content_len={}", content.len());
-                // Accumulate for live display only.
+                // Live display + status-bar estimates: thinking tokens are
+                // generated tokens, so TG speed and the token gauge must
+                // track them too (before this, TG froze for the whole
+                // duration of thinking segments).
                 if let Some(runtime) = self.session_store.get_mut(&sid) {
-                    runtime.chat_state.current_thinking.push_str(&content);
+                    runtime.chat_state.stream_thinking_chunk(&content);
+                    runtime.chat_state.update_live_estimates(n_ctx);
                 }
             }
             AppEvent::StreamThinkingComplete { content: _, .. } => {

@@ -88,6 +88,12 @@ pub struct ChatAreaState {
     pub prompt_progress: Option<crate::types::PromptProgress>,
     /// When the current generation segment started (live speed estimate).
     pub live_gen_started: Option<std::time::Instant>,
+    /// Estimated tokens of the current segment ALREADY added to `token_count`
+    /// by `update_live_estimates` (content + thinking chunks). `live_gen_tokens()`
+    /// returns the segment CUMULATIVE, so without this marker every chunk would
+    /// re-add the whole segment and the live gauge would inflate quadratically.
+    /// Reset by `commit_stream`.
+    pub live_tokens_added: f64,
     pub pending_image: Option<egui::ImageSource<'static>>,
     /// Status shown in the status bar for this session.
     pub status: crate::types::AppStatus,
@@ -127,6 +133,7 @@ impl Default for ChatAreaState {
             gen_tps: None,
             live_gen_chars: 0,
             live_gen_started: None,
+            live_tokens_added: 0.0,
             prompt_progress: None,
             pending_image: None,
             status: crate::types::AppStatus::Stopped,
@@ -153,6 +160,22 @@ impl ChatAreaState {
 
     pub fn stream_chunk(&mut self, chunk: &str) {
         self.stream_buffer.push_str(chunk);
+        self.bump_live_gen(chunk);
+    }
+
+    /// Accumulate a thinking chunk: live display buffer plus the SAME live
+    /// token/speed counters as `stream_chunk`. Thinking tokens are generated
+    /// tokens too (they consume context), so the TG speed pill and the live
+    /// token gauge must track them — before this, TG froze (or never appeared
+    /// when thinking led a round) for the whole duration of thinking segments.
+    pub fn stream_thinking_chunk(&mut self, chunk: &str) {
+        self.current_thinking.push_str(chunk);
+        self.bump_live_gen(chunk);
+    }
+
+    /// Bump the live generation estimate (chars + segment start time) with a
+    /// chunk of streamed output (content or thinking).
+    fn bump_live_gen(&mut self, chunk: &str) {
         self.live_gen_chars = self
             .live_gen_chars
             .saturating_add(chunk.chars().count() as u32);
@@ -171,6 +194,7 @@ impl ChatAreaState {
         // from a clean slate.
         self.live_gen_chars = 0;
         self.live_gen_started = None;
+        self.live_tokens_added = 0.0;
     }
 
     /// Estimated tokens generated so far in the current segment
@@ -185,6 +209,32 @@ impl ChatAreaState {
         let started = self.live_gen_started?;
         let elapsed = started.elapsed().as_secs_f64();
         (elapsed >= 0.5).then(|| self.live_gen_tokens() / elapsed)
+    }
+
+    /// Update the status bar's live estimates (token gauge + TG speed) from
+    /// the streamed output so far in the current segment — content AND
+    /// thinking chunks feed `live_gen_chars`, so TG tracks both. Only the
+    /// not-yet-counted delta is added to `token_count` (idempotent between
+    /// chunks), and `gen_tps` takes the live segment speed once available.
+    /// No-op while not generating; values snap to server-reported totals on
+    /// round/complete.
+    pub fn update_live_estimates(&mut self, n_ctx: u32) {
+        if !self.is_generating {
+            return;
+        }
+        let live = self.live_gen_tokens();
+        let delta = live - self.live_tokens_added;
+        if delta > 0.0 {
+            self.token_count = (self.token_count as f64 + delta) as usize;
+            self.live_tokens_added = live;
+            if n_ctx > 0 {
+                self.context_used =
+                    (self.token_count as f64 / n_ctx as f64 * 100.0) as f32;
+            }
+        }
+        if let Some(tps) = self.live_gen_tps() {
+            self.gen_tps = Some(tps);
+        }
     }
 
     /// Show a brief notification message (stored as a temporary system message).
@@ -399,5 +449,97 @@ impl SessionRuntime {
             self.chat_state.context_used =
                 self.chat_state.token_count as f32 / n_ctx as f32 * 100.0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_chunks_feed_live_estimate() {
+        let mut s = ChatAreaState::default();
+        s.is_generating = true;
+        // Thinking chunk: display buffer + live counters (TG must track it).
+        s.stream_thinking_chunk("hello world"); // 11 chars
+        assert_eq!(s.current_thinking, "hello world");
+        assert_eq!(s.live_gen_chars, 11);
+        assert!(s.live_gen_started.is_some());
+        // Content chunk: same counters, different buffers.
+        s.stream_chunk("abc"); // 3 chars
+        assert_eq!(s.stream_buffer, "abc");
+        assert_eq!(s.current_thinking, "hello world");
+        assert_eq!(s.live_gen_chars, 14);
+        assert!((s.live_gen_tokens() - 14.0 / 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn update_live_estimates_no_double_count() {
+        let mut s = ChatAreaState::default();
+        s.is_generating = true;
+        s.token_count = 100;
+        s.stream_chunk(&"x".repeat(35)); // ~10 estimated tokens
+        s.update_live_estimates(1000);
+        let after_first = s.token_count;
+        assert!(after_first > 100, "live gauge must grow while generating");
+        // Applying again WITHOUT new chunks must add nothing (the old code
+        // re-added the whole cumulative segment every chunk — quadratic).
+        s.update_live_estimates(1000);
+        assert_eq!(s.token_count, after_first);
+        // A new chunk adds only its own share.
+        s.stream_chunk(&"y".repeat(35));
+        s.update_live_estimates(1000);
+        let after_second = s.token_count;
+        assert!(after_second > after_first);
+        assert!((after_second as f64 - after_first as f64 - 35.0 / 3.5).abs() < 1.0);
+    }
+
+    #[test]
+    fn update_live_estimates_noop_when_not_generating() {
+        let mut s = ChatAreaState::default();
+        s.token_count = 42;
+        s.stream_chunk(&"x".repeat(35));
+        s.update_live_estimates(1000);
+        assert_eq!(s.token_count, 42);
+        assert!(s.gen_tps.is_none());
+        assert_eq!(s.context_used, 0.0);
+    }
+
+    #[test]
+    fn update_live_estimates_sets_context_used() {
+        let mut s = ChatAreaState::default();
+        s.is_generating = true;
+        s.stream_chunk(&"x".repeat(350)); // 100 estimated tokens
+        s.update_live_estimates(1000);
+        assert!((s.context_used - (100.0 / 1000.0 * 100.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn commit_stream_resets_live_estimate() {
+        let mut s = ChatAreaState::default();
+        s.is_generating = true;
+        s.token_count = 100;
+        s.stream_chunk(&"x".repeat(35));
+        s.update_live_estimates(1000);
+        let grown = s.token_count;
+        assert!(grown > 100);
+        s.commit_stream();
+        assert_eq!(s.live_gen_chars, 0);
+        assert!(s.live_gen_started.is_none());
+        assert_eq!(s.live_tokens_added, 0.0);
+        // Next segment starts counting from a clean slate.
+        s.stream_chunk(&"y".repeat(35));
+        s.update_live_estimates(1000);
+        assert!(s.token_count > grown);
+    }
+
+    #[test]
+    fn live_gen_tps_0_5s_gate() {
+        let mut s = ChatAreaState::default();
+        s.stream_chunk("some text");
+        assert!(s.live_gen_tps().is_none(), "under 0.5s the estimate is meaningless");
+        std::thread::sleep(std::time::Duration::from_millis(550));
+        let tps = s.live_gen_tps().expect("after 0.5s the live speed is available");
+        assert!(tps > 0.0);
     }
 }
