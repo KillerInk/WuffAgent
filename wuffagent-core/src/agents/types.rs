@@ -43,7 +43,9 @@ pub struct RestartRequest {
 pub struct AgentId(pub String);
 
 impl AgentId {
-    pub fn new(id: &str) -> Self { Self(id.to_string()) }
+    pub fn new(id: &str) -> Self {
+        Self(id.to_string())
+    }
     pub fn generate() -> Self {
         Self(format!("agent-{}", Uuid::new_v4()))
     }

@@ -3,7 +3,9 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use crate::tools::types::{FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema};
+use crate::tools::types::{
+    FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema,
+};
 
 /// Validates a path for safety, rejecting traversal patterns and sensitive
 /// system directories. Canonicalizes when possible for stronger guarantees.
@@ -13,10 +15,7 @@ pub(crate) fn validate_path(path: &str) -> Result<(), ToolError> {
     }
 
     let normalized = path.replace('\\', "/");
-    if normalized.contains("../")
-        || normalized.ends_with("/..")
-        || normalized == ".."
-    {
+    if normalized.contains("../") || normalized.ends_with("/..") || normalized == ".." {
         return Err(ToolError::Execution("Path not allowed".to_string()));
     }
 
@@ -30,7 +29,9 @@ pub(crate) fn validate_path(path: &str) -> Result<(), ToolError> {
     if let Ok(canonical) = std::path::Path::new(path).canonicalize() {
         let canonical_str = canonical.to_string_lossy().to_lowercase();
         // Strip the Windows `\\?\` verbatim prefix (exact 4-char prefix).
-        let canonical_str = canonical_str.strip_prefix(r"\\?\").unwrap_or(&canonical_str);
+        let canonical_str = canonical_str
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&canonical_str);
         let canonical_norm = canonical_str.replace('\\', "/");
         if is_sensitive_path(&canonical_norm) {
             return Err(ToolError::Execution("Path not allowed".to_string()));
@@ -46,9 +47,12 @@ pub(crate) fn validate_path(path: &str) -> Result<(), ToolError> {
 }
 
 fn is_sensitive_path(p: &str) -> bool {
-    p == "/etc" || p.starts_with("/etc/")
-        || p == "/root" || p.starts_with("/root/")
-        || p == "c:/windows" || p.starts_with("c:/windows/")
+    p == "/etc"
+        || p.starts_with("/etc/")
+        || p == "/root"
+        || p.starts_with("/root/")
+        || p == "c:/windows"
+        || p.starts_with("c:/windows/")
         || p.starts_with("c:/program files")
 }
 
@@ -85,7 +89,11 @@ impl Eol {
 /// Text without any line break reports Lf (any conversion is a no-op then).
 fn detect_eol(bytes: &[u8]) -> Eol {
     let crlf = bytes.windows(2).filter(|w| *w == b"\r\n").count();
-    let lone_lf = bytes.iter().filter(|&&b| b == b'\n').count().saturating_sub(crlf);
+    let lone_lf = bytes
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+        .saturating_sub(crlf);
     if crlf > lone_lf {
         Eol::Crlf
     } else {
@@ -183,9 +191,8 @@ fn read_file(
     /// Individual lines longer than this are trimmed.
     const MAX_LINE_LEN: usize = 10_000;
 
-    let file = fs::File::open(path).map_err(|e| {
-        ToolError::Execution(format!("Failed to open '{}': {}", path, e))
-    })?;
+    let file = fs::File::open(path)
+        .map_err(|e| ToolError::Execution(format!("Failed to open '{}': {}", path, e)))?;
     let mut reader = std::io::BufReader::new(file);
     // Fail early with a clear message on UTF-16 files (BOM sniff) instead of
     // erroring mid-iteration with "stream did not contain valid UTF-8".
@@ -352,11 +359,17 @@ fn write_file(path: &str, content: &str) -> crate::tools::types::ToolResult<Tool
     })();
     if let Err(e) = write_result {
         let _ = fs::remove_file(&tmp);
-        return Err(ToolError::Execution(format!("Failed to write '{}': {}", path, e)));
+        return Err(ToolError::Execution(format!(
+            "Failed to write '{}': {}",
+            path, e
+        )));
     }
     if let Err(e) = replace_over_existing(&tmp, target) {
         let _ = fs::remove_file(&tmp);
-        return Err(ToolError::Execution(format!("Failed to replace '{}': {}", path, e)));
+        return Err(ToolError::Execution(format!(
+            "Failed to replace '{}': {}",
+            path, e
+        )));
     }
     Ok(ToolOutput::Success(serde_json::json!({
         "path": path,
@@ -370,9 +383,8 @@ fn write_file(path: &str, content: &str) -> crate::tools::types::ToolResult<Tool
 /// listed first, then files, each sorted by name — the OS enumeration
 /// order is otherwise arbitrary.
 fn list_dir(path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
-    let dir_iter = fs::read_dir(path).map_err(|e| {
-        ToolError::Execution(format!("Failed to list '{}': {}", path, e))
-    })?;
+    let dir_iter = fs::read_dir(path)
+        .map_err(|e| ToolError::Execution(format!("Failed to list '{}': {}", path, e)))?;
     let mut entries: Vec<(bool, String, serde_json::Value)> = Vec::new();
     for e in dir_iter {
         let e = match e {
@@ -432,9 +444,7 @@ fn append_file(path: &str, content: &str) -> crate::tools::types::ToolResult<Too
             ToolError::Execution(format!("Failed to open '{}' for appending: {}", path, e))
         })?
         .write_all(payload.as_bytes())
-        .map_err(|e| {
-            ToolError::Execution(format!("Failed to append to '{}': {}", path, e))
-        })?;
+        .map_err(|e| ToolError::Execution(format!("Failed to append to '{}': {}", path, e)))?;
     Ok(ToolOutput::Success(serde_json::json!({
         "path": path,
         "bytes_appended": payload.len(),
@@ -459,9 +469,8 @@ fn search_files(
     const SKIP_DIRS: &[&str] = &[".git", "target"];
 
     let cap = max_results.unwrap_or(DEFAULT_MAX_RESULTS).max(1);
-    let mut iter = glob::glob(pattern).map_err(|e| {
-        ToolError::Execution(format!("Invalid glob pattern '{}': {}", pattern, e))
-    })?;
+    let mut iter = glob::glob(pattern)
+        .map_err(|e| ToolError::Execution(format!("Invalid glob pattern '{}': {}", pattern, e)))?;
 
     let mut matches: Vec<String> = Vec::new();
     let mut skipped = 0usize;
@@ -527,7 +536,10 @@ fn apply_diff(path: &str, diff: &str) -> crate::tools::types::ToolResult<ToolOut
     let diff = strip_utf8_bom(diff);
 
     let blocks = parse_search_replace_blocks(diff).map_err(|e| {
-        ToolError::Execution(format!("Malformed search/replace blocks for '{}': {}", path, e))
+        ToolError::Execution(format!(
+            "Malformed search/replace blocks for '{}': {}",
+            path, e
+        ))
     })?;
     if blocks.is_empty() {
         return Err(ToolError::Execution(
@@ -548,7 +560,9 @@ fn apply_diff(path: &str, diff: &str) -> crate::tools::types::ToolResult<ToolOut
         let count = current.matches(search).count();
         if count == 0 {
             return Err(ToolError::Execution(format!(
-                "Block {}: search text not found in '{}'", i + 1, path
+                "Block {}: search text not found in '{}'",
+                i + 1,
+                path
             )));
         }
         if count > 1 {
@@ -635,9 +649,8 @@ fn mkdir(path: &str, recursive: bool) -> crate::tools::types::ToolResult<ToolOut
 /// Delete a file or directory. If `recursive` is true, directories and all
 /// their contents are deleted; otherwise a directory must be empty.
 fn delete(path: &str, recursive: bool) -> crate::tools::types::ToolResult<ToolOutput> {
-    let metadata = fs::metadata(path).map_err(|e| {
-        ToolError::Execution(format!("Failed to stat '{}': {}", path, e))
-    })?;
+    let metadata = fs::metadata(path)
+        .map_err(|e| ToolError::Execution(format!("Failed to stat '{}': {}", path, e)))?;
     if metadata.is_dir() {
         if recursive {
             fs::remove_dir_all(path).map_err(|e| {
@@ -664,9 +677,8 @@ fn delete(path: &str, recursive: bool) -> crate::tools::types::ToolResult<ToolOu
 
 /// Copy a file or directory (directories are copied recursively).
 fn copy(src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutput> {
-    let metadata = fs::metadata(src).map_err(|e| {
-        ToolError::Execution(format!("Source '{}' not found: {}", src, e))
-    })?;
+    let metadata = fs::metadata(src)
+        .map_err(|e| ToolError::Execution(format!("Source '{}' not found: {}", src, e)))?;
     if metadata.is_dir() {
         copy_dir_all(src, dest).map_err(|e| {
             ToolError::Execution(format!("Failed to copy directory '{}': {}", src, e))
@@ -732,11 +744,11 @@ fn move_item(src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutpu
     if fs::rename(src, dest).is_err() {
         // Try cross-device fallback
         copy(src, dest)?;
-        fs::remove_file(src).or_else(|_| fs::remove_dir_all(src)).map_err(|e| {
-            ToolError::Execution(format!(
-                "Cross-device move failed after copy: {}", e
-            ))
-        })?;
+        fs::remove_file(src)
+            .or_else(|_| fs::remove_dir_all(src))
+            .map_err(|e| {
+                ToolError::Execution(format!("Cross-device move failed after copy: {}", e))
+            })?;
         return Ok(ToolOutput::Success(serde_json::json!({
             "src": src,
             "dest": dest,
@@ -753,9 +765,8 @@ fn move_item(src: &str, dest: &str) -> crate::tools::types::ToolResult<ToolOutpu
 
 /// Stat a file or directory: size, last-modified time, type, and permissions.
 fn file_info(path: &str) -> crate::tools::types::ToolResult<ToolOutput> {
-    let metadata = fs::metadata(path).map_err(|e| {
-        ToolError::Execution(format!("Failed to stat '{}': {}", path, e))
-    })?;
+    let metadata = fs::metadata(path)
+        .map_err(|e| ToolError::Execution(format!("Failed to stat '{}': {}", path, e)))?;
     let perms = metadata.permissions();
     #[cfg(unix)]
     let perm_str = {
@@ -892,7 +903,12 @@ impl Tool for WriteFileTool {
             "Write (overwrite) a text file",
             &[
                 ("path", "string", "Path of the file to write.", false),
-                ("content", "string", "Full content to write to the file.", false),
+                (
+                    "content",
+                    "string",
+                    "Full content to write to the file.",
+                    false,
+                ),
             ],
             &["path", "content"],
         )
@@ -998,8 +1014,18 @@ impl Tool for SearchFilesTool {
             "search_files",
             "Find files matching a glob pattern",
             &[
-                ("pattern", "string", "Glob pattern to match files against.", false),
-                ("max_results", "integer", "Maximum number to return. Defaults to 500.", true),
+                (
+                    "pattern",
+                    "string",
+                    "Glob pattern to match files against.",
+                    false,
+                ),
+                (
+                    "max_results",
+                    "integer",
+                    "Maximum number to return. Defaults to 500.",
+                    true,
+                ),
             ],
             &["pattern"],
         )
@@ -1077,7 +1103,12 @@ impl Tool for MkdirTool {
             "Create a directory",
             &[
                 ("path", "string", "Path of the directory to create.", false),
-                ("recursive", "boolean", "Create parent directories as needed. Defaults to true.", true),
+                (
+                    "recursive",
+                    "boolean",
+                    "Create parent directories as needed. Defaults to true.",
+                    true,
+                ),
             ],
             &["path"],
         )
@@ -1113,8 +1144,18 @@ impl Tool for DeleteTool {
             "delete",
             "Delete a file or directory",
             &[
-                ("path", "string", "Path of the file or directory to delete.", false),
-                ("recursive", "boolean", "Delete directories recursively with all their contents. Defaults to false.", true),
+                (
+                    "path",
+                    "string",
+                    "Path of the file or directory to delete.",
+                    false,
+                ),
+                (
+                    "recursive",
+                    "boolean",
+                    "Delete directories recursively with all their contents. Defaults to false.",
+                    true,
+                ),
             ],
             &["path"],
         )
@@ -1150,8 +1191,18 @@ impl Tool for CopyTool {
             "copy",
             "Copy a file or directory",
             &[
-                ("src", "string", "Path of the source file or directory.", false),
-                ("dest", "string", "Path of the destination file or directory.", false),
+                (
+                    "src",
+                    "string",
+                    "Path of the source file or directory.",
+                    false,
+                ),
+                (
+                    "dest",
+                    "string",
+                    "Path of the destination file or directory.",
+                    false,
+                ),
             ],
             &["src", "dest"],
         )
@@ -1190,8 +1241,18 @@ impl Tool for MoveTool {
             "move",
             "Move or rename a file or directory",
             &[
-                ("src", "string", "Current path of the file or directory.", false),
-                ("dest", "string", "New path for the file or directory.", false),
+                (
+                    "src",
+                    "string",
+                    "Current path of the file or directory.",
+                    false,
+                ),
+                (
+                    "dest",
+                    "string",
+                    "New path for the file or directory.",
+                    false,
+                ),
             ],
             &["src", "dest"],
         )

@@ -4,14 +4,7 @@ use super::*;
 
 #[test]
 fn test_server_manager_creation() {
-    let server = ServerManager::new(
-        "llama-server",
-        "test_model.gguf",
-        18080,
-        0,
-        2048,
-        4,
-    );
+    let server = ServerManager::new("llama-server", "test_model.gguf", 18080, 0, 2048, 4);
     assert!(!server.is_running());
     assert_eq!(server.get_error(), None);
 }

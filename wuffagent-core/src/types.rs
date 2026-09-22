@@ -52,37 +52,37 @@ struct MessageDe {
 /// array, so old session files keep loading unchanged.
 fn split_content(content: serde_json::Value) -> (String, Option<String>) {
     match content {
-            serde_json::Value::String(s) => (s, None),
-            serde_json::Value::Array(parts) => {
-                let mut text = String::new();
-                let mut image = None;
-                for part in parts {
-                    match part.get("type").and_then(|t| t.as_str()) {
-                        Some("text") => {
-                            if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                if !text.is_empty() {
-                                    text.push('\n');
-                                }
-                                text.push_str(t);
+        serde_json::Value::String(s) => (s, None),
+        serde_json::Value::Array(parts) => {
+            let mut text = String::new();
+            let mut image = None;
+            for part in parts {
+                match part.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() {
+                                text.push('\n');
                             }
+                            text.push_str(t);
                         }
-                        Some("image_url") => {
-                            if image.is_none() {
-                                image = part
-                                    .get("image_url")
-                                    .and_then(|u| u.get("url"))
-                                    .and_then(|u| u.as_str())
-                                    .map(|s| s.to_string());
-                            }
-                        }
-                        _ => {}
                     }
+                    Some("image_url") => {
+                        if image.is_none() {
+                            image = part
+                                .get("image_url")
+                                .and_then(|u| u.get("url"))
+                                .and_then(|u| u.as_str())
+                                .map(|s| s.to_string());
+                        }
+                    }
+                    _ => {}
                 }
-                (text, image)
             }
-            // Null or any other shape — keep it loadable, display as empty.
-            _ => (String::new(), None),
+            (text, image)
         }
+        // Null or any other shape — keep it loadable, display as empty.
+        _ => (String::new(), None),
+    }
 }
 
 impl<'de> Deserialize<'de> for Message {
@@ -302,15 +302,36 @@ pub enum MessageKind {
 /// not be mixed between sessions.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
-    StreamChunk { content: String, session_id: String },
+    StreamChunk {
+        content: String,
+        session_id: String,
+    },
     /// Live prompt-processing progress (llama.cpp `prompt_progress` chunks,
     /// sent while the server processes the prompt before the first token).
-    StreamPromptProgress { progress: PromptProgress, session_id: String },
+    StreamPromptProgress {
+        progress: PromptProgress,
+        session_id: String,
+    },
     /// An intermediate tool round finished (text committed, generation continues).
-    StreamRoundComplete { content: String, usage: Option<Usage>, session_id: String },
-    StreamComplete { content: String, usage: Option<Usage>, session_id: String },
-    StreamError { error: String, session_id: String },
-    ToolCallWarning { tool_name: String, message: String, session_id: String },
+    StreamRoundComplete {
+        content: String,
+        usage: Option<Usage>,
+        session_id: String,
+    },
+    StreamComplete {
+        content: String,
+        usage: Option<Usage>,
+        session_id: String,
+    },
+    StreamError {
+        error: String,
+        session_id: String,
+    },
+    ToolCallWarning {
+        tool_name: String,
+        message: String,
+        session_id: String,
+    },
     /// A tool call began. `args_preview` is a one-line human-readable
     /// summary of the arguments (what the tool is doing), for the live
     /// tool card in the chat area.
@@ -330,13 +351,32 @@ pub enum AppEvent {
         text: String,
         session_id: String,
     },
-    ToolCallComplete { tool_name: String, call_id: String, result: String, session_id: String },
-    ToolCallError { tool_name: String, call_id: String, error: String, session_id: String },
+    ToolCallComplete {
+        tool_name: String,
+        call_id: String,
+        result: String,
+        session_id: String,
+    },
+    ToolCallError {
+        tool_name: String,
+        call_id: String,
+        error: String,
+        session_id: String,
+    },
     // Thinking output events (e.g. Claude-style reasoning)
-    StreamThinkingChunk { content: String, session_id: String },
-    StreamThinkingComplete { content: String, session_id: String },
+    StreamThinkingChunk {
+        content: String,
+        session_id: String,
+    },
+    StreamThinkingComplete {
+        content: String,
+        session_id: String,
+    },
     /// Remote server n_ctx was updated.
-    NCtxUpdated { n_ctx: u32, session_id: String },
+    NCtxUpdated {
+        n_ctx: u32,
+        session_id: String,
+    },
     /// Agent self-improvement suggestions generated.
     ImprovementSuggested {
         agent_name: String,
@@ -417,7 +457,11 @@ pub fn timestamp_time(ts: &str) -> &str {
 
 /// Format a tool call header for display.
 pub fn tool_call_header(name: &str, result: &str) -> String {
-    format!("🔧 {}: {}", name, result.chars().take(80).collect::<String>())
+    format!(
+        "🔧 {}: {}",
+        name,
+        result.chars().take(80).collect::<String>()
+    )
 }
 
 /// One-line human-readable preview of a tool call's arguments, for the live
@@ -443,14 +487,8 @@ pub fn tool_args_summary(name: &str, arguments: &str) -> String {
         // Preferred argument fields per tool (first present field wins).
         let fields: &[&str] = match name {
             "shell" => &["command"],
-            "read_file"
-            | "append_file"
-            | "apply_diff"
-            | "write_file"
-            | "delete"
-            | "file_info"
-            | "mkdir"
-            | "list_dir" => &["path"],
+            "read_file" | "append_file" | "apply_diff" | "write_file" | "delete" | "file_info"
+            | "mkdir" | "list_dir" => &["path"],
             "copy" | "move" => &["dest"],
             "search_files" => &["pattern"],
             "search_content" => &["pattern", "path"],

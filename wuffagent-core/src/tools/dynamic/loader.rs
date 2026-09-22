@@ -23,19 +23,13 @@ impl PluginHandle {
         // SAFETY: libloading and raw pointer operations below are all safe in context.
         unsafe {
             let lib = Library::new(path).map_err(|e| {
-                ToolError::PluginLoad(format!(
-                    "Failed to load '{}': {}",
-                    path.display(),
-                    e
-                ))
+                ToolError::PluginLoad(format!("Failed to load '{}': {}", path.display(), e))
             })?;
 
             // Try to read the metadata symbol
             let metadata_ptr: Symbol<unsafe extern "C" fn() -> *const ToolMetadata> = lib
                 .get(b"wuff_tool_metadata")
-                .map_err(|e| {
-                    ToolError::PluginLoad(format!("Missing metadata symbol: {}", e))
-                })?;
+                .map_err(|e| ToolError::PluginLoad(format!("Missing metadata symbol: {}", e)))?;
             let metadata_ref = &*metadata_ptr();
             let metadata = metadata_ref.clone();
 
@@ -57,9 +51,7 @@ impl PluginHandle {
             let create_fn: Symbol<PluginCreateFn> = self
                 .lib
                 .get(b"wuff_tool_create")
-                .map_err(|e| {
-                    ToolError::PluginLoad(format!("Missing create symbol: {}", e))
-                })?;
+                .map_err(|e| ToolError::PluginLoad(format!("Missing create symbol: {}", e)))?;
             let raw = create_fn();
             // SAFETY: The plugin is responsible for returning a valid PluginTool
             // created via PluginTool::from_box(). We take ownership and convert.

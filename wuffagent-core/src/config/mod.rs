@@ -4,34 +4,35 @@
 //! to provide a unified import path for consumers.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 pub use self::chat::ChatMessage;
-pub use self::local::LocalConfig;
-pub use self::remote::RemoteConfig;
 pub use self::encryption::EncryptionSettings;
-pub use self::presets::{get_presets_path, LocalPreset, Preset, PresetError, PresetStore, RemotePreset};
-pub use self::search::{SearchConfig, SearchBackend, SearchRegion, TimeRange};
-pub use paths::{get_config_path, get_restart_marker_path, get_wuffagent_home, RestartMarker};
+pub use self::local::LocalConfig;
+pub use self::presets::{
+    get_presets_path, LocalPreset, Preset, PresetError, PresetStore, RemotePreset,
+};
+pub use self::remote::RemoteConfig;
+pub use self::search::{SearchBackend, SearchConfig, SearchRegion, TimeRange};
 pub use crate::agents::config::{AgentConfig, ShellConfig, WorkerConfig};
 pub use crate::memory::types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};
+pub use paths::{get_config_path, get_restart_marker_path, get_wuffagent_home, RestartMarker};
 
 mod chat;
-mod local;
-mod remote;
 mod encryption;
+mod local;
 mod mcp;
 mod paths;
 mod presets;
+mod remote;
 mod search;
 #[cfg(test)]
 mod tests;
 
 pub use mcp::{McpServerConfig, McpTransport};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub enum ConnectionType {
     #[serde(rename = "local")]
     #[default]
@@ -39,7 +40,6 @@ pub enum ConnectionType {
     #[serde(rename = "remote")]
     Remote,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -104,7 +104,9 @@ pub struct Config {
 
 /// Deserialize `agent_config` with migration support.
 /// If old-style fields exist, migrate them to `agents/general.json` and clear.
-fn deserialize_agent_config<'de, D>(deserializer: D) -> Result<crate::agents::config::AgentConfig, D::Error>
+fn deserialize_agent_config<'de, D>(
+    deserializer: D,
+) -> Result<crate::agents::config::AgentConfig, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -231,7 +233,9 @@ impl Config {
                 if self.remote_url.is_empty() {
                     return Err(Error::EmptyRemoteUrl);
                 }
-                if !self.remote_url.starts_with("http://") && !self.remote_url.starts_with("https://") {
+                if !self.remote_url.starts_with("http://")
+                    && !self.remote_url.starts_with("https://")
+                {
                     return Err(Error::InvalidRemoteUrl(self.remote_url.clone()));
                 }
             }

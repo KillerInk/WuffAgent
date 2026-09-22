@@ -1,8 +1,8 @@
 //! Unit tests for the `manager` module (see `super`).
 
 use super::*;
-use crate::tools::types::ToolMetadata;
 use crate::tools::registry::ToolEntry;
+use crate::tools::types::ToolMetadata;
 
 /// Build a ToolManager whose registry contains a single `shell` entry,
 /// mirroring the global registration in `register_builtins`.
@@ -62,8 +62,16 @@ fn test_with_handoff_tool_swaps_entry() {
     let tm = tm.with_handoff_tool(tool);
 
     let names = tm.get_allowed_tools();
-    assert!(names.contains(&"handoff".to_string()), "handoff added: {:?}", names);
-    assert!(names.contains(&"shell".to_string()), "other tools preserved: {:?}", names);
+    assert!(
+        names.contains(&"handoff".to_string()),
+        "handoff added: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"shell".to_string()),
+        "other tools preserved: {:?}",
+        names
+    );
     // Exactly one handoff entry, and it is the per-execution one.
     let defs: Vec<_> = tm
         .get_tool_definitions()

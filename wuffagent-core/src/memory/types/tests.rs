@@ -54,7 +54,10 @@ fn test_i4_cooldown_and_auto_improve_defaults() {
     let legacy: MemoryConfig =
         serde_json::from_str(r#"{"enabled": true}"#).expect("old config should load");
     assert_eq!(legacy.improvement_cooldown_tasks, 5);
-    assert!(legacy.auto_improve, "I4: default flipped even for legacy files");
+    assert!(
+        legacy.auto_improve,
+        "I4: default flipped even for legacy files"
+    );
 
     // An EXPLICIT "auto_improve": false in an existing config file is
     // respected (the default only fills in missing values).

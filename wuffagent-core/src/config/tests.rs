@@ -43,8 +43,16 @@ fn test_config_save_and_load() {
     cfg.system_prompt = "You are a helpful assistant.".to_string();
     cfg.theme = "light".to_string();
     cfg.chat_history = vec![
-        ChatMessage { role: "user".to_string(), content: "Hello".to_string(), timestamp: String::new() },
-        ChatMessage { role: "assistant".to_string(), content: "Hi there!".to_string(), timestamp: String::new() },
+        ChatMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            timestamp: String::new(),
+        },
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: "Hi there!".to_string(),
+            timestamp: String::new(),
+        },
     ];
     cfg.reasoning_effort = crate::types::ReasoningEffort::High;
     cfg.file_path = path.clone();
@@ -176,7 +184,10 @@ fn test_config_remote_mode_invalid_url() {
     let mut cfg = Config::default();
     cfg.connection_type = ConnectionType::Remote;
     cfg.remote_url = "ftp://bad-url".to_string();
-    assert!(matches!(cfg.validate().unwrap_err(), Error::InvalidRemoteUrl(_)));
+    assert!(matches!(
+        cfg.validate().unwrap_err(),
+        Error::InvalidRemoteUrl(_)
+    ));
 }
 
 #[test]
@@ -439,8 +450,16 @@ fn test_config_serialize_deserialize_all_fields() {
     cfg.system_prompt = "You are a helpful agent.".to_string();
     cfg.theme = "light".to_string();
     cfg.chat_history = vec![
-        ChatMessage { role: "user".to_string(), content: "Hello".to_string(), timestamp: String::new() },
-        ChatMessage { role: "assistant".to_string(), content: "Hi!".to_string(), timestamp: String::new() },
+        ChatMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            timestamp: String::new(),
+        },
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: "Hi!".to_string(),
+            timestamp: String::new(),
+        },
     ];
     cfg.remote_url = String::new();
     cfg.remote_api_key = Some("secret".to_string());
@@ -505,7 +524,10 @@ fn test_config_old_file_without_mcp_servers_loads() {
         name: "fs".to_string(),
         transport: crate::config::McpTransport::Stdio {
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+            ],
             env: std::collections::HashMap::new(),
             working_dir: None,
         },

@@ -198,9 +198,8 @@ fn search_content(
     context_lines: usize,
     max_results: usize,
 ) -> crate::tools::types::ToolResult<ToolOutput> {
-    let metadata = fs::metadata(path).map_err(|e| {
-        ToolError::Execution(format!("Path '{path}' not found: {e}"))
-    })?;
+    let metadata = fs::metadata(path)
+        .map_err(|e| ToolError::Execution(format!("Path '{path}' not found: {e}")))?;
     let matcher = make_matcher(pattern, is_regex, case_sensitive)?;
 
     let glob_filter = glob_filter.map(|g| {
@@ -299,10 +298,12 @@ impl Tool for SearchContentTool {
         let glob_filter: Option<String> = params.get("glob");
         let is_regex: bool = params.get("regex").unwrap_or(false);
         let case_sensitive: bool = params.get("case_sensitive").unwrap_or(true);
-        let context_lines =
-            opt_uint(&params, "context_lines").unwrap_or(0).min(MAX_CONTEXT_LINES) as usize;
-        let max_results =
-            opt_uint(&params, "max_results").unwrap_or(DEFAULT_MAX_RESULTS).max(1) as usize;
+        let context_lines = opt_uint(&params, "context_lines")
+            .unwrap_or(0)
+            .min(MAX_CONTEXT_LINES) as usize;
+        let max_results = opt_uint(&params, "max_results")
+            .unwrap_or(DEFAULT_MAX_RESULTS)
+            .max(1) as usize;
         search_content(
             &pattern,
             &path,

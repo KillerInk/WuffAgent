@@ -29,14 +29,24 @@ pub const MAX_MCP_OUTPUT_BYTES: usize = 100 * 1024;
 /// match `^[a-zA-Z0-9_-]{1,64}$`).
 pub fn sanitize_name_part(part: &str) -> String {
     part.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
 /// Full registry name for an MCP tool: `mcp__<server>__<tool>`, truncated to
 /// 64 chars (the sanitized name is pure ASCII, so char truncation is safe).
 pub fn mcp_tool_name(server: &str, tool: &str) -> String {
-    let name = format!("mcp__{}__{}", sanitize_name_part(server), sanitize_name_part(tool));
+    let name = format!(
+        "mcp__{}__{}",
+        sanitize_name_part(server),
+        sanitize_name_part(tool)
+    );
     name.chars().take(64).collect()
 }
 
@@ -52,11 +62,15 @@ pub fn value_to_json_schema(value: &Value) -> JsonSchema {
         .unwrap_or("object")
         .to_string();
 
-    let mut properties: std::collections::HashMap<String, FieldSchema> = std::collections::HashMap::new();
+    let mut properties: std::collections::HashMap<String, FieldSchema> =
+        std::collections::HashMap::new();
     if let Some(props) = value.get("properties").and_then(|p| p.as_object()) {
         for (key, prop) in props {
             // `anyOf: [..., {"type": "null"}]` is the common JSON-Schema nullable marker.
-            let nullable = prop.get("nullable").and_then(|n| n.as_bool()).unwrap_or(false)
+            let nullable = prop
+                .get("nullable")
+                .and_then(|n| n.as_bool())
+                .unwrap_or(false)
                 || matches!(
                     prop.get("anyOf"),
                     Some(Value::Array(items))
@@ -236,14 +250,18 @@ mod tests {
     fn sanitize_and_name_format() {
         assert_eq!(sanitize_name_part("my server!"), "my_server_");
         assert_eq!(mcp_tool_name("fs", "read"), "mcp__fs__read");
-        assert_eq!(mcp_tool_name("My Server", "do:thing"), "mcp__My_Server__do_thing");
+        assert_eq!(
+            mcp_tool_name("My Server", "do:thing"),
+            "mcp__My_Server__do_thing"
+        );
         let long = mcp_tool_name("s", &"x".repeat(100));
         assert_eq!(long.len(), 64);
         // Always matches ^[a-zA-Z0-9_-]{1,64}$
         let re_ok = |n: &str| {
             n.len() <= 64
                 && !n.is_empty()
-                && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && n.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         };
         assert!(re_ok(&mcp_tool_name("a", "b")));
         assert!(re_ok(&long));

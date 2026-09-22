@@ -111,7 +111,10 @@ fn test_read_file_total_lines_with_range() {
 fn test_read_file_long_line_trimmed() {
     let dir = temp_dir("longline");
     let p = dir.join("long.txt");
-    write(p.to_str().unwrap(), &format!("short\n{}\ntail\n", "y".repeat(50_000)));
+    write(
+        p.to_str().unwrap(),
+        &format!("short\n{}\ntail\n", "y".repeat(50_000)),
+    );
     let out = read_file(p.to_str().unwrap(), None, None, false).unwrap();
     let json = success_json(out);
     assert!(!json["truncated"].as_bool().unwrap());
@@ -186,7 +189,10 @@ fn test_list_dir_dirs_first_and_symlinks() {
     assert_eq!(entries[0]["type"].as_str().unwrap(), "dir");
     assert!(entries[0].get("size").is_none());
     // Files follow, sorted by name, with sizes.
-    let names: Vec<&str> = entries[1..].iter().map(|e| e["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = entries[1..]
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
     let mut sorted_names = names.clone();
     sorted_names.sort();
     assert_eq!(names, sorted_names);
@@ -255,10 +261,7 @@ fn test_search_files_skips_git_and_target() {
     let json = success_json(out);
     assert_eq!(json["count"].as_u64().unwrap(), 1);
     assert_eq!(json["skipped"].as_u64().unwrap(), 2);
-    assert!(json["matches"][0]
-        .as_str()
-        .unwrap()
-        .ends_with("a.txt"));
+    assert!(json["matches"][0].as_str().unwrap().ends_with("a.txt"));
     // Recursive: nothing under .git or target may appear.
     let pattern2 = dir.join("**").to_string_lossy().to_string();
     let out2 = search_files(&pattern2, None).unwrap();
@@ -312,7 +315,10 @@ fn test_validate_path_allows_normal() {
 fn test_apply_diff_single_block() {
     let dir = temp_dir("diff1");
     let p = dir.join("d.txt");
-    write(p.to_str().unwrap(), "fn main() {\n    println!(\"old\");\n}\n");
+    write(
+        p.to_str().unwrap(),
+        "fn main() {\n    println!(\"old\");\n}\n",
+    );
     let diff = "<<<<<<< SEARCH\n    println!(\"old\");\n=======\n    println!(\"new\");\n>>>>>>> REPLACE\n";
     let out = apply_diff(p.to_str().unwrap(), diff).unwrap();
     let json = success_json(out);
@@ -354,7 +360,9 @@ fn test_apply_diff_not_found_fails() {
     write(p.to_str().unwrap(), original);
     let diff = "<<<<<<< SEARCH\nmissing\n=======\nx\n>>>>>>> REPLACE\n";
     let err = apply_diff(p.to_str().unwrap(), diff).unwrap_err();
-    let ToolError::Execution(msg) = &err else { panic!("{err:?}") };
+    let ToolError::Execution(msg) = &err else {
+        panic!("{err:?}")
+    };
     assert!(msg.contains("not found"), "msg: {msg}");
     assert_eq!(read_string(p.to_str().unwrap()), original);
     let _ = fs::remove_dir_all(&dir);
@@ -368,7 +376,9 @@ fn test_apply_diff_ambiguous_fails() {
     write(p.to_str().unwrap(), original);
     let diff = "<<<<<<< SEARCH\ndup\n=======\nunique\n>>>>>>> REPLACE\n";
     let err = apply_diff(p.to_str().unwrap(), diff).unwrap_err();
-    let ToolError::Execution(msg) = &err else { panic!("{err:?}") };
+    let ToolError::Execution(msg) = &err else {
+        panic!("{err:?}")
+    };
     assert!(msg.contains("3 places"), "msg: {msg}");
     assert_eq!(read_string(p.to_str().unwrap()), original);
     let _ = fs::remove_dir_all(&dir);
@@ -381,7 +391,9 @@ fn test_apply_diff_malformed_fails() {
     let original = "content\n";
     write(p.to_str().unwrap(), original);
     let err = apply_diff(p.to_str().unwrap(), "just some text").unwrap_err();
-    let ToolError::Execution(msg) = &err else { panic!("{err:?}") };
+    let ToolError::Execution(msg) = &err else {
+        panic!("{err:?}")
+    };
     assert!(msg.contains("No search/replace blocks"), "msg: {msg}");
     assert_eq!(read_string(p.to_str().unwrap()), original);
     let _ = fs::remove_dir_all(&dir);
@@ -428,7 +440,10 @@ fn test_apply_diff_crlf_multiline() {
     let json = success_json(out);
     assert_eq!(json["blocks_applied"].as_u64().unwrap(), 1);
     let content = read_string(p.to_str().unwrap());
-    assert_eq!(content, "ALPHA\r\nBETA\r\ngamma\r\n", "content: {content:?}");
+    assert_eq!(
+        content, "ALPHA\r\nBETA\r\ngamma\r\n",
+        "content: {content:?}"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -495,7 +510,10 @@ fn test_delete_dir_nonempty_guard_and_recursive() {
     write(inner.to_str().unwrap(), "x");
     // Non-recursive delete of a non-empty dir must fail and keep contents.
     assert!(delete(sub.to_str().unwrap(), false).is_err());
-    assert!(inner.exists(), "file must survive a failed non-recursive delete");
+    assert!(
+        inner.exists(),
+        "file must survive a failed non-recursive delete"
+    );
     delete(sub.to_str().unwrap(), true).unwrap();
     assert!(!sub.exists());
     let _ = fs::remove_dir_all(&dir);
@@ -557,9 +575,11 @@ fn test_move_file_and_dir() {
 #[test]
 fn test_move_missing_source_fails() {
     let dir = temp_dir("mvnf");
-    let err =
-        move_item(dir.join("nope").to_str().unwrap(), dir.join("nope2").to_str().unwrap())
-            .unwrap_err();
+    let err = move_item(
+        dir.join("nope").to_str().unwrap(),
+        dir.join("nope2").to_str().unwrap(),
+    )
+    .unwrap_err();
     assert!(matches!(err, ToolError::Execution(_)));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -598,7 +618,8 @@ fn test_read_file_tool_executes() {
     let tool = ReadFileTool::new();
     assert_eq!(tool.name(), "read_file");
     let mut prms = params(&[("path", p.to_str().unwrap())]);
-    prms.values.insert("line_numbers".to_string(), serde_json::json!(false));
+    prms.values
+        .insert("line_numbers".to_string(), serde_json::json!(false));
     let out = tool.execute(prms).unwrap();
     let json = success_json(out);
     assert_eq!(json["content"].as_str().unwrap(), "abc");
@@ -609,7 +630,9 @@ fn test_read_file_tool_executes() {
 fn test_write_file_tool_requires_content() {
     let tool = WriteFileTool::new();
     let err = tool.execute(params(&[("path", "x.txt")])).unwrap_err();
-    let ToolError::InvalidParams(msg) = &err else { panic!("{err:?}") };
+    let ToolError::InvalidParams(msg) = &err else {
+        panic!("{err:?}")
+    };
     assert!(msg.contains("content"));
 }
 
@@ -728,7 +751,6 @@ fn test_tool_names_unique() {
     assert_eq!(set.len(), 11, "tool names must be unique: {names:?}");
 }
 
-
 // ─── CRLF / BOM handling ────────────────────────────────────────────────────
 
 const BOM: &str = "\u{feff}";
@@ -830,7 +852,10 @@ fn test_append_file_matches_crlf() {
     let p = dir.join("a.txt");
     fs::write(&p, "one\r\n").unwrap();
     append_file(p.to_str().unwrap(), "two\nthree\n").unwrap();
-    assert_eq!(fs::read(p.to_str().unwrap()).unwrap(), b"one\r\ntwo\r\nthree\r\n");
+    assert_eq!(
+        fs::read(p.to_str().unwrap()).unwrap(),
+        b"one\r\ntwo\r\nthree\r\n"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -860,7 +885,10 @@ fn test_append_file_inserts_crlf_for_missing_trailing_newline() {
     let p = dir.join("n.txt");
     fs::write(&p, "one\r\ntwo").unwrap();
     append_file(p.to_str().unwrap(), "three\n").unwrap();
-    assert_eq!(fs::read(p.to_str().unwrap()).unwrap(), b"one\r\ntwo\r\nthree\r\n");
+    assert_eq!(
+        fs::read(p.to_str().unwrap()).unwrap(),
+        b"one\r\ntwo\r\nthree\r\n"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 

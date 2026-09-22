@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Message, Usage};
 use super::Error;
+use crate::types::{Message, Usage};
 
 /// HTTP request building and sending for ChatClient.
 
@@ -85,7 +85,7 @@ pub fn build_request(
             timestamp: String::new(),
             tool_calls: None,
             tool_call_id: None,
-        reasoning_content: None,
+            reasoning_content: None,
             image: None,
         });
     }
@@ -114,7 +114,7 @@ pub fn build_request(
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
 
@@ -124,7 +124,9 @@ pub fn build_request(
         stream,
         tools: tools.map(|t| t.to_vec()),
         reasoning_effort: reasoning_effort.as_wire_value().map(|s| s.to_string()),
-        stream_options: Some(StreamOptions { include_usage: true }),
+        stream_options: Some(StreamOptions {
+            include_usage: true,
+        }),
         // Live prompt-processing progress is only meaningful for streams.
         return_progress: if stream { Some(true) } else { None },
     }
@@ -146,25 +148,16 @@ pub async fn send_message(
         .header("Content-Type", "application/json")
         .body(body);
     if let Some(ref key) = api_key {
-        builder = builder.header(
-            "Authorization",
-            format!("Bearer {}", key),
-        );
+        builder = builder.header("Authorization", format!("Bearer {}", key));
     }
 
     let resp = builder.send().await?;
 
     let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| Error::Http(e.to_string()))?;
+    let text = resp.text().await.map_err(|e| Error::Http(e.to_string()))?;
 
     if !status.is_success() {
-        return Err(Error::Http(format!(
-            "Server returned {}: {}",
-            status, text
-        )));
+        return Err(Error::Http(format!("Server returned {}: {}", status, text)));
     }
 
     let response: Response = serde_json::from_str(&text)?;
@@ -224,10 +217,7 @@ pub fn build_stream_request(
         .header("Accept", "text/event-stream")
         .body(body);
     if let Some(ref key) = api_key {
-        builder = builder.header(
-            "Authorization",
-            format!("Bearer {}", key),
-        );
+        builder = builder.header("Authorization", format!("Bearer {}", key));
     }
     builder
 }

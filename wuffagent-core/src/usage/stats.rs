@@ -11,7 +11,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::path::Path;
 
-use chrono::{Datelike, DateTime, Local, NaiveDate, NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, Timelike, Utc};
 
 /// Bucket granularity (also selects the window size).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +40,10 @@ impl Granularity {
         let days = chrono::Duration::days;
         match self {
             Granularity::Hour => {
-                let hour_start =
-                    now_local.date().and_hms_opt(now_local.hour(), 0, 0).expect("valid hour");
+                let hour_start = now_local
+                    .date()
+                    .and_hms_opt(now_local.hour(), 0, 0)
+                    .expect("valid hour");
                 hour_start - chrono::Duration::hours(23)
             }
             Granularity::Day => (now_local.date() - days(29)).and_hms_opt(0, 0, 0).unwrap(),
@@ -249,10 +251,7 @@ impl UsageLogReader {
 
     /// Read the entire file, replacing any previously read state.
     /// Returns `(entries, skipped_line_count)`.
-    pub fn load_all(
-        &mut self,
-        path: &Path,
-    ) -> (Vec<crate::usage::recorder::UsageEntry>, usize) {
+    pub fn load_all(&mut self, path: &Path) -> (Vec<crate::usage::recorder::UsageEntry>, usize) {
         self.reset();
         let (entries, skipped) = load_entries(path);
         self.skipped = skipped;
@@ -269,10 +268,7 @@ impl UsageLogReader {
     /// - A partial trailing line (no newline yet) is buffered, not skipped.
     ///
     /// Returns `(new_entries, newly_skipped_lines)`.
-    pub fn poll(
-        &mut self,
-        path: &Path,
-    ) -> (Vec<crate::usage::recorder::UsageEntry>, usize) {
+    pub fn poll(&mut self, path: &Path) -> (Vec<crate::usage::recorder::UsageEntry>, usize) {
         let Ok(meta) = fs::metadata(path) else {
             return (Vec::new(), 0);
         };
@@ -398,7 +394,10 @@ mod tests {
         std::fs::write(&path, format!("{good}\ngarbage\n\n{good}\n")).unwrap();
         let (entries, skipped) = load_entries(&path);
         assert_eq!(entries.len(), 2);
-        assert_eq!(skipped, 1, "only the garbage line counts, not the blank one");
+        assert_eq!(
+            skipped, 1,
+            "only the garbage line counts, not the blank one"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -426,10 +425,7 @@ mod tests {
         assert_eq!(w.buckets.len(), 24);
         // Bucket 0 starts at 16:00 yesterday = now floored to the hour − 23h.
         let now_local = now.with_timezone(&Local).naive_local();
-        assert_eq!(
-            w.buckets[0].start,
-            now_local - chrono::Duration::hours(23)
-        );
+        assert_eq!(w.buckets[0].start, now_local - chrono::Duration::hours(23));
         assert_eq!(w.buckets[0].total_tokens, 110);
         assert_eq!(w.buckets[0].calls, 1);
         // Bucket 23 = the current hour (15:00).
@@ -476,7 +472,10 @@ mod tests {
         assert_eq!(w.buckets[29].total_tokens, 6);
         assert_eq!(w.total_tokens, 12);
         // Day bucket starts are local midnights.
-        assert_eq!(w.buckets[29].start.time(), chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        assert_eq!(
+            w.buckets[29].start.time(),
+            chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+        );
     }
 
     // ── week bucketing (Monday-based) ─────────────────────────────────────

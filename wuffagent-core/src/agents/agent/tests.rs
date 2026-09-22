@@ -88,7 +88,11 @@ fn handoff_agents_dir(tag: &str) -> std::path::PathBuf {
 /// `tag` must be unique per test: the fixture dir is shared with any
 /// concurrently running test that uses the same tag, and each test deletes
 /// it on cleanup (parallel test runs would race otherwise).
-fn make_agent_with_handoff(enabled: bool, targets: Vec<String>, tag: &str) -> (Agent, std::path::PathBuf) {
+fn make_agent_with_handoff(
+    enabled: bool,
+    targets: Vec<String>,
+    tag: &str,
+) -> (Agent, std::path::PathBuf) {
     let dir = handoff_agents_dir(tag);
     let mut config = AgentConfig {
         name: "planner".to_string(),
@@ -232,7 +236,10 @@ fn test_agent_per_agent_reasoning_effort() {
         None,
         None,
     );
-    assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::High);
+    assert_eq!(
+        agent.client.reasoning_effort(),
+        crate::types::ReasoningEffort::High
+    );
     assert!(!Arc::ptr_eq(&agent.client, &global_client));
 
     // Agent with Off: shares the global client (inherits Medium).
@@ -248,7 +255,10 @@ fn test_agent_per_agent_reasoning_effort() {
         None,
         None,
     );
-    assert_eq!(agent.client.reasoning_effort(), crate::types::ReasoningEffort::Medium);
+    assert_eq!(
+        agent.client.reasoning_effort(),
+        crate::types::ReasoningEffort::Medium
+    );
     assert!(Arc::ptr_eq(&agent.client, &global_client));
 }
 
@@ -325,7 +335,10 @@ fn agent_with_llm(llm: std::sync::Arc<dyn LlmClient>) -> Agent {
     )
 }
 
-fn judge_agent(verdict: &'static str, seen: std::sync::Arc<std::sync::Mutex<Vec<Message>>>) -> Agent {
+fn judge_agent(
+    verdict: &'static str,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
+) -> Agent {
     agent_with_llm(std::sync::Arc::new(JudgeLlm { verdict, seen }))
 }
 
@@ -353,7 +366,12 @@ async fn test_verify_verdict_verified() {
         test_msg("assistant", "There are two files: a.txt and b.txt."),
     ];
     let verdict = agent
-        .verify_tool_outputs(&messages, "list the directory", "There are two files: a.txt and b.txt.", &CancellationToken::new())
+        .verify_tool_outputs(
+            &messages,
+            "list the directory",
+            "There are two files: a.txt and b.txt.",
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(verdict.verified);
@@ -362,14 +380,22 @@ async fn test_verify_verdict_verified() {
 
 #[tokio::test]
 async fn test_verify_verdict_needs_fix() {
-    let agent = judge_agent("NEEDS_FIX: the response misses b.txt", std::sync::Arc::new(Mutex::new(Vec::new())));
+    let agent = judge_agent(
+        "NEEDS_FIX: the response misses b.txt",
+        std::sync::Arc::new(Mutex::new(Vec::new())),
+    );
     let messages = vec![
         test_msg("user", "list the directory"),
         test_msg("tool", "a.txt\nb.txt"),
         test_msg("assistant", "There is one file: a.txt."),
     ];
     let verdict = agent
-        .verify_tool_outputs(&messages, "list the directory", "There is one file: a.txt.", &CancellationToken::new())
+        .verify_tool_outputs(
+            &messages,
+            "list the directory",
+            "There is one file: a.txt.",
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert!(!verdict.verified);
@@ -379,17 +405,28 @@ async fn test_verify_verdict_needs_fix() {
 
 #[tokio::test]
 async fn test_verify_ambiguous_verdict_defaults_to_verified() {
-    let agent = judge_agent("The answer looks plausible I guess", std::sync::Arc::new(Mutex::new(Vec::new())));
+    let agent = judge_agent(
+        "The answer looks plausible I guess",
+        std::sync::Arc::new(Mutex::new(Vec::new())),
+    );
     let messages = vec![
         test_msg("user", "list the directory"),
         test_msg("tool", "a.txt"),
         test_msg("assistant", "One file."),
     ];
     let verdict = agent
-        .verify_tool_outputs(&messages, "list the directory", "One file.", &CancellationToken::new())
+        .verify_tool_outputs(
+            &messages,
+            "list the directory",
+            "One file.",
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
-    assert!(verdict.verified, "ambiguous judge text defaults to verified");
+    assert!(
+        verdict.verified,
+        "ambiguous judge text defaults to verified"
+    );
     assert_eq!(verdict.judge_reason, "The answer looks plausible I guess");
 }
 
@@ -403,7 +440,12 @@ async fn test_verify_prompt_includes_final_response_and_outputs() {
         test_msg("assistant", "The readme says hello world."),
     ];
     agent
-        .verify_tool_outputs(&messages, "read the readme", "The readme says hello world.", &CancellationToken::new())
+        .verify_tool_outputs(
+            &messages,
+            "read the readme",
+            "The readme says hello world.",
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     let joined: String = seen
@@ -457,7 +499,10 @@ fn test_store_stays_bounded_after_trim_reconciliation() {
         let mut conv = agent.client.conversation().lock().unwrap();
         for i in 0..30 {
             conv.push(test_msg("user", &format!("turn {i} question")));
-            conv.push(test_msg("assistant", &format!("answer {i} {}", "x".repeat(300))));
+            conv.push(test_msg(
+                "assistant",
+                &format!("answer {i} {}", "x".repeat(300)),
+            ));
         }
         conv.push(test_msg("user", "the current request"));
     }
@@ -472,9 +517,11 @@ fn test_store_stays_bounded_after_trim_reconciliation() {
         crate::trimming::message_char_count(&messages),
         agent.client.trim_trigger_chars()
     );
-    agent
-        .trimming
-        .trim_messages(&mut messages, agent.client.trim_target_chars(), &agent.config.trim_config);
+    agent.trimming.trim_messages(
+        &mut messages,
+        agent.client.trim_target_chars(),
+        &agent.config.trim_config,
+    );
     agent.reconcile_store(&messages);
 
     let store = agent.client.conversation().lock().unwrap();
@@ -512,7 +559,10 @@ async fn test_verify_judges_against_request_captured_before_nudge() {
     ];
     // The pre-fix extraction now returns the nudge, not the request —
     // which is exactly why the loop captures it before any nudge exists.
-    assert_eq!(agent.extract_original_request(&messages), VERIFICATION_NUDGE);
+    assert_eq!(
+        agent.extract_original_request(&messages),
+        VERIFICATION_NUDGE
+    );
 
     // The post-fix call: the request captured at loop start is passed
     // through, and the judge prompt must contain it (and not the nudge).
@@ -522,7 +572,7 @@ async fn test_verify_judges_against_request_captured_before_nudge() {
             &messages,
             &original_request,
             "There are two files: a.txt and b.txt.",
-            &CancellationToken::new()
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -590,13 +640,25 @@ fn test_record_verification_outcome_stores_and_dedups() {
     let e = &stored[0];
     assert!(matches!(e.r#type, MemoryType::Lesson));
     assert_eq!(e.source, "verification");
-    assert!(e.tags.contains(&"agent:coder".to_string()), "tags: {:?}", e.tags);
-    assert!(e.tags.contains(&"verification".to_string()), "tags: {:?}", e.tags);
+    assert!(
+        e.tags.contains(&"agent:coder".to_string()),
+        "tags: {:?}",
+        e.tags
+    );
+    assert!(
+        e.tags.contains(&"verification".to_string()),
+        "tags: {:?}",
+        e.tags
+    );
     // Names the agent, the verdict, the judge reason, and the task — so
     // collect_lessons' agent-name+task keyword search finds it.
     assert!(e.content.contains("coder"), "{}", e.content);
     assert!(e.content.contains("gave_up"), "{}", e.content);
-    assert!(e.content.contains("NEEDS_FIX: the response misses b.txt"), "{}", e.content);
+    assert!(
+        e.content.contains("NEEDS_FIX: the response misses b.txt"),
+        "{}",
+        e.content
+    );
     assert!(e.content.contains("list the directory"), "{}", e.content);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -652,7 +714,11 @@ fn test_record_verification_outcome_truncates() {
     .unwrap();
     let e = &memory.get_all_memories()[0];
     // Fixed prefix + 300-char reason + 200-char task, each plus an ellipsis.
-    assert!(e.content.len() < 900, "content must be bounded: {} chars", e.content.len());
+    assert!(
+        e.content.len() < 900,
+        "content must be bounded: {} chars",
+        e.content.len()
+    );
     assert!(e.content.contains('…'), "truncation marker expected");
     assert!(e.content.contains("verified_after_retry"), "{}", e.content);
 
@@ -660,9 +726,14 @@ fn test_record_verification_outcome_truncates() {
     record_verification_outcome(&memory, "coder", "gave_up", 2, "  ", "short task").unwrap();
     let entries = memory.get_all_memories();
     assert!(
-        entries.iter().any(|e| e.content.contains("(no reason given)")),
+        entries
+            .iter()
+            .any(|e| e.content.contains("(no reason given)")),
         "entries: {:?}",
-        entries.iter().map(|e| e.content.as_str()).collect::<Vec<_>>()
+        entries
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
     );
 
     let _ = std::fs::remove_dir_all(&dir);

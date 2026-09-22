@@ -157,7 +157,8 @@ impl Tool for HandoffTool {
                         "agent".to_string(),
                         crate::tools::types::FieldSchema {
                             type_name: "string".to_string(),
-                            description: "Name of the target agent profile (e.g. 'coder')".to_string(),
+                            description: "Name of the target agent profile (e.g. 'coder')"
+                                .to_string(),
                             nullable: false,
                         },
                     );
@@ -182,7 +183,9 @@ impl Tool for HandoffTool {
             .ok_or_else(|| ToolError::InvalidParams("agent is required".to_string()))?;
         let agent = agent.trim();
         if agent.is_empty() {
-            return Err(ToolError::InvalidParams("agent must not be empty".to_string()));
+            return Err(ToolError::InvalidParams(
+                "agent must not be empty".to_string(),
+            ));
         }
         let task: String = params
             .get("task")

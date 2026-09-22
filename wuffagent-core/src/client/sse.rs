@@ -5,8 +5,8 @@ use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::types::{Message, PromptProgress, ToolCall, Usage};
 use super::Error;
+use crate::types::{Message, PromptProgress, ToolCall, Usage};
 
 /// Tracks, across one stream, which tool call is currently receiving deltas.
 /// This is what lets us detect the moment the model has "moved past" a tool
@@ -190,18 +190,16 @@ pub async fn process_sse_line(
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .or_else(|| {
-                    tc.get("index")
-                        .and_then(|v| v.as_u64())
-                        .and_then(|idx| {
-                            conversation
-                                .lock()
-                                .ok()?
-                                .last()?
-                                .tool_calls
-                                .as_ref()?
-                                .get(idx as usize)
-                                .map(|c| c.id.clone())
-                        })
+                    tc.get("index").and_then(|v| v.as_u64()).and_then(|idx| {
+                        conversation
+                            .lock()
+                            .ok()?
+                            .last()?
+                            .tool_calls
+                            .as_ref()?
+                            .get(idx as usize)
+                            .map(|c| c.id.clone())
+                    })
                 })
         });
 
@@ -294,22 +292,14 @@ pub async fn process_sse_line(
         if let Some(tc_array) = tool_calls.as_array() {
             for tc_chunk in tc_array {
                 // Extract id (may be null/missing in delta chunks after the first)
-                let id = tc_chunk
-                    .get("id")
-                    .and_then(|v| v.as_str());
+                let id = tc_chunk.get("id").and_then(|v| v.as_str());
                 // Extract index (used when id is not present)
                 let index = tc_chunk.get("index").and_then(|v| v.as_u64());
                 let func = tc_chunk.get("function");
 
                 if let Some(func) = func {
-                    let name = func
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let args = func
-                        .get("arguments")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let args = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
 
                     // Accumulate partial args from streaming
                     let mut conv = conversation.lock().unwrap();
@@ -508,7 +498,7 @@ pub fn add_streaming_messages(conversation: &Arc<Mutex<Vec<Message>>>, prompt: &
         timestamp: crate::types::format_timestamp(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     conv.push(Message {
@@ -517,7 +507,7 @@ pub fn add_streaming_messages(conversation: &Arc<Mutex<Vec<Message>>>, prompt: &
         timestamp: crate::types::format_timestamp(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
 }

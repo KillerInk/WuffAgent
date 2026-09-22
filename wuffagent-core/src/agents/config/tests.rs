@@ -26,7 +26,10 @@ fn test_worker_config_shell_config() {
     }"#;
     let config: WorkerConfig = serde_json::from_str(json).unwrap();
     assert!(config.shell_config.shell_enabled);
-    assert_eq!(config.shell_config.allowed_commands, vec!["cargo build.*".to_string(), "git.*".to_string()]);
+    assert_eq!(
+        config.shell_config.allowed_commands,
+        vec!["cargo build.*".to_string(), "git.*".to_string()]
+    );
     assert_eq!(config.shell_config.shell_type, "powershell");
     assert_eq!(config.shell_config.shell_timeout_ms, 60000);
 }
@@ -144,7 +147,9 @@ fn test_agent_manager_multi_dir_search() {
         enabled: true,
         ..Default::default()
     };
-    search_agent.save_to_file(&search_dir.join("search_agent.json")).unwrap();
+    search_agent
+        .save_to_file(&search_dir.join("search_agent.json"))
+        .unwrap();
 
     // Place an agent in the primary dir
     let primary_agent = AgentConfig {
@@ -155,7 +160,9 @@ fn test_agent_manager_multi_dir_search() {
         enabled: true,
         ..Default::default()
     };
-    primary_agent.save_to_file(&primary_dir.join("primary_agent.json")).unwrap();
+    primary_agent
+        .save_to_file(&primary_dir.join("primary_agent.json"))
+        .unwrap();
 
     // AgentManager with search dir
     let mut mgr = AgentManager::new(primary_dir.clone());
@@ -257,10 +264,20 @@ fn test_load_agent_from_dir() {
 
     let legacy = load_agent_from_dir(&dir, "legacy").unwrap();
     assert_eq!(legacy.system_prompt, "You are legacy.");
-    assert!(legacy.handoff_enabled, "legacy handoff_enabled must migrate");
-    assert_eq!(legacy.handoff_targets, vec!["coder"], "legacy can_invoke must migrate");
+    assert!(
+        legacy.handoff_enabled,
+        "legacy handoff_enabled must migrate"
+    );
+    assert_eq!(
+        legacy.handoff_targets,
+        vec!["coder"],
+        "legacy can_invoke must migrate"
+    );
 
-    assert!(load_agent_from_dir(&dir, "off").is_none(), "disabled agent must not load");
+    assert!(
+        load_agent_from_dir(&dir, "off").is_none(),
+        "disabled agent must not load"
+    );
     assert!(load_agent_from_dir(&dir, "missing").is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -304,7 +321,10 @@ fn test_load_agent_from_dirs_multi_dir_and_anchoring() {
     // sides, original order) become the search dirs for chained handoffs.
     let helper = load_agent_from_dirs(&dirs, "helper").unwrap();
     assert_eq!(helper.agents_dir, search_a);
-    assert_eq!(helper.agents_search_dirs, vec![primary.clone(), search_b.clone()]);
+    assert_eq!(
+        helper.agents_search_dirs,
+        vec![primary.clone(), search_b.clone()]
+    );
 
     assert!(load_agent_from_dirs(&dirs, "missing").is_none());
 
@@ -316,7 +336,8 @@ fn test_load_agent_from_dirs_multi_dir_and_anchoring() {
 // ─── Prompt history + rollback (F4) ────────────────────────────────────────
 
 fn temp_agents_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wuffagent_test_hist_{tag}_{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("wuffagent_test_hist_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -349,7 +370,11 @@ fn test_edit_agent_creates_history_snapshot() {
     assert!(snaps[0].starts_with(dir.join("history")));
     // The snapshot holds the PRE-edit prompt.
     let content = std::fs::read_to_string(&snaps[0]).unwrap();
-    assert!(content.contains("v1"), "snapshot should contain old prompt, got: {}", content);
+    assert!(
+        content.contains("v1"),
+        "snapshot should contain old prompt, got: {}",
+        content
+    );
     // The live file holds the new prompt.
     assert_eq!(mgr.get_agent("hist").unwrap().system_prompt, "v2");
 
@@ -361,7 +386,8 @@ fn test_edit_agent_creates_history_snapshot() {
 fn test_edit_missing_agent_creates_no_history() {
     let dir = temp_agents_dir("missing");
     let mgr = AgentManager::new(dir.clone());
-    mgr.edit_agent("missing", &hist_agent("missing", "v1")).unwrap();
+    mgr.edit_agent("missing", &hist_agent("missing", "v1"))
+        .unwrap();
     assert!(!dir.join("history").exists());
     assert_eq!(mgr.get_agent("missing").unwrap().system_prompt, "v1");
 
@@ -377,7 +403,8 @@ fn test_history_capped_at_20() {
 
     // 25 edits → 25 snapshots taken, capped at 20 on the way.
     for i in 1..=25 {
-        mgr.edit_agent("cap", &hist_agent("cap", &format!("v{}", i))).unwrap();
+        mgr.edit_agent("cap", &hist_agent("cap", &format!("v{}", i)))
+            .unwrap();
     }
 
     let snaps = mgr.list_agent_history("cap").unwrap();
@@ -385,9 +412,17 @@ fn test_history_capped_at_20() {
     // The newest snapshot is the pre-last-edit state (v24); the oldest
     // retained is v5 (v0..v4 were pruned first).
     let newest = std::fs::read_to_string(&snaps[0]).unwrap();
-    assert!(newest.contains("v24"), "newest snapshot should hold v24, got: {}", newest);
+    assert!(
+        newest.contains("v24"),
+        "newest snapshot should hold v24, got: {}",
+        newest
+    );
     let oldest = std::fs::read_to_string(&snaps[19]).unwrap();
-    assert!(oldest.contains("v5"), "oldest kept snapshot should hold v5, got: {}", oldest);
+    assert!(
+        oldest.contains("v5"),
+        "oldest kept snapshot should hold v5, got: {}",
+        oldest
+    );
     // Every retained snapshot is a distinct pre-edit state: exactly v5..v24.
     let mut prompts: Vec<String> = Vec::new();
     for p in &snaps {
@@ -402,13 +437,21 @@ fn test_history_capped_at_20() {
     }
     prompts.sort();
     prompts.dedup();
-    assert_eq!(prompts.len(), 20, "retained snapshots must be distinct states");
+    assert_eq!(
+        prompts.len(),
+        20,
+        "retained snapshots must be distinct states"
+    );
     assert!(
-        !prompts.iter().any(|p| matches!(p.as_str(), "v0" | "v1" | "v2" | "v3" | "v4")),
-        "pruned early states leaked back: {:?}", prompts
+        !prompts
+            .iter()
+            .any(|p| matches!(p.as_str(), "v0" | "v1" | "v2" | "v3" | "v4")),
+        "pruned early states leaked back: {:?}",
+        prompts
     );
     // No overflow in the raw dir.
-    let count = std::fs::read_dir(dir.join("history")).unwrap()
+    let count = std::fs::read_dir(dir.join("history"))
+        .unwrap()
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("cap-"))
         .count();
@@ -541,13 +584,20 @@ fn test_rename_snapshots_old_file() {
 
     assert!(!dir.join("oldname.json").exists());
     assert!(dir.join("newname.json").exists());
-    assert_eq!(mgr.get_agent("newname").unwrap().system_prompt, "new prompt");
+    assert_eq!(
+        mgr.get_agent("newname").unwrap().system_prompt,
+        "new prompt"
+    );
 
     // The old file was snapshotted under its old name.
     let old_snaps = mgr.list_agent_history("oldname").unwrap();
     assert_eq!(old_snaps.len(), 1);
     let content = std::fs::read_to_string(&old_snaps[0]).unwrap();
-    assert!(content.contains("old prompt"), "old snapshot content: {}", content);
+    assert!(
+        content.contains("old prompt"),
+        "old snapshot content: {}",
+        content
+    );
     // No snapshot for the new name (it did not exist before the rename).
     assert!(mgr.list_agent_history("newname").unwrap().is_empty());
 

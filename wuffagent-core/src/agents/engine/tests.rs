@@ -91,7 +91,11 @@ async fn test_post_task_improvement_llm_called_only_on_boundary() {
         system_prompt: "You are a coding agent.".to_string(),
         ..Default::default()
     };
-    let stats = RunStats { tool_calls: 0, tool_errors: 0, verification_attempts: 0 };
+    let stats = RunStats {
+        tool_calls: 0,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
 
     // Task 1: before the boundary -> no LLM call.
     engine

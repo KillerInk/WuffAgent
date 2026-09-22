@@ -75,7 +75,11 @@ fn test_handoff_unknown_agent_errors() {
     match err {
         ToolError::InvalidParams(msg) => {
             assert!(msg.contains("nope"), "error should name the agent: {}", msg);
-            assert!(msg.contains("coder"), "error should list available agents: {}", msg);
+            assert!(
+                msg.contains("coder"),
+                "error should list available agents: {}",
+                msg
+            );
         }
         other => panic!("expected InvalidParams, got {:?}", other),
     }
@@ -175,7 +179,8 @@ fn test_handoff_finds_agent_in_search_dir() {
         t.description()
     );
 
-    t.execute(params("architect", "Implement the plan.")).unwrap();
+    t.execute(params("architect", "Implement the plan."))
+        .unwrap();
     let req = mailbox.lock().unwrap().take().expect("request written");
     assert_eq!(req.agent, "architect");
     // Anchored for chained handoffs: the found dir becomes the primary,

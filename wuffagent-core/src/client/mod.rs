@@ -2,9 +2,9 @@ use std::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub mod http;
-pub mod sse;
-pub mod session;
 pub mod pipeline;
+pub mod session;
+pub mod sse;
 
 pub use pipeline::ChatPipeline;
 
@@ -52,34 +52,44 @@ impl ConnectionSettings {
 
 // Re-export key types so the public API surface is unchanged
 pub use http::{
-    build_request, send_message, build_stream_request, ChatRequest, NonStreamResult, Response, Choice,
+    build_request, build_stream_request, send_message, ChatRequest, Choice, NonStreamResult,
+    Response,
 };
-pub use sse::{process_sse_line, stream_message, add_streaming_messages, ToolCallTracker, looks_like_complete_json};
 pub use session::{
-    save_session, load_session,
-    enqueue_save_failure, retry_pending_saves, has_save_failure,
-    clear_save_failure,
-    trim_conversation, clear_history, clear_session_messages,
+    clear_history, clear_save_failure, clear_session_messages, enqueue_save_failure,
+    has_save_failure, load_session, retry_pending_saves, save_session, trim_conversation,
+};
+pub use sse::{
+    add_streaming_messages, looks_like_complete_json, process_sse_line, stream_message,
+    ToolCallTracker,
 };
 // Re-export trimming helpers for backward compatibility
 pub use crate::trimming::{estimate_tokens, message_char_count, ContextTrimming};
 
 /// Backward-compat wrapper: delegates to `ContextTrimming::trim_to_token_budget`.
-pub fn trim_to_token_budget(conversation: &std::sync::Arc<std::sync::Mutex<Vec<crate::types::Message>>>, target_tokens: usize) -> usize {
+pub fn trim_to_token_budget(
+    conversation: &std::sync::Arc<std::sync::Mutex<Vec<crate::types::Message>>>,
+    target_tokens: usize,
+) -> usize {
     let trimming = ContextTrimming::new();
     let config = crate::trimming::TrimConfig::default();
     trimming.trim_to_token_budget(&mut conversation.lock().unwrap(), target_tokens, &config)
 }
 
 /// Backward-compat wrapper: delegates to `ContextTrimming::trim_messages`.
-pub fn trim_to_token_budget_messages(messages: &mut Vec<crate::types::Message>, target_tokens: usize) -> usize {
+pub fn trim_to_token_budget_messages(
+    messages: &mut Vec<crate::types::Message>,
+    target_tokens: usize,
+) -> usize {
     let trimming = ContextTrimming::new();
     let config = crate::trimming::TrimConfig::default();
     trimming.trim_messages(messages, target_tokens, &config)
 }
 
 /// Backward-compat wrapper: estimates conversation tokens via `message_char_count`.
-pub fn estimate_conversation_tokens(conversation: &std::sync::Arc<std::sync::Mutex<Vec<crate::types::Message>>>) -> usize {
+pub fn estimate_conversation_tokens(
+    conversation: &std::sync::Arc<std::sync::Mutex<Vec<crate::types::Message>>>,
+) -> usize {
     message_char_count(&conversation.lock().unwrap())
 }
 
@@ -105,14 +115,16 @@ pub fn parse_context_overflow(err: &Error) -> Option<ContextOverflow> {
     if body_end <= body_start {
         return None;
     }
-    let v: serde_json::Value =
-        serde_json::from_str(&msg[body_start..=body_end]).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&msg[body_start..=body_end]).ok()?;
     let e = v.get("error")?;
     if e.get("type").and_then(|t| t.as_str()) != Some("exceed_context_size_error") {
         return None;
     }
     let n_prompt = e.get("n_prompt_tokens")?.as_u64()? as u32;
-    let n_ctx = e.get("n_ctx").and_then(|t| t.as_u64()).unwrap_or(n_prompt as u64) as u32;
+    let n_ctx = e
+        .get("n_ctx")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(n_prompt as u64) as u32;
     Some(ContextOverflow { n_prompt, n_ctx })
 }
 
@@ -367,17 +379,18 @@ impl ChatClient {
         };
         let session_id = self.session_id.clone().unwrap_or_default();
         let agent = self.agent_name.lock().unwrap().clone();
-        self.usage_recorder.record(&crate::usage::recorder::UsageEntry {
-            ts: chrono::Utc::now(),
-            session_id,
-            agent,
-            model: model.unwrap_or("unknown").to_string(),
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
-            total_tokens: usage.total_tokens,
-            tool_calls,
-            thinking_chars,
-        });
+        self.usage_recorder
+            .record(&crate::usage::recorder::UsageEntry {
+                ts: chrono::Utc::now(),
+                session_id,
+                agent,
+                model: model.unwrap_or("unknown").to_string(),
+                prompt_tokens: usage.prompt_tokens,
+                completion_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
+                tool_calls,
+                thinking_chars,
+            });
     }
 
     pub fn set_max_messages(&mut self, max_messages: usize) {
@@ -388,7 +401,8 @@ impl ChatClient {
     /// so callers can sync the server's reported context size on a shared client
     /// without cloning it — every clone sees the new value immediately.
     pub fn set_n_ctx(&self, n_ctx: u32) {
-        self.n_ctx.store(n_ctx, std::sync::atomic::Ordering::Relaxed);
+        self.n_ctx
+            .store(n_ctx, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn n_ctx(&self) -> u32 {
@@ -398,7 +412,8 @@ impl ChatClient {
     /// Calibrated chars-per-token ratio (×100). Falls back to the static
     /// default until the server has reported real usage.
     pub fn chars_per_token_x100(&self) -> u32 {
-        self.chars_per_token_x100.load(std::sync::atomic::Ordering::Relaxed)
+        self.chars_per_token_x100
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Estimate the token count of `chars` of content using the calibrated
@@ -487,8 +502,7 @@ impl ChatClient {
     pub fn overflow_retry_char_budget(&self, ov: &ContextOverflow) -> usize {
         let chars = *self.last_prompt_chars.lock().unwrap();
         if ov.n_prompt > 0 && chars > 0 {
-            let ratio_x100 =
-                ((chars as u64) * 100 / ov.n_prompt as u64).clamp(100, 1000);
+            let ratio_x100 = ((chars as u64) * 100 / ov.n_prompt as u64).clamp(100, 1000);
             self.chars_per_token_x100
                 .store(ratio_x100 as u32, std::sync::atomic::Ordering::Relaxed);
             tracing::debug!(
@@ -559,9 +573,8 @@ impl ChatClient {
     }
 
     pub fn clear_session_messages(&mut self) {
-        session::clear_session_messages(
-            &self.conversation,
-            &|| save_session(
+        session::clear_session_messages(&self.conversation, &|| {
+            save_session(
                 self.session_id.as_deref(),
                 &self.session_dir,
                 &self.conversation,
@@ -569,8 +582,8 @@ impl ChatClient {
                 self.encryption_key.as_ref(),
                 &self.save_queue,
                 &self.save_failed,
-            ),
-        );
+            )
+        });
     }
 
     pub fn trim_conversation(&self, max_messages: usize) {
@@ -588,7 +601,10 @@ impl ChatClient {
     /// Trim a standalone message vec to the given token budget.
     /// Used by the agent loop to trim its own history, since streaming
     /// writes to a throwaway conversation and never updates this field.
-    pub fn trim_to_token_budget_messages(messages: &mut Vec<Message>, target_tokens: usize) -> usize {
+    pub fn trim_to_token_budget_messages(
+        messages: &mut Vec<Message>,
+        target_tokens: usize,
+    ) -> usize {
         let trimming = ContextTrimming::new();
         let config = crate::trimming::TrimConfig::default();
         trimming.trim_messages(messages, target_tokens, &config)
@@ -649,10 +665,8 @@ impl ChatClient {
 
     /// Try to retry any pending saves and clear the queue on success.
     pub fn retry_pending_saves(&self) {
-        let _ = session::retry_pending_saves(
-            &self.save_queue,
-            &self.save_failed,
-            &|| save_session(
+        let _ = session::retry_pending_saves(&self.save_queue, &self.save_failed, &|| {
+            save_session(
                 self.session_id.as_deref(),
                 &self.session_dir,
                 &self.conversation,
@@ -660,8 +674,8 @@ impl ChatClient {
                 self.encryption_key.as_ref(),
                 &self.save_queue,
                 &self.save_failed,
-            ),
-        );
+            )
+        });
     }
 
     /// Returns true if there is a pending save failure notification to show.
@@ -676,10 +690,7 @@ impl ChatClient {
 
     // ── HTTP methods ──────────────────────────────────────────────────────────
 
-    pub async fn send_message(
-        &self,
-        prompt: &str,
-    ) -> Result<(String, Option<Usage>), Error> {
+    pub async fn send_message(&self, prompt: &str) -> Result<(String, Option<Usage>), Error> {
         self.send_message_with_tools(prompt, None).await
     }
 
@@ -701,7 +712,9 @@ impl ChatClient {
             stream: false,
             tools: tools.map(|t| t.to_vec()),
             reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
-            stream_options: Some(http::StreamOptions { include_usage: true }),
+            stream_options: Some(http::StreamOptions {
+                include_usage: true,
+            }),
             return_progress: None,
         };
         self.note_prompt_chars(message_char_count(&msgs));
@@ -730,8 +743,13 @@ impl ChatClient {
                         messages: msgs.clone(),
                         stream: false,
                         tools: tools.map(|t| t.to_vec()),
-                        reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
-                        stream_options: Some(http::StreamOptions { include_usage: true }),
+                        reasoning_effort: self
+                            .reasoning_effort
+                            .as_wire_value()
+                            .map(|s| s.to_string()),
+                        stream_options: Some(http::StreamOptions {
+                            include_usage: true,
+                        }),
                         return_progress: None,
                     };
                     self.note_prompt_chars(message_char_count(&msgs));
@@ -759,7 +777,12 @@ impl ChatClient {
         };
 
         let r = result?;
-        self.record_usage(r.usage.as_ref(), r.model.as_deref(), r.tool_calls, r.thinking_chars);
+        self.record_usage(
+            r.usage.as_ref(),
+            r.model.as_deref(),
+            r.tool_calls,
+            r.thinking_chars,
+        );
         self.calibrate_from_usage(r.usage.as_ref());
         Ok((r.content, r.usage))
     }
@@ -833,7 +856,12 @@ impl ChatClient {
             other => other,
         };
         let r = result?;
-        self.record_usage(r.usage.as_ref(), r.model.as_deref(), r.tool_calls, r.thinking_chars);
+        self.record_usage(
+            r.usage.as_ref(),
+            r.model.as_deref(),
+            r.tool_calls,
+            r.thinking_chars,
+        );
         let (content, usage) = (r.content, r.usage);
 
         // Update conversation history
@@ -844,7 +872,7 @@ impl ChatClient {
             timestamp: crate::types::format_timestamp(),
             tool_calls: None,
             tool_call_id: None,
-        reasoning_content: None,
+            reasoning_content: None,
             image: None,
         });
         conv.push(Message {
@@ -853,7 +881,7 @@ impl ChatClient {
             timestamp: crate::types::format_timestamp(),
             tool_calls: None,
             tool_call_id: None,
-        reasoning_content: None,
+            reasoning_content: None,
             image: None,
         });
         drop(conv);
@@ -916,8 +944,13 @@ impl ChatClient {
             messages: messages.to_vec(),
             stream: true,
             tools: tools.map(|t| t.to_vec()),
-            reasoning_effort: client.reasoning_effort.as_wire_value().map(|s| s.to_string()),
-            stream_options: Some(http::StreamOptions { include_usage: true }),
+            reasoning_effort: client
+                .reasoning_effort
+                .as_wire_value()
+                .map(|s| s.to_string()),
+            stream_options: Some(http::StreamOptions {
+                include_usage: true,
+            }),
             // Ask llama.cpp for live prompt-processing progress chunks.
             return_progress: Some(true),
         };
@@ -936,10 +969,7 @@ impl ChatClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Http(format!(
-                "Server returned {}: {}",
-                status, text
-            )));
+            return Err(Error::Http(format!("Server returned {}: {}", status, text)));
         }
 
         // Throwaway conversation seeded with one empty assistant message; the
@@ -958,7 +988,16 @@ impl ChatClient {
         let mut boxed_ready = Box::new(on_tool_call_ready);
         let mut boxed_pp = Box::new(on_prompt_progress);
         let mut ready_tracker = ToolCallTracker::default();
-        let (usage, model) = sse::stream_message(resp, &local_conv, &mut boxed_cb, &mut boxed_ready, &mut boxed_pp, &mut ready_tracker, cancel_token).await?;
+        let (usage, model) = sse::stream_message(
+            resp,
+            &local_conv,
+            &mut boxed_cb,
+            &mut boxed_ready,
+            &mut boxed_pp,
+            &mut ready_tracker,
+            cancel_token,
+        )
+        .await?;
 
         let msg = local_conv.lock().unwrap().pop().unwrap_or_else(|| Message {
             role: "assistant".to_string(),
@@ -989,34 +1028,35 @@ impl ChatClient {
     pub fn check_tool_call_warnings(&self) -> Vec<(String, String)> {
         let conv = self.conversation.lock().unwrap();
         let mut warnings = Vec::new();
-        
+
         for msg in conv.iter() {
             if let Some(tool_calls) = &msg.tool_calls {
                 for tc in tool_calls {
                     // Try to parse the arguments as JSON
                     if tc.function.arguments.is_empty() {
-                        warnings.push((
-                            tc.function.name.clone(),
-                            "Empty arguments".to_string(),
-                        ));
+                        warnings.push((tc.function.name.clone(), "Empty arguments".to_string()));
                     } else if !tc.function.arguments.starts_with('{') {
                         warnings.push((
                             tc.function.name.clone(),
                             "Invalid JSON: arguments don't start with '{'".to_string(),
                         ));
-                    } else if serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_err() {
+                    } else if serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                        .is_err()
+                    {
                         warnings.push((
                             tc.function.name.clone(),
-                            format!("Malformed JSON arguments: {}", &tc.function.arguments[..tc.function.arguments.len().min(50)]),
+                            format!(
+                                "Malformed JSON arguments: {}",
+                                &tc.function.arguments[..tc.function.arguments.len().min(50)]
+                            ),
                         ));
                     }
                 }
             }
         }
-        
+
         warnings
     }
-
 }
 
 #[derive(Debug, thiserror::Error)]

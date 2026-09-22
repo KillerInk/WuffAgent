@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::types::{MemoryEntry, MemoryConfig};
+use super::types::{MemoryConfig, MemoryEntry};
 
 /// Minimum token length to be considered for matching (single characters are noise).
 const MIN_TOKEN_LEN: usize = 2;
@@ -8,21 +8,18 @@ const MIN_TOKEN_LEN: usize = 2;
 /// Common English + German stopwords that carry no retrieval signal.
 const STOPWORDS: &[&str] = &[
     // English
-    "a", "an", "the", "and", "or", "but", "if", "then", "else", "when", "while",
-    "of", "in", "on", "at", "to", "from", "by", "for", "with", "about", "into",
-    "over", "under", "is", "am", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "should",
-    "could", "can", "may", "might", "must", "it", "its", "this", "that",
-    "these", "those", "i", "you", "he", "she", "we", "they", "them", "his",
-    "her", "our", "your", "not", "no", "yes", "so", "as", "up", "down", "out",
-    // German
-    "und", "oder", "aber", "wenn", "dann", "dass", "dass", "bei", "aus",
-    "auf", "den", "dem", "der", "des", "die", "ein", "eine", "einen", "einem",
-    "einer", "einem", "mit", "nach", "von", "vor", "zu", "zum", "zur", "ist",
-    "sind", "war", "waren", "hat", "hatte", "haben", "habe", "wird", "wurde",
-    "ich", "du", "er", "sie", "wir", "ihr", "man", "nicht", "ja", "nein",
-    "auch", "als", "am", "im", "ins", "um", "noch", "nur", "sehr", "wie",
-    "was", "wer", "wo", "wohin", "wieso", "worum", "wollte", "kann", "muss",
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "when", "while", "of", "in", "on",
+    "at", "to", "from", "by", "for", "with", "about", "into", "over", "under", "is", "am", "are",
+    "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will",
+    "would", "should", "could", "can", "may", "might", "must", "it", "its", "this", "that",
+    "these", "those", "i", "you", "he", "she", "we", "they", "them", "his", "her", "our", "your",
+    "not", "no", "yes", "so", "as", "up", "down", "out", // German
+    "und", "oder", "aber", "wenn", "dann", "dass", "dass", "bei", "aus", "auf", "den", "dem", "der",
+    "des", "die", "ein", "eine", "einen", "einem", "einer", "einem", "mit", "nach", "von", "vor",
+    "zu", "zum", "zur", "ist", "sind", "war", "waren", "hat", "hatte", "haben", "habe", "wird",
+    "wurde", "ich", "du", "er", "sie", "wir", "ihr", "man", "nicht", "ja", "nein", "auch", "als",
+    "am", "im", "ins", "um", "noch", "nur", "sehr", "wie", "was", "wer", "wo", "wohin", "wieso",
+    "worum", "wollte", "kann", "muss",
 ];
 
 fn is_stopword(token: &str) -> bool {
@@ -51,12 +48,14 @@ fn keyword_score(entry: &MemoryEntry, query: &str) -> f64 {
         return 0.0;
     }
 
-    let entry_freq: HashMap<&str, usize> = entry_tokens.iter()
-        .map(|t| t.as_str())
-        .fold(HashMap::new(), |mut map, t| {
-            *map.entry(t).or_insert(0) += 1;
-            map
-        });
+    let entry_freq: HashMap<&str, usize> =
+        entry_tokens
+            .iter()
+            .map(|t| t.as_str())
+            .fold(HashMap::new(), |mut map, t| {
+                *map.entry(t).or_insert(0) += 1;
+                map
+            });
 
     let total_tokens = entry_tokens.len() as f64;
     let mut score = 0.0;
@@ -88,12 +87,17 @@ fn keyword_score(entry: &MemoryEntry, query: &str) -> f64 {
 
 /// Search for relevant memories using keyword matching.
 /// Returns entries sorted by relevance score (descending), capped at max_results.
-pub fn keyword_search<'a>(entries: &'a [MemoryEntry], query: &str, max_results: usize) -> Vec<&'a MemoryEntry> {
+pub fn keyword_search<'a>(
+    entries: &'a [MemoryEntry],
+    query: &str,
+    max_results: usize,
+) -> Vec<&'a MemoryEntry> {
     if query.trim().is_empty() {
         return Vec::new();
     }
 
-    let mut scored: Vec<(&MemoryEntry, f64)> = entries.iter()
+    let mut scored: Vec<(&MemoryEntry, f64)> = entries
+        .iter()
         .filter(|e| !e.is_expired() && e.supersedes.is_none())
         .map(|e| (e, keyword_score(e, query)))
         .filter(|(_, score)| *score > 0.0)
@@ -101,7 +105,8 @@ pub fn keyword_search<'a>(entries: &'a [MemoryEntry], query: &str, max_results: 
 
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    scored.into_iter()
+    scored
+        .into_iter()
         .take(max_results)
         .map(|(e, _)| e)
         .collect()
@@ -109,7 +114,8 @@ pub fn keyword_search<'a>(entries: &'a [MemoryEntry], query: &str, max_results: 
 
 /// Get the N most recent memories (fallback when no query).
 pub fn get_recent_memories(entries: &[MemoryEntry], count: usize) -> Vec<&MemoryEntry> {
-    let mut active: Vec<&MemoryEntry> = entries.iter()
+    let mut active: Vec<&MemoryEntry> = entries
+        .iter()
         .filter(|e| !e.is_expired() && e.supersedes.is_none())
         .collect();
 
@@ -123,7 +129,11 @@ pub fn get_recent_memories(entries: &[MemoryEntry], count: usize) -> Vec<&Memory
 }
 
 /// Search memories based on config settings.
-pub fn search_memories<'a>(entries: &'a [MemoryEntry], query: &str, config: &MemoryConfig) -> Vec<&'a MemoryEntry> {
+pub fn search_memories<'a>(
+    entries: &'a [MemoryEntry],
+    query: &str,
+    config: &MemoryConfig,
+) -> Vec<&'a MemoryEntry> {
     keyword_search(entries, query, config.injection_max_entries)
 }
 

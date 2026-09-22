@@ -1,9 +1,9 @@
-use tokio::process::Command;
-use tokio::sync::Mutex;
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
-use std::net::TcpStream;
 use tokio::io::AsyncBufReadExt;
+use tokio::process::Command;
+use tokio::sync::Mutex;
 
 mod progress;
 pub use progress::parse_progress;
@@ -30,7 +30,14 @@ pub enum ServerStatus {
 }
 
 impl ServerManager {
-    pub fn new(server_path: &str, model_path: &str, port: u16, n_gpu_layers: i32, n_ctx: u32, threads: u32) -> Self {
+    pub fn new(
+        server_path: &str,
+        model_path: &str,
+        port: u16,
+        n_gpu_layers: i32,
+        n_ctx: u32,
+        threads: u32,
+    ) -> Self {
         Self {
             server_path: server_path.to_string(),
             model_path: model_path.to_string(),
@@ -61,7 +68,15 @@ impl ServerManager {
     }
 
     pub async fn start_server(&self) -> Result<(), Error> {
-        self.start_server_with_paths(&self.server_path, &self.model_path, self.port, self.n_gpu_layers, self.n_ctx, self.threads).await
+        self.start_server_with_paths(
+            &self.server_path,
+            &self.model_path,
+            self.port,
+            self.n_gpu_layers,
+            self.n_ctx,
+            self.threads,
+        )
+        .await
     }
 
     pub async fn start_server_with_paths(
@@ -96,10 +111,13 @@ impl ServerManager {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let child = cmd.spawn().map_err(|e| Error::SpawnFailed(e, server_path.to_string()))?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| Error::SpawnFailed(e, server_path.to_string()))?;
 
         *self.process.lock().await = Some(child);
-        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Spawn monitor task
         let running = self.running.clone();
@@ -136,7 +154,8 @@ impl ServerManager {
             child.kill().await?;
         }
         *process = None;
-        self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -179,7 +198,10 @@ impl ServerManager {
             if TcpStream::connect(format!("127.0.0.1:{}", self.port)).is_ok() {
                 // Give HTTP a moment to be ready
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                if reqwest::get(format!("http://127.0.0.1:{}/health", self.port)).await.is_ok() {
+                if reqwest::get(format!("http://127.0.0.1:{}/health", self.port))
+                    .await
+                    .is_ok()
+                {
                     return Ok(());
                 }
             }

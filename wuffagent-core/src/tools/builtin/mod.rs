@@ -1,26 +1,28 @@
 pub mod calculation;
-pub mod file_io;
-pub mod search;
-pub mod web_search;
 pub mod fetch_url;
+pub mod file_io;
+pub mod handoff;
 pub(crate) mod html;
 pub mod memory;
-pub mod time;
-pub mod shell;
-pub mod handoff;
 pub mod restart;
+pub mod search;
+pub mod shell;
+pub mod time;
+pub mod web_search;
 
 pub use calculation::CalculationTool;
+pub use fetch_url::FetchUrlTool;
 pub use file_io::{
     AppendFileTool, ApplyDiffTool, CopyTool, DeleteTool, FileInfoTool, ListDirTool, MkdirTool,
     MoveTool, ReadFileTool, SearchFilesTool, WriteFileTool,
 };
+pub use memory::{
+    ConsolidateMemoriesTool, DeleteMemoryTool, SaveMemoryTool, SearchMemoryTool, UpdateMemoryTool,
+};
 pub use search::SearchContentTool;
-pub use web_search::WebSearchTool;
-pub use fetch_url::FetchUrlTool;
-pub use memory::{SaveMemoryTool, UpdateMemoryTool, SearchMemoryTool, ConsolidateMemoriesTool, DeleteMemoryTool};
+pub use shell::{ShellConfig, ShellTool};
 pub use time::TimeTool;
-pub use shell::{ShellTool, ShellConfig};
+pub use web_search::WebSearchTool;
 // NOTE: HandoffTool is NOT registered in `register_builtins` — it is
 // per-execution (own mailbox / agents dir / allowlist) and is injected by
 // `Agent::new` for agents with `handoff_enabled`, like the per-agent shell.
@@ -30,8 +32,8 @@ pub use handoff::HandoffTool;
 // `register_builtins`.
 pub use restart::RestartTool;
 
-use crate::tools::types::{Tool, ToolMetadata};
 use crate::tools::registry::ToolEntry;
+use crate::tools::types::{Tool, ToolMetadata};
 
 /// Register all built-in tools that do not require external dependencies.
 pub fn register_builtins(
@@ -50,7 +52,9 @@ pub fn register_builtins(
         metadata: ToolMetadata {
             name: "web_search".to_string(),
             version: "1.0.0".to_string(),
-            description: "Search the web (Bing/Yahoo/DuckDuckGo with automatic failover, or SearXNG)".to_string(),
+            description:
+                "Search the web (Bing/Yahoo/DuckDuckGo with automatic failover, or SearXNG)"
+                    .to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
@@ -197,7 +201,8 @@ pub fn register_memory_tools(
         metadata: ToolMetadata {
             name: "save_memory".to_string(),
             version: "1.0.0".to_string(),
-            description: "Save a persistent fact, lesson, or decision to project memory".to_string(),
+            description: "Save a persistent fact, lesson, or decision to project memory"
+                .to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
@@ -230,7 +235,8 @@ pub fn register_memory_tools(
         metadata: ToolMetadata {
             name: "consolidate_memories".to_string(),
             version: "1.0.0".to_string(),
-            description: "Merge multiple related memories into a single comprehensive entry".to_string(),
+            description: "Merge multiple related memories into a single comprehensive entry"
+                .to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

@@ -135,13 +135,19 @@ mod tests {
     #[test]
     fn serde_defaults() {
         let cfg: McpServerConfig =
-            serde_json::from_str(r#"{"name":"fs","transport":{"Stdio":{"command":"npx"}}}"#).unwrap();
+            serde_json::from_str(r#"{"name":"fs","transport":{"Stdio":{"command":"npx"}}}"#)
+                .unwrap();
         assert_eq!(cfg.name, "fs");
         assert!(cfg.enabled, "enabled defaults to true");
         assert_eq!(cfg.timeout_secs, 60, "timeout defaults to 60s");
         assert!(cfg.allowed_tools.is_empty());
         match cfg.transport {
-            McpTransport::Stdio { args, env, working_dir, .. } => {
+            McpTransport::Stdio {
+                args,
+                env,
+                working_dir,
+                ..
+            } => {
                 assert!(args.is_empty());
                 assert!(env.is_empty());
                 assert_eq!(working_dir, None);

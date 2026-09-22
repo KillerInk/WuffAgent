@@ -1,7 +1,7 @@
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::mpsc;
-use std::sync::atomic::{AtomicPtr, Ordering};
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -145,7 +145,13 @@ impl ChatPipeline {
     /// `image` is an optional `data:` URI (e.g. `data:image/png;base64,...`)
     /// for a user-attached image; it is recorded on the user message so the
     /// model receives it (and it persists with the session).
-    pub fn start(&self, prompt: &str, system_prompt: &str, tool_policy: &ChatToolPolicy, image: Option<&str>) {
+    pub fn start(
+        &self,
+        prompt: &str,
+        system_prompt: &str,
+        tool_policy: &ChatToolPolicy,
+        image: Option<&str>,
+    ) {
         // Cancel any existing task
         self.cancel();
 
@@ -212,7 +218,10 @@ impl ChatPipeline {
             // with the sweep and could double-fire).
             if let Err(e) = result {
                 tracing::error!("[CHAT PIPELINE] Failed: {}", e);
-                let _ = event_tx.send(AppEvent::StreamError { error: e.to_string(), session_id });
+                let _ = event_tx.send(AppEvent::StreamError {
+                    error: e.to_string(),
+                    session_id,
+                });
             }
         });
 

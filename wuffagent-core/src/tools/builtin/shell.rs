@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command as StdCommand, Stdio};
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -139,7 +139,8 @@ impl ShellTool {
         for dangerous in DANGEROUS_PATTERNS {
             if lower_cmd.contains(dangerous.to_lowercase().as_str()) {
                 return Err(ToolError::Execution(format!(
-                    "Dangerous command pattern detected: {}", dangerous
+                    "Dangerous command pattern detected: {}",
+                    dangerous
                 )));
             }
         }
@@ -157,7 +158,8 @@ impl ShellTool {
         }
 
         Err(ToolError::Execution(format!(
-            "Command not allowed. Allowed patterns: {:?}", self.config.allowed_commands
+            "Command not allowed. Allowed patterns: {:?}",
+            self.config.allowed_commands
         )))
     }
 
@@ -168,10 +170,14 @@ impl ShellTool {
                 "powershell.exe".to_string(),
                 vec!["-Command".to_string(), command.to_string()],
             ),
-            "cmd" => {
-                ("cmd.exe".to_string(), vec!["/C".to_string(), command.to_string()])
-            }
-            "bash" => ("bash".to_string(), vec!["-c".to_string(), command.to_string()]),
+            "cmd" => (
+                "cmd.exe".to_string(),
+                vec!["/C".to_string(), command.to_string()],
+            ),
+            "bash" => (
+                "bash".to_string(),
+                vec!["-c".to_string(), command.to_string()],
+            ),
             _ => (
                 "powershell.exe".to_string(),
                 vec!["-Command".to_string(), command.to_string()],
@@ -218,9 +224,9 @@ impl ShellTool {
 
         let timeout_duration = Duration::from_millis(timeout_ms);
         let start = Instant::now();
-        let mut child = cmd.spawn().map_err(|e| {
-            ToolError::Execution(format!("Command execution failed: {}", e))
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ToolError::Execution(format!("Command execution failed: {}", e)))?;
 
         let stdout_pipe = child.stdout.take().expect("stdout is piped");
         let stderr_pipe = child.stderr.take().expect("stderr is piped");
@@ -260,7 +266,8 @@ impl ShellTool {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(ToolError::Execution(format!(
-                    "Command timed out after {}ms", timeout_ms
+                    "Command timed out after {}ms",
+                    timeout_ms
                 )));
             }
 
@@ -330,9 +337,19 @@ impl PipeState {
 
     fn feed(&mut self, stream: u8, chunk: &[u8]) {
         if stream == 0 {
-            Self::append(&mut self.stdout, &mut self.stdout_line, chunk, &mut self.recent);
+            Self::append(
+                &mut self.stdout,
+                &mut self.stdout_line,
+                chunk,
+                &mut self.recent,
+            );
         } else {
-            Self::append(&mut self.stderr, &mut self.stderr_line, chunk, &mut self.recent);
+            Self::append(
+                &mut self.stderr,
+                &mut self.stderr_line,
+                chunk,
+                &mut self.recent,
+            );
         }
     }
 
@@ -348,7 +365,9 @@ impl PipeState {
         let take = chunk.len().min(room);
         for &b in &chunk[..take] {
             if b == b'\n' {
-                let s = String::from_utf8_lossy(line).trim_end_matches('\r').to_string();
+                let s = String::from_utf8_lossy(line)
+                    .trim_end_matches('\r')
+                    .to_string();
                 let s = s.trim_end().to_string();
                 if !s.trim().is_empty() {
                     let s: String = s.chars().take(Self::LINE_CAP).collect();
@@ -419,7 +438,8 @@ impl Tool for ShellTool {
                         "timeout_ms".to_string(),
                         crate::tools::types::FieldSchema {
                             type_name: "integer".to_string(),
-                            description: "Timeout in milliseconds (optional, uses agent default)".to_string(),
+                            description: "Timeout in milliseconds (optional, uses agent default)"
+                                .to_string(),
                             nullable: true,
                         },
                     );
@@ -448,7 +468,8 @@ impl Tool for ShellTool {
         // Reject overly long commands to prevent resource exhaustion.
         if command.len() > MAX_COMMAND_LEN {
             return Err(ToolError::InvalidParams(format!(
-                "Command exceeds maximum length of {} characters", MAX_COMMAND_LEN
+                "Command exceeds maximum length of {} characters",
+                MAX_COMMAND_LEN
             )));
         }
 
@@ -466,7 +487,9 @@ impl Tool for ShellTool {
         let result = Self::run_command(
             &shell_cmd,
             &shell_args,
-            working_dir.as_deref().or(self.config.working_dir.as_deref()),
+            working_dir
+                .as_deref()
+                .or(self.config.working_dir.as_deref()),
             timeout_ms,
             fp,
         );

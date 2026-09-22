@@ -117,7 +117,10 @@ impl McpContent {
         match self {
             McpContent::Text { text } => text.clone(),
             McpContent::Image { data, mime_type } => {
-                format!("[image {mime_type}, {} base64 chars, omitted from text]", data.len())
+                format!(
+                    "[image {mime_type}, {} base64 chars, omitted from text]",
+                    data.len()
+                )
             }
             McpContent::Resource { resource } => {
                 let uri = resource
@@ -148,7 +151,11 @@ pub struct CallToolResult {
 impl CallToolResult {
     /// Concatenated text rendering of all content parts.
     pub fn to_text(&self) -> String {
-        self.content.iter().map(McpContent::to_text).collect::<Vec<_>>().join("\n")
+        self.content
+            .iter()
+            .map(McpContent::to_text)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 

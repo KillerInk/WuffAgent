@@ -55,7 +55,9 @@ fn test_evaluate_scientific_notation() {
 fn test_evaluate_complex() {
     assert!((evaluate_expression("2 * pi").unwrap() - 2.0 * std::f64::consts::PI).abs() < 1e-9);
     // sqrt(1024 + 196) = sqrt(1220) ≈ 34.9285
-    assert!((evaluate_expression("sqrt(2 ^ 10 + 14 ^ 2)").unwrap() - 1220.0f64.sqrt()).abs() < 1e-9);
+    assert!(
+        (evaluate_expression("sqrt(2 ^ 10 + 14 ^ 2)").unwrap() - 1220.0f64.sqrt()).abs() < 1e-9
+    );
     assert!((evaluate_expression("sqrt(12 ^ 2 + 5 ^ 2)").unwrap() - 13.0).abs() < 1e-9);
     assert!((evaluate_expression("sin(pi) / 2 + 1").unwrap() - 1.0).abs() < 1e-9);
 }
@@ -72,7 +74,9 @@ fn test_evaluate_error() {
 
 #[test]
 fn test_shell_command_detection() {
-    assert!(looks_like_shell_command("cargo check --manifest-path M:/repos/WuffAgent/Cargo.toml 2>&1"));
+    assert!(looks_like_shell_command(
+        "cargo check --manifest-path M:/repos/WuffAgent/Cargo.toml 2>&1"
+    ));
     assert!(looks_like_shell_command("git status"));
     assert!(looks_like_shell_command("npm run build"));
     assert!(!looks_like_shell_command("2 + 2"));

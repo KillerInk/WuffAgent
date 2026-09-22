@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::agents::types::RestartRequest;
-use crate::tools::types::{FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema};
+use crate::tools::types::{
+    FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema,
+};
 
 /// How long a `build_cmd` may run before it is considered to have hung. A full
 /// WuffAgent rebuild can be slow, so this is deliberately generous.
@@ -70,7 +72,10 @@ fn run_build(cmd: &str, cwd: Option<&std::path::Path>) -> Result<(), String> {
         .map_err(|e| format!("failed to open build log {:?}: {}", log_path, e))?;
 
     let (program, args): (String, Vec<&str>) = if cfg!(windows) {
-        ("powershell".to_string(), vec!["-NoProfile", "-Command", cmd])
+        (
+            "powershell".to_string(),
+            vec!["-NoProfile", "-Command", cmd],
+        )
     } else {
         ("sh".to_string(), vec!["-c", cmd])
     };
@@ -100,7 +105,10 @@ fn run_build(cmd: &str, cwd: Option<&std::path::Path>) -> Result<(), String> {
                 return if status.success() {
                     Ok(())
                 } else {
-                    Err(format!("build command '{}' failed ({}) — output tail:\n{}", cmd, status, tail))
+                    Err(format!(
+                        "build command '{}' failed ({}) — output tail:\n{}",
+                        cmd, status, tail
+                    ))
                 };
             }
             Ok(None) => {
@@ -237,7 +245,8 @@ impl Tool for RestartTool {
     fn parameters_schema(&self) -> ToolSchema {
         ToolSchema {
             name: "restart".to_string(),
-            description: "Restart WuffAgent (optionally after a build) and resume the session".to_string(),
+            description: "Restart WuffAgent (optionally after a build) and resume the session"
+                .to_string(),
             input_type: Some(JsonSchema {
                 type_name: "object".to_string(),
                 properties: Some({
@@ -279,7 +288,9 @@ impl Tool for RestartTool {
             .ok_or_else(|| ToolError::InvalidParams("reason is required".to_string()))?;
         let reason = reason.trim().to_string();
         if reason.is_empty() {
-            return Err(ToolError::InvalidParams("reason must not be empty".to_string()));
+            return Err(ToolError::InvalidParams(
+                "reason must not be empty".to_string(),
+            ));
         }
         let build_cmd_param: Option<String> = params
             .get::<String>("build_cmd")
@@ -334,7 +345,9 @@ impl Tool for RestartTool {
         {
             let mut guard = self.mailbox.lock().unwrap();
             if guard.is_some() {
-                return Err(ToolError::Execution("A restart is already pending".to_string()));
+                return Err(ToolError::Execution(
+                    "A restart is already pending".to_string(),
+                ));
             }
             *guard = Some(RestartRequest {
                 reason,

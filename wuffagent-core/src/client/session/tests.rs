@@ -1,10 +1,10 @@
 //! Unit tests for the `session` module (see `super`).
 
 use super::*;
+use crate::client::{estimate_conversation_tokens, trim_to_token_budget};
+use crate::trimming::message_char_count;
 use std::path::PathBuf;
 use tempfile::tempdir;
-use crate::trimming::message_char_count;
-use crate::client::{estimate_conversation_tokens, trim_to_token_budget};
 
 fn make_message(role: &str, content: &str) -> Message {
     Message {
@@ -13,7 +13,7 @@ fn make_message(role: &str, content: &str) -> Message {
         timestamp: "2024-01-01T00:00:00Z".to_string(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     }
 }
@@ -130,8 +130,11 @@ async fn test_save_session_creates_new_if_missing() {
     );
 
     assert!(result.is_ok());
-    assert!(sessions::session_exists(&session_dir, session_id),
-        "session file should exist for id={}", session_id);
+    assert!(
+        sessions::session_exists(&session_dir, session_id),
+        "session file should exist for id={}",
+        session_id
+    );
 
     // Load it back
     let loaded_conv = make_conversation(vec![]);
@@ -307,7 +310,7 @@ fn test_trim_conversation_no_system() {
 fn test_estimate_conversation_tokens() {
     let conv = make_conversation(vec![
         make_message("system", "You are helpful"), // 15 chars
-        make_message("user", "What is 2+2?"), // 12 chars
+        make_message("user", "What is 2+2?"),      // 12 chars
     ]);
 
     assert_eq!(estimate_conversation_tokens(&conv), 27);
@@ -333,7 +336,11 @@ fn test_trim_removes_messages_when_tool_result_is_system() {
     let messages = conv.lock().unwrap();
     // The huge message must have been removed (or truncated), so the count
     // drops well under the original 4 and the total is back under budget.
-    assert!(messages.len() < 4, "expected trimming, got {}", messages.len());
+    assert!(
+        messages.len() < 4,
+        "expected trimming, got {}",
+        messages.len()
+    );
     assert!(
         message_char_count(&messages) <= 100,
         "total {} still over budget",

@@ -1,7 +1,9 @@
-use std::sync::Arc;
-use crate::memory::{MemoryAddResult, MemoryManager, MemoryEntry, MemoryType};
-use crate::tools::types::{Tool, ToolParams, ToolOutput, ToolResult, ToolSchema, JsonSchema, FieldSchema};
+use crate::memory::{MemoryAddResult, MemoryEntry, MemoryManager, MemoryType};
+use crate::tools::types::{
+    FieldSchema, JsonSchema, Tool, ToolOutput, ToolParams, ToolResult, ToolSchema,
+};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Short content preview for tool feedback (keeps responses compact for the LLM).
 fn snippet(content: &str) -> String {
@@ -21,7 +23,9 @@ impl SaveMemoryTool {
 }
 
 impl Tool for SaveMemoryTool {
-    fn name(&self) -> &str { "save_memory" }
+    fn name(&self) -> &str {
+        "save_memory"
+    }
 
     fn description(&self) -> &str {
         "Save a persistent fact, lesson, or decision to project memory. Use when discovering \
@@ -39,23 +43,37 @@ impl Tool for SaveMemoryTool {
             input_type: Some(JsonSchema {
                 type_name: "object".to_string(),
                 properties: Some(HashMap::from([
-                    ("type".to_string(), FieldSchema {
-                        type_name: "string".to_string(),
-                        description: "Memory type: fact, lesson, decision, context, or goal".to_string(),
-                        nullable: false,
-                    }),
-                    ("content".to_string(), FieldSchema {
-                        type_name: "string".to_string(),
-                        description: "The memory content (1-3 sentences, specific and complete)".to_string(),
-                        nullable: false,
-                    }),
-                    ("tags".to_string(), FieldSchema {
-                        type_name: "array".to_string(),
-                        description: "Tags for categorization (optional). Tag lessons with your \
+                    (
+                        "type".to_string(),
+                        FieldSchema {
+                            type_name: "string".to_string(),
+                            description: "Memory type: fact, lesson, decision, context, or goal"
+                                .to_string(),
+                            nullable: false,
+                        },
+                    ),
+                    (
+                        "content".to_string(),
+                        FieldSchema {
+                            type_name: "string".to_string(),
+                            description:
+                                "The memory content (1-3 sentences, specific and complete)"
+                                    .to_string(),
+                            nullable: false,
+                        },
+                    ),
+                    (
+                        "tags".to_string(),
+                        FieldSchema {
+                            type_name: "array".to_string(),
+                            description:
+                                "Tags for categorization (optional). Tag lessons with your \
                                       agent name (e.g. \"agent:coder\") so per-agent improvement \
-                                      checks can find them".to_string(),
-                        nullable: true,
-                    }),
+                                      checks can find them"
+                                    .to_string(),
+                            nullable: true,
+                        },
+                    ),
                 ])),
                 required: vec!["type".to_string(), "content".to_string()],
             }),
@@ -74,7 +92,9 @@ impl Tool for SaveMemoryTool {
         }
 
         // Determine memory type
-        let type_str = params.get::<String>("type").unwrap_or_else(|| "fact".to_string());
+        let type_str = params
+            .get::<String>("type")
+            .unwrap_or_else(|| "fact".to_string());
         let mem_type = MemoryManager::parse_memory_type(&type_str);
 
         // Parse tags
@@ -135,7 +155,9 @@ impl UpdateMemoryTool {
 }
 
 impl Tool for UpdateMemoryTool {
-    fn name(&self) -> &str { "update_memory" }
+    fn name(&self) -> &str {
+        "update_memory"
+    }
 
     fn description(&self) -> &str {
         "Update an existing memory entry when information has changed or been refined. \
@@ -211,7 +233,9 @@ impl SearchMemoryTool {
 }
 
 impl Tool for SearchMemoryTool {
-    fn name(&self) -> &str { "search_memory" }
+    fn name(&self) -> &str {
+        "search_memory"
+    }
 
     fn description(&self) -> &str {
         "Search project memory for relevant information before starting work or before saving a \
@@ -225,13 +249,14 @@ impl Tool for SearchMemoryTool {
             description: self.description().to_string(),
             input_type: Some(JsonSchema {
                 type_name: "object".to_string(),
-                properties: Some(HashMap::from([
-                    ("query".to_string(), FieldSchema {
+                properties: Some(HashMap::from([(
+                    "query".to_string(),
+                    FieldSchema {
                         type_name: "string".to_string(),
                         description: "Search query".to_string(),
                         nullable: false,
-                    }),
-                ])),
+                    },
+                )])),
                 required: vec!["query".to_string()],
             }),
         }
@@ -251,7 +276,10 @@ impl Tool for SearchMemoryTool {
 
         let mut output = String::from(format!("Found {} relevant memory(ies):\n", results.len()));
         for mem in &results {
-            output.push_str(&format!("- [{}] (id: {}) {}\n", mem.r#type, mem.id, mem.content));
+            output.push_str(&format!(
+                "- [{}] (id: {}) {}\n",
+                mem.r#type, mem.id, mem.content
+            ));
         }
 
         Ok(ToolOutput::success(output))
@@ -270,7 +298,9 @@ impl ConsolidateMemoriesTool {
 }
 
 impl Tool for ConsolidateMemoriesTool {
-    fn name(&self) -> &str { "consolidate_memories" }
+    fn name(&self) -> &str {
+        "consolidate_memories"
+    }
 
     fn description(&self) -> &str {
         "Merge multiple related memories into a single, more comprehensive entry. \
@@ -285,16 +315,22 @@ impl Tool for ConsolidateMemoriesTool {
             input_type: Some(JsonSchema {
                 type_name: "object".to_string(),
                 properties: Some(HashMap::from([
-                    ("memory_ids".to_string(), FieldSchema {
-                        type_name: "array".to_string(),
-                        description: "IDs of memories to merge".to_string(),
-                        nullable: false,
-                    }),
-                    ("consolidated_content".to_string(), FieldSchema {
-                        type_name: "string".to_string(),
-                        description: "The merged, comprehensive content".to_string(),
-                        nullable: false,
-                    }),
+                    (
+                        "memory_ids".to_string(),
+                        FieldSchema {
+                            type_name: "array".to_string(),
+                            description: "IDs of memories to merge".to_string(),
+                            nullable: false,
+                        },
+                    ),
+                    (
+                        "consolidated_content".to_string(),
+                        FieldSchema {
+                            type_name: "string".to_string(),
+                            description: "The merged, comprehensive content".to_string(),
+                            nullable: false,
+                        },
+                    ),
                 ])),
                 required: vec!["memory_ids".to_string(), "consolidated_content".to_string()],
             }),
@@ -319,7 +355,12 @@ impl Tool for ConsolidateMemoriesTool {
             match self.memory.delete(id) {
                 Ok(Some(_)) => deleted += 1,
                 Ok(None) => missing.push(id.clone()),
-                Err(e) => return Ok(ToolOutput::error(format!("Failed to delete memory '{}': {}", id, e))),
+                Err(e) => {
+                    return Ok(ToolOutput::error(format!(
+                        "Failed to delete memory '{}': {}",
+                        id, e
+                    )))
+                }
             }
         }
 
@@ -364,7 +405,9 @@ impl DeleteMemoryTool {
 }
 
 impl Tool for DeleteMemoryTool {
-    fn name(&self) -> &str { "delete_memory" }
+    fn name(&self) -> &str {
+        "delete_memory"
+    }
 
     fn description(&self) -> &str {
         "Delete a memory entry by ID. Use for entries that are stale, wrong, or fully covered by a \
@@ -378,13 +421,14 @@ impl Tool for DeleteMemoryTool {
             description: self.description().to_string(),
             input_type: Some(JsonSchema {
                 type_name: "object".to_string(),
-                properties: Some(HashMap::from([
-                    ("id".to_string(), FieldSchema {
+                properties: Some(HashMap::from([(
+                    "id".to_string(),
+                    FieldSchema {
                         type_name: "string".to_string(),
                         description: "The memory entry ID to delete".to_string(),
                         nullable: false,
-                    }),
-                ])),
+                    },
+                )])),
                 required: vec!["id".to_string()],
             }),
         }

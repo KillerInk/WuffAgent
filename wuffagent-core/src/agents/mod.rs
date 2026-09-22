@@ -9,16 +9,16 @@
 //!
 //! LlmClient and ChatClientAdapter are re-exported from the top-level `llm` module.
 
-pub mod types;
-pub mod traits;
+pub mod agent;
 pub mod config;
 pub mod engine;
-pub mod agent;
+pub mod traits;
+pub mod types;
 
-pub use types::*;
-pub use traits::*;
-pub use config::*;
 pub use super::llm::{ChatClientAdapter, LlmClient};
-pub use engine::AgentEngine;
 pub use agent::Agent;
 pub use agent::RunStats;
+pub use config::*;
+pub use engine::AgentEngine;
+pub use traits::*;
+pub use types::*;

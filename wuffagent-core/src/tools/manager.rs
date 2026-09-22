@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::tools::registry::ToolRegistry;
 use crate::tools::types::{
     ToolError, ToolLogger, ToolOutput, ToolParams, ToolProgress, ToolResult, TracingToolLogger,
 };
-use crate::tools::registry::ToolRegistry;
 
 /// Parse raw tool-call argument JSON into `ToolParams`.
 ///
@@ -12,8 +12,12 @@ use crate::tools::registry::ToolRegistry;
 /// fields into `values` (some models emit direct arguments like
 /// `{"path": "..."}`).
 pub fn parse_tool_args(arguments: &str) -> Result<ToolParams, String> {
-    let args = serde_json::from_str::<serde_json::Value>(arguments)
-        .map_err(|_| format!("Failed to parse arguments: {}", &arguments[..arguments.len().min(100)]))?;
+    let args = serde_json::from_str::<serde_json::Value>(arguments).map_err(|_| {
+        format!(
+            "Failed to parse arguments: {}",
+            &arguments[..arguments.len().min(100)]
+        )
+    })?;
     // Try deserializing directly first; fall back to raw values map.
     if let Ok(p) = serde_json::from_value::<ToolParams>(args.clone()) {
         return Ok(p);
@@ -75,7 +79,10 @@ impl ToolManager {
     /// Rebuild a registry from the current one, swapping the shared `shell` tool
     /// for a `ShellTool` built from the given per-agent config. Pass `None` to
     /// keep the shared shell unchanged.
-    fn rebuild_registry(&self, shell_cfg: Option<crate::agents::config::ShellConfig>) -> Arc<ToolRegistry> {
+    fn rebuild_registry(
+        &self,
+        shell_cfg: Option<crate::agents::config::ShellConfig>,
+    ) -> Arc<ToolRegistry> {
         let mut entries = self.registry.list();
         if let Some(cfg) = shell_cfg {
             let new_shell = crate::tools::builtin::shell::ShellTool::new(
@@ -164,7 +171,8 @@ impl ToolManager {
             .unwrap_or_else(|| crate::tools::types::ToolMetadata {
                 name: "restart".to_string(),
                 version: "1.0.0".to_string(),
-                description: "Restart WuffAgent (optionally after a build) and resume the session".to_string(),
+                description: "Restart WuffAgent (optionally after a build) and resume the session"
+                    .to_string(),
                 dependencies: vec![],
             });
         entries.retain(|e| e.metadata.name != "restart");
@@ -238,11 +246,7 @@ impl ToolManager {
     /// Execute a tool by name with the given parameters.
     ///
     /// Delegates to [`Self::execute_with_progress`] with a no-op sink.
-    pub async fn execute(
-        &self,
-        tool_name: &str,
-        params: ToolParams,
-    ) -> ToolResult<ToolOutput> {
+    pub async fn execute(&self, tool_name: &str, params: ToolParams) -> ToolResult<ToolOutput> {
         self.execute_with_progress(tool_name, params, &ToolProgress::none())
             .await
     }
@@ -273,9 +277,10 @@ impl ToolManager {
         // Clone the sink so it can be moved into the blocking task.
         let progress = progress.clone();
         // Execute on the blocking thread to avoid holding the main runtime.
-        let result = tokio::task::spawn_blocking(move || tool.execute_with_progress(params, &progress))
-            .await
-            .map_err(|e| ToolError::Execution(format!("Join error: {}", e)))?;
+        let result =
+            tokio::task::spawn_blocking(move || tool.execute_with_progress(params, &progress))
+                .await
+                .map_err(|e| ToolError::Execution(format!("Join error: {}", e)))?;
 
         match &result {
             Ok(output) => self.logger.log_tool_result(tool_name, output),
@@ -311,7 +316,11 @@ impl ToolManager {
         if let Some(ref allowlist) = self.allowlist {
             allowlist.clone()
         } else {
-            self.registry.list().iter().map(|e| e.metadata.name.clone()).collect()
+            self.registry
+                .list()
+                .iter()
+                .map(|e| e.metadata.name.clone())
+                .collect()
         }
     }
 

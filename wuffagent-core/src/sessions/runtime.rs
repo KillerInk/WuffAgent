@@ -228,8 +228,7 @@ impl ChatAreaState {
             self.token_count = (self.token_count as f64 + delta) as usize;
             self.live_tokens_added = live;
             if n_ctx > 0 {
-                self.context_used =
-                    (self.token_count as f64 / n_ctx as f64 * 100.0) as f32;
+                self.context_used = (self.token_count as f64 / n_ctx as f64 * 100.0) as f32;
             }
         }
         if let Some(tps) = self.live_gen_tps() {
@@ -390,10 +389,7 @@ impl SessionRuntime {
                 client.set_encryption_key(Some(key));
             }
         }
-        let name = client
-            .load_session()
-            .map(|s| s.name)
-            .unwrap_or(name);
+        let name = client.load_session().map(|s| s.name).unwrap_or(name);
 
         // Route tool-call events into the shared channel.
         client.set_tool_event_sender(event_tx.clone());
@@ -537,9 +533,14 @@ mod tests {
     fn live_gen_tps_0_5s_gate() {
         let mut s = ChatAreaState::default();
         s.stream_chunk("some text");
-        assert!(s.live_gen_tps().is_none(), "under 0.5s the estimate is meaningless");
+        assert!(
+            s.live_gen_tps().is_none(),
+            "under 0.5s the estimate is meaningless"
+        );
         std::thread::sleep(std::time::Duration::from_millis(550));
-        let tps = s.live_gen_tps().expect("after 0.5s the live speed is available");
+        let tps = s
+            .live_gen_tps()
+            .expect("after 0.5s the live speed is available");
         assert!(tps > 0.0);
     }
 }

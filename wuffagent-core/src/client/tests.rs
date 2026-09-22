@@ -109,9 +109,15 @@ fn test_trim_trigger_and_target_chars_use_calibrated_ratio() {
     client.set_n_ctx(100_096);
     // Default 3.5 chars/token:
     // trigger: 100096 × 0.9 × 3.5 = 315292.8 → 315292
-    assert_eq!(client.trim_trigger_chars(), (100_096u64 * 90 * 350 / 10_000) as usize);
+    assert_eq!(
+        client.trim_trigger_chars(),
+        (100_096u64 * 90 * 350 / 10_000) as usize
+    );
     // target:  100096 × 0.5 × 3.5 = 175168.0 → 175168
-    assert_eq!(client.trim_target_chars(), (100_096u64 * 50 * 350 / 10_000) as usize);
+    assert_eq!(
+        client.trim_target_chars(),
+        (100_096u64 * 50 * 350 / 10_000) as usize
+    );
 
     // Calibrate to 3.0 chars/token (English prose): both budgets shrink
     client.note_prompt_chars(30_000);
@@ -121,8 +127,14 @@ fn test_trim_trigger_and_target_chars_use_calibrated_ratio() {
         total_tokens: 10_000,
         timings: None,
     }));
-    assert_eq!(client.trim_trigger_chars(), (100_096u64 * 90 * 300 / 10_000) as usize);
-    assert_eq!(client.trim_target_chars(), (100_096u64 * 50 * 300 / 10_000) as usize);
+    assert_eq!(
+        client.trim_trigger_chars(),
+        (100_096u64 * 90 * 300 / 10_000) as usize
+    );
+    assert_eq!(
+        client.trim_target_chars(),
+        (100_096u64 * 50 * 300 / 10_000) as usize
+    );
 
     // n_ctx = 0 → no budget
     client.set_n_ctx(0);
@@ -156,8 +168,7 @@ fn test_parse_context_overflow() {
 
     // Other 400 errors must not trigger a force-trim retry.
     let err = Error::Http(
-        "Server returned 400 Bad Request: {\"error\":{\"message\":\"bad request\"}}"
-            .to_string(),
+        "Server returned 400 Bad Request: {\"error\":{\"message\":\"bad request\"}}".to_string(),
     );
     assert_eq!(parse_context_overflow(&err), None);
 
@@ -187,7 +198,10 @@ fn test_parse_props_n_ctx_nested_wins() {
 #[test]
 fn test_parse_props_n_ctx_absent_or_invalid() {
     assert_eq!(parse_props_n_ctx(r#"{"models":[]}"#), None);
-    assert_eq!(parse_props_n_ctx(r#"{"default_generation_settings":{}}"#), None);
+    assert_eq!(
+        parse_props_n_ctx(r#"{"default_generation_settings":{}}"#),
+        None
+    );
     assert_eq!(parse_props_n_ctx("not json"), None);
     assert_eq!(parse_props_n_ctx(""), None);
 }
@@ -232,20 +246,18 @@ fn test_build_request_streaming() {
 #[test]
 fn test_build_request_with_tools() {
     let client = ChatClient::new("http://localhost:8080");
-    let tools = vec![
-        crate::tools::ToolDefinition {
-            type_name: "function".to_string(),
-            function: crate::tools::ToolFunctionSpec {
-                name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
-                parameters: crate::tools::JsonSchema {
-                    type_name: "object".to_string(),
-                    properties: None,
-                    required: vec![],
-                },
+    let tools = vec![crate::tools::ToolDefinition {
+        type_name: "function".to_string(),
+        function: crate::tools::ToolFunctionSpec {
+            name: "test_tool".to_string(),
+            description: "A test tool".to_string(),
+            parameters: crate::tools::JsonSchema {
+                type_name: "object".to_string(),
+                properties: None,
+                required: vec![],
             },
-        }
-    ];
+        },
+    }];
     let request = build_request(
         &client.system_prompt,
         &client.conversation,
@@ -264,8 +276,24 @@ fn test_build_request_includes_history() {
     let client = ChatClient::new("http://localhost:8080");
     {
         let mut conv = client.conversation.lock().unwrap();
-        conv.push(Message { role: "user".into(), content: "Hi there".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None, image: None, });
-                    conv.push(Message { role: "assistant".into(), content: "Hello! How can I help?".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None, image: None, });
+        conv.push(Message {
+            role: "user".into(),
+            content: "Hi there".into(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        });
+        conv.push(Message {
+            role: "assistant".into(),
+            content: "Hello! How can I help?".into(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        });
     }
     let request = build_request(
         &client.system_prompt,
@@ -290,8 +318,24 @@ fn test_build_request_skips_empty_assistant_message() {
     let client = ChatClient::new("http://localhost:8080");
     {
         let mut conv = client.conversation.lock().unwrap();
-        conv.push(Message { role: "user".into(), content: "Hi".into(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None, image: None, });
-                    conv.push(Message { role: "assistant".into(), content: String::new(), timestamp: String::new(), tool_calls: None, tool_call_id: None, reasoning_content: None, image: None, });
+        conv.push(Message {
+            role: "user".into(),
+            content: "Hi".into(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        });
+        conv.push(Message {
+            role: "assistant".into(),
+            content: String::new(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        });
     }
     let request = build_request(
         &client.system_prompt,
@@ -331,7 +375,15 @@ async fn test_process_sse_line_empty() {
         captured.push(s);
         Ok(())
     };
-    let result = process_sse_line("", &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        "",
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
 }
 
@@ -343,7 +395,15 @@ async fn test_process_sse_line_done() {
         captured.push(s);
         Ok(())
     };
-    let result = process_sse_line("data: [DONE]", &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        "data: [DONE]",
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
     assert!(captured.is_empty());
 }
@@ -360,7 +420,15 @@ async fn test_process_sse_line_prompt_progress() {
     // llama.cpp progress chunk: `prompt_progress` is a sibling of `choices`,
     // the delta carries no content (content: null).
     let sse = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null}}],\"prompt_progress\":{\"total\":1000,\"cache\":200,\"processed\":500,\"time_ms\":1200.5}}\n";
-    let result = process_sse_line(sse, &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut pp_cb, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        sse,
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut pp_cb,
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
     assert_eq!(seen.len(), 1);
     let pp = seen[0];
@@ -376,12 +444,24 @@ fn test_prompt_tps_guards() {
     use crate::types::PromptProgress;
     // Initial 0% chunk: everything "processed" is cached, no measurable time.
     assert_eq!(
-        PromptProgress { total: 100, cache: 100, processed: 100, time_ms: 0.0 }.prompt_tps(),
+        PromptProgress {
+            total: 100,
+            cache: 100,
+            processed: 100,
+            time_ms: 0.0
+        }
+        .prompt_tps(),
         None
     );
     // Sub-millisecond: skip to avoid a noisy speed spike.
     assert_eq!(
-        PromptProgress { total: 100, cache: 0, processed: 10, time_ms: 0.4 }.prompt_tps(),
+        PromptProgress {
+            total: 100,
+            cache: 0,
+            processed: 10,
+            time_ms: 0.4
+        }
+        .prompt_tps(),
         None
     );
 }
@@ -423,7 +503,15 @@ async fn test_process_sse_line_done_trailing_newline() {
         captured.push(s);
         Ok(())
     };
-    let result = process_sse_line("data: [DONE]\n", &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        "data: [DONE]\n",
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
     assert!(captured.is_empty());
 }
@@ -436,7 +524,15 @@ async fn test_process_sse_line_done_crlf() {
         captured.push(s);
         Ok(())
     };
-    let result = process_sse_line("data: [DONE]\r\n", &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        "data: [DONE]\r\n",
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
     assert!(captured.is_empty());
 }
@@ -463,7 +559,15 @@ async fn test_process_sse_line_data_prefix_without_space() {
         captured.push(s);
         Ok(())
     };
-    let result = process_sse_line(sse_data, &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        sse_data,
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
     assert_eq!(captured, vec!["Hi"]);
     let c = client.conversation().lock().unwrap();
@@ -478,7 +582,15 @@ async fn test_process_sse_line_non_data() {
         captured.push(s);
         Ok(())
     };
-    let result = process_sse_line("id: 1", &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        "id: 1",
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
     assert!(captured.is_empty());
 }
@@ -494,7 +606,7 @@ async fn test_process_sse_line_valid_chunk() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     drop(conv);
@@ -505,7 +617,15 @@ async fn test_process_sse_line_valid_chunk() {
         captured.push(s);
         Ok(())
     };
-    let result = process_sse_line(sse_data, &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        sse_data,
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
     assert_eq!(captured, vec!["Hello"]);
     let c = client.conversation().lock().unwrap();
@@ -524,7 +644,7 @@ async fn test_process_sse_line_multiple_chunks() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     drop(conv);
@@ -535,7 +655,16 @@ async fn test_process_sse_line_multiple_chunks() {
         captured.push(s);
         Ok(())
     };
-    process_sse_line(sse1, &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await.unwrap();
+    process_sse_line(
+        sse1,
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await
+    .unwrap();
 
     let sse2 = r#"data: {"choices":[{"delta":{"content":" world"}}]}"#;
     let mut captured2 = Vec::new();
@@ -543,7 +672,16 @@ async fn test_process_sse_line_multiple_chunks() {
         captured2.push(s);
         Ok(())
     };
-    process_sse_line(sse2, &mut cb2, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await.unwrap();
+    process_sse_line(
+        sse2,
+        &mut cb2,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(captured, vec!["Hello"]);
     assert_eq!(captured2, vec![" world"]);
@@ -561,7 +699,7 @@ async fn test_process_sse_line_empty_content() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     drop(conv);
@@ -572,7 +710,15 @@ async fn test_process_sse_line_empty_content() {
         captured.push(s);
         Ok(())
     };
-    let result = process_sse_line(sse_data, &mut cb, &client.conversation(), &mut |_tc: ToolCall| {}, &mut |_| {}, &mut ToolCallTracker::default()).await;
+    let result = process_sse_line(
+        sse_data,
+        &mut cb,
+        &client.conversation(),
+        &mut |_tc: ToolCall| {},
+        &mut |_| {},
+        &mut ToolCallTracker::default(),
+    )
+    .await;
     assert!(result.is_ok());
     assert!(captured.is_empty());
 }
@@ -594,7 +740,7 @@ fn test_check_tool_call_warnings_empty_args() {
             },
         }]),
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     drop(conv);
@@ -622,7 +768,7 @@ fn test_check_tool_call_warnings_invalid_json() {
             },
         }]),
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     drop(conv);
@@ -650,7 +796,7 @@ fn test_check_tool_call_warnings_valid_json() {
             },
         }]),
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     drop(conv);
@@ -699,12 +845,33 @@ async fn test_ready_fires_when_model_moves_past_tool_call() {
 
     // First line: a tool call with complete JSON arguments.
     let tc_line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc1","function":{"name":"shell","arguments":"{\"command\":\"ls\"}"}}]}}]}"#;
-    process_sse_line(tc_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
-    assert!(ready.lock().unwrap().is_empty(), "no signal yet: the stream is still inside the tool call");
+    process_sse_line(
+        tc_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
+    assert!(
+        ready.lock().unwrap().is_empty(),
+        "no signal yet: the stream is still inside the tool call"
+    );
 
     // Second line: a text delta — the model moved past the tool call.
     let text_line = r#"data: {"choices":[{"delta":{"content":"here you go"}}]}"#;
-    process_sse_line(text_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
+    process_sse_line(
+        text_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
     let reported = ready.lock().unwrap();
     assert_eq!(reported.len(), 1, "moving past the call must report it");
     assert_eq!(reported[0].id, "tc1");
@@ -713,8 +880,21 @@ async fn test_ready_fires_when_model_moves_past_tool_call() {
     drop(reported);
 
     // A further text delta must not report the same call again.
-    process_sse_line(text_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
-    assert_eq!(ready.lock().unwrap().len(), 1, "a call is reported exactly once");
+    process_sse_line(
+        text_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ready.lock().unwrap().len(),
+        1,
+        "a call is reported exactly once"
+    );
 }
 
 #[tokio::test]
@@ -727,18 +907,60 @@ async fn test_ready_waits_for_complete_args() {
 
     // Partial arguments — the object is not closed yet.
     let part_line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc1","function":{"name":"shell","arguments":"{\"command\": \"l"}}]}}]}"#;
-    process_sse_line(part_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
+    process_sse_line(
+        part_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
     let text_line = r#"data: {"choices":[{"delta":{"content":"x"}}]}"#;
-    process_sse_line(text_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
-    assert!(ready.lock().unwrap().is_empty(), "args are still incomplete JSON");
+    process_sse_line(
+        text_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
+    assert!(
+        ready.lock().unwrap().is_empty(),
+        "args are still incomplete JSON"
+    );
 
     // Continuation chunk (index only) completes the arguments...
     let cont_line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"s\"}"}}]}}]}"#;
-    process_sse_line(cont_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
-    assert!(ready.lock().unwrap().is_empty(), "still inside the tool call");
+    process_sse_line(
+        cont_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
+    assert!(
+        ready.lock().unwrap().is_empty(),
+        "still inside the tool call"
+    );
 
     // ...and the next text delta reports the fully accumulated call.
-    process_sse_line(text_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
+    process_sse_line(
+        text_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
     let reported = ready.lock().unwrap();
     assert_eq!(reported.len(), 1);
     assert_eq!(reported[0].id, "tc1");
@@ -754,10 +976,28 @@ async fn test_ready_fires_for_prior_call_when_next_starts() {
     let mut cb = |_s: String, _t: bool| -> Result<(), Error> { Ok(()) };
 
     let tc1_line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"tc1","function":{"name":"shell","arguments":"{\"command\":\"ls\"}"}}]}}]}"#;
-    process_sse_line(tc1_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
+    process_sse_line(
+        tc1_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
     // tc2 starts: tc1 is reported, tc2 is not (it is still streaming).
     let tc2_line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"tc2","function":{"name":"read_file","arguments":"{\"path\": \"a.txt\"}"}}]}}]}"#;
-    process_sse_line(tc2_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
+    process_sse_line(
+        tc2_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
     let reported = ready.lock().unwrap();
     assert_eq!(reported.len(), 1);
     assert_eq!(reported[0].id, "tc1");
@@ -765,7 +1005,16 @@ async fn test_ready_fires_for_prior_call_when_next_starts() {
 
     // Text after tc2: tc2 is reported too.
     let text_line = r#"data: {"choices":[{"delta":{"content":"done"}}]}"#;
-    process_sse_line(text_line, &mut cb, &client.conversation(), &mut ready_cb, &mut |_| {}, &mut tracker).await.unwrap();
+    process_sse_line(
+        text_line,
+        &mut cb,
+        &client.conversation(),
+        &mut ready_cb,
+        &mut |_| {},
+        &mut tracker,
+    )
+    .await
+    .unwrap();
     let reported = ready.lock().unwrap();
     assert_eq!(reported.len(), 2);
     assert_eq!(reported[1].id, "tc2");
@@ -826,8 +1075,7 @@ async fn test_completed_call_logs_one_usage_line() {
         stream.write_all(&body).unwrap();
     });
 
-    let mut client =
-        ChatClient::new(&format!("http://127.0.0.1:{port}/chat/completions"));
+    let mut client = ChatClient::new(&format!("http://127.0.0.1:{port}/chat/completions"));
     client.set_usage_recorder(std::sync::Arc::new(
         crate::usage::recorder::UsageRecorder::new(log_path.clone()),
     ));

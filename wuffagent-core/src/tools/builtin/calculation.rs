@@ -50,11 +50,9 @@ impl Tool for CalculationTool {
     }
 
     fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
-        let expression: String = params
-            .get("expression")
-            .ok_or_else(|| {
-                crate::tools::types::ToolError::InvalidParams("expression is required".to_string())
-            })?;
+        let expression: String = params.get("expression").ok_or_else(|| {
+            crate::tools::types::ToolError::InvalidParams("expression is required".to_string())
+        })?;
 
         // Detect shell commands and guide the agent to use the `shell` tool instead.
         if looks_like_shell_command(&expression) {
@@ -92,16 +90,60 @@ fn looks_like_shell_command(input: &str) -> bool {
     // Shell commands typically start with a known command name.
     // Math expressions start with a digit, '(', or a function name.
     let shell_command_prefixes = [
-        "cargo ", "npm ", "npx ", "git ", "python ", "python3 ", "node ", "docker ",
-        "make ", "cmake ", "rustc ", "clang ", "gcc ", "g++ ", "rust-analyzer ",
-        "echo ", "ls ", "cd ", "mkdir ", "rm ", "cp ", "mv ", "cat ",
-        "curl ", "wget ", "pip ", "pip3 ", "conda ", "brew ", "apt ", "yum ",
-        "find ", "grep ", "sed ", "awk ", "chmod ", "chown ", "ssh ", "scp ",
-        "tar ", "zip ", "unzip ", "ping ", "ps ", "kill ", "top ", "htop ",
+        "cargo ",
+        "npm ",
+        "npx ",
+        "git ",
+        "python ",
+        "python3 ",
+        "node ",
+        "docker ",
+        "make ",
+        "cmake ",
+        "rustc ",
+        "clang ",
+        "gcc ",
+        "g++ ",
+        "rust-analyzer ",
+        "echo ",
+        "ls ",
+        "cd ",
+        "mkdir ",
+        "rm ",
+        "cp ",
+        "mv ",
+        "cat ",
+        "curl ",
+        "wget ",
+        "pip ",
+        "pip3 ",
+        "conda ",
+        "brew ",
+        "apt ",
+        "yum ",
+        "find ",
+        "grep ",
+        "sed ",
+        "awk ",
+        "chmod ",
+        "chown ",
+        "ssh ",
+        "scp ",
+        "tar ",
+        "zip ",
+        "unzip ",
+        "ping ",
+        "ps ",
+        "kill ",
+        "top ",
+        "htop ",
         "--manifest-path",
     ];
     // Only match if input starts with a shell command prefix
-    if shell_command_prefixes.iter().any(|p| trimmed.starts_with(p)) {
+    if shell_command_prefixes
+        .iter()
+        .any(|p| trimmed.starts_with(p))
+    {
         return true;
     }
     // As a last resort, check for bare shell operators at start (e.g. "| ls", "; rm")
@@ -131,13 +173,13 @@ fn evaluate_expression(expr: &str) -> Result<f64, String> {
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Number(f64),
-    Func(String),       // function name (sin, cos, etc.)
-    Const(String),      // constant name (pi, e)
+    Func(String),  // function name (sin, cos, etc.)
+    Const(String), // constant name (pi, e)
     Plus,
     Minus,
     Mul,
     Div,
-    Pow,                // ^ operator
+    Pow, // ^ operator
     LParen,
     RParen,
 }
@@ -148,26 +190,56 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
-            ' ' | '\t' | '\n' | '\r' => { i += 1; continue; }
-            '+' => { tokens.push(Token::Plus); i += 1; }
-            '-' => { tokens.push(Token::Minus); i += 1; }
-            '*' => { tokens.push(Token::Mul); i += 1; }
-            '/' => { tokens.push(Token::Div); i += 1; }
-            '^' => { tokens.push(Token::Pow); i += 1; }
-            '(' => { tokens.push(Token::LParen); i += 1; }
-            ')' => { tokens.push(Token::RParen); i += 1; }
-            c if c.is_ascii_digit() || (c == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()) => {
+            ' ' | '\t' | '\n' | '\r' => {
+                i += 1;
+                continue;
+            }
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            '-' => {
+                tokens.push(Token::Minus);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token::Mul);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(Token::Div);
+                i += 1;
+            }
+            '^' => {
+                tokens.push(Token::Pow);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            c if c.is_ascii_digit()
+                || (c == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()) =>
+            {
                 let mut num_str = String::new();
                 // Collect the integer/fractional part
                 num_str.push(c);
-                while i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '.') {
+                while i + 1 < chars.len() && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '.')
+                {
                     i += 1;
                     num_str.push(chars[i]);
                 }
                 // Handle scientific notation (e.g. 1.5e10, 1e-3, 2.5E+4)
                 if i + 1 < chars.len()
                     && (chars[i + 1].to_lowercase().next() == Some('e'))
-                    && (i + 2 < chars.len() && (chars[i + 2].is_ascii_digit() || chars[i + 2] == '+' || chars[i + 2] == '-'))
+                    && (i + 2 < chars.len()
+                        && (chars[i + 2].is_ascii_digit()
+                            || chars[i + 2] == '+'
+                            || chars[i + 2] == '-'))
                 {
                     i += 1;
                     num_str.push(chars[i]); // 'e' or 'E'
@@ -180,7 +252,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                         num_str.push(chars[i]);
                     }
                 }
-                let n: f64 = num_str.parse()
+                let n: f64 = num_str
+                    .parse()
                     .map_err(|_| format!("Invalid number: {}", num_str))?;
                 tokens.push(Token::Number(n));
                 i += 1; // advance past the last digit consumed
@@ -198,7 +271,12 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     _ => tokens.push(Token::Func(lower)),
                 }
             }
-            _ => return Err(format!("Unexpected character: {} at position {}", chars[i], i)),
+            _ => {
+                return Err(format!(
+                    "Unexpected character: {} at position {}",
+                    chars[i], i
+                ))
+            }
         }
     }
     Ok(tokens)
@@ -224,7 +302,10 @@ impl Parser {
         match self.advance() {
             Some(t) if t == expected => Ok(()),
             Some(t) => Err(format!("Expected {:?}, got {:?}", expected, t)),
-            None => Err(format!("Expected {:?}, but reached end of expression", expected)),
+            None => Err(format!(
+                "Expected {:?}, but reached end of expression",
+                expected
+            )),
         }
     }
 
@@ -332,7 +413,10 @@ impl Parser {
             "tan" => Ok(arg.tan()),
             "asin" | "acos" => {
                 if arg < -1.0 || arg > 1.0 {
-                    return Err(format!("{} argument out of range: must be in [-1, 1], got {}", name, arg));
+                    return Err(format!(
+                        "{} argument out of range: must be in [-1, 1], got {}",
+                        name, arg
+                    ));
                 }
                 if name == "asin" {
                     Ok(arg.asin())

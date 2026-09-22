@@ -1,8 +1,8 @@
 //! Unit tests for the `registry` module (see `super`).
 
 use super::*;
-use crate::tools::types::{ToolLogger, TracingToolLogger};
 use crate::tools::builtin::{CalculationTool, ReadFileTool};
+use crate::tools::types::{ToolLogger, TracingToolLogger};
 
 fn mock_logger() -> Arc<dyn ToolLogger> {
     Arc::new(TracingToolLogger)
@@ -71,8 +71,12 @@ fn test_list_tools_empty() {
 #[test]
 fn test_list_tools_after_adds() {
     let registry = ToolRegistry::new(vec![], mock_logger());
-    registry.register(make_entry(Arc::new(CalculationTool::new()))).unwrap();
-    registry.register(make_entry(Arc::new(ReadFileTool::new()))).unwrap();
+    registry
+        .register(make_entry(Arc::new(CalculationTool::new())))
+        .unwrap();
+    registry
+        .register(make_entry(Arc::new(ReadFileTool::new())))
+        .unwrap();
 
     assert_eq!(registry.list().len(), 2);
 }
@@ -82,7 +86,9 @@ fn test_list_schemas() {
     let registry = ToolRegistry::new(vec![], mock_logger());
     assert!(registry.list_schemas().is_empty());
 
-    registry.register(make_entry(Arc::new(CalculationTool::new()))).unwrap();
+    registry
+        .register(make_entry(Arc::new(CalculationTool::new())))
+        .unwrap();
     let schemas = registry.list_schemas();
     assert_eq!(schemas.len(), 1);
     assert_eq!(schemas[0].name, "calculation");
@@ -93,7 +99,9 @@ fn test_to_tool_definitions() {
     let registry = ToolRegistry::new(vec![], mock_logger());
     assert!(registry.to_tool_definitions().is_empty());
 
-    registry.register(make_entry(Arc::new(CalculationTool::new()))).unwrap();
+    registry
+        .register(make_entry(Arc::new(CalculationTool::new())))
+        .unwrap();
     let definitions = registry.to_tool_definitions();
     assert_eq!(definitions.len(), 1);
     assert_eq!(definitions[0].function.name, "calculation");

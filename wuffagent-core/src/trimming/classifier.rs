@@ -125,9 +125,16 @@ fn is_json_wrapper(content: &str) -> bool {
         let has_query = value.get("query").is_some();
         let has_results = value.get("results").is_some();
 
-        has_result || has_error || has_entries || has_deleted
-            || has_created || has_bytes_written || has_lines_changed
-            || has_path || has_query || has_results
+        has_result
+            || has_error
+            || has_entries
+            || has_deleted
+            || has_created
+            || has_bytes_written
+            || has_lines_changed
+            || has_path
+            || has_query
+            || has_results
     } else {
         false
     }

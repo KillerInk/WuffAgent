@@ -53,7 +53,9 @@ fn test_new_dangerous_patterns() {
     assert!(tool.is_command_allowed("rm -rf ~/").is_err());
     assert!(tool.is_command_allowed("rm -rf /*").is_err());
     assert!(tool.is_command_allowed("> /dev/sda").is_err());
-    assert!(tool.is_command_allowed("remove-item -recurse -force c:\\").is_err());
+    assert!(tool
+        .is_command_allowed("remove-item -recurse -force c:\\")
+        .is_err());
     assert!(tool.is_command_allowed("$(rm -rf /)").is_err());
     assert!(tool.is_command_allowed("shutdown -h now").is_err());
     assert!(tool.is_command_allowed("kill -9 1").is_err());
@@ -150,7 +152,10 @@ fn execute_with_progress_streams_live_output() {
     let cmd = r#"sh -c 'i=0; while [ $i -lt 25 ]; do echo line; sleep 0.06; i=$((i+1)); done'""#;
 
     let mut params = ToolParams::new();
-    params.values.insert("command".to_string(), serde_json::Value::String(cmd.to_string()));
+    params.values.insert(
+        "command".to_string(),
+        serde_json::Value::String(cmd.to_string()),
+    );
     let out = tool
         .execute_with_progress(params, &sink)
         .expect("command should succeed");

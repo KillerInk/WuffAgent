@@ -1,5 +1,5 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use chrono::{Utc, DateTime};
 
 /// Types of memories that can be stored.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -79,7 +79,9 @@ impl MemoryEntry {
     }
 }
 
-fn default_confidence() -> f32 { 1.0 }
+fn default_confidence() -> f32 {
+    1.0
+}
 
 /// Search mode for memory retrieval.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -193,18 +195,42 @@ pub struct MemoryConfig {
     pub memory_maintenance_batch_size: usize,
 }
 
-fn default_enabled() -> bool { true }
-fn default_max_entries() -> usize { 100 }
-fn default_injection_max_entries() -> usize { 5 }
-fn default_injection_max_chars() -> usize { 1000 }
-fn default_project() -> String { "default".to_string() }
-fn default_auto_improve() -> bool { true }
-fn default_improvement_trigger_lessons() -> usize { 1 }
-fn default_improvement_cooldown_tasks() -> usize { 5 }
-fn default_memory_maintenance() -> bool { false }
-fn default_memory_maintenance_threshold() -> usize { 40 }
-fn default_memory_maintenance_timeout_secs() -> u64 { 600 }
-fn default_memory_maintenance_batch_size() -> usize { 15 }
+fn default_enabled() -> bool {
+    true
+}
+fn default_max_entries() -> usize {
+    100
+}
+fn default_injection_max_entries() -> usize {
+    5
+}
+fn default_injection_max_chars() -> usize {
+    1000
+}
+fn default_project() -> String {
+    "default".to_string()
+}
+fn default_auto_improve() -> bool {
+    true
+}
+fn default_improvement_trigger_lessons() -> usize {
+    1
+}
+fn default_improvement_cooldown_tasks() -> usize {
+    5
+}
+fn default_memory_maintenance() -> bool {
+    false
+}
+fn default_memory_maintenance_threshold() -> usize {
+    40
+}
+fn default_memory_maintenance_timeout_secs() -> u64 {
+    600
+}
+fn default_memory_maintenance_batch_size() -> usize {
+    15
+}
 
 impl Default for MemoryConfig {
     fn default() -> Self {

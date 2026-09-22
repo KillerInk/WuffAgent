@@ -29,9 +29,8 @@ impl From<ChatMessage> for Message {
             timestamp: m.timestamp,
             tool_calls: None,
             tool_call_id: None,
-        reasoning_content: None,
+            reasoning_content: None,
             image: None,
         }
     }
 }
-

@@ -120,10 +120,7 @@ impl UsageRecorder {
             // freshly-provisioned profile (or a test path) works.
             if let Some(parent) = self.path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    self.report_failure(&format!(
-                        "create usage log dir {:?}: {e}",
-                        parent
-                    ));
+                    self.report_failure(&format!("create usage log dir {:?}: {e}", parent));
                     return;
                 }
             }
@@ -132,10 +129,7 @@ impl UsageRecorder {
             match opts.open(&self.path) {
                 Ok(f) => *guard = Some(std::io::BufWriter::new(f)),
                 Err(e) => {
-                    self.report_failure(&format!(
-                        "open usage log {:?}: {e}",
-                        self.path
-                    ));
+                    self.report_failure(&format!("open usage log {:?}: {e}", self.path));
                     return;
                 }
             }
@@ -168,7 +162,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        std::env::temp_dir().join(format!("wuffagent-usage-{}-{}-{nix}", std::process::id(), name))
+        std::env::temp_dir().join(format!(
+            "wuffagent-usage-{}-{}-{nix}",
+            std::process::id(),
+            name
+        ))
     }
 
     fn entry(total: u32) -> UsageEntry {
@@ -210,10 +208,8 @@ mod tests {
         // A "directory" that is actually a file: create_dir_all succeeds (it
         // exists), but opening the log inside it fails — the recorder must
         // degrade to a warn, not fail the caller.
-        let base = std::env::temp_dir().join(format!(
-            "wuffagent-usage-blocked-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("wuffagent-usage-blocked-{}", std::process::id()));
         let _ = std::fs::remove_file(&base);
         std::fs::write(&base, b"blocker").unwrap();
         let rec = UsageRecorder::new(base.join("usage.jsonl"));

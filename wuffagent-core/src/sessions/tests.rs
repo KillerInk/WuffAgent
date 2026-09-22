@@ -36,7 +36,7 @@ fn test_save_and_reload_with_messages() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     session.add_message(Message {
@@ -45,7 +45,7 @@ fn test_save_and_reload_with_messages() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     save_session(&dir, &session).unwrap();
@@ -142,7 +142,7 @@ fn test_save_session_creates_file_when_missing() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     save_session(&dir, &session).unwrap();
@@ -161,7 +161,7 @@ fn test_save_session_creates_file_when_missing() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     save_session(&dir, &new_session).unwrap();
@@ -190,7 +190,7 @@ fn test_session_encrypt_decrypt_roundtrip() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     let key = gen_key();
@@ -232,7 +232,7 @@ fn test_session_encrypt_decrypt_unicode() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     session.add_message(Message {
@@ -241,7 +241,7 @@ fn test_session_encrypt_decrypt_unicode() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     let key = gen_key();
@@ -249,7 +249,10 @@ fn test_session_encrypt_decrypt_unicode() {
 
     let loaded = decrypt_and_load_session(&dir, &session.id, &key).expect("should decrypt unicode");
     assert_eq!(loaded.messages.len(), 2);
-    assert_eq!(loaded.messages[0].content, "こんにちは世界 🌍 émojis Ñoño 中文");
+    assert_eq!(
+        loaded.messages[0].content,
+        "こんにちは世界 🌍 émojis Ñoño 中文"
+    );
     assert_eq!(loaded.messages[1].content, "你好！🎉 مرحبا");
 
     let _ = fs::remove_dir_all(&dir);
@@ -266,7 +269,7 @@ fn test_session_decrypt_wrong_key_fails() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     let key = gen_key();
@@ -290,7 +293,7 @@ fn test_session_decrypt_corrupted_data_fails() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     let key = gen_key();
@@ -346,7 +349,7 @@ fn test_session_save_and_load_with_messages() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     session.add_message(Message {
@@ -355,7 +358,7 @@ fn test_session_save_and_load_with_messages() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     session.add_message(Message {
@@ -364,7 +367,7 @@ fn test_session_save_and_load_with_messages() {
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
-    reasoning_content: None,
+        reasoning_content: None,
         image: None,
     });
     let key = gen_key();

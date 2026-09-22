@@ -40,13 +40,12 @@ fn shared_client() -> reqwest::Client {
 
 /// Cached tokio current-thread runtime for use inside spawn_blocking calls.
 /// Avoids creating a new runtime on every web search invocation.
-static BLOCKING_RUNTIME: LazyLock<tokio::runtime::Runtime> =
-    LazyLock::new(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build blocking runtime")
-    });
+static BLOCKING_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build blocking runtime")
+});
 
 /// Run an async block to completion. Reuses the ambient runtime handle when
 /// available (e.g. inside `spawn_blocking`), otherwise the cached
@@ -172,11 +171,9 @@ impl Tool for WebSearchTool {
     }
 
     fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
-        let query: String = params
-            .get("query")
-            .ok_or_else(|| {
-                crate::tools::types::ToolError::InvalidParams("query is required".to_string())
-            })?;
+        let query: String = params.get("query").ok_or_else(|| {
+            crate::tools::types::ToolError::InvalidParams("query is required".to_string())
+        })?;
 
         let max_results: u32 = params
             .get("max_results")
@@ -200,14 +197,12 @@ impl Tool for WebSearchTool {
             }
         };
 
-        let (backend, results) = self
-            .run_chain(&chain, &query, fetch)
-            .map_err(|failures| {
-                crate::tools::types::ToolError::Execution(format!(
-                    "All search backends failed: {}",
-                    failures.join("; ")
-                ))
-            })?;
+        let (backend, results) = self.run_chain(&chain, &query, fetch).map_err(|failures| {
+            crate::tools::types::ToolError::Execution(format!(
+                "All search backends failed: {}",
+                failures.join("; ")
+            ))
+        })?;
 
         Ok(ToolOutput::Success(serde_json::json!({
             "query": query,
@@ -467,8 +462,7 @@ pub(crate) fn parse_bing_results(html: &str, limit: usize) -> Vec<Value> {
                 let h2seg = &seg[h2..];
                 h2seg
                     .find("<a")
-                    .and_then(|a| h2seg[a..].find('>')
-                        .map(|gt| &h2seg[a + gt + 1..]))
+                    .and_then(|a| h2seg[a..].find('>').map(|gt| &h2seg[a + gt + 1..]))
             })
             .and_then(|t| t.find("</a>").map(|e| &t[..e]))
             .and_then(html::extract_text)
@@ -480,8 +474,7 @@ pub(crate) fn parse_bing_results(html: &str, limit: usize) -> Vec<Value> {
         // Snippet: <div class="b_caption"><p …>…</p>
         let snippet = seg
             .find("class=\"b_caption\"")
-            .and_then(|i| seg[i..].find('>')
-                .map(|gt| &seg[i + gt + 1..]))
+            .and_then(|i| seg[i..].find('>').map(|gt| &seg[i + gt + 1..]))
             .and_then(|s| s.find("</p>").map(|e| &s[..e]))
             .and_then(html::extract_text)
             .unwrap_or_default();
@@ -554,8 +547,7 @@ pub(crate) fn parse_yahoo_results(html: &str, limit: usize) -> Vec<Value> {
                 let h3seg = &seg[h3..];
                 h3seg
                     .find("<span")
-                    .and_then(|sp| h3seg[sp..].find('>')
-                        .map(|gt| &h3seg[sp + gt + 1..]))
+                    .and_then(|sp| h3seg[sp..].find('>').map(|gt| &h3seg[sp + gt + 1..]))
             })
             .and_then(|t| t.find("</span>").map(|e| &t[..e]))
             .and_then(html::extract_text)
@@ -570,8 +562,7 @@ pub(crate) fn parse_yahoo_results(html: &str, limit: usize) -> Vec<Value> {
             .and_then(|i| {
                 seg[i..]
                     .find("<p")
-                    .and_then(|p| seg[i + p..].find('>')
-                        .map(|gt| &seg[i + p + gt + 1..]))
+                    .and_then(|p| seg[i + p..].find('>').map(|gt| &seg[i + p + gt + 1..]))
             })
             .and_then(|s| s.find("</p>").map(|e| &s[..e]))
             .and_then(html::extract_text)
@@ -599,8 +590,7 @@ fn parse_duckduckgo_results(html: &str, limit: usize) -> Vec<Value> {
         // relied on: the anchor tag ends at the first `>` after the class).
         let title = row
             .find("class=\"result__a\"")
-            .and_then(|i| row[i..].find('>')
-                .map(|gt| &row[i + gt + 1..]))
+            .and_then(|i| row[i..].find('>').map(|gt| &row[i + gt + 1..]))
             .and_then(|t| t.find("</a>").map(|e| &t[..e]))
             .and_then(html::extract_text)
             .unwrap_or_default();
@@ -619,8 +609,7 @@ fn parse_duckduckgo_results(html: &str, limit: usize) -> Vec<Value> {
         // Snippet: text of <div class="result__snippet">…</div>
         let snippet = row
             .find("class=\"result__snippet\"")
-            .and_then(|i| row[i..].find('>')
-                .map(|gt| &row[i + gt + 1..]))
+            .and_then(|i| row[i..].find('>').map(|gt| &row[i + gt + 1..]))
             .and_then(|s| s.find("</").map(|e| &s[..e]))
             .and_then(html::extract_text)
             .unwrap_or_default();

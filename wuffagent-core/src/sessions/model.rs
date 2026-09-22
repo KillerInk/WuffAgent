@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use chrono::{Utc, DateTime};
 use crate::types::Message;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Status of an agent session.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -116,7 +116,6 @@ impl Session {
         }
         self.messages = kept;
     }
-
 }
 
 #[cfg(test)]

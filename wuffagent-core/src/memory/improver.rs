@@ -147,7 +147,10 @@ fn outcomes_since(
 fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(String, String)> {
     let marker = latest_applied_marker(manager, agent_name)?;
     let since = marker.timestamp?;
-    let days = chrono::Utc::now().signed_duration_since(since).num_days().max(0);
+    let days = chrono::Utc::now()
+        .signed_duration_since(since)
+        .num_days()
+        .max(0);
     let date = since.format("%Y-%m-%d").to_string();
 
     // Most recent first, capped so the section can't blow the prompt budget.
@@ -346,7 +349,10 @@ pub async fn suggest_improvements(
     // I1: safety net — even with the lesson budget, a huge system prompt
     // could push the total past the cap; truncate the tail.
     let extraction_prompt: String = if extraction_prompt.len() > TOTAL_PROMPT_CHAR_BUDGET {
-        let mut t: String = extraction_prompt.chars().take(TOTAL_PROMPT_CHAR_BUDGET).collect();
+        let mut t: String = extraction_prompt
+            .chars()
+            .take(TOTAL_PROMPT_CHAR_BUDGET)
+            .collect();
         t.push_str(" [truncated]");
         t
     } else {
@@ -402,7 +408,10 @@ pub async fn suggest_improvements(
     }
 
     if suggestions.is_empty() {
-        tracing::debug!("No improvements suggested for agent '{}'", agent_config.name);
+        tracing::debug!(
+            "No improvements suggested for agent '{}'",
+            agent_config.name
+        );
     } else {
         tracing::info!(
             "Generated {} improvement suggestion(s) for agent '{}'",

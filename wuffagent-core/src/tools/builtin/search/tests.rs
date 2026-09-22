@@ -3,10 +3,8 @@
 use super::*;
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "wuff_search_content_{tag}_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("wuff_search_content_{tag}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
@@ -175,8 +173,14 @@ fn test_search_context_lines() {
         search_content("target", p.to_str().unwrap(), None, false, true, 1, 100).unwrap(),
     );
     let m = &json["matches"][0];
-    assert_eq!(m["context_before"].as_array().unwrap(), &vec![serde_json::json!("l2")]);
-    assert_eq!(m["context_after"].as_array().unwrap(), &vec![serde_json::json!("l4")]);
+    assert_eq!(
+        m["context_before"].as_array().unwrap(),
+        &vec![serde_json::json!("l2")]
+    );
+    assert_eq!(
+        m["context_after"].as_array().unwrap(),
+        &vec![serde_json::json!("l4")]
+    );
     // Without context lines the keys are absent.
     let json = success_json(
         search_content("target", p.to_str().unwrap(), None, false, true, 0, 100).unwrap(),
@@ -194,7 +198,11 @@ fn test_search_binary_skipped() {
         search_content("needle", p.to_str().unwrap(), None, false, true, 0, 100).unwrap(),
     );
     assert_eq!(json["total_matches"].as_u64().unwrap(), 0);
-    assert_eq!(json["files_searched"].as_u64().unwrap(), 0, "binary files are not counted");
+    assert_eq!(
+        json["files_searched"].as_u64().unwrap(),
+        0,
+        "binary files are not counted"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -238,16 +246,8 @@ fn test_search_invalid_regex_fails() {
     let dir = temp_dir("badre");
     let p = dir.join("f.txt");
     write(&p, "abc\n");
-    let err = search_content(
-        "([unclosed",
-        p.to_str().unwrap(),
-        None,
-        true,
-        true,
-        0,
-        100,
-    )
-    .unwrap_err();
+    let err =
+        search_content("([unclosed", p.to_str().unwrap(), None, true, true, 0, 100).unwrap_err();
     assert!(matches!(err, ToolError::InvalidParams(_)));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -292,7 +292,6 @@ fn test_search_content_tool_requires_pattern() {
     assert!(matches!(err, ToolError::InvalidParams(_)));
 }
 
-
 // ─── CRLF / BOM handling ────────────────────────────────────────────────────
 
 #[test]
@@ -308,7 +307,10 @@ fn test_search_bom_file_line_anchored() {
     assert_eq!(json["matches"][0]["line"].as_u64().unwrap(), 1);
     let text = json["matches"][0]["text"].as_str().unwrap();
     assert_eq!(text, "needle here");
-    assert!(!text.starts_with('\u{feff}'), "BOM leaked into output: {text:?}");
+    assert!(
+        !text.starts_with('\u{feff}'),
+        "BOM leaked into output: {text:?}"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -318,7 +320,16 @@ fn test_search_bom_file_substring_first_line() {
     let p = dir.join("s.txt");
     fs::write(&p, "\u{feff}unique_token\nrest\n").unwrap();
     let json = success_json(
-        search_content("unique_token", p.to_str().unwrap(), None, false, true, 0, 100).unwrap(),
+        search_content(
+            "unique_token",
+            p.to_str().unwrap(),
+            None,
+            false,
+            true,
+            0,
+            100,
+        )
+        .unwrap(),
     );
     assert_eq!(json["total_matches"].as_u64().unwrap(), 1);
     assert_eq!(json["matches"][0]["text"].as_str().unwrap(), "unique_token");

@@ -44,7 +44,8 @@ fn add_message_rejects_system_role() {
 #[test]
 fn sanitize_extracts_system_drops_placeholders_and_dups() {
     let mut s = Session::new("t");
-    s.messages.push(msg("system", "You are a helpful assistant."));
+    s.messages
+        .push(msg("system", "You are a helpful assistant."));
     s.messages.push(msg("user", "hi"));
     s.messages.push(empty_assistant());
     s.messages.push(msg("assistant", "hello"));
@@ -59,9 +60,9 @@ fn sanitize_extracts_system_drops_placeholders_and_dups() {
     );
     assert_eq!(s.system_prompt, "You are a helpful assistant.");
     assert!(
-        !s.messages.iter().any(|m| {
-            m.role == "assistant" && m.content.is_empty() && m.tool_calls.is_none()
-        }),
+        !s.messages
+            .iter()
+            .any(|m| { m.role == "assistant" && m.content.is_empty() && m.tool_calls.is_none() }),
         "empty assistant placeholders must be dropped"
     );
     // user + single assistant (duplicate collapsed).
@@ -97,5 +98,13 @@ fn multi_turn_appends_once_in_order() {
     let roles: Vec<_> = s.messages.iter().map(|m| m.role.as_str()).collect();
     assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
     let contents: Vec<_> = s.messages.iter().map(|m| m.content.as_str()).collect();
-    assert_eq!(contents, ["turn 1 user", "turn 1 assistant", "turn 2 user", "turn 2 assistant"]);
+    assert_eq!(
+        contents,
+        [
+            "turn 1 user",
+            "turn 1 assistant",
+            "turn 2 user",
+            "turn 2 assistant"
+        ]
+    );
 }

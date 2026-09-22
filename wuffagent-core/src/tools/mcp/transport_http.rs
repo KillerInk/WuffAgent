@@ -78,7 +78,10 @@ impl HttpTransport {
             .map_err(|e| McpError::Http(format!("POST {} failed: {e}", self.url)))?;
 
         // Persist the session id assigned by the server (initialize response).
-        if let Some(sid) = response.headers().get(MCP_SESSION_HEADER).and_then(|v| v.to_str().ok())
+        if let Some(sid) = response
+            .headers()
+            .get(MCP_SESSION_HEADER)
+            .and_then(|v| v.to_str().ok())
         {
             if !sid.is_empty() {
                 *self.session_id.lock().await = Some(sid.to_string());
@@ -147,8 +150,12 @@ impl HttpTransport {
                 .text()
                 .await
                 .map_err(|e| McpError::Http(format!("reading body: {e}")))?;
-            let value: Value = serde_json::from_str(&text)
-                .map_err(|e| McpError::Http(format!("non-JSON response from '{}': {e}", self.server_name)))?;
+            let value: Value = serde_json::from_str(&text).map_err(|e| {
+                McpError::Http(format!(
+                    "non-JSON response from '{}': {e}",
+                    self.server_name
+                ))
+            })?;
             finish_jsonrpc(value)
         }
     }

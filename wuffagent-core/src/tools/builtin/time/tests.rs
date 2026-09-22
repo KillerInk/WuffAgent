@@ -6,7 +6,7 @@ use super::*;
 fn test_time_tool() {
     let tool = TimeTool::new();
     let result = tool.execute(ToolParams::new()).unwrap();
-        
+
     match result {
         ToolOutput::Success(value) => {
             assert!(value.get("timestamp").is_some());

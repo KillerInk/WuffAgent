@@ -4,8 +4,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 /// Encryption-related fields extracted from Config.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct EncryptionSettings {
     #[serde(default)]
     pub encryption_enabled: bool,
@@ -13,7 +12,6 @@ pub struct EncryptionSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption_password: Option<String>,
 }
-
 
 impl EncryptionSettings {
     /// Derive a 32-byte encryption key from a password using PBKDF2 (via the `chacha20poly1305` crate's key derivation).
@@ -67,11 +65,8 @@ pub fn encrypt(plaintext: &str, key: &[u8]) -> Result<String, anyhow::Error> {
 /// Returns None if the key is wrong or the data is malformed.
 #[allow(dead_code)]
 pub fn decrypt(encrypted: &str, key: &[u8]) -> Result<String, anyhow::Error> {
-    let raw = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        encrypted,
-    )
-    .map_err(|e| anyhow::anyhow!("base64 decode failed: {}", e))?;
+    let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encrypted)
+        .map_err(|e| anyhow::anyhow!("base64 decode failed: {}", e))?;
 
     if raw.len() < 12 {
         return Err(anyhow::anyhow!("encrypted data too short"));

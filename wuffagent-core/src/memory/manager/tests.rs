@@ -12,12 +12,14 @@ fn test_add_and_search() {
     };
     let manager = MemoryManager::new(config).unwrap();
 
-    manager.add(MemoryEntry::new(
-        MemoryType::Fact,
-        "WuffAgent uses Cargo workspace",
-        "test",
-        &["project"],
-    )).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Fact,
+            "WuffAgent uses Cargo workspace",
+            "test",
+            &["project"],
+        ))
+        .unwrap();
 
     let results = manager.search("cargo");
     assert!(!results.is_empty());
@@ -34,12 +36,14 @@ fn test_eviction() {
     let manager = MemoryManager::new(config).unwrap();
 
     for i in 0..5 {
-        manager.add(MemoryEntry::new(
-            MemoryType::Fact,
-            &format!("Memory {}", i),
-            "test",
-            &[],
-        )).unwrap();
+        manager
+            .add(MemoryEntry::new(
+                MemoryType::Fact,
+                &format!("Memory {}", i),
+                "test",
+                &[],
+            ))
+            .unwrap();
     }
 
     assert_eq!(manager.count(), 3);
@@ -167,7 +171,10 @@ fn test_get_recent_skips_superseded() {
 
     let recent = manager.get_recent(10);
     assert_eq!(recent.len(), 1);
-    assert_eq!(recent[0].id, new_id, "get_recent must skip superseded entries");
+    assert_eq!(
+        recent[0].id, new_id,
+        "get_recent must skip superseded entries"
+    );
 }
 
 #[test]
@@ -192,22 +199,48 @@ fn test_update_replaces_tags_and_revives() {
     };
     let manager = MemoryManager::new(config).unwrap();
 
-    let e = MemoryEntry::new(MemoryType::Fact, "Original content here for testing purposes", "test", &["old"]);
+    let e = MemoryEntry::new(
+        MemoryType::Fact,
+        "Original content here for testing purposes",
+        "test",
+        &["old"],
+    );
     let id = e.id.clone();
     manager.add(e).unwrap();
 
-    let updated = manager.update(&id, "Refined content here for testing purposes", Some(vec!["new".to_string()])).unwrap();
+    let updated = manager
+        .update(
+            &id,
+            "Refined content here for testing purposes",
+            Some(vec!["new".to_string()]),
+        )
+        .unwrap();
     assert_eq!(updated.tags, vec!["new"]);
     assert_eq!(updated.supersedes, None);
 
     // Superseded entries are revived by update.
-    let e2 = MemoryEntry::new(MemoryType::Fact, "Another original memory for the revival test", "test", &[]);
+    let e2 = MemoryEntry::new(
+        MemoryType::Fact,
+        "Another original memory for the revival test",
+        "test",
+        &[],
+    );
     let id2 = e2.id.clone();
     manager.add(e2).unwrap();
     manager.supersede(&id2, &id).unwrap();
-    let revived = manager.update(&id2, "Revived memory content for the revival test now", None).unwrap();
+    let revived = manager
+        .update(
+            &id2,
+            "Revived memory content for the revival test now",
+            None,
+        )
+        .unwrap();
     assert_eq!(revived.supersedes, None);
-    assert_eq!(revived.tags, Vec::<String>::new(), "tags unchanged when None is passed");
+    assert_eq!(
+        revived.tags,
+        Vec::<String>::new(),
+        "tags unchanged when None is passed"
+    );
     assert!(manager.get_recent(10).iter().any(|m| m.id == id2));
 }
 
@@ -222,19 +255,23 @@ fn test_build_context_block() {
     };
     let manager = MemoryManager::new(config).unwrap();
 
-    manager.add(MemoryEntry::new(
-        MemoryType::Fact,
-        "WuffAgent is a Rust project",
-        "test",
-        &["project"],
-    )).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Fact,
+            "WuffAgent is a Rust project",
+            "test",
+            &["project"],
+        ))
+        .unwrap();
 
-    manager.add(MemoryEntry::new(
-        MemoryType::Lesson,
-        "Shell tool plan was implemented with nested config",
-        "test",
-        &["shell"],
-    )).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "Shell tool plan was implemented with nested config",
+            "test",
+            &["shell"],
+        ))
+        .unwrap();
 
     let block = manager.build_context_block("rust project");
     assert!(block.contains("WuffAgent is a Rust project"));
@@ -252,23 +289,33 @@ fn test_query_injection_prefers_relevant_hit() {
     };
     let manager = MemoryManager::new(config).unwrap();
 
-    manager.add(MemoryEntry::new(
-        MemoryType::Fact,
-        "The deploy script lives in scripts/deploy.sh",
-        "test",
-        &["deploy"],
-    )).unwrap();
-    manager.add(MemoryEntry::new(
-        MemoryType::Fact,
-        "WuffAgent is a Rust project using eframe",
-        "test",
-        &["project"],
-    )).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Fact,
+            "The deploy script lives in scripts/deploy.sh",
+            "test",
+            &["deploy"],
+        ))
+        .unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Fact,
+            "WuffAgent is a Rust project using eframe",
+            "test",
+            &["project"],
+        ))
+        .unwrap();
 
     // Query about the deploy script should surface the deploy entry first.
     let block = manager.build_context_block("run the deploy script");
-    assert!(block.contains("scripts/deploy.sh"), "relevant entry must be injected: {block}");
-    assert!(!block.contains("eframe"), "unrelated entry must not fill the single slot: {block}");
+    assert!(
+        block.contains("scripts/deploy.sh"),
+        "relevant entry must be injected: {block}"
+    );
+    assert!(
+        !block.contains("eframe"),
+        "unrelated entry must not fill the single slot: {block}"
+    );
 }
 
 #[test]
@@ -293,14 +340,20 @@ fn test_query_injection_empty_store_fallback() {
 
     // Query with no hits: Always mode falls back to the most recent entry.
     let block = manager.build_context_block("quantum entanglement theory");
-    assert!(block.contains("Recent unrelated architecture note"), "recent fallback expected: {block}");
+    assert!(
+        block.contains("Recent unrelated architecture note"),
+        "recent fallback expected: {block}"
+    );
 
     // Smart mode with no hits: nothing is injected.
     manager.set_config(MemoryConfig {
         injection_mode: super::super::types::InjectionMode::Smart,
         ..manager.config().clone()
     });
-    assert_eq!(manager.build_context_block("quantum entanglement theory"), "");
+    assert_eq!(
+        manager.build_context_block("quantum entanglement theory"),
+        ""
+    );
 }
 
 // --- Maintenance pass tests ---
@@ -326,10 +379,20 @@ impl QueuedLlm {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn first_prompt(&self) -> String {
-        self.prompts.lock().unwrap().first().cloned().unwrap_or_default()
+        self.prompts
+            .lock()
+            .unwrap()
+            .first()
+            .cloned()
+            .unwrap_or_default()
     }
     fn last_prompt(&self) -> String {
-        self.prompts.lock().unwrap().last().cloned().unwrap_or_default()
+        self.prompts
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -337,10 +400,12 @@ impl QueuedLlm {
 impl LlmClient for QueuedLlm {
     async fn complete(&self, messages: &[Message]) -> Result<String, String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.prompts
-            .lock()
-            .unwrap()
-            .push(messages.first().map(|m| m.content.clone()).unwrap_or_default());
+        self.prompts.lock().unwrap().push(
+            messages
+                .first()
+                .map(|m| m.content.clone())
+                .unwrap_or_default(),
+        );
         Ok(self
             .responses
             .lock()
@@ -424,7 +489,13 @@ fn manager_with_llm(dir: &std::path::Path, response: &str) -> MemoryManager {
         memory_maintenance: true,
         ..Default::default()
     };
-    MemoryManager::new_with_llm(config, Arc::new(ScriptedLlm { response: response.to_string() })).unwrap()
+    MemoryManager::new_with_llm(
+        config,
+        Arc::new(ScriptedLlm {
+            response: response.to_string(),
+        }),
+    )
+    .unwrap()
 }
 
 /// Build an entry with a known ID so scripted LLM responses can target it.
@@ -437,9 +508,24 @@ fn entry_with_id(id: &str, r#type: MemoryType, content: &str, tags: &[&str]) -> 
 /// Seed the standard three-entry fixture into `manager`.
 fn seed_three(manager: &MemoryManager) {
     for e in [
-        entry_with_id("mem-a", MemoryType::Fact, "The build uses cargo with a workspace layout for core and gui", &["build"]),
-        entry_with_id("mem-b", MemoryType::Fact, "The release notes must mention the new memory panel feature", &["release"]),
-        entry_with_id("mem-c", MemoryType::Lesson, "Use PowerShell not bash when running commands on this machine", &["shell"]),
+        entry_with_id(
+            "mem-a",
+            MemoryType::Fact,
+            "The build uses cargo with a workspace layout for core and gui",
+            &["build"],
+        ),
+        entry_with_id(
+            "mem-b",
+            MemoryType::Fact,
+            "The release notes must mention the new memory panel feature",
+            &["release"],
+        ),
+        entry_with_id(
+            "mem-c",
+            MemoryType::Lesson,
+            "Use PowerShell not bash when running commands on this machine",
+            &["shell"],
+        ),
     ] {
         manager.add(e).unwrap();
     }
@@ -453,10 +539,17 @@ async fn test_maintenance_merge() {
     seed_three(&manager);
 
     let report = manager.run_maintenance().await.unwrap();
-    assert!(report.summary.contains("merged"), "summary: {}", report.summary);
+    assert!(
+        report.summary.contains("merged"),
+        "summary: {}",
+        report.summary
+    );
     assert!(manager.find("mem-a").is_none(), "source a must be removed");
     assert!(manager.find("mem-b").is_none(), "source b must be removed");
-    assert!(manager.find("mem-c").is_some(), "unrelated entry must survive");
+    assert!(
+        manager.find("mem-c").is_some(),
+        "unrelated entry must survive"
+    );
     // The consolidated entry replaced the two sources: net -1.
     assert_eq!(manager.count(), 2);
 }
@@ -469,13 +562,24 @@ async fn test_maintenance_update_and_delete() {
     seed_three(&manager);
 
     let report = manager.run_maintenance().await.unwrap();
-    assert!(report.summary.contains("updated"), "summary: {}", report.summary);
-    assert!(report.summary.contains("deleted"), "summary: {}", report.summary);
+    assert!(
+        report.summary.contains("updated"),
+        "summary: {}",
+        report.summary
+    );
+    assert!(
+        report.summary.contains("deleted"),
+        "summary: {}",
+        report.summary
+    );
 
     let updated = manager.find("mem-a").unwrap();
     assert_eq!(updated.content, "Updated build note content");
     assert!(updated.tags.contains(&"v2".to_string()));
-    assert!(manager.find("mem-b").is_none(), "deleted entry must be gone");
+    assert!(
+        manager.find("mem-b").is_none(),
+        "deleted entry must be gone"
+    );
     assert!(manager.find("mem-c").is_some());
 }
 
@@ -487,7 +591,11 @@ async fn test_maintenance_unknown_and_malformed_actions() {
     seed_three(&manager);
     let report = manager.run_maintenance().await.unwrap();
     assert_eq!(manager.count(), 3);
-    assert!(report.summary.contains("no changes suggested"), "summary: {}", report.summary);
+    assert!(
+        report.summary.contains("no changes suggested"),
+        "summary: {}",
+        report.summary
+    );
 
     // Unknown IDs in every action type: no-op.
     let response = r#"{"merge": [{"ids": ["nope1", "nope2"], "consolidated": "x"}], "update": [{"id": "nope3", "content": "y"}], "delete": [{"id": "nope4", "reason": "r"}]}"#;
@@ -495,7 +603,11 @@ async fn test_maintenance_unknown_and_malformed_actions() {
     seed_three(&manager);
     let report = manager.run_maintenance().await.unwrap();
     assert_eq!(manager.count(), 3, "unknown ids must not mutate the store");
-    assert!(report.summary.contains("no changes applied"), "summary: {}", report.summary);
+    assert!(
+        report.summary.contains("no changes applied"),
+        "summary: {}",
+        report.summary
+    );
 }
 
 #[tokio::test]
@@ -507,7 +619,12 @@ async fn test_maintenance_never_wipes_store() {
     seed_three(&manager);
 
     let report = manager.run_maintenance().await.unwrap();
-    assert_eq!(manager.count(), 1, "store must never be emptied: {}", report.summary);
+    assert_eq!(
+        manager.count(),
+        1,
+        "store must never be emptied: {}",
+        report.summary
+    );
 }
 
 #[tokio::test]
@@ -541,7 +658,11 @@ async fn test_maintenance_batched_chunks_oldest_first() {
     assert!(llm.last_prompt().contains("Distinct memory 34"));
     // "{}" from every batch: no changes, store intact.
     assert_eq!(manager.count(), 35);
-    assert!(report.summary.contains("no changes suggested"), "summary: {}", report.summary);
+    assert!(
+        report.summary.contains("no changes suggested"),
+        "summary: {}",
+        report.summary
+    );
 }
 
 #[tokio::test]
@@ -549,8 +670,10 @@ async fn test_maintenance_batched_applies_each_batch() {
     let dir = tempdir().unwrap();
     // 20 entries, batch 10 => 2 calls; each batch gets its own response.
     let responses = vec![
-        r#"{"merge": [{"ids": ["m-0", "m-1"], "consolidated": "Consolidated oldest pair"}]}"#.to_string(),
-        r#"{"update": [{"id": "m-15", "content": "Updated middle entry content", "tags": ["t"]}]}"#.to_string(),
+        r#"{"merge": [{"ids": ["m-0", "m-1"], "consolidated": "Consolidated oldest pair"}]}"#
+            .to_string(),
+        r#"{"update": [{"id": "m-15", "content": "Updated middle entry content", "tags": ["t"]}]}"#
+            .to_string(),
     ];
     let (manager, llm) = manager_with_queued_llm(dir.path(), responses, 10);
     seed_distinct_with_ids(&manager, 20);
@@ -558,16 +681,33 @@ async fn test_maintenance_batched_applies_each_batch() {
     let report = manager.run_maintenance().await.unwrap();
     assert_eq!(llm.call_count(), 2);
     // Batch 1 actions applied to the oldest chunk...
-    assert!(manager.find("m-0").is_none(), "merge source m-0 must be removed");
-    assert!(manager.find("m-1").is_none(), "merge source m-1 must be removed");
+    assert!(
+        manager.find("m-0").is_none(),
+        "merge source m-0 must be removed"
+    );
+    assert!(
+        manager.find("m-1").is_none(),
+        "merge source m-1 must be removed"
+    );
     // ...and batch 2 actions to the newest chunk.
     let updated = manager.find("m-15").expect("m-15 must survive");
     assert_eq!(updated.content, "Updated middle entry content");
     // 20 - 2 merged sources + 1 consolidated = 19.
     assert_eq!(manager.count(), 19);
-    assert!(report.summary.contains("merged"), "summary: {}", report.summary);
-    assert!(report.summary.contains("updated"), "summary: {}", report.summary);
-    assert_eq!(report.merges, 1, "one merge action (covering two source ids)");
+    assert!(
+        report.summary.contains("merged"),
+        "summary: {}",
+        report.summary
+    );
+    assert!(
+        report.summary.contains("updated"),
+        "summary: {}",
+        report.summary
+    );
+    assert_eq!(
+        report.merges, 1,
+        "one merge action (covering two source ids)"
+    );
     assert_eq!(report.updated, 1);
 }
 
@@ -576,8 +716,14 @@ async fn test_maintenance_batched_never_wipes_store() {
     let dir = tempdir().unwrap();
     // Every batch tries to delete all of ITS entries: the very last
     // remaining entry in the store must be kept.
-    let del_0_9 = (0..10).map(|i| format!("{{\"id\": \"m-{i}\"}}")).collect::<Vec<_>>().join(",");
-    let del_10_19 = (10..20).map(|i| format!("{{\"id\": \"m-{i}\"}}")).collect::<Vec<_>>().join(",");
+    let del_0_9 = (0..10)
+        .map(|i| format!("{{\"id\": \"m-{i}\"}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let del_10_19 = (10..20)
+        .map(|i| format!("{{\"id\": \"m-{i}\"}}"))
+        .collect::<Vec<_>>()
+        .join(",");
     let responses = vec![
         format!("{{\"delete\": [{del_0_9}]}}"),
         format!("{{\"delete\": [{del_10_19}]}}"),
@@ -587,7 +733,12 @@ async fn test_maintenance_batched_never_wipes_store() {
 
     let report = manager.run_maintenance().await.unwrap();
     assert_eq!(llm.call_count(), 2);
-    assert_eq!(manager.count(), 1, "store must never be emptied: {}", report.summary);
+    assert_eq!(
+        manager.count(),
+        1,
+        "store must never be emptied: {}",
+        report.summary
+    );
 }
 
 #[tokio::test]
@@ -624,7 +775,8 @@ async fn test_maintenance_step_processes_only_oldest_batch() {
 async fn test_maintenance_step_applies_actions() {
     let dir = tempdir().unwrap();
     let responses = vec![
-        r#"{"merge": [{"ids": ["m-0", "m-1"], "consolidated": "Consolidated oldest pair"}]}"#.to_string(),
+        r#"{"merge": [{"ids": ["m-0", "m-1"], "consolidated": "Consolidated oldest pair"}]}"#
+            .to_string(),
     ];
     let (manager, llm) = manager_with_queued_llm(dir.path(), responses, 10);
     seed_distinct_with_ids(&manager, 20);
@@ -636,5 +788,9 @@ async fn test_maintenance_step_applies_actions() {
     // Newest entries must be untouched by a step.
     assert!(manager.find("m-19").is_some());
     assert_eq!(manager.count(), 19);
-    assert!(report.summary.contains("merged"), "summary: {}", report.summary);
+    assert!(
+        report.summary.contains("merged"),
+        "summary: {}",
+        report.summary
+    );
 }

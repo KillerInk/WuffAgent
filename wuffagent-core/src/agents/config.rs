@@ -1,7 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 use tracing;
 
 /// Shell configuration for an agent.
@@ -36,9 +36,15 @@ impl Default for ShellConfig {
     }
 }
 
-fn default_shell_type() -> String { "powershell".to_string() }
-fn default_shell_timeout() -> u64 { 300_000 }
-fn default_shell_enabled() -> bool { false }
+fn default_shell_type() -> String {
+    "powershell".to_string()
+}
+fn default_shell_timeout() -> u64 {
+    300_000
+}
+fn default_shell_enabled() -> bool {
+    false
+}
 
 /// Legacy configuration for a single worker, loaded from a JSON file.
 /// Kept for backward compatibility with existing agent JSON files.
@@ -100,12 +106,20 @@ impl Default for WorkerConfig {
     }
 }
 
-fn default_handoff_enabled() -> bool { false }
+fn default_handoff_enabled() -> bool {
+    false
+}
 
-fn default_enabled() -> bool { true }
+fn default_enabled() -> bool {
+    true
+}
 
-fn default_priority() -> u32 { 0 }
-fn default_max_concurrent() -> usize { 1 }
+fn default_priority() -> u32 {
+    0
+}
+fn default_max_concurrent() -> usize {
+    1
+}
 
 impl WorkerConfig {
     /// Load all Agent configs from a directory.
@@ -135,32 +149,42 @@ impl WorkerConfig {
     }
 
     pub fn load_from_file(path: &Path) -> Result<Self, crate::agents::AgentError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to read Agent config from {:?}: {}", path, e
-            )))?;
-        let config: WorkerConfig = serde_json::from_str(&content)
-            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to parse Agent config from {:?}: {}", path, e
-            )))?;
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::agents::AgentError::ConfigError(format!(
+                "Failed to read Agent config from {:?}: {}",
+                path, e
+            ))
+        })?;
+        let config: WorkerConfig = serde_json::from_str(&content).map_err(|e| {
+            crate::agents::AgentError::ConfigError(format!(
+                "Failed to parse Agent config from {:?}: {}",
+                path, e
+            ))
+        })?;
         Ok(config)
     }
 
     pub fn save_to_file(&self, path: &Path) -> Result<(), crate::agents::AgentError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                    "Failed to create directory {:?}: {}", parent, e
-                )))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                crate::agents::AgentError::ConfigError(format!(
+                    "Failed to create directory {:?}: {}",
+                    parent, e
+                ))
+            })?;
         }
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to serialize Agent config: {}", e
-            )))?;
-        std::fs::write(path, content)
-            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to write Agent config to {:?}: {}", path, e
-            )))?;
+        let content = serde_json::to_string_pretty(self).map_err(|e| {
+            crate::agents::AgentError::ConfigError(format!(
+                "Failed to serialize Agent config: {}",
+                e
+            ))
+        })?;
+        std::fs::write(path, content).map_err(|e| {
+            crate::agents::AgentError::ConfigError(format!(
+                "Failed to write Agent config to {:?}: {}",
+                path, e
+            ))
+        })?;
         Ok(())
     }
 
@@ -216,7 +240,11 @@ impl AgentManager {
 
     /// Load agent configs from a single directory, deduplicating by name (first wins).
     /// Tries AgentConfig first, falls back to legacy WorkerConfig.
-    fn load_from_dir(&self, dir: &PathBuf, seen: &mut HashMap<String, ()>) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
+    fn load_from_dir(
+        &self,
+        dir: &PathBuf,
+        seen: &mut HashMap<String, ()>,
+    ) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
         let mut agents = Vec::new();
         if !dir.exists() {
             return Ok(agents);
@@ -253,7 +281,11 @@ impl AgentManager {
                             system_prompt: legacy.system_prompt,
                             allowed_tools: legacy.allowed_tools,
                             enabled: legacy.enabled,
-                            task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
+                            task_timeout_ms: if legacy.task_timeout_ms > 0 {
+                                legacy.task_timeout_ms
+                            } else {
+                                60_000
+                            },
                             shell_config: legacy.shell_config,
                             agents_dir: self.agents_dir.clone(),
                             agents_search_dirs: Vec::new(),
@@ -274,7 +306,10 @@ impl AgentManager {
                             agents.push(config);
                         }
                     } else {
-                        tracing::warn!("Failed to load agent config from {:?}: invalid format", path);
+                        tracing::warn!(
+                            "Failed to load agent config from {:?}: invalid format",
+                            path
+                        );
                     }
                 } else {
                     tracing::warn!("Failed to read agent config from {:?}", path);
@@ -329,7 +364,11 @@ impl AgentManager {
     /// which funnel through this method — is reversible via
     /// [`Self::revert_agent`]. On a rename the OLD file is snapshotted under
     /// its old name first.
-    pub fn edit_agent(&self, name: &str, config: &AgentConfig) -> Result<(), crate::agents::AgentError> {
+    pub fn edit_agent(
+        &self,
+        name: &str,
+        config: &AgentConfig,
+    ) -> Result<(), crate::agents::AgentError> {
         if config.name != name {
             // Name changed — snapshot the old file under its old name, then
             // remove it and save the new one.
@@ -348,10 +387,12 @@ impl AgentManager {
     pub fn remove_agent(&self, name: &str) -> Result<(), crate::agents::AgentError> {
         let path = self.agents_dir.join(format!("{}.json", name));
         if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                    "Failed to remove agent config {:?}: {}", path, e
-                )))?;
+            std::fs::remove_file(&path).map_err(|e| {
+                crate::agents::AgentError::ConfigError(format!(
+                    "Failed to remove agent config {:?}: {}",
+                    path, e
+                ))
+            })?;
             tracing::info!("Removed agent config: {}", name);
         }
         Ok(())
@@ -371,8 +412,14 @@ impl AgentManager {
     /// before all real snapshots.
     fn history_file_order(ts_seq: &str) -> (u64, u32) {
         let mut parts = ts_seq.splitn(2, '-');
-        let ts = parts.next().and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
-        let seq = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+        let ts = parts
+            .next()
+            .and_then(|t| t.parse::<u64>().ok())
+            .unwrap_or(0);
+        let seq = parts
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
         (ts, seq)
     }
 
@@ -481,7 +528,15 @@ impl AgentManager {
         if snaps.len() <= Self::HISTORY_SNAPSHOTS_KEEP {
             return;
         }
-        snaps.sort_by_key(|(path, ts, seq)| (*ts, *seq, path.file_name().map(|f| f.to_os_string()).unwrap_or_default()));
+        snaps.sort_by_key(|(path, ts, seq)| {
+            (
+                *ts,
+                *seq,
+                path.file_name()
+                    .map(|f| f.to_os_string())
+                    .unwrap_or_default(),
+            )
+        });
         let excess = snaps.len() - Self::HISTORY_SNAPSHOTS_KEEP;
         for (path, _, _) in snaps.into_iter().take(excess) {
             if let Err(e) = std::fs::remove_file(&path) {
@@ -494,7 +549,10 @@ impl AgentManager {
     ///
     /// Returns an empty vec when the agent has no history (missing history
     /// dir or no snapshots) — not an error.
-    pub fn list_agent_history(&self, name: &str) -> Result<Vec<PathBuf>, crate::agents::AgentError> {
+    pub fn list_agent_history(
+        &self,
+        name: &str,
+    ) -> Result<Vec<PathBuf>, crate::agents::AgentError> {
         let hist = self.history_dir();
         if !hist.is_dir() {
             return Ok(Vec::new());
@@ -503,7 +561,8 @@ impl AgentManager {
         let mut snaps: Vec<(PathBuf, u64, u32)> = Vec::new();
         let entries = std::fs::read_dir(&hist).map_err(|e| {
             crate::agents::AgentError::ConfigError(format!(
-                "Failed to read history directory {:?}: {}", hist, e
+                "Failed to read history directory {:?}: {}",
+                hist, e
             ))
         })?;
         for entry in entries.flatten() {
@@ -528,7 +587,15 @@ impl AgentManager {
                 snaps.push((path, ts, seq));
             }
         }
-        snaps.sort_by_key(|(path, ts, seq)| (*ts, *seq, path.file_name().map(|f| f.to_os_string()).unwrap_or_default()));
+        snaps.sort_by_key(|(path, ts, seq)| {
+            (
+                *ts,
+                *seq,
+                path.file_name()
+                    .map(|f| f.to_os_string())
+                    .unwrap_or_default(),
+            )
+        });
         snaps.reverse(); // newest first
         Ok(snaps.into_iter().map(|(path, _, _)| path).collect())
     }
@@ -539,12 +606,17 @@ impl AgentManager {
     /// (`<name>-<unixts>[-seq].json`). The CURRENT `agents_dir/<name>.json`
     /// is itself snapshotted first, so a revert is reversible. Returns the
     /// restored [`AgentConfig`] (with `agents_dir` anchored to this manager).
-    pub fn revert_agent(&self, name: &str, snapshot: &Path) -> Result<AgentConfig, crate::agents::AgentError> {
+    pub fn revert_agent(
+        &self,
+        name: &str,
+        snapshot: &Path,
+    ) -> Result<AgentConfig, crate::agents::AgentError> {
         let hist = self.history_dir();
         // The snapshot must be a direct child of the history dir.
         if snapshot.parent() != Some(hist.as_path()) {
             return Err(crate::agents::AgentError::ConfigError(format!(
-                "History snapshot {:?} is not under the history directory {:?}", snapshot, hist
+                "History snapshot {:?} is not under the history directory {:?}",
+                snapshot, hist
             )));
         }
         let file_name = snapshot
@@ -553,12 +625,14 @@ impl AgentManager {
             .unwrap_or_default();
         let Some(stem) = file_name.strip_suffix(".json") else {
             return Err(crate::agents::AgentError::ConfigError(format!(
-                "History snapshot {:?} must be a .json file", snapshot
+                "History snapshot {:?} must be a .json file",
+                snapshot
             )));
         };
         let Some(rest) = stem.strip_prefix(name).and_then(|s| s.strip_prefix('-')) else {
             return Err(crate::agents::AgentError::ConfigError(format!(
-                "History snapshot {:?} does not belong to agent '{}'", snapshot, name
+                "History snapshot {:?} does not belong to agent '{}'",
+                snapshot, name
             )));
         };
         // Validate the `<unixts>[-seq]` suffix.
@@ -572,12 +646,14 @@ impl AgentManager {
         }
         if rest.is_empty() || !ts_ok {
             return Err(crate::agents::AgentError::ConfigError(format!(
-                "History snapshot {:?} is not a valid history file for agent '{}'", snapshot, name
+                "History snapshot {:?} is not a valid history file for agent '{}'",
+                snapshot, name
             )));
         }
         if !snapshot.is_file() {
             return Err(crate::agents::AgentError::ConfigError(format!(
-                "History snapshot {:?} does not exist", snapshot
+                "History snapshot {:?} does not exist",
+                snapshot
             )));
         }
         // Reverting is itself a config change: snapshot the current file so
@@ -586,7 +662,8 @@ impl AgentManager {
         let dst = self.agents_dir.join(format!("{}.json", name));
         std::fs::copy(snapshot, &dst).map_err(|e| {
             crate::agents::AgentError::ConfigError(format!(
-                "Failed to revert agent '{}' from {:?}: {}", name, snapshot, e
+                "Failed to revert agent '{}' from {:?}: {}",
+                name, snapshot, e
             ))
         })?;
         let mut config: AgentConfig = Self::load_agent_file(&dst)?;
@@ -600,7 +677,8 @@ impl AgentManager {
     fn load_agent_file(path: &Path) -> Result<AgentConfig, crate::agents::AgentError> {
         let content = std::fs::read_to_string(path).map_err(|e| {
             crate::agents::AgentError::ConfigError(format!(
-                "Failed to read agent config {:?}: {}", path, e
+                "Failed to read agent config {:?}: {}",
+                path, e
             ))
         })?;
         if let Ok(config) = serde_json::from_str::<AgentConfig>(&content) {
@@ -608,7 +686,8 @@ impl AgentManager {
         }
         let legacy: WorkerConfig = serde_json::from_str(&content).map_err(|e| {
             crate::agents::AgentError::ConfigError(format!(
-                "Failed to parse agent config {:?}: {}", path, e
+                "Failed to parse agent config {:?}: {}",
+                path, e
             ))
         })?;
         Ok(AgentConfig {
@@ -617,7 +696,11 @@ impl AgentManager {
             system_prompt: legacy.system_prompt,
             allowed_tools: legacy.allowed_tools,
             enabled: legacy.enabled,
-            task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
+            task_timeout_ms: if legacy.task_timeout_ms > 0 {
+                legacy.task_timeout_ms
+            } else {
+                60_000
+            },
             shell_config: legacy.shell_config,
             agents_dir: PathBuf::new(),
             agents_search_dirs: Vec::new(),
@@ -633,7 +716,11 @@ impl AgentManager {
     /// Reload all agent configs from disk (use after add/edit/remove).
     pub fn reload(&self) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
         let agents = self.list_agents();
-        tracing::info!("Reloaded {} agent config(s) from {:?}", agents.as_ref().map(|a| a.len()).unwrap_or(0), self.agents_dir);
+        tracing::info!(
+            "Reloaded {} agent config(s) from {:?}",
+            agents.as_ref().map(|a| a.len()).unwrap_or(0),
+            self.agents_dir
+        );
         agents
     }
 }
@@ -700,9 +787,15 @@ pub struct AgentConfig {
     pub restart_enabled: bool,
 }
 
-fn default_enabled_agent() -> bool { true }
-fn default_true() -> bool { true }
-fn default_task_timeout_ms() -> u64 { 60_000 }
+fn default_enabled_agent() -> bool {
+    true
+}
+fn default_true() -> bool {
+    true
+}
+fn default_task_timeout_ms() -> u64 {
+    60_000
+}
 pub fn default_agents_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -811,7 +904,11 @@ pub fn load_agent_from_dirs(dirs: &[PathBuf], name: &str) -> Option<AgentConfig>
     }
     cfg.map(|(i, mut c)| {
         c.agents_dir = dirs[i].clone();
-        c.agents_search_dirs = dirs[..i].iter().cloned().chain(dirs[i + 1..].iter().cloned()).collect();
+        c.agents_search_dirs = dirs[..i]
+            .iter()
+            .cloned()
+            .chain(dirs[i + 1..].iter().cloned())
+            .collect();
         c
     })
 }
@@ -829,19 +926,25 @@ impl AgentConfig {
     /// Save this config to a JSON file.
     pub fn save_to_file(&self, path: &Path) -> Result<(), crate::agents::AgentError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                    "Failed to create directory {:?}: {}", parent, e
-                )))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                crate::agents::AgentError::ConfigError(format!(
+                    "Failed to create directory {:?}: {}",
+                    parent, e
+                ))
+            })?;
         }
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to serialize agent config: {}", e
-            )))?;
-        std::fs::write(path, content)
-            .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                "Failed to write agent config to {:?}: {}", path, e
-            )))?;
+        let content = serde_json::to_string_pretty(self).map_err(|e| {
+            crate::agents::AgentError::ConfigError(format!(
+                "Failed to serialize agent config: {}",
+                e
+            ))
+        })?;
+        std::fs::write(path, content).map_err(|e| {
+            crate::agents::AgentError::ConfigError(format!(
+                "Failed to write agent config to {:?}: {}",
+                path, e
+            ))
+        })?;
         Ok(())
     }
 
@@ -856,14 +959,18 @@ impl AgentConfig {
         let agent_config_path = config_path.parent().map(|p| p.join("agent.json"));
         if let Some(path) = agent_config_path {
             if path.exists() {
-                let content = std::fs::read_to_string(&path)
-                    .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                        "Failed to read agent config: {}", e
-                    )))?;
-                let mut config: AgentConfig = serde_json::from_str(&content)
-                    .map_err(|e| crate::agents::AgentError::ConfigError(format!(
-                        "Failed to parse agent config: {}", e
-                    )))?;
+                let content = std::fs::read_to_string(&path).map_err(|e| {
+                    crate::agents::AgentError::ConfigError(format!(
+                        "Failed to read agent config: {}",
+                        e
+                    ))
+                })?;
+                let mut config: AgentConfig = serde_json::from_str(&content).map_err(|e| {
+                    crate::agents::AgentError::ConfigError(format!(
+                        "Failed to parse agent config: {}",
+                        e
+                    ))
+                })?;
                 config.agents_dir = agents_dir;
                 return Ok(config);
             }
@@ -876,7 +983,10 @@ impl AgentConfig {
         let mut agents = Vec::new();
 
         if !self.agents_dir.exists() {
-            tracing::info!("agents directory does not exist: {:?}, using built-in defaults", self.agents_dir);
+            tracing::info!(
+                "agents directory does not exist: {:?}, using built-in defaults",
+                self.agents_dir
+            );
             return Ok(agents);
         }
 
@@ -919,7 +1029,11 @@ impl AgentConfig {
                             system_prompt: legacy.system_prompt,
                             allowed_tools: legacy.allowed_tools,
                             enabled: legacy.enabled,
-                            task_timeout_ms: if legacy.task_timeout_ms > 0 { legacy.task_timeout_ms } else { 60_000 },
+                            task_timeout_ms: if legacy.task_timeout_ms > 0 {
+                                legacy.task_timeout_ms
+                            } else {
+                                60_000
+                            },
                             shell_config: legacy.shell_config,
                             agents_dir: self.agents_dir.clone(),
                             agents_search_dirs: Vec::new(),

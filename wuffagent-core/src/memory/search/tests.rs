@@ -43,7 +43,10 @@ fn test_keyword_search() {
 
     let results = keyword_search(&entries, "shell tool", 2);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].content, "Shell tool plan was implemented with nested config");
+    assert_eq!(
+        results[0].content,
+        "Shell tool plan was implemented with nested config"
+    );
 }
 
 #[test]

@@ -93,7 +93,9 @@ impl ToolParams {
     }
 
     pub fn get<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
-        self.values.get(key).and_then(|v| serde_json::from_value(v.clone()).ok())
+        self.values
+            .get(key)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 }
 

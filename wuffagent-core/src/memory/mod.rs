@@ -8,13 +8,13 @@
 //! Module dependency: `memory` uses `llm` for improvement,
 //! but `llm` does not depend on `memory`.
 
-pub mod types;
-pub mod storage;
-pub mod search;
-pub mod manager;
 pub mod improver;
+pub mod manager;
+pub mod search;
+pub mod storage;
+pub mod types;
 
-pub use types::{MemoryEntry, MemoryType, MemoryConfig, SearchMode, InjectionMode};
-pub use manager::{MemoryManager, MemoryAddResult, MaintenanceReport, MaintenanceProgress};
-pub use storage::{load_memories, save_memories, get_memories_path};
-pub use improver::{ImprovementSuggestion, NewAgentProposal, suggest_improvements};
+pub use improver::{suggest_improvements, ImprovementSuggestion, NewAgentProposal};
+pub use manager::{MaintenanceProgress, MaintenanceReport, MemoryAddResult, MemoryManager};
+pub use storage::{get_memories_path, load_memories, save_memories};
+pub use types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};

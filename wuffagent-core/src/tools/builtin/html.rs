@@ -47,7 +47,9 @@ pub(crate) fn html_unescape(input: &str) -> String {
     while let Some(pos) = rest.find('&') {
         let after = &rest[pos + 1..];
         match ENTITIES.iter().find(|(name, _)| {
-            after.len() > name.len() && after.starts_with(name) && after.as_bytes()[name.len()] == b';'
+            after.len() > name.len()
+                && after.starts_with(name)
+                && after.as_bytes()[name.len()] == b';'
         }) {
             Some((name, replacement)) => {
                 result.push_str(&rest[..pos]);

@@ -23,13 +23,12 @@ pub struct FetchUrlTool {
 
 /// Cached tokio current-thread runtime for use inside spawn_blocking calls
 /// (same pattern as `web_search`: never build a runtime per call).
-static BLOCKING_RUNTIME: LazyLock<tokio::runtime::Runtime> =
-    LazyLock::new(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build blocking runtime")
-    });
+static BLOCKING_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build blocking runtime")
+});
 
 macro_rules! block_on {
     ($expr:expr) => {{
@@ -87,7 +86,9 @@ impl Tool for FetchUrlTool {
                         "max_bytes".to_string(),
                         crate::tools::types::FieldSchema {
                             type_name: "integer".to_string(),
-                            description: format!("Maximum number of bytes to read (default {DEFAULT_MAX_BYTES})"),
+                            description: format!(
+                                "Maximum number of bytes to read (default {DEFAULT_MAX_BYTES})"
+                            ),
                             nullable: true,
                         },
                     );
@@ -99,11 +100,9 @@ impl Tool for FetchUrlTool {
     }
 
     fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
-        let url: String = params
-            .get("url")
-            .ok_or_else(|| {
-                crate::tools::types::ToolError::InvalidParams("url is required".to_string())
-            })?;
+        let url: String = params.get("url").ok_or_else(|| {
+            crate::tools::types::ToolError::InvalidParams("url is required".to_string())
+        })?;
 
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(crate::tools::types::ToolError::InvalidParams(format!(
@@ -142,12 +141,9 @@ impl Tool for FetchUrlTool {
                 .trim()
                 .to_ascii_lowercase();
             let final_url = resp.url().to_string();
-            let body = resp
-                .bytes()
-                .await
-                .map_err(|e| {
-                    crate::tools::types::ToolError::Execution(format!("Failed to read response: {e}"))
-                })?;
+            let body = resp.bytes().await.map_err(|e| {
+                crate::tools::types::ToolError::Execution(format!("Failed to read response: {e}"))
+            })?;
             Ok::<_, crate::tools::types::ToolError>((status, content_type, final_url, body))
         })?;
 
@@ -157,7 +153,12 @@ impl Tool for FetchUrlTool {
             )));
         }
 
-        const ACCEPTED: &[&str] = &["text/html", "text/plain", "application/json", "text/markdown"];
+        const ACCEPTED: &[&str] = &[
+            "text/html",
+            "text/plain",
+            "application/json",
+            "text/markdown",
+        ];
         if !ACCEPTED.iter().any(|p| content_type.starts_with(p)) {
             return Err(crate::tools::types::ToolError::Execution(format!(
                 "Unsupported content type: {content_type}"

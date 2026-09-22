@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command, ChildStdin};
+use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::oneshot;
 
 use super::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
@@ -173,7 +173,8 @@ impl StdioTransport {
 
     /// Send a notification (no response expected).
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
-        self.write_line(&JsonRpcRequest::notification(method, params)).await
+        self.write_line(&JsonRpcRequest::notification(method, params))
+            .await
     }
 
     /// Kill the child process and wait for it to be reaped (idempotent).

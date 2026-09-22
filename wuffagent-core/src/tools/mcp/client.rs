@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::jsonrpc::{parse_call_result, parse_tools_list, CallToolResult, McpToolInfo, PROTOCOL_VERSION};
+use super::jsonrpc::{
+    parse_call_result, parse_tools_list, CallToolResult, McpToolInfo, PROTOCOL_VERSION,
+};
 use super::transport_http::HttpTransport;
 use super::transport_stdio::StdioTransport;
 use super::McpError;
@@ -19,7 +21,12 @@ pub enum Transport {
 }
 
 impl Transport {
-    pub async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, McpError> {
+    pub async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, McpError> {
         match self {
             Transport::Stdio(t) => t.request(method, params, timeout).await,
             Transport::Http(t) => t.request(method, params, timeout).await,
@@ -103,7 +110,9 @@ impl McpClient {
             .to_string();
 
         // The client MUST signal readiness after the initialize response.
-        let _ = transport.notify("notifications/initialized", json!({})).await;
+        let _ = transport
+            .notify("notifications/initialized", json!({}))
+            .await;
 
         tracing::info!(
             target: "mcp",
@@ -141,7 +150,11 @@ impl McpClient {
     }
 
     /// Call one of the server's tools.
-    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError> {
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+    ) -> Result<CallToolResult, McpError> {
         let result = self
             .transport
             .request(

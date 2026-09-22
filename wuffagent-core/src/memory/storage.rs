@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use tracing;
 
-use super::types::{MemoryEntry, MemoryConfig};
+use super::types::{MemoryConfig, MemoryEntry};
 
 /// Load memories from a JSON file.
 /// Backwards-compatible with the old format that used plain objects without
@@ -10,7 +10,10 @@ use super::types::{MemoryEntry, MemoryConfig};
 pub fn load_memories(path: &Path) -> Result<Vec<MemoryEntry>, String> {
     tracing::debug!("[MEMORY] Loading memories from {:?}", path);
     if !path.exists() {
-        tracing::debug!("[MEMORY] Memory file does not exist, starting fresh: {:?}", path);
+        tracing::debug!(
+            "[MEMORY] Memory file does not exist, starting fresh: {:?}",
+            path
+        );
         return Ok(Vec::new());
     }
 
@@ -34,7 +37,10 @@ pub fn load_memories(path: &Path) -> Result<Vec<MemoryEntry>, String> {
         return Ok(vec![entry]);
     }
 
-    Err(format!("Failed to parse memory file {:?}: invalid JSON", path))
+    Err(format!(
+        "Failed to parse memory file {:?}: invalid JSON",
+        path
+    ))
 }
 
 /// Save memories to a JSON file atomically.
@@ -73,7 +79,8 @@ pub fn get_memories_path(config: &MemoryConfig) -> PathBuf {
 
 /// Count active (non-expired, non-superseded) memories.
 pub fn count_active_memories(entries: &[MemoryEntry]) -> usize {
-    entries.iter()
+    entries
+        .iter()
         .filter(|e| !e.is_expired() && e.supersedes.is_none())
         .count()
 }

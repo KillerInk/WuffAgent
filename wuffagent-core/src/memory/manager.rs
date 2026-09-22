@@ -6,11 +6,11 @@ use tracing;
 
 use crate::types::Message;
 
-use super::types::{MemoryConfig, MemoryEntry, MemoryType};
+use super::improver::suggest_improvements;
 use super::search::get_recent_memories;
 use super::search::search_memories;
-use super::storage::{load_memories, save_memories, get_memories_path, count_active_memories};
-use super::improver::suggest_improvements;
+use super::storage::{count_active_memories, get_memories_path, load_memories, save_memories};
+use super::types::{MemoryConfig, MemoryEntry, MemoryType};
 use crate::llm::LlmClient;
 
 /// Main orchestrator for the memory system.
@@ -60,7 +60,10 @@ impl MemoryManager {
     }
 
     /// Create a new MemoryManager with an LLM client (used by the maintenance pass).
-    pub fn new_with_llm(config: MemoryConfig, llm_client: Arc<dyn LlmClient>) -> Result<Self, String> {
+    pub fn new_with_llm(
+        config: MemoryConfig,
+        llm_client: Arc<dyn LlmClient>,
+    ) -> Result<Self, String> {
         let mut m = Self::new(config)?;
         m.llm_client = Some(llm_client);
         Ok(m)
@@ -100,7 +103,10 @@ impl MemoryManager {
         }
 
         let entries = self.entries.lock().unwrap();
-        search_memories(&*entries, query, &config).into_iter().map(|e| (*e).clone()).collect()
+        search_memories(&*entries, query, &config)
+            .into_iter()
+            .map(|e| (*e).clone())
+            .collect()
     }
 
     /// Get all active (non-expired, non-superseded) memories carrying the
@@ -145,7 +151,8 @@ impl MemoryManager {
     pub fn get_all_memories(&self) -> Vec<MemoryEntry> {
         let entries = {
             let entries = self.entries.lock().unwrap();
-            entries.iter()
+            entries
+                .iter()
                 .filter(|e| !e.is_expired() && e.supersedes.is_none())
                 .cloned()
                 .collect::<Vec<_>>()
@@ -170,9 +177,9 @@ impl MemoryManager {
         let memories = self.get_all_memories();
         match last_check {
             // Some Lesson entry strictly newer than the last check.
-            Some(ts) => memories
-                .iter()
-                .any(|e| e.r#type == MemoryType::Lesson && e.timestamp.map(|t| t > ts).unwrap_or(false)),
+            Some(ts) => memories.iter().any(|e| {
+                e.r#type == MemoryType::Lesson && e.timestamp.map(|t| t > ts).unwrap_or(false)
+            }),
             None => memories.iter().any(|e| e.r#type == MemoryType::Lesson),
         }
     }
@@ -203,9 +210,15 @@ impl MemoryManager {
         };
         // Atomic write (temp + rename), mirroring `save_memories`.
         let temp_path = path.with_extension("json.tmp");
-        if let Err(e) = std::fs::write(&temp_path, content).and_then(|_| std::fs::rename(&temp_path, &path)) {
+        if let Err(e) =
+            std::fs::write(&temp_path, content).and_then(|_| std::fs::rename(&temp_path, &path))
+        {
             let _ = std::fs::remove_file(&temp_path);
-            tracing::debug!("[MEMORY] Could not write improvement state {:?}: {}", path, e);
+            tracing::debug!(
+                "[MEMORY] Could not write improvement state {:?}: {}",
+                path,
+                e
+            );
         }
     }
 
@@ -279,7 +292,12 @@ impl MemoryManager {
     ///
     /// Updating an entry revives it (clears `supersedes`) and, when provided,
     /// replaces its tags. Returns the updated entry.
-    pub fn update(&self, id: &str, content: &str, tags: Option<Vec<String>>) -> Result<MemoryEntry, String> {
+    pub fn update(
+        &self,
+        id: &str,
+        content: &str,
+        tags: Option<Vec<String>>,
+    ) -> Result<MemoryEntry, String> {
         let mut entries = self.entries.lock().unwrap();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
             entry.content = content.to_string();
@@ -347,11 +365,13 @@ impl MemoryManager {
         }
 
         // Sort by confidence (ascending) and timestamp (ascending) to evict oldest/lowest first
-        let mut sorted: Vec<&MemoryEntry> = entries.iter()
+        let mut sorted: Vec<&MemoryEntry> = entries
+            .iter()
             .filter(|e| !e.is_expired() && e.supersedes.is_none())
             .collect();
         sorted.sort_by(|a, b| {
-            a.confidence.partial_cmp(&b.confidence)
+            a.confidence
+                .partial_cmp(&b.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
                     let ta = a.timestamp.unwrap_or_default();
@@ -362,7 +382,8 @@ impl MemoryManager {
 
         // Collect IDs to remove BEFORE dropping the lock to avoid deadlock
         let to_remove = active_count - max_entries;
-        let ids_to_remove: Vec<String> = sorted.iter()
+        let ids_to_remove: Vec<String> = sorted
+            .iter()
             .take(to_remove)
             .map(|e| e.id.clone())
             .collect();
@@ -391,14 +412,22 @@ impl MemoryManager {
             if let Some(ts) = e.timestamp {
                 let age_days = now.signed_duration_since(ts).num_days();
                 if age_days > 90 {
-                    tracing::debug!("[MEMORY] Cleaning expired memory ({} days old): {}", age_days, e.id);
+                    tracing::debug!(
+                        "[MEMORY] Cleaning expired memory ({} days old): {}",
+                        age_days,
+                        e.id
+                    );
                     return false;
                 }
             }
 
             // Keep if confidence is reasonable (above 0.3)
             if e.confidence < 0.3 {
-                tracing::debug!("[MEMORY] Cleaning low-confidence memory ({}): {}", e.confidence, e.id);
+                tracing::debug!(
+                    "[MEMORY] Cleaning low-confidence memory ({}): {}",
+                    e.confidence,
+                    e.id
+                );
                 return false;
             }
 
@@ -410,7 +439,11 @@ impl MemoryManager {
 
         if removed > 0 {
             self.save()?;
-            tracing::info!("Cleaned up {} memories, {} remaining", removed, self.count());
+            tracing::info!(
+                "Cleaned up {} memories, {} remaining",
+                removed,
+                self.count()
+            );
         }
         Ok(removed)
     }
@@ -452,7 +485,10 @@ impl MemoryManager {
         }
         // Oldest first: stale/overlapping entries consolidate early, and a
         // manual sweep makes forward progress on the oldest part of the store.
-        entries.sort_by_key(|e| e.timestamp.unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC));
+        entries.sort_by_key(|e| {
+            e.timestamp
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+        });
         let batch_size = self.config().memory_maintenance_batch_size.clamp(5, 100);
         // A single leftover entry cannot be merged with anything; skip it.
         let chunks: Vec<&[MemoryEntry]> = entries
@@ -505,7 +541,11 @@ impl MemoryManager {
             if deleted > 0 {
                 parts.push(format!("{deleted} deleted"));
             }
-            format!("Maintenance complete: {} ({} batches)", parts.join(", "), total_batches)
+            format!(
+                "Maintenance complete: {} ({} batches)",
+                parts.join(", "),
+                total_batches
+            )
         };
         let report = MaintenanceReport {
             summary,
@@ -516,7 +556,9 @@ impl MemoryManager {
             had_actions,
         };
         if failures > 0 {
-            tracing::warn!("[MEMORY] {failures} maintenance batch(es) failed; see earlier log lines");
+            tracing::warn!(
+                "[MEMORY] {failures} maintenance batch(es) failed; see earlier log lines"
+            );
         }
         tracing::info!("[MEMORY] {}", report.summary);
         Ok(report)
@@ -538,7 +580,10 @@ impl MemoryManager {
                 "Maintenance step skipped: fewer than 2 entries",
             ));
         }
-        entries.sort_by_key(|e| e.timestamp.unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC));
+        entries.sort_by_key(|e| {
+            e.timestamp
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+        });
         let batch_size = self.config().memory_maintenance_batch_size.clamp(5, 100);
         let chunk: Vec<MemoryEntry> = entries.drain(..batch_size.min(entries.len())).collect();
         // `entries` is the remainder after draining: the pre-step global
@@ -569,7 +614,15 @@ impl MemoryManager {
         for e in chunk {
             let age = e
                 .timestamp
-                .map(|ts| format!("{}d old", chrono::Utc::now().signed_duration_since(ts).num_days().max(0)))
+                .map(|ts| {
+                    format!(
+                        "{}d old",
+                        chrono::Utc::now()
+                            .signed_duration_since(ts)
+                            .num_days()
+                            .max(0)
+                    )
+                })
                 .unwrap_or_default();
             lines.push(format!(
                 "- id: {} | type: {} | tags: [{}] | age: {} | {}",
@@ -610,9 +663,8 @@ impl MemoryManager {
         // Per-step timeout: `memory_maintenance_timeout_secs` bounds this
         // single batch (LLM call), so one slow batch can neither stall a
         // multi-batch sweep nor hold a task completion hostage.
-        let per_step = std::time::Duration::from_secs(
-            self.config().memory_maintenance_timeout_secs.max(10),
-        );
+        let per_step =
+            std::time::Duration::from_secs(self.config().memory_maintenance_timeout_secs.max(10));
         let response = tokio::time::timeout(per_step, llm.complete(&messages))
             .await
             .map_err(|_| {
@@ -627,11 +679,22 @@ impl MemoryManager {
             })?;
         let actions = parse_maintenance_actions(&response);
         if actions.is_empty() {
-            Ok(MaintenanceReport::summary("Maintenance complete: no changes suggested"))
+            Ok(MaintenanceReport::summary(
+                "Maintenance complete: no changes suggested",
+            ))
         } else {
-            tracing::info!("[MEMORY] Applying maintenance: {} merges, {} updates, {} deletes",
-                actions.merge.len(), actions.update.len(), actions.delete.len());
-            Ok(apply_maintenance_actions(self, chunk, total_entries, &actions))
+            tracing::info!(
+                "[MEMORY] Applying maintenance: {} merges, {} updates, {} deletes",
+                actions.merge.len(),
+                actions.update.len(),
+                actions.delete.len()
+            );
+            Ok(apply_maintenance_actions(
+                self,
+                chunk,
+                total_entries,
+                &actions,
+            ))
         }
     }
 
@@ -678,7 +741,8 @@ impl MemoryManager {
         }
 
         let max_chars = self.config().injection_max_chars;
-        let mut block = String::from("\n═══ MEMORY CONTEXT ═══\n(Relevant memories from past sessions)\n\n");
+        let mut block =
+            String::from("\n═══ MEMORY CONTEXT ═══\n(Relevant memories from past sessions)\n\n");
         let mut chars = 0;
 
         for memory in &memories {
@@ -854,13 +918,19 @@ fn apply_maintenance_actions(
             .filter(|id| existing_ids.contains(id.as_str()))
             .collect();
         if valid.len() < 2 {
-            skipped.push(format!("merge needs at least 2 known ids (got {})", merge.ids.len()));
+            skipped.push(format!(
+                "merge needs at least 2 known ids (got {})",
+                merge.ids.len()
+            ));
             continue;
         }
         // Safety: never let a single merge consume the entire store
         // (checked against the global store size, not this batch).
         if total_entries > 0 && valid.len() >= total_entries {
-            skipped.push(format!("merge of {} entries would remove the whole store", valid.len()));
+            skipped.push(format!(
+                "merge of {} entries would remove the whole store",
+                valid.len()
+            ));
             continue;
         }
         let mut content = merge.consolidated.trim().to_string();
@@ -932,7 +1002,11 @@ fn apply_maintenance_actions(
 
     // Delete: drop stale entries, but never the last remaining entry.
     let mut current_count = manager.count();
-    for delete in actions.delete.iter().filter(|d| existing_ids.contains(d.id.as_str())) {
+    for delete in actions
+        .delete
+        .iter()
+        .filter(|d| existing_ids.contains(d.id.as_str()))
+    {
         if current_count <= 1 {
             skipped.push("delete skipped, would remove the last entry".into());
             continue;
@@ -994,7 +1068,10 @@ fn first_source_type(entries: &[MemoryEntry], ids: &[&String]) -> MemoryType {
         .unwrap_or(MemoryType::Fact)
 }
 
-fn tags_from_sources(entries: &[MemoryEntry], ids: &[&String]) -> std::collections::VecDeque<String> {
+fn tags_from_sources(
+    entries: &[MemoryEntry],
+    ids: &[&String],
+) -> std::collections::VecDeque<String> {
     let mut tags = std::collections::VecDeque::new();
     for id in ids {
         if let Some(e) = entries.iter().find(|e| &e.id == *id) {

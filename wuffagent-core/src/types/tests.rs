@@ -56,7 +56,8 @@ fn message_with_image_serializes_content_parts() {
 #[test]
 fn image_only_message_omits_empty_text_part() {
     let url = "data:image/png;base64,AAAA";
-    let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&msg_with_image("", url)).unwrap()).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&msg_with_image("", url)).unwrap()).unwrap();
     let parts = v["content"].as_array().unwrap();
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0]["type"], "image_url");

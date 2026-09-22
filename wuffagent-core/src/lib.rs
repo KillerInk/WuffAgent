@@ -38,23 +38,23 @@
 //!   `usage` depends only on `config`/`types`, so no cycle.
 //! - No circular dependencies exist between top-level modules.
 
-pub mod types;
+pub mod agents;
 pub mod client;
 pub mod config;
 pub mod config_types;
+pub mod llm;
+pub mod memory;
 pub mod server;
 pub mod sessions;
 pub mod tools;
-pub mod agents;
-pub mod memory;
 pub mod trimming;
-pub mod llm;
+pub mod types;
 pub mod usage;
 
 // Common UI-facing types re-exported for convenient access from egui consumers.
-pub use types::{AppEvent, AppStatus, ChatMessage, MessageKind, ReasoningEffort};
+pub use agents::AgentEngine;
 pub use client::ChatClient;
 pub use config::Config;
 pub use server::ServerManager;
 pub use tools::ToolManager;
-pub use agents::AgentEngine;
+pub use types::{AppEvent, AppStatus, ChatMessage, MessageKind, ReasoningEffort};

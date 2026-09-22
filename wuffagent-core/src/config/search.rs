@@ -81,9 +81,9 @@ impl SearchBackend {
         // A configured/selected SearXNG backend picks up the env URL override.
         match &backend {
             SearchBackend::SearXNG { .. } => match std::env::var("WUFFAGENT_SEARXNG_URL") {
-                Ok(url) if !url.trim().is_empty() => {
-                    SearchBackend::SearXNG { base_url: url.trim().to_string() }
-                }
+                Ok(url) if !url.trim().is_empty() => SearchBackend::SearXNG {
+                    base_url: url.trim().to_string(),
+                },
                 _ => backend,
             },
             other => other.clone(),

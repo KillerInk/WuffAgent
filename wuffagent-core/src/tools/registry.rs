@@ -92,11 +92,13 @@ impl ToolRegistry {
                     function: crate::tools::types::ToolFunctionSpec {
                         name: e.tool.name().to_string(),
                         description: e.tool.description().to_string(),
-                        parameters: schema.input_type.unwrap_or(crate::tools::types::JsonSchema {
-                            type_name: "object".to_string(),
-                            properties: None,
-                            required: vec![],
-                        }),
+                        parameters: schema
+                            .input_type
+                            .unwrap_or(crate::tools::types::JsonSchema {
+                                type_name: "object".to_string(),
+                                properties: None,
+                                required: vec![],
+                            }),
                     },
                 }
             })
@@ -113,7 +115,11 @@ impl ToolRegistry {
                 continue;
             }
             let entries = std::fs::read_dir(path).map_err(|e| {
-                ToolError::PluginLoad(format!("Cannot read discovery path '{}': {}", path.display(), e))
+                ToolError::PluginLoad(format!(
+                    "Cannot read discovery path '{}': {}",
+                    path.display(),
+                    e
+                ))
             })?;
             for entry in entries {
                 let entry = entry.map_err(ToolError::Io)?;

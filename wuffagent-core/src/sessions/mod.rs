@@ -27,7 +27,9 @@ pub fn load_session(dir: &Path, id: &str) -> Option<Session> {
     let path = dir.join(format!("{}.json", id));
     if path.exists() {
         if let Ok(bytes) = fs::read(&path) {
-            if bytes.len() > ENCRYPTION_MARKER.len() && &bytes[..ENCRYPTION_MARKER.len()] == ENCRYPTION_MARKER {
+            if bytes.len() > ENCRYPTION_MARKER.len()
+                && &bytes[..ENCRYPTION_MARKER.len()] == ENCRYPTION_MARKER
+            {
                 // Encrypted file — return None to signal that decrypt_and_load_session is needed
                 return None;
             }
@@ -63,9 +65,8 @@ pub fn encrypt_session(dir: &Path, session: &Session, key: &[u8]) -> Result<(), 
         .map_err(|e| anyhow::anyhow!("encryption failed: {}", e))?;
 
     // Layout: [ENCRYPTION_MARKER (7 bytes)][12-byte nonce][ciphertext + tag]
-    let mut encoded = Vec::with_capacity(
-        ENCRYPTION_MARKER.len() + nonce_bytes.len() + ciphertext.len(),
-    );
+    let mut encoded =
+        Vec::with_capacity(ENCRYPTION_MARKER.len() + nonce_bytes.len() + ciphertext.len());
     encoded.extend_from_slice(ENCRYPTION_MARKER);
     encoded.extend_from_slice(&nonce_bytes);
     encoded.extend_from_slice(&ciphertext);
@@ -118,7 +119,11 @@ pub fn save_session_atomic(dir: &Path, session: &Session) -> Result<(), anyhow::
 }
 
 /// Save a session, encrypting it if the key is provided.
-pub fn save_session_encrypted(dir: &Path, session: &Session, key: &[u8]) -> Result<(), anyhow::Error> {
+pub fn save_session_encrypted(
+    dir: &Path,
+    session: &Session,
+    key: &[u8],
+) -> Result<(), anyhow::Error> {
     fs::create_dir_all(dir)?;
     encrypt_session(dir, session, key)?;
     Ok(())
@@ -163,8 +168,8 @@ pub fn delete_session(dir: &Path, id: &str) -> Result<(), String> {
 /// Clear all messages from a session while preserving the session itself.
 /// Returns true if the session was found and cleared, false otherwise.
 pub fn clear_session_messages(dir: &Path, id: &str) -> Result<(), anyhow::Error> {
-    let session = load_session(dir, id)
-        .ok_or_else(|| anyhow::anyhow!("session not found: {}", id))?;
+    let session =
+        load_session(dir, id).ok_or_else(|| anyhow::anyhow!("session not found: {}", id))?;
     let mut cleared = session;
     cleared.messages.clear();
     cleared.touch();
@@ -198,7 +203,11 @@ pub fn session_stats(dir: &Path) -> (usize, u64) {
 }
 
 /// Export a single session as a JSON file to the given output path.
-pub fn export_session(dir: &Path, session_id: &str, output_path: &Path) -> Result<(), anyhow::Error> {
+pub fn export_session(
+    dir: &Path,
+    session_id: &str,
+    output_path: &Path,
+) -> Result<(), anyhow::Error> {
     let session = load_session(dir, session_id)
         .ok_or_else(|| anyhow::anyhow!("session not found: {}", session_id))?;
     fs::create_dir_all(
@@ -215,8 +224,8 @@ pub fn export_session(dir: &Path, session_id: &str, output_path: &Path) -> Resul
 pub fn import_session(dir: &Path, input_path: &Path) -> Result<String, anyhow::Error> {
     let content = fs::read_to_string(input_path)
         .map_err(|e| anyhow::anyhow!("failed to read import file: {}", e))?;
-    let session: Session =
-        serde_json::from_str(&content).map_err(|e| anyhow::anyhow!("failed to parse session JSON: {}", e))?;
+    let session: Session = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("failed to parse session JSON: {}", e))?;
 
     // Generate a new ID by appending a timestamp suffix to avoid conflicts
     let new_id = format!(
@@ -315,13 +324,21 @@ mod tar_builder {
             let mut raw = *self;
             raw.checksum = [0u8; 8];
             let bytes = unsafe {
-                std::slice::from_raw_parts(&raw as *const Self as *const u8, std::mem::size_of::<Self>())
+                std::slice::from_raw_parts(
+                    &raw as *const Self as *const u8,
+                    std::mem::size_of::<Self>(),
+                )
             };
             bytes.iter().map(|&b| b as u32).sum()
         }
 
         fn as_bytes(&self) -> &[u8] {
-            unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, std::mem::size_of::<Self>()) }
+            unsafe {
+                std::slice::from_raw_parts(
+                    self as *const Self as *const u8,
+                    std::mem::size_of::<Self>(),
+                )
+            }
         }
     }
 

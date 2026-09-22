@@ -32,10 +32,16 @@ fn test_suggestion_serialization() {
     let json = serde_json::to_string(&s).unwrap();
     let parsed: ImprovementSuggestion = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.agent_name, "coder");
-    assert_eq!(parsed.prompt_change, Some("You are a coding agent.".to_string()));
+    assert_eq!(
+        parsed.prompt_change,
+        Some("You are a coding agent.".to_string())
+    );
     // I2: the wider fields survive a round trip.
     assert_eq!(parsed.allowed_tools, Some(vec!["file_io".to_string()]));
-    assert_eq!(parsed.reasoning_effort, Some(crate::types::ReasoningEffort::Medium));
+    assert_eq!(
+        parsed.reasoning_effort,
+        Some(crate::types::ReasoningEffort::Medium)
+    );
     assert_eq!(parsed.task_timeout_ms, Some(90_000));
     assert_eq!(parsed.evidence.len(), 1);
 }
@@ -193,10 +199,12 @@ struct CaptureLlm {
 #[async_trait::async_trait]
 impl LlmClient for CaptureLlm {
     async fn complete(&self, messages: &[Message]) -> Result<String, String> {
-        self.prompts
-            .lock()
-            .unwrap()
-            .push(messages.first().map(|m| m.content.clone()).unwrap_or_default());
+        self.prompts.lock().unwrap().push(
+            messages
+                .first()
+                .map(|m| m.content.clone())
+                .unwrap_or_default(),
+        );
         Ok(self.response.clone())
     }
 
@@ -334,7 +342,10 @@ async fn test_evidence_attached_to_suggestions() {
     .await
     .unwrap();
     assert_eq!(suggestions.len(), 1);
-    assert!(!suggestions[0].evidence.is_empty(), "evidence must be attached");
+    assert!(
+        !suggestions[0].evidence.is_empty(),
+        "evidence must be attached"
+    );
     assert!(
         suggestions[0].evidence[0].starts_with("Trajectory:"),
         "first evidence line is the trajectory: {:?}",
@@ -387,14 +398,21 @@ async fn test_wider_fields_parse_and_default() {
     .unwrap();
     assert_eq!(suggestions.len(), 1);
     let s = &suggestions[0];
-    assert_eq!(s.allowed_tools, Some(vec!["file_io".to_string(), "shell".to_string()]));
-    assert_eq!(s.reasoning_effort, Some(crate::types::ReasoningEffort::High));
+    assert_eq!(
+        s.allowed_tools,
+        Some(vec!["file_io".to_string(), "shell".to_string()])
+    );
+    assert_eq!(
+        s.reasoning_effort,
+        Some(crate::types::ReasoningEffort::High)
+    );
     assert!(s.shell_config.is_some() && s.shell_config.as_ref().unwrap().shell_enabled);
     assert_eq!(s.handoff_targets, Some(vec!["reviewer".to_string()]));
     assert_eq!(s.task_timeout_ms, Some(120_000));
 
     // Old-format response (no new fields) → all None.
-    let old_json = r#"[{"agent_name":"coder","prompt_change":"p","rationale":"r","new_agents":[]}]"#;
+    let old_json =
+        r#"[{"agent_name":"coder","prompt_change":"p","rationale":"r","new_agents":[]}]"#;
     let llm2 = Arc::new(CaptureLlm {
         response: old_json.to_string(),
         prompts: Arc::new(Mutex::new(Vec::new())),
@@ -476,7 +494,12 @@ fn test_evidence_gate_no_state_with_lessons() {
 fn test_evidence_gate_ignores_non_lesson_entries() {
     let (manager, _dir) = fresh_manager();
     manager
-        .add(MemoryEntry::new(MemoryType::Fact, "A fact is not evidence", "agent", &[]))
+        .add(MemoryEntry::new(
+            MemoryType::Fact,
+            "A fact is not evidence",
+            "agent",
+            &[],
+        ))
         .unwrap();
     assert!(
         !manager.has_new_improvement_evidence(),
@@ -556,7 +579,12 @@ fn test_improvement_state_corrupt_file_tolerated() {
     };
     let manager = MemoryManager::new(config).unwrap();
     manager
-        .add(MemoryEntry::new(MemoryType::Lesson, "A lesson", "agent", &[]))
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "A lesson",
+            "agent",
+            &[],
+        ))
         .unwrap();
 
     // Corrupt state -> treated as "no check recorded" -> lessons are evidence.
@@ -579,7 +607,10 @@ fn test_improvement_state_corrupt_file_tolerated() {
 fn marker_for(agent: &str, days_ago: i64) -> MemoryEntry {
     let mut e = MemoryEntry::new(
         MemoryType::Fact,
-        &format!("Prompt for agent '{}' changed via approved improvement.", agent),
+        &format!(
+            "Prompt for agent '{}' changed via approved improvement.",
+            agent
+        ),
         "improvement-review",
         &["improvement-applied", &format!("agent:{}", agent)],
     );
@@ -613,14 +644,25 @@ async fn test_effect_check_includes_outcomes_since_marker() {
         .unwrap();
 
     let llm = Arc::new(CaptureLlm {
-        response: r#"[{"agent_name": "coder", "prompt_change": "p", "rationale": "r"}]"#.to_string(),
+        response: r#"[{"agent_name": "coder", "prompt_change": "p", "rationale": "r"}]"#
+            .to_string(),
         prompts: prompts.clone(),
     });
-    let stats = RunStats { tool_calls: 1, tool_errors: 0, verification_attempts: 0 };
-    let suggestions =
-        suggest_improvements(&manager, &test_agent_config(), "task", "result", &stats, llm.as_ref())
-            .await
-            .unwrap();
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+    let suggestions = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(suggestions.len(), 1);
     let prompt = &prompts.lock().unwrap()[0];
@@ -634,12 +676,23 @@ async fn test_effect_check_includes_outcomes_since_marker() {
         "prompt: {}",
         prompt
     );
-    assert!(prompt.contains("tests still red after the change"), "prompt: {}", prompt);
+    assert!(
+        prompt.contains("tests still red after the change"),
+        "prompt: {}",
+        prompt
+    );
     assert!(prompt.contains("result rated poorly"), "prompt: {}", prompt);
-    assert!(prompt.contains("you may propose reverting the prompt"), "prompt: {}", prompt);
+    assert!(
+        prompt.contains("you may propose reverting the prompt"),
+        "prompt: {}",
+        prompt
+    );
     // The effect-check input is attached as deterministic evidence.
     assert!(
-        suggestions[0].evidence.iter().any(|e| e.starts_with("Effect check:")),
+        suggestions[0]
+            .evidence
+            .iter()
+            .any(|e| e.starts_with("Effect check:")),
         "evidence: {:?}",
         suggestions[0].evidence
     );
@@ -658,12 +711,25 @@ async fn test_effect_check_absent_without_marker() {
         ))
         .unwrap();
 
-    let llm = Arc::new(CaptureLlm { response: "[]".to_string(), prompts: prompts.clone() });
-    let stats = RunStats { tool_calls: 1, tool_errors: 0, verification_attempts: 0 };
-    let suggestions =
-        suggest_improvements(&manager, &test_agent_config(), "task", "result", &stats, llm.as_ref())
-            .await
-            .unwrap();
+    let llm = Arc::new(CaptureLlm {
+        response: "[]".to_string(),
+        prompts: prompts.clone(),
+    });
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+    let suggestions = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
     assert!(suggestions.is_empty());
 
     let prompt = &prompts.lock().unwrap()[0];
@@ -696,12 +762,25 @@ async fn test_effect_check_marker_without_outcomes_shows_none_yet() {
     backdate(&mut old, 5);
     manager.add(old).unwrap();
 
-    let llm = Arc::new(CaptureLlm { response: "[]".to_string(), prompts: prompts.clone() });
-    let stats = RunStats { tool_calls: 1, tool_errors: 0, verification_attempts: 0 };
-    let suggestions =
-        suggest_improvements(&manager, &test_agent_config(), "task", "result", &stats, llm.as_ref())
-            .await
-            .unwrap();
+    let llm = Arc::new(CaptureLlm {
+        response: "[]".to_string(),
+        prompts: prompts.clone(),
+    });
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+    let suggestions = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
     assert!(suggestions.is_empty());
 
     let prompt = &prompts.lock().unwrap()[0];
@@ -737,12 +816,25 @@ async fn test_effect_check_excludes_outcomes_older_than_marker() {
     backdate(&mut old_outcome, 4);
     manager.add(old_outcome).unwrap();
 
-    let llm = Arc::new(CaptureLlm { response: "[]".to_string(), prompts: prompts.clone() });
-    let stats = RunStats { tool_calls: 1, tool_errors: 0, verification_attempts: 0 };
-    let suggestions =
-        suggest_improvements(&manager, &test_agent_config(), "task", "result", &stats, llm.as_ref())
-            .await
-            .unwrap();
+    let llm = Arc::new(CaptureLlm {
+        response: "[]".to_string(),
+        prompts: prompts.clone(),
+    });
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+    let suggestions = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
     assert!(suggestions.is_empty());
 
     let prompt = &prompts.lock().unwrap()[0];

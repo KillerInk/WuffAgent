@@ -9,8 +9,8 @@ use super::LlmClient;
 use crate::client::ChatClient;
 use crate::memory::{MemoryEntry, MemoryManager, MemoryType};
 use crate::tools::ToolManager;
-use crate::types::Message;
 use crate::trimming::ContextTrimming;
+use crate::types::Message;
 
 /// Minimum delay between LLM calls to prevent API rate-limiting (500ms).
 const LLM_RATE_LIMIT_DELAY: Duration = Duration::from_millis(500);
@@ -368,7 +368,11 @@ impl Agent {
     /// `ToolCallProgress` events (latest-tail semantics) which the UI renders
     /// in the live tool card. Returns a no-op sink when no UI channel is
     /// attached (tests, headless runs).
-    fn tool_progress_for(&self, tool_name: &str, call_id: &str) -> crate::tools::types::ToolProgress {
+    fn tool_progress_for(
+        &self,
+        tool_name: &str,
+        call_id: &str,
+    ) -> crate::tools::types::ToolProgress {
         match &self.event_tx {
             Some(tx) => {
                 let tx = std::sync::Arc::clone(tx);
@@ -504,10 +508,7 @@ impl Agent {
             // a session reload) sees the transition and why it happened.
             let marker = Message {
                 role: "user".to_string(),
-                content: format!(
-                    "[Handoff from '{}' to '{}'] {}",
-                    from, req.agent, req.task
-                ),
+                content: format!("[Handoff from '{}' to '{}'] {}", from, req.agent, req.task),
                 timestamp: crate::types::format_timestamp(),
                 tool_calls: None,
                 tool_call_id: None,
@@ -562,7 +563,9 @@ impl Agent {
         // its last occurrence rather than by a captured index.
         {
             let conv = self.client.conversation().lock().unwrap();
-            let turn_idx = conv.iter().rposition(|m| m.role == "user" && m.content == request);
+            let turn_idx = conv
+                .iter()
+                .rposition(|m| m.role == "user" && m.content == request);
             self.messages = match turn_idx {
                 Some(i) => conv.iter().skip(i).cloned().collect(),
                 // The turn's user message was trimmed away (extreme context
@@ -612,7 +615,10 @@ impl Agent {
     /// `query` is the user's current request; it makes memory injection query-aware.
     fn build_system_prompt(&self, query: &str) -> String {
         let mut prompt = if self.config.system_prompt.is_empty() {
-            format!("You are the '{}' agent. {}", self.config.name, self.config.description)
+            format!(
+                "You are the '{}' agent. {}",
+                self.config.name, self.config.description
+            )
         } else {
             self.config.system_prompt.clone()
         };
@@ -621,10 +627,14 @@ impl Agent {
         prompt.push_str(
             "\n\nYou have memory management tools (save_memory, update_memory, search_memory, consolidate_memories, delete_memory). Use them proactively:\n",
         );
-        prompt.push_str("- search_memory: Search memory before starting tasks and before saving anything new\n");
+        prompt.push_str(
+            "- search_memory: Search memory before starting tasks and before saving anything new\n",
+        );
         prompt.push_str("- save_memory: Save non-obvious facts, lessons, or decisions as you discover them during work\n");
         prompt.push_str("- update_memory: Refine an existing entry (by ID) instead of re-adding similar information\n");
-        prompt.push_str("- consolidate_memories: Merge related entries (by IDs) into one comprehensive entry\n");
+        prompt.push_str(
+            "- consolidate_memories: Merge related entries (by IDs) into one comprehensive entry\n",
+        );
         prompt.push_str("- delete_memory: Remove entries that turn out to be stale or wrong\n");
         prompt.push_str(&format!(
             "Tool responses include entry IDs - use them for updates, consolidation, and deletion. \
@@ -716,8 +726,11 @@ impl Agent {
     /// the trim removed and keeps store and request list in sync for every
     /// later turn (including after a session reload).
     fn reconcile_store(&self, messages: &[Message]) {
-        let projected: Vec<Message> =
-            messages.iter().filter(|m| Self::is_storable(m)).cloned().collect();
+        let projected: Vec<Message> = messages
+            .iter()
+            .filter(|m| Self::is_storable(m))
+            .cloned()
+            .collect();
         let conv = self.client.conversation();
         *conv.lock().unwrap() = projected;
     }
@@ -786,7 +799,11 @@ impl Agent {
         // Tool definitions for native function calling, filtered per-agent.
         let tool_defs: Option<Vec<crate::tools::ToolDefinition>> = {
             let defs = tool_manager.get_tool_definitions();
-            if defs.is_empty() { None } else { Some(defs) }
+            if defs.is_empty() {
+                None
+            } else {
+                Some(defs)
+            }
         };
 
         // Capture the turn's original request ONCE, before any verification
@@ -908,12 +925,18 @@ impl Agent {
                     // Target in char units: 50% of n_ctx tokens converted to
                     // chars via the client's calibrated chars-per-token ratio.
                     let target_chars = self.client.trim_target_chars();
-                    let removed = self.trimming
-                        .trim_messages(messages, target_chars, &self.config.trim_config);
+                    let removed = self.trimming.trim_messages(
+                        messages,
+                        target_chars,
+                        &self.config.trim_config,
+                    );
                     if removed > 0 {
                         tracing::info!(
                             "[AGENT] Agent '{}' trimmed {} messages (n_ctx={}, target_chars={})",
-                            self.config.name, removed, self.client.n_ctx(), target_chars
+                            self.config.name,
+                            removed,
+                            self.client.n_ctx(),
+                            target_chars
                         );
                     }
                     // Post-trim verification: the trim already truncates the largest
@@ -922,7 +945,8 @@ impl Agent {
                     if post_trim_total > target_chars {
                         tracing::warn!(
                             "[AGENT] Post-trim count {} > target {}",
-                            post_trim_total, target_chars
+                            post_trim_total,
+                            target_chars
                         );
                     }
                     // Reconcile the shared store with the trimmed request list.
@@ -947,11 +971,18 @@ impl Agent {
             // background at that point, so tools run while the model keeps
             // thinking. Results are collected in call order after the stream
             // ends (see the native tool-call block further down).
-            let pending_tool_runs: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<Result<String, String>>>>> =
-                Arc::new(Mutex::new(std::collections::HashMap::new()));
+            let pending_tool_runs: Arc<
+                Mutex<
+                    std::collections::HashMap<
+                        String,
+                        tokio::task::JoinHandle<Result<String, String>>,
+                    >,
+                >,
+            > = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
             let (assistant_msg, usage) = {
-                self.client.note_prompt_chars(crate::trimming::message_char_count(messages));
+                self.client
+                    .note_prompt_chars(crate::trimming::message_char_count(messages));
                 let mut attempt = 0usize;
                 loop {
                     attempt += 1;
@@ -1201,84 +1232,102 @@ impl Agent {
                         // enclosing future must stay Send).
                         let early_handle = pending_tool_runs.lock().unwrap().remove(&call.id);
                         let result_str: String = if let Some(handle) = early_handle {
-                                match handle.await {
-                                    Ok(Ok(s)) => s,
-                                    Ok(Err(bad_args)) => {
-                                        tracing::warn!("[AGENT] Bad args for '{}': {}", call.function.name, bad_args);
-                                        self.send_event(crate::types::AppEvent::ToolCallError {
-                                            tool_name: call.function.name.clone(),
-                                            call_id: call.id.clone(),
-                                            error: bad_args.clone(),
-                                            session_id: self.session_id(),
-                                        });
-                                        format!("Error: {}", bad_args)
-                                    }
-                                    Err(join_err) => {
-                                        let e = format!("tool task failed: {}", join_err);
-                                        self.send_event(crate::types::AppEvent::ToolCallError {
-                                            tool_name: call.function.name.clone(),
-                                            call_id: call.id.clone(),
-                                            error: e.clone(),
-                                            session_id: self.session_id(),
-                                        });
-                                        format!("Error: {}", e)
-                                    }
+                            match handle.await {
+                                Ok(Ok(s)) => s,
+                                Ok(Err(bad_args)) => {
+                                    tracing::warn!(
+                                        "[AGENT] Bad args for '{}': {}",
+                                        call.function.name,
+                                        bad_args
+                                    );
+                                    self.send_event(crate::types::AppEvent::ToolCallError {
+                                        tool_name: call.function.name.clone(),
+                                        call_id: call.id.clone(),
+                                        error: bad_args.clone(),
+                                        session_id: self.session_id(),
+                                    });
+                                    format!("Error: {}", bad_args)
                                 }
-                            } else {
-                                // Inline fallback: the stream ended while this
-                                // call was still the active one.
-                                self.send_event(crate::types::AppEvent::ToolCallStart {
-                                    tool_name: call.function.name.clone(),
-                                    call_id: call.id.clone(),
-                                    args_preview: crate::types::tool_args_summary(
-                                        &call.function.name,
-                                        &call.function.arguments,
-                                    ),
-                                    session_id: self.session_id(),
-                                });
-                                let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        tracing::warn!("[AGENT] Bad args for '{}': {}", call.function.name, e);
-                                        self.send_event(crate::types::AppEvent::ToolCallError {
-                                            tool_name: call.function.name.clone(),
-                                            call_id: call.id.clone(),
-                                            error: e.clone(),
-                                            session_id: self.session_id(),
-                                        });
-                                        let bad_args_msg = Message {
-                                            role: "tool".to_string(),
-                                            content: format!("Error: {}", e),
-                                            timestamp: crate::types::format_timestamp(),
-                                            tool_calls: None,
-                                            tool_call_id: Some(call.id.clone()),
-                                            reasoning_content: None,
-                                            image: None,
-                                        };
-                                        messages.push(bad_args_msg.clone());
-                                        self.record_in_store(&bad_args_msg);
-                                        continue;
-                                    }
-                                };
-                                let manager = tool_manager.clone();
-                                let progress = self.tool_progress_for(&call.function.name, &call.id);
-                                let tool_result = manager
-                                    .execute_with_progress(&call.function.name, params, &progress)
-                                    .await;
-                                // Tools must always return *something*: an empty result
-                                // string becomes an empty `role: "tool"` message, which
-                                // the model/server rejects.
-                                match tool_result {
-                                    Ok(output) => {
-                                        let s = format!("{}", output);
-                                        if s.trim().is_empty() { "(no output)".to_string() } else { s }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("[AGENT] Tool '{}' failed: {}", call.function.name, e);
-                                        format!("Error: {}", e)
-                                    }
+                                Err(join_err) => {
+                                    let e = format!("tool task failed: {}", join_err);
+                                    self.send_event(crate::types::AppEvent::ToolCallError {
+                                        tool_name: call.function.name.clone(),
+                                        call_id: call.id.clone(),
+                                        error: e.clone(),
+                                        session_id: self.session_id(),
+                                    });
+                                    format!("Error: {}", e)
+                                }
+                            }
+                        } else {
+                            // Inline fallback: the stream ended while this
+                            // call was still the active one.
+                            self.send_event(crate::types::AppEvent::ToolCallStart {
+                                tool_name: call.function.name.clone(),
+                                call_id: call.id.clone(),
+                                args_preview: crate::types::tool_args_summary(
+                                    &call.function.name,
+                                    &call.function.arguments,
+                                ),
+                                session_id: self.session_id(),
+                            });
+                            let params = match crate::tools::manager::parse_tool_args(
+                                &call.function.arguments,
+                            ) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "[AGENT] Bad args for '{}': {}",
+                                        call.function.name,
+                                        e
+                                    );
+                                    self.send_event(crate::types::AppEvent::ToolCallError {
+                                        tool_name: call.function.name.clone(),
+                                        call_id: call.id.clone(),
+                                        error: e.clone(),
+                                        session_id: self.session_id(),
+                                    });
+                                    let bad_args_msg = Message {
+                                        role: "tool".to_string(),
+                                        content: format!("Error: {}", e),
+                                        timestamp: crate::types::format_timestamp(),
+                                        tool_calls: None,
+                                        tool_call_id: Some(call.id.clone()),
+                                        reasoning_content: None,
+                                        image: None,
+                                    };
+                                    messages.push(bad_args_msg.clone());
+                                    self.record_in_store(&bad_args_msg);
+                                    continue;
                                 }
                             };
+                            let manager = tool_manager.clone();
+                            let progress = self.tool_progress_for(&call.function.name, &call.id);
+                            let tool_result = manager
+                                .execute_with_progress(&call.function.name, params, &progress)
+                                .await;
+                            // Tools must always return *something*: an empty result
+                            // string becomes an empty `role: "tool"` message, which
+                            // the model/server rejects.
+                            match tool_result {
+                                Ok(output) => {
+                                    let s = format!("{}", output);
+                                    if s.trim().is_empty() {
+                                        "(no output)".to_string()
+                                    } else {
+                                        s
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "[AGENT] Tool '{}' failed: {}",
+                                        call.function.name,
+                                        e
+                                    );
+                                    format!("Error: {}", e)
+                                }
+                            }
+                        };
                         // Early-started calls sent their ToolCallStart mid-stream;
                         // emit the completion in call order now.
                         self.send_event(crate::types::AppEvent::ToolCallComplete {
@@ -1330,7 +1379,9 @@ impl Agent {
                             ),
                             session_id: self.session_id(),
                         });
-                        let params = match crate::tools::manager::parse_tool_args(&call.function.arguments) {
+                        let params = match crate::tools::manager::parse_tool_args(
+                            &call.function.arguments,
+                        ) {
                             Ok(p) => p,
                             Err(e) => {
                                 self.send_event(crate::types::AppEvent::ToolCallError {
@@ -1350,7 +1401,11 @@ impl Agent {
                         let result_str = match tool_result {
                             Ok(output) => {
                                 let s = format!("{}", output);
-                                if s.trim().is_empty() { "(no output)".to_string() } else { s }
+                                if s.trim().is_empty() {
+                                    "(no output)".to_string()
+                                } else {
+                                    s
+                                }
                             }
                             Err(e) => format!("Error: {}", e),
                         };
@@ -1419,7 +1474,9 @@ impl Agent {
             }
             verification_attempts += 1;
 
-            let verification_result = self.verify_tool_outputs(messages, &original_request, &display_content, cancel_token).await;
+            let verification_result = self
+                .verify_tool_outputs(messages, &original_request, &display_content, cancel_token)
+                .await;
             match verification_result {
                 Ok(verdict) if verdict.verified => {
                     // S1: a pass that needed a retry is negative evidence for
@@ -1433,10 +1490,7 @@ impl Agent {
                             &original_request,
                         );
                     }
-                    tracing::info!(
-                        "[AGENT] Agent '{}' completed (verified)",
-                        self.config.name
-                    );
+                    tracing::info!("[AGENT] Agent '{}' completed (verified)", self.config.name);
                     self.send_event(crate::types::AppEvent::StreamComplete {
                         content: display_content.clone(),
                         usage: usage.clone(),
@@ -1483,8 +1537,7 @@ impl Agent {
         };
 
         // I1: record this run's tool-use trajectory for the improver.
-        self.run_stats =
-            Self::run_stats_since(messages, run_start_len, verification_attempts);
+        self.run_stats = Self::run_stats_since(messages, run_start_len, verification_attempts);
         Ok(outcome)
     }
 
@@ -1551,10 +1604,7 @@ impl Agent {
         // tool results from earlier turns; feeding those to the judge made it
         // return NEEDS_FIX for a perfectly complete answer to the current
         // request, which then re-asked the model after it had already finished.
-        let turn_start = messages
-            .iter()
-            .rposition(|m| m.role == "user")
-            .unwrap_or(0);
+        let turn_start = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
         let tool_outputs: Vec<String> = messages
             .iter()
             .skip(turn_start)
@@ -1662,11 +1712,24 @@ impl Agent {
     /// S1: store a non-first-try verification outcome as a lesson memory.
     /// No-op when the agent has no memory manager; store failures are logged,
     /// never fatal to the run.
-    fn store_verification_outcome(&self, verdict: &str, attempts: u32, judge_reason: &str, task: &str) {
+    fn store_verification_outcome(
+        &self,
+        verdict: &str,
+        attempts: u32,
+        judge_reason: &str,
+        task: &str,
+    ) {
         let Some(memory) = &self.memory else {
             return;
         };
-        match record_verification_outcome(memory, &self.config.name, verdict, attempts, judge_reason, task) {
+        match record_verification_outcome(
+            memory,
+            &self.config.name,
+            verdict,
+            attempts,
+            judge_reason,
+            task,
+        ) {
             Ok(true) => tracing::debug!(
                 "[AGENT] Stored verification outcome for '{}' ({})",
                 self.config.name,
@@ -1701,7 +1764,11 @@ impl Agent {
                                     other => other.to_string(),
                                 };
                                 calls.push(ToolCall {
-                                    id: v.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
+                                    id: v
+                                        .get("id")
+                                        .and_then(|i| i.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
                                     _call_type: "function".to_string(),
                                     function: crate::agents::agent::ToolFunction {
                                         name: name.to_string(),
@@ -1744,15 +1811,27 @@ impl Agent {
                         start = Some(i);
                         start_type = Some(c);
                     }
-                    if c == '[' { bracket_depth += 1; }
-                    if c == '{' { brace_depth += 1; }
+                    if c == '[' {
+                        bracket_depth += 1;
+                    }
+                    if c == '{' {
+                        brace_depth += 1;
+                    }
                 }
                 c if !in_string && (c == ']' || c == '}') => {
-                    if c == ']' { bracket_depth -= 1; }
-                    if c == '}' { brace_depth -= 1; }
+                    if c == ']' {
+                        bracket_depth -= 1;
+                    }
+                    if c == '}' {
+                        brace_depth -= 1;
+                    }
                     // Only close a region if we're closing the matching depth-0 opener.
-                    if bracket_depth < 0 { bracket_depth = 0; }
-                    if brace_depth < 0 { brace_depth = 0; }
+                    if bracket_depth < 0 {
+                        bracket_depth = 0;
+                    }
+                    if brace_depth < 0 {
+                        brace_depth = 0;
+                    }
                     if bracket_depth == 0 && brace_depth == 0 {
                         if let Some(s) = start {
                             if start_type == Some('[') {
@@ -1810,7 +1889,9 @@ impl Agent {
                 }
 
                 let lines: Vec<&str> = block.lines().collect();
-                let cmd_line = if lines.len() > 1 && (lines[0] == "bash" || lines[0] == "sh" || lines[0] == "shell") {
+                let cmd_line = if lines.len() > 1
+                    && (lines[0] == "bash" || lines[0] == "sh" || lines[0] == "shell")
+                {
                     lines[1..].join("\n").trim().to_string()
                 } else {
                     block.trim().to_string()
@@ -1864,8 +1945,7 @@ impl Agent {
                         // grep [-flags] pattern [path]
                         if let Some(pattern) = args_parts.first() {
                             let path = args_parts.get(1).copied().unwrap_or(".");
-                            let is_regex =
-                                raw_parts.iter().any(|p| *p == "-E" || *p == "-P");
+                            let is_regex = raw_parts.iter().any(|p| *p == "-E" || *p == "-P");
                             let case_sensitive = !raw_parts.iter().any(|p| *p == "-i");
                             emit_tool(
                                 "search_content",
@@ -1885,8 +1965,7 @@ impl Agent {
                     }
                     "mkdir" => {
                         let path = args_parts.first().copied().unwrap_or(".");
-                        let recursive =
-                            raw_parts.iter().any(|p| *p == "-p" || *p == "--parents");
+                        let recursive = raw_parts.iter().any(|p| *p == "-p" || *p == "--parents");
                         emit_tool(
                             "mkdir",
                             serde_json::json!({ "path": path, "recursive": recursive }),
@@ -1895,7 +1974,10 @@ impl Agent {
                     "rm" => {
                         for path in &args_parts {
                             let recursive = raw_parts.iter().any(|p| {
-                                *p == "-r" || *p == "-R" || *p == "-rf" || *p == "-fr"
+                                *p == "-r"
+                                    || *p == "-R"
+                                    || *p == "-rf"
+                                    || *p == "-fr"
                                     || *p == "--recursive"
                             });
                             emit_tool(

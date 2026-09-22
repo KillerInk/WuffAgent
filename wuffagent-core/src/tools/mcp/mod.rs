@@ -46,12 +46,14 @@ pub enum McpError {
 }
 
 pub use client::McpClient;
-pub use manager::{McpManager, McpServerSnapshot, McpServerState, McpServerStatus, McpToolSnapshot};
-pub use tool::{mcp_tool_name, sanitize_name_part, value_to_json_schema, McpTool, MCP_TOOL_PREFIX};
 pub use jsonrpc::{
     parse_call_result, parse_tools_list, CallToolResult, JsonRpcError, JsonRpcRequest,
     JsonRpcResponse, McpContent, McpToolInfo, PROTOCOL_VERSION,
 };
+pub use manager::{
+    McpManager, McpServerSnapshot, McpServerState, McpServerStatus, McpToolSnapshot,
+};
+pub use tool::{mcp_tool_name, sanitize_name_part, value_to_json_schema, McpTool, MCP_TOOL_PREFIX};
 pub use transport_http::HttpTransport;
 pub use transport_stdio::StdioTransport;
 
@@ -172,7 +174,10 @@ for line in sys.stdin:
 
         // Unknown tool → JSON-RPC error from the server.
         let unknown = client.call_tool("nope", json!({})).await;
-        assert!(matches!(unknown, Err(McpError::JsonRpc { code: -32602, .. })));
+        assert!(matches!(
+            unknown,
+            Err(McpError::JsonRpc { code: -32602, .. })
+        ));
 
         client.disconnect().await;
         // Disconnect is idempotent (kill + wait happens only once).
@@ -185,10 +190,7 @@ for line in sys.stdin:
             eprintln!("python not available, skipping MCP manager integration test");
             return;
         };
-        let registry = Arc::new(ToolRegistry::new(
-            Vec::new(),
-            Arc::new(TracingToolLogger),
-        ));
+        let registry = Arc::new(ToolRegistry::new(Vec::new(), Arc::new(TracingToolLogger)));
         let manager = McpManager::new(registry.clone());
 
         manager
@@ -241,7 +243,9 @@ for line in sys.stdin:
         }
 
         // Disable one tool → unregistered; re-enable → registered.
-        manager.set_tool_enabled("mock", "fail_tool", false).unwrap();
+        manager
+            .set_tool_enabled("mock", "fail_tool", false)
+            .unwrap();
         assert!(registry.get("mcp__mock__fail_tool").is_none());
         manager.set_tool_enabled("mock", "fail_tool", true).unwrap();
         assert!(registry.get("mcp__mock__fail_tool").is_some());

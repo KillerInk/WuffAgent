@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::mpsc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -169,9 +169,9 @@ impl AgentEngine {
         chat_config.name = tool_policy.agent_name.clone();
         chat_config.system_prompt = system_prompt.to_string();
         chat_config.task_timeout_ms = 0; // no timeout for chat
-        // Apply the selected profile's tool policy. An empty allowed_tools means
-        // the chat agent gets all available tools (the old default); the shell
-        // config lets a profile like "coder" restrict the shell to its allowlist.
+                                         // Apply the selected profile's tool policy. An empty allowed_tools means
+                                         // the chat agent gets all available tools (the old default); the shell
+                                         // config lets a profile like "coder" restrict the shell to its allowlist.
         chat_config.allowed_tools = tool_policy.allowed_tools.clone();
         chat_config.shell_config = tool_policy.shell_config.clone();
         // Carry over the profile's reasoning effort and trim config so the
@@ -228,7 +228,8 @@ impl AgentEngine {
 
         // Post-task: throttled LLM memory maintenance + optional self-improvement
         // suggestions. Both are opt-in via MemoryConfig and never fail the task.
-        self.post_task_maintenance(&maintenance_config, request, &result, agent.run_stats()).await;
+        self.post_task_maintenance(&maintenance_config, request, &result, agent.run_stats())
+            .await;
 
         result
     }

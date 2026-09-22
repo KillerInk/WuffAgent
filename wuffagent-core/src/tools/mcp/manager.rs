@@ -282,7 +282,10 @@ impl McpManager {
     /// Connect: handshake → `tools/list` → register enabled tools.
     /// Replaces any previous connection for the server.
     pub async fn connect_async(&self, name: &str) -> Result<usize, McpError> {
-        if self.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return Err(McpError::Other("MCP manager is shutting down".to_string()));
         }
         let config = self.get_config(name)?;
@@ -294,8 +297,21 @@ impl McpManager {
         }
 
         let client = match &config.transport {
-            McpTransport::Stdio { command, args, env, working_dir } => {
-                McpClient::connect_stdio(name, command, args, env, working_dir.as_deref(), config.timeout_secs).await
+            McpTransport::Stdio {
+                command,
+                args,
+                env,
+                working_dir,
+            } => {
+                McpClient::connect_stdio(
+                    name,
+                    command,
+                    args,
+                    env,
+                    working_dir.as_deref(),
+                    config.timeout_secs,
+                )
+                .await
             }
             McpTransport::Http { url, headers } => {
                 McpClient::connect_http(name, url, headers, config.timeout_secs).await
@@ -330,9 +346,9 @@ impl McpManager {
         // per-tool enable flags the user set earlier.
         let (old_client, previous_flags) = {
             let mut servers = self.inner.servers.write().unwrap();
-            let state = servers
-                .get_mut(name)
-                .ok_or_else(|| McpError::Other(format!("server '{name}' removed during connect")))?;
+            let state = servers.get_mut(name).ok_or_else(|| {
+                McpError::Other(format!("server '{name}' removed during connect"))
+            })?;
             let old = state.client.take();
             let flags = std::mem::take(&mut state.tool_enabled);
             (old, flags)
@@ -359,7 +375,9 @@ impl McpManager {
                 state.tools = tools;
                 state.tool_enabled = new_flags;
                 state.client = Some(client);
-                state.status = McpServerStatus::Connected { tool_count: registered };
+                state.status = McpServerStatus::Connected {
+                    tool_count: registered,
+                };
             }
         }
         tracing::info!(target: "mcp", server = name, tools = registered, "MCP server connected");
@@ -413,14 +431,15 @@ impl McpManager {
                 .ok_or_else(|| McpError::NotConnected(server.to_string()))?;
             state.client.clone()
         };
-        let client = client
-            .ok_or_else(|| McpError::NotConnected(server.to_string()))?;
+        let client = client.ok_or_else(|| McpError::NotConnected(server.to_string()))?;
         let result = client.call_tool(tool, arguments).await;
         match &result {
             Ok(r) if r.is_error => {
                 tracing::warn!(target: "mcp", server, tool, "MCP tool call reported error")
             }
-            Err(e) => tracing::warn!(target: "mcp", server, tool, error = %e, "MCP tool call failed"),
+            Err(e) => {
+                tracing::warn!(target: "mcp", server, tool, error = %e, "MCP tool call failed")
+            }
             _ => {}
         }
         result
@@ -466,7 +485,9 @@ impl McpManager {
         }
         state.tools = tools;
         state.tool_enabled = new_flags;
-        state.status = McpServerStatus::Connected { tool_count: registered };
+        state.status = McpServerStatus::Connected {
+            tool_count: registered,
+        };
         Ok(registered)
     }
 
@@ -547,7 +568,12 @@ impl McpManager {
     /// Enable or disable one tool: registers or unregisters it in the shared
     /// registry. Synchronous and cheap — safe to call directly from the UI
     /// thread.
-    pub fn set_tool_enabled(&self, server: &str, tool: &str, enabled: bool) -> Result<(), McpError> {
+    pub fn set_tool_enabled(
+        &self,
+        server: &str,
+        tool: &str,
+        enabled: bool,
+    ) -> Result<(), McpError> {
         let info = {
             let mut servers = self.inner.servers.write().unwrap();
             let state = servers
@@ -626,7 +652,11 @@ impl McpManager {
             .spawn(move || {
                 // Kill all child processes while the runtime still runs.
                 rt.block_on(async move {
-                    let _ = tokio::time::timeout(Duration::from_secs(5), manager.disconnect_all_async()).await;
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        manager.disconnect_all_async(),
+                    )
+                    .await;
                 });
                 // Dropping the last runtime handle waits for worker tasks
                 // (the stdio reader tasks exit once their stdout hits EOF).
@@ -639,7 +669,9 @@ impl McpManager {
             let manager_fb = self.clone();
             tracing::warn!(target: "mcp", error = %e, "Failed to start MCP shutdown thread; dropping runtime here");
             rt_for_fallback.block_on(async move {
-                let _ = tokio::time::timeout(Duration::from_secs(2), manager_fb.disconnect_all_async()).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(2), manager_fb.disconnect_all_async())
+                        .await;
             });
             drop(rt_for_fallback);
         }

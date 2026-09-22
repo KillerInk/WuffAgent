@@ -77,7 +77,11 @@ pub fn save_session(
                 // Cap backoff at 1s to avoid long freezes on persistent failures
                 let backoff_ms = (50u64.pow(retries as u32)).min(1000);
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                tracing::error!("Session save attempt {} failed: {}, retrying...", retries, e);
+                tracing::error!(
+                    "Session save attempt {} failed: {}, retrying...",
+                    retries,
+                    e
+                );
             }
             Err(e) => {
                 // All retries exhausted — enqueue for later retry and signal UI
@@ -107,9 +111,7 @@ pub fn load_session(
     // Repair legacy files in place (extract stray system messages into the
     // session's prompt field, drop duplicates and empty placeholders).
     session.sanitize();
-    let mut conv = conversation
-        .lock()
-        .ok()?;
+    let mut conv = conversation.lock().ok()?;
     *conv = session.messages.clone();
     if !session.system_prompt.is_empty() {
         *system_prompt = session.system_prompt.clone();
@@ -166,10 +168,7 @@ pub fn retry_pending_saves(
 
 /// Returns true if there is a pending save failure notification to show.
 pub fn has_save_failure(save_failed: &Arc<Mutex<bool>>) -> bool {
-    save_failed
-        .lock()
-        .map(|m| *m)
-        .unwrap_or(false)
+    save_failed.lock().map(|m| *m).unwrap_or(false)
 }
 
 /// Clear the save failure flag (call after a successful save or user dismissal).
@@ -187,10 +186,7 @@ pub fn clear_save_queue(save_queue: &Arc<Mutex<VecDeque<()>>>) {
 }
 
 /// Trim the conversation to the given max_messages, preserving the system message.
-pub fn trim_conversation(
-    conversation: &Arc<Mutex<Vec<Message>>>,
-    max_messages: usize,
-) {
+pub fn trim_conversation(conversation: &Arc<Mutex<Vec<Message>>>, max_messages: usize) {
     let mut conv = conversation.lock().unwrap();
     let initial_len = conv.len();
     if initial_len <= max_messages {
@@ -200,7 +196,11 @@ pub fn trim_conversation(
     // request-build time). Protect a leading system message only if one is
     // actually present at index 0 — tool results mislabelled "system" further
     // back must remain removable, otherwise trimming keeps a huge prefix.
-    let keep_from = if conv.first().map(|m| m.role.as_str()) == Some("system") { 1 } else { 0 };
+    let keep_from = if conv.first().map(|m| m.role.as_str()) == Some("system") {
+        1
+    } else {
+        0
+    };
     let trim_at = conv.len().saturating_sub(max_messages);
     if trim_at > keep_from {
         conv.drain(keep_from..trim_at);

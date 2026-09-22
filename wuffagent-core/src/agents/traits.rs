@@ -22,4 +22,3 @@ pub enum AgentError {
     #[error("Internal error: {0}")]
     Internal(String),
 }
-
