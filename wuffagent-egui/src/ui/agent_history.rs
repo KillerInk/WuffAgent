@@ -1,4 +1,4 @@
-//! Cross-directory prompt-history helpers for the agent editor and the
+﻿//! Cross-directory prompt-history helpers for the agent editor and the
 //! improvements panel (F4 UI).
 //!
 //! `AgentManager` keeps snapshots in `<primary>/history/`. Because the F3
@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agents::config::{AgentConfig, AgentManager};
+use wuffagent_core::agents::config::{AgentConfig, AgentManager};
 
 /// One prompt-history snapshot, tagged with the agents directory that owns
 /// it (a revert must go through a manager bound to that directory).
@@ -90,7 +90,7 @@ pub fn revert(
     dir: &Path,
     name: &str,
     entry: &HistoryEntry,
-) -> Result<AgentConfig, crate::agents::AgentError> {
+) -> Result<AgentConfig, wuffagent_core::agents::AgentError> {
     AgentManager::new(dir.to_path_buf()).revert_agent(name, &entry.path)
 }
 

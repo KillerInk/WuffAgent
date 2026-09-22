@@ -1,7 +1,7 @@
-use eframe::egui;
+﻿use eframe::egui;
 
 use super::state::ChatApp;
-use crate::types::AppStatus;
+use wuffagent_core::types::AppStatus;
 use super::theme::Theme;
 
 impl ChatApp {

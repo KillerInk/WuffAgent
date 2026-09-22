@@ -1,11 +1,11 @@
-use eframe::egui;
+﻿use eframe::egui;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
-use crate::memory::{
+use wuffagent_core::config::Config;
+use wuffagent_core::memory::{
     InjectionMode, MaintenanceProgress, MaintenanceReport, MemoryConfig, MemoryEntry, MemoryManager,
 };
 use super::theme::Theme;

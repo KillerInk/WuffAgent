@@ -2,8 +2,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::agents::config::{AgentConfig, AgentManager};
-use crate::tools::ToolManager;
+use wuffagent_core::agents::config::{AgentConfig, AgentManager};
+use wuffagent_core::tools::ToolManager;
 use super::agent_history;
 use super::theme::Theme;
 
@@ -21,7 +21,7 @@ pub struct AgentConfigDialog {
     system_prompt: String,
     enabled: bool,
     /// Reasoning effort for this agent (Off = inherit the global toggle).
-    reasoning_effort: crate::types::ReasoningEffort,
+    reasoning_effort: wuffagent_core::types::ReasoningEffort,
     /// Shell settings (persisted as the agent's `shell_config`).
     shell_enabled: bool,
     shell_type: String,
@@ -70,7 +70,7 @@ impl AgentConfigDialog {
             description: String::new(),
             system_prompt: String::new(),
             enabled: true,
-            reasoning_effort: crate::types::ReasoningEffort::default(),
+            reasoning_effort: wuffagent_core::types::ReasoningEffort::default(),
             shell_enabled: false,
             shell_type: "powershell".to_string(),
             shell_timeout_ms: 300_000,
@@ -227,7 +227,7 @@ impl AgentConfigDialog {
                                                 ui.checkbox(&mut self.enabled, "Enabled");
                                                 ui.separator();
                                                 ui.label("Reasoning effort:");
-                                                for variant in crate::types::ReasoningEffort::VARIANTS {
+                                                for variant in wuffagent_core::types::ReasoningEffort::VARIANTS {
                                                     ui.selectable_value(&mut self.reasoning_effort, variant, variant.name());
                                                 }
                                             });
@@ -531,7 +531,7 @@ impl AgentConfigDialog {
         self.description.clear();
         self.system_prompt.clear();
         self.enabled = true;
-        self.reasoning_effort = crate::types::ReasoningEffort::default();
+        self.reasoning_effort = wuffagent_core::types::ReasoningEffort::default();
         self.shell_enabled = false;
         self.shell_type = "powershell".to_string();
         self.shell_timeout_ms = 300_000;

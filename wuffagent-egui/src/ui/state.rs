@@ -1,13 +1,13 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::config::Config;
-use crate::server::ServerManager;
-use crate::tools::ToolManager;
+use wuffagent_core::config::Config;
+use wuffagent_core::server::ServerManager;
+use wuffagent_core::tools::ToolManager;
 
-use crate::types::{AppEvent, AppStatus};
+use wuffagent_core::types::{AppEvent, AppStatus};
 
 /// A tokio `Runtime` (held in an `Arc`) that is dropped on a dedicated plain
 /// OS thread.
@@ -77,14 +77,14 @@ pub struct ChatApp {
     /// Shared connection settings (URL + API key) used by every client in the
     /// app (session runtimes, bootstrap engine, non-streaming LLM adapter).
     /// One `update()` here propagates to all of them.
-    pub connection: Arc<crate::client::ConnectionSettings>,
+    pub connection: Arc<wuffagent_core::client::ConnectionSettings>,
     /// Last base_url synced to the shared connection settings (no-op guard).
     pub last_synced_base_url: String,
     pub tool_manager: Arc<ToolManager>,
-    pub agent_engine: Arc<crate::agents::AgentEngine>,
+    pub agent_engine: Arc<wuffagent_core::agents::AgentEngine>,
     /// Shared memory manager (single-writer discipline; all UI memory writes go
     /// through it). Shared with the agent engine and the memory tools.
-    pub memory_manager: Arc<crate::memory::MemoryManager>,
+    pub memory_manager: Arc<wuffagent_core::memory::MemoryManager>,
     /// Dedicated runtime for UI-triggered async memory work (maintenance pass).
     /// Wrapped in [`RuntimeOnThread`] so its `Drop` (a blocking wait) never
     /// runs on a thread inside another runtime's async context.
@@ -93,17 +93,17 @@ pub struct ChatApp {
     /// MCP I/O and mirrors connected servers' tools into the shared registry.
     /// Its own `shutdown()` (called in `Drop`) disconnects all servers and
     /// drops that runtime on a plain thread.
-    pub mcp_manager: Arc<crate::tools::mcp::McpManager>,
+    pub mcp_manager: Arc<wuffagent_core::tools::mcp::McpManager>,
 
     // ── Sessions ─────────────────────────────────────────────────────
     /// Per-session runtime state keyed by session ID.
-    pub session_store: HashMap<String, crate::sessions::SessionRuntime>,
+    pub session_store: HashMap<String, wuffagent_core::sessions::SessionRuntime>,
     /// ID of the currently selected session (None = no session selected).
     pub selected_session_id: Option<String>,
     /// The sessions sidebar widget (manages its own list + selection).
     pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
     /// Reasoning effort for reasoning models (Off = omitted from requests).
-    pub reasoning_effort: crate::types::ReasoningEffort,
+    pub reasoning_effort: wuffagent_core::types::ReasoningEffort,
 
     // ── Dialogs & panels (transient UI windows) ──────────────────────
     pub status: AppStatus,
@@ -143,7 +143,7 @@ pub struct ChatApp {
     /// when the session or its message set changes, so a per-frame redraw is an
     /// O(1) `Arc::clone` instead of a full deep clone of every message (which
     /// copies large tool outputs + base64 images and is the main lag).
-    pub display_snapshot: std::sync::Arc<Vec<crate::types::ChatMessage>>,
+    pub display_snapshot: std::sync::Arc<Vec<wuffagent_core::types::ChatMessage>>,
     /// Session id the snapshot belongs to (None = empty).
     pub snapshot_session: Option<String>,
     /// Message count the snapshot was built from.
@@ -167,15 +167,15 @@ impl ChatApp {
         config: Config,
         server: ServerManager,
         tool_manager: Arc<ToolManager>,
-        agent_engine: Arc<crate::agents::AgentEngine>,
-        connection: Arc<crate::client::ConnectionSettings>,
-        session_store: HashMap<String, crate::sessions::SessionRuntime>,
+        agent_engine: Arc<wuffagent_core::agents::AgentEngine>,
+        connection: Arc<wuffagent_core::client::ConnectionSettings>,
+        session_store: HashMap<String, wuffagent_core::sessions::SessionRuntime>,
         selected_session_id: Option<String>,
         event_tx: mpsc::Sender<AppEvent>,
         event_rx: mpsc::Receiver<AppEvent>,
-        memory_manager: Arc<crate::memory::MemoryManager>,
+        memory_manager: Arc<wuffagent_core::memory::MemoryManager>,
         memory_runtime: Arc<tokio::runtime::Runtime>,
-        mcp_manager: Arc<crate::tools::mcp::McpManager>,
+        mcp_manager: Arc<wuffagent_core::tools::mcp::McpManager>,
         auto_resume_reason: Option<String>,
     ) -> Self {
         let reasoning_effort = config.reasoning_effort;
@@ -225,7 +225,7 @@ impl ChatApp {
     }
 
     /// Centralized config save — all callers should use this.
-    pub fn save_config(&mut self) -> Result<(), crate::config::Error> {
+    pub fn save_config(&mut self) -> Result<(), wuffagent_core::config::Error> {
         self.config.reasoning_effort = self.reasoning_effort;
         self.config.save()
     }
@@ -263,7 +263,7 @@ impl ChatApp {
     }
 
     /// Get the selected session's chat area state (immutable view).
-    pub fn selected_chat_state(&self) -> Option<&crate::sessions::ChatAreaState> {
+    pub fn selected_chat_state(&self) -> Option<&wuffagent_core::sessions::ChatAreaState> {
         self.selected_session_id
             .as_ref()
             .and_then(|id| self.session_store.get(id))
@@ -271,7 +271,7 @@ impl ChatApp {
     }
 
     /// Get the client for the selected session (if any).
-    pub fn active_client(&self) -> Option<&crate::client::ChatClient> {
+    pub fn active_client(&self) -> Option<&wuffagent_core::client::ChatClient> {
         self.selected_session_id
             .as_ref()
             .and_then(|id| self.session_store.get(id))

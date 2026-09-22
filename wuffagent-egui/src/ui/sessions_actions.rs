@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 
 use super::state::ChatApp;
 
@@ -23,9 +23,9 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
 
     match action {
         PanelAction::Rename { id, new_name } => {
-            if let Some(mut s) = crate::sessions::load_session(&sessions_dir, &id) {
+            if let Some(mut s) = wuffagent_core::sessions::load_session(&sessions_dir, &id) {
                 s.name = new_name.clone();
-                let _ = crate::sessions::save_session(&sessions_dir, &s);
+                let _ = wuffagent_core::sessions::save_session(&sessions_dir, &s);
             }
             if let Some(runtime) = app.session_store.get_mut(&id) {
                 runtime.name = new_name;
@@ -33,9 +33,9 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             panel.refresh();
         }
         PanelAction::Create(name) => {
-            let session = crate::sessions::create_session(&sessions_dir, &name);
+            let session = wuffagent_core::sessions::create_session(&sessions_dir, &name);
 
-            let mut runtime = crate::sessions::SessionRuntime::create_from_config(
+            let mut runtime = wuffagent_core::sessions::SessionRuntime::create_from_config(
                 &app.config,
                 &app.connection,
                 &app.agent_engine,
@@ -61,7 +61,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             panel.refresh();
         }
         PanelAction::Delete(id) => {
-            match crate::sessions::delete_session(&sessions_dir, &id) {
+            match wuffagent_core::sessions::delete_session(&sessions_dir, &id) {
                 Ok(()) => {
                     app.session_store.remove(&id);
                     if app.selected_session_id.as_deref() == Some(&*id) {
@@ -92,7 +92,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             } else {
                 PathBuf::from(panel.export_path())
             };
-            match crate::sessions::export_session(&sessions_dir, &session_id, &output_path) {
+            match wuffagent_core::sessions::export_session(&sessions_dir, &session_id, &output_path) {
                 Ok(()) => panel.show_notification(&format!("Exported to {}", output_path.display()), true),
                 Err(e) => panel.show_notification(&format!("Export failed: {}", e), false),
             }
@@ -103,7 +103,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             } else {
                 PathBuf::from(panel.import_path())
             };
-            match crate::sessions::import_session(&sessions_dir, &input_path) {
+            match wuffagent_core::sessions::import_session(&sessions_dir, &input_path) {
                 Ok(new_id) => {
                     panel.show_notification(&format!("Imported session: {}", new_id), true);
                     panel.refresh();

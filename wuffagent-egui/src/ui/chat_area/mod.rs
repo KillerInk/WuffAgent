@@ -1,7 +1,7 @@
-use eframe::egui;
+﻿use eframe::egui;
 
 use super::state::ChatApp;
-use crate::types::{ChatMessage, MessageKind};
+use wuffagent_core::types::{ChatMessage, MessageKind};
 use super::theme::Theme;
 
 // ── TEMPORARY layout debugging (set WUFF_LAYOUT_DBG=1 to enable) ────────
@@ -91,7 +91,7 @@ impl ChatApp {
 
         // Live tool cards (small: name + args preview + output tail) — snapshotted
         // for the same reason as the streaming state above.
-        let active_tools: Vec<crate::sessions::ActiveTool> = self
+        let active_tools: Vec<wuffagent_core::sessions::ActiveTool> = self
             .selected_session_id
             .as_ref()
             .and_then(|sid| self.session_store.get(sid))
@@ -128,7 +128,7 @@ impl ChatApp {
                             }
                             let mut prev_day: Option<&str> = None;
                             for (i, msg) in messages.iter().enumerate() {
-                                if let Some(day) = crate::types::timestamp_day(&msg.timestamp) {
+                                if let Some(day) = wuffagent_core::types::timestamp_day(&msg.timestamp) {
                                     if prev_day != Some(day) {
                                         if prev_day.is_some() {
                                             Self::draw_date_separator(ui, day, &theme);
@@ -390,7 +390,7 @@ impl ChatApp {
     /// of the output so long commands are visible while they run. The card
     /// carries the same indent as a committed tool card, so the transcript
     /// doesn't jump when the live card is replaced by the persisted result.
-    fn draw_active_tool_card(&mut self, ui: &mut egui::Ui, tool: &crate::sessions::ActiveTool, theme: &Theme) {
+    fn draw_active_tool_card(&mut self, ui: &mut egui::Ui, tool: &wuffagent_core::sessions::ActiveTool, theme: &Theme) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             // Same indent as a committed tool card (28px avatar + 8px gap).
@@ -676,7 +676,7 @@ impl ChatApp {
                         }
 
                         // Timestamp — always visible, part of the layout flow.
-                        let ts = crate::types::timestamp_time(&message.timestamp);
+                        let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
                         if !ts.is_empty() {
                             ui.add(egui::Label::new(
                                 egui::RichText::new(ts).color(theme.text_dim).size(9.5),

@@ -1,4 +1,4 @@
-//! Self-improvement review panel.
+﻿//! Self-improvement review panel.
 //!
 //! Receives [`wuffagent_core::memory::ImprovementSuggestion`] items (via
 //! `AppEvent::ImprovementSuggested`) and lets the user approve or dismiss
@@ -12,7 +12,7 @@ use wuffagent_core::agents::config::{AgentConfig, AgentManager, ShellConfig, Wor
 use wuffagent_core::types::ReasoningEffort;
 
 use super::theme::Theme;
-use crate::memory::{MemoryEntry, MemoryManager, MemoryType};
+use wuffagent_core::memory::{MemoryEntry, MemoryManager, MemoryType};
 
 /// A pending suggestion in the review panel (UI-level wrapper around the core
 /// `ImprovementSuggestion`).

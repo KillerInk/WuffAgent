@@ -11,16 +11,6 @@ use wuffagent_core::{
     tools::{builtin, registry::ToolRegistry, ToolManager, TracingToolLogger},
 };
 
-// Re-export core modules so `mod ui` can use `crate::...` paths
-pub use wuffagent_core::types;
-pub use wuffagent_core::client;
-pub use wuffagent_core::config;
-pub use wuffagent_core::server;
-pub use wuffagent_core::sessions;
-pub use wuffagent_core::tools;
-pub use wuffagent_core::agents;
-pub use wuffagent_core::memory;
-
 mod image_loader;
 mod ui;
 

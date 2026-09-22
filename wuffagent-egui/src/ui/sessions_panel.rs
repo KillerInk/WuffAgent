@@ -1,16 +1,16 @@
-use eframe::egui;
+﻿use eframe::egui;
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 
-use crate::config::Config;
-use crate::sessions;
+use wuffagent_core::config::Config;
+use wuffagent_core::sessions;
 use super::theme::Theme;
 use super::sessions_actions::PanelAction;
 use super::sessions_utils::{relative_time, truncate};
 
 #[derive(Clone, Debug)]
 pub struct SessionsPanel {
-    sessions: Vec<crate::sessions::Session>,
+    sessions: Vec<wuffagent_core::sessions::Session>,
     selected_id: Option<String>,
     sessions_dir: PathBuf,
     config: Config,
@@ -116,7 +116,7 @@ impl SessionsPanel {
     /// Check if a session is currently generating (has active task).
     pub fn is_session_generating(
         &self,
-        session_store: &std::collections::HashMap<String, crate::sessions::SessionRuntime>,
+        session_store: &std::collections::HashMap<String, wuffagent_core::sessions::SessionRuntime>,
         session_id: &str,
     ) -> bool {
         session_store.get(session_id).map(|r| r.is_generating()).unwrap_or(false)
@@ -126,7 +126,7 @@ impl SessionsPanel {
     /// last message preview, and relative timestamp.
     fn draw_session_item(
         ui: &mut egui::Ui,
-        session: &crate::sessions::Session,
+        session: &wuffagent_core::sessions::Session,
         is_selected: bool,
         is_renaming: bool,
         is_generating: bool,
@@ -194,7 +194,7 @@ impl SessionsPanel {
     pub fn draw(
         &mut self,
         theme: &str,
-        session_store: &std::collections::HashMap<String, crate::sessions::SessionRuntime>,
+        session_store: &std::collections::HashMap<String, wuffagent_core::sessions::SessionRuntime>,
         ui: &mut egui::Ui,
     ) -> (Option<String>, Option<PanelAction>) {
         let ctx = ui.ctx();

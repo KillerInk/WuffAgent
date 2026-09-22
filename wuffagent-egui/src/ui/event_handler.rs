@@ -1,7 +1,7 @@
 ﻿use tracing;
 
 use super::state::ChatApp;
-use crate::types::{AppEvent, AppStatus, MessageKind};
+use wuffagent_core::types::{AppEvent, AppStatus, MessageKind};
 
 impl ChatApp {
     pub fn handle_event(&mut self, event: AppEvent) {
@@ -166,7 +166,7 @@ impl ChatApp {
                         .iter()
                         .any(|t| t.call_id == call_id)
                     {
-                        runtime.chat_state.active_tools.push(crate::sessions::ActiveTool {
+                        runtime.chat_state.active_tools.push(wuffagent_core::sessions::ActiveTool {
                             tool_name: tool_name.clone(),
                             call_id: call_id.clone(),
                             args_preview,
@@ -217,7 +217,7 @@ impl ChatApp {
                         .active_tools
                         .retain(|t| t.call_id != call_id);
                     let header = if args_preview.is_empty() {
-                        crate::tools::tool_call_header(&tool_name, &result)
+                        wuffagent_core::tools::tool_call_header(&tool_name, &result)
                     } else {
                         format!("🔧 {}: {}", tool_name, args_preview)
                     };

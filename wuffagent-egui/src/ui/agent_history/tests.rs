@@ -1,7 +1,7 @@
-//! Unit tests for the `agent_history` module (see `super`).
+﻿//! Unit tests for the `agent_history` module (see `super`).
 
 use super::*;
-use crate::agents::config::AgentConfig;
+use wuffagent_core::agents::config::AgentConfig;
 
 fn temp_agents_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("wuffagent-egui-hist-{tag}-{}", std::process::id()));

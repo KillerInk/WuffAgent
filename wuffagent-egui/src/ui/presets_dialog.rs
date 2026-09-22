@@ -1,7 +1,7 @@
-use eframe::egui;
+﻿use eframe::egui;
 use std::sync::{Arc, Mutex};
 
-use crate::config::{Config, LocalPreset, Preset, PresetStore, RemotePreset};
+use wuffagent_core::config::{Config, LocalPreset, Preset, PresetStore, RemotePreset};
 
 /// Which kind of preset is currently being created/edited.
 #[derive(Clone, Debug, PartialEq)]

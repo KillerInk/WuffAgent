@@ -1,11 +1,11 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine;
 use eframe::egui;
 
 use super::state::ChatApp;
-use crate::types::{AppStatus, MessageKind};
+use wuffagent_core::types::{AppStatus, MessageKind};
 use super::theme::Theme;
 
 impl ChatApp {
@@ -171,7 +171,7 @@ impl ChatApp {
                         .width(130.0)
                         .selected_text(self.reasoning_effort.label())
                         .show_ui(ui, |ui| {
-                            for variant in crate::types::ReasoningEffort::VARIANTS {
+                            for variant in wuffagent_core::types::ReasoningEffort::VARIANTS {
                                 if ui
                                     .selectable_value(&mut self.reasoning_effort, variant, variant.label())
                                     .changed()
@@ -302,7 +302,7 @@ impl ChatApp {
                     .session_store
                     .get_mut(&sid)
                     .and_then(|cs| cs.chat_state.pending_image.take());
-                let queued = crate::sessions::QueuedMessage {
+                let queued = wuffagent_core::sessions::QueuedMessage {
                     text: input.to_string(),
                     image,
                     agent_prompt,
@@ -319,11 +319,11 @@ impl ChatApp {
                     .map(|rt| rt.pipeline.inject(queued.clone()))
                     .unwrap_or(false);
                 if let Some(cs) = self.session_store.get_mut(&sid) {
-                    cs.chat_state.messages.push(crate::types::ChatMessage {
+                    cs.chat_state.messages.push(wuffagent_core::types::ChatMessage {
                         kind: MessageKind::Normal,
                         role: "user".to_string(),
                         content: input.to_string(),
-                        timestamp: crate::types::format_timestamp(),
+                        timestamp: wuffagent_core::types::format_timestamp(),
                         image: image_b64,
                     });
                     cs.chat_state.input_text.clear();
@@ -528,7 +528,7 @@ impl ChatApp {
     /// Resolve the tool policy for an agent profile by name. An empty name
     /// ("Auto") or a profile not found yields an unrestricted policy (all tools
     /// + allow-all shell, no handoff).
-    fn resolve_tool_policy(&self, agent_name: &str) -> crate::types::ChatToolPolicy {
+    fn resolve_tool_policy(&self, agent_name: &str) -> wuffagent_core::types::ChatToolPolicy {
         let names: Vec<&str> = if agent_name.is_empty() {
             vec!["general", "generalist"]
         } else {
@@ -536,7 +536,7 @@ impl ChatApp {
         };
         let policy = self.load_agent_config(&names);
         match policy {
-            Some(cfg) => crate::types::ChatToolPolicy {
+            Some(cfg) => wuffagent_core::types::ChatToolPolicy {
                 allowed_tools: cfg.allowed_tools,
                 shell_config: cfg.shell_config,
                 agent_name: cfg.name,
@@ -546,7 +546,7 @@ impl ChatApp {
                 reasoning_effort: cfg.reasoning_effort,
                 trim_config: cfg.trim_config,
             },
-            None => crate::types::ChatToolPolicy::unrestricted(),
+            None => wuffagent_core::types::ChatToolPolicy::unrestricted(),
         }
     }
 
@@ -579,10 +579,10 @@ impl ChatApp {
     /// Load the first matching agent profile (by `name`) from the known agents
     /// directories, handling both current `AgentConfig` and legacy `WorkerConfig`
     /// (via the core loader, which preserves every field incl. handoff settings).
-    fn load_agent_config(&self, names: &[&str]) -> Option<crate::agents::config::AgentConfig> {
+    fn load_agent_config(&self, names: &[&str]) -> Option<wuffagent_core::agents::config::AgentConfig> {
         let dirs = self.agents_dirs();
         for name in names {
-            if let Some(cfg) = crate::agents::config::load_agent_from_dirs(&dirs, name) {
+            if let Some(cfg) = wuffagent_core::agents::config::load_agent_from_dirs(&dirs, name) {
                 return Some(cfg);
             }
         }
@@ -605,7 +605,7 @@ impl ChatApp {
     }
 
     /// Start a fresh pipeline run for `text` in the given session.
-    pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: crate::types::ChatToolPolicy, already_displayed: bool) {
+    pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: wuffagent_core::types::ChatToolPolicy, already_displayed: bool) {
         tracing::info!("[CHAT PATH] start_pipeline_for_session called with: {}", text);
 
         // Convert the attached image (if any) into the two forms we need:
@@ -625,11 +625,11 @@ impl ChatApp {
         // Add the user message to the chat display
         if !already_displayed {
             if let Some(runtime) = self.session_store.get_mut(sid) {
-                runtime.chat_state.messages.push(crate::types::ChatMessage {
+                runtime.chat_state.messages.push(wuffagent_core::types::ChatMessage {
                     kind: MessageKind::Normal,
                     role: "user".to_string(),
                     content: text.to_string(),
-                    timestamp: crate::types::format_timestamp(),
+                    timestamp: wuffagent_core::types::format_timestamp(),
                     image: image_b64.clone(),
                 });
             }
@@ -662,7 +662,7 @@ impl ChatApp {
             // mutated by every session in parallel (a cross-session data race).
             let new_engine = runtime.engine.clone().with_client(runtime.client.clone());
             runtime.engine = new_engine;
-            let pipeline = crate::agents::ChatPipeline::new(
+            let pipeline = wuffagent_core::agents::ChatPipeline::new(
                 Arc::new(runtime.engine.clone()),
                 pending_tx,
                 self.reasoning_effort,
@@ -766,12 +766,12 @@ impl ChatApp {
                         continue;
                     }
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(cfg) = serde_json::from_str::<crate::agents::config::AgentConfig>(&content) {
+                        if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::AgentConfig>(&content) {
                             if names.iter().any(|n| cfg.name == *n) {
                                 prompt = cfg.system_prompt;
                                 break;
                             }
-                        } else if let Ok(cfg) = serde_json::from_str::<crate::agents::config::WorkerConfig>(&content) {
+                        } else if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::WorkerConfig>(&content) {
                             if names.iter().any(|n| cfg.name == *n) {
                                 prompt = cfg.system_prompt;
                                 break;
@@ -807,11 +807,11 @@ impl ChatApp {
                             continue;
                         }
                         if let Ok(content) = std::fs::read_to_string(&path) {
-                            if let Ok(cfg) = serde_json::from_str::<crate::agents::config::AgentConfig>(&content) {
+                            if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::AgentConfig>(&content) {
                                 if cfg.enabled && seen.insert(cfg.name.clone()) {
                                     names.push(cfg.name);
                                 }
-                            } else if let Ok(cfg) = serde_json::from_str::<crate::agents::config::WorkerConfig>(&content) {
+                            } else if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::WorkerConfig>(&content) {
                                 if cfg.enabled && seen.insert(cfg.name.clone()) {
                                     names.push(cfg.name);
                                 }

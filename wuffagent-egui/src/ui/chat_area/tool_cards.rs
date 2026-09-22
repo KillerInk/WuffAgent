@@ -1,11 +1,11 @@
-//! Tool-card rendering: collapsed tool cards, JSON result views,
+﻿//! Tool-card rendering: collapsed tool cards, JSON result views,
 //! path badges, code blocks. Split out of ui/chat_area.rs (U3).
 
 use eframe::egui;
 
 use crate::ui::state::ChatApp;
 use crate::ui::theme::Theme;
-use crate::types::ChatMessage;
+use wuffagent_core::types::ChatMessage;
 
 /// Parsed fields of a persisted tool message (for the collapsed card).
 struct ToolCardInfo {
@@ -52,7 +52,7 @@ impl ChatApp {
                 let raw_result = card.raw_result.clone();
                 let args = card.args.clone();
                 let duration_ms = card.duration_ms;
-                let ts = crate::types::timestamp_time(&message.timestamp);
+                let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
 
                 egui::Frame::NONE
                     .fill(theme.surface)

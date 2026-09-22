@@ -1,4 +1,4 @@
-//! Unit tests for the `improvements` module (see `super`).
+﻿//! Unit tests for the `improvements` module (see `super`).
 
 use super::*;
 
@@ -359,7 +359,7 @@ fn test_rejection_lesson_shape() {
     imp.rationale = "too verbose".to_string();
 
     let entry = rejection_lesson(&imp);
-    assert!(matches!(entry.r#type, crate::memory::MemoryType::Lesson));
+    assert!(matches!(entry.r#type, wuffagent_core::memory::MemoryType::Lesson));
     assert_eq!(entry.source, "improvement-review");
     assert!(
         entry.tags.contains(&"improvement-rejected".to_string()),
@@ -392,11 +392,11 @@ fn test_remember_dismissal_saves_and_dedups() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let config = crate::memory::MemoryConfig {
+    let config = wuffagent_core::memory::MemoryConfig {
         memories_dir: Some(dir.to_str().unwrap().to_string()),
         ..Default::default()
     };
-    let manager = crate::memory::MemoryManager::new(config).unwrap();
+    let manager = wuffagent_core::memory::MemoryManager::new(config).unwrap();
 
     let imp = pending("coder", Some("new prompt"));
     assert!(remember_dismissal(&manager, &imp).is_ok());
@@ -434,7 +434,7 @@ fn test_applied_marker_shape() {
     let imp = pending("coder", Some("new prompt"));
 
     let entry = applied_marker(&imp);
-    assert!(matches!(entry.r#type, crate::memory::MemoryType::Fact));
+    assert!(matches!(entry.r#type, wuffagent_core::memory::MemoryType::Fact));
     assert_eq!(entry.source, "improvement-review");
     assert!(
         entry.tags.contains(&"improvement-applied".to_string()),
@@ -472,11 +472,11 @@ fn test_remember_applied_prompt_saves_and_dedups() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let config = crate::memory::MemoryConfig {
+    let config = wuffagent_core::memory::MemoryConfig {
         memories_dir: Some(dir.to_str().unwrap().to_string()),
         ..Default::default()
     };
-    let manager = crate::memory::MemoryManager::new(config).unwrap();
+    let manager = wuffagent_core::memory::MemoryManager::new(config).unwrap();
 
     let imp = pending("coder", Some("new prompt"));
     assert!(remember_applied_prompt(&manager, &imp).is_ok());

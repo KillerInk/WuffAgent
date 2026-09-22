@@ -1,4 +1,4 @@
-//! MCP (Model Context Protocol) management panel.
+﻿//! MCP (Model Context Protocol) management panel.
 //!
 //! Lists configured MCP servers with live status, allows connecting /
 //! disconnecting / refreshing, toggling individual tools, and adding /
@@ -15,8 +15,8 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::{Config, McpServerConfig, McpTransport};
-use crate::tools::mcp::{McpManager, McpServerSnapshot, McpServerStatus, McpToolSnapshot};
+use wuffagent_core::config::{Config, McpServerConfig, McpTransport};
+use wuffagent_core::tools::mcp::{McpManager, McpServerSnapshot, McpServerStatus, McpToolSnapshot};
 use super::theme::Theme;
 
 /// MCP panel: server list + status + add/edit/delete + per-tool toggles.
@@ -804,7 +804,7 @@ impl ServerEditState {
 
     /// Validate + build the config. None if invalid.
     fn build(&self) -> Option<McpServerConfig> {
-        let name = crate::tools::mcp::sanitize_name_part(&self.name.trim());
+        let name = wuffagent_core::tools::mcp::sanitize_name_part(&self.name.trim());
         if name.is_empty() {
             return None;
         }

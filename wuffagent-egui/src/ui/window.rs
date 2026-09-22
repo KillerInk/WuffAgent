@@ -1,7 +1,7 @@
-use std::sync::{Arc, Mutex};
+﻿use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 
-use crate::config::{get_presets_path, PresetStore};
+use wuffagent_core::config::{get_presets_path, PresetStore};
 pub use crate::ui::state::ChatApp;
 
 impl ChatApp {
@@ -9,7 +9,7 @@ impl ChatApp {
     /// the settings dialog opens (as a clone of the live config) and dropped
     /// when it closes. Each frame the app syncs `self.config` from it so that
     /// Save (settings) and Load (presets) take effect in the running app.
-    fn active_config_handle(&self) -> Option<Arc<Mutex<crate::config::Config>>> {
+    fn active_config_handle(&self) -> Option<Arc<Mutex<wuffagent_core::config::Config>>> {
         self.settings_dialog
             .as_ref()
             .map(|d| d.config.clone())
@@ -109,7 +109,7 @@ impl ChatApp {
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| PathBuf::from("agents"));
         if self.show_agent_config && self.agent_config_dialog.is_none() {
-            let mut agent_manager = crate::agents::config::AgentManager::new(agents_dir.clone());
+            let mut agent_manager = wuffagent_core::agents::config::AgentManager::new(agents_dir.clone());
             // Scan project-level agents dirs for discovery (same as get_agent_names)
             if let Ok(cwd) = std::env::current_dir() {
                 agent_manager.add_search_dir(cwd.join("agents"));
@@ -123,7 +123,7 @@ impl ChatApp {
                 Some(super::agent_config::AgentConfigDialog::new(Arc::new(Mutex::new(agent_manager)), &self.tool_manager));
         }
         if let Some(dialog) = self.agent_config_dialog.as_mut() {
-            let mut agent_manager = crate::agents::config::AgentManager::new(agents_dir.clone());
+            let mut agent_manager = wuffagent_core::agents::config::AgentManager::new(agents_dir.clone());
             if let Ok(cwd) = std::env::current_dir() {
                 agent_manager.add_search_dir(cwd.join("agents"));
             }
@@ -219,14 +219,14 @@ impl ChatApp {
         // (URL + key via the shared connection settings, isolated
         // client/engine/pipeline, tool event routing).
         let sessions_dir = self.config.sessions_dir.clone();
-        let runtime = crate::sessions::SessionRuntime::create_from_config(
+        let runtime = wuffagent_core::sessions::SessionRuntime::create_from_config(
             &self.config,
             &self.connection,
             &self.agent_engine,
             id.to_string(),
             // Fallback name only used when no session file exists on disk yet
             // (the factory prefers the on-disk name).
-            crate::sessions::load_session(&sessions_dir, id)
+            wuffagent_core::sessions::load_session(&sessions_dir, id)
                 .map(|s| s.name)
                 .unwrap_or_else(|| format!("Session {}", id)),
             self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
@@ -298,7 +298,7 @@ impl eframe::App for ChatApp {
                                 None
                             } else {
                                 match resp.text().await {
-                                    Ok(text) => match crate::client::parse_props_n_ctx(&text) {
+                                    Ok(text) => match wuffagent_core::client::parse_props_n_ctx(&text) {
                                         Some(n_ctx) => {
                                             tracing::info!("Server n_ctx: {}", n_ctx);
                                             Some(n_ctx)

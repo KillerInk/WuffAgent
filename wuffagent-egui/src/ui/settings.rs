@@ -1,7 +1,7 @@
-use eframe::egui;
+﻿use eframe::egui;
 use std::sync::{Arc, Mutex};
 
-use crate::config::{get_presets_path, Config, PresetStore, SearchBackend};
+use wuffagent_core::config::{get_presets_path, Config, PresetStore, SearchBackend};
 use super::theme::Theme;
 
 /// The settings dialog.
