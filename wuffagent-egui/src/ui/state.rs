@@ -252,115 +252,14 @@ impl ChatApp {
 
     /// Apply a pending sessions-panel action (create/delete/rename/export/import).
     ///
-    /// This inlines the per-action logic (previously in `apply_actions`) so we
-    /// only ever hold a single mutable borrow of `self.sessions_panel` at a
-    /// time — calling a free function with both `&mut self` and a `&mut` field
-    /// of `self` would be a conflicting double-borrow.
+    /// Thin shim delegating to `sessions_actions::apply_sessions_action` (U2);
+    /// the free fn there holds `&mut ChatApp` so this method keeps the single
+    /// mutable borrow of `self.sessions_panel`.
     pub fn apply_sessions_action(
         &mut self,
         action: super::sessions_actions::PanelAction,
     ) {
-        use super::sessions_actions::PanelAction;
-        use std::path::PathBuf;
-
-        let Some(panel) = self.sessions_panel.as_mut() else {
-            return;
-        };
-        let sessions_dir = panel.sessions_dir().clone();
-
-        match action {
-            PanelAction::Rename { id, new_name } => {
-                if let Some(mut s) = crate::sessions::load_session(&sessions_dir, &id) {
-                    s.name = new_name.clone();
-                    let _ = crate::sessions::save_session(&sessions_dir, &s);
-                }
-                if let Some(runtime) = self.session_store.get_mut(&id) {
-                    runtime.name = new_name;
-                }
-                panel.refresh();
-            }
-            PanelAction::Create(name) => {
-                let session = crate::sessions::create_session(&sessions_dir, &name);
-
-                let mut runtime = crate::sessions::SessionRuntime::create_from_config(
-                    &self.config,
-                    &self.connection,
-                    &self.agent_engine,
-                    session.id.clone(),
-                    session.name.clone(),
-                    self.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
-                );
-
-                // Default the new session agent to "general" (per-session
-                // selection shown in the input selector).
-                runtime.selected_agent = Some("general".to_string());
-
-                self.session_store.insert(session.id.clone(), runtime);
-                *panel.selected_id_mut() = Some(session.id.clone());
-
-                {
-                    let mut cfg = panel.config().clone();
-                    cfg.session_id = Some(session.id.clone());
-                    if let Err(e) = cfg.save() {
-                        eprintln!("Failed to save config after creating session: {}", e);
-                    }
-                }
-                panel.refresh();
-            }
-            PanelAction::Delete(id) => {
-                match crate::sessions::delete_session(&sessions_dir, &id) {
-                    Ok(()) => {
-                        self.session_store.remove(&id);
-                        if self.selected_session_id.as_deref() == Some(&*id) {
-                            self.selected_session_id = None;
-                        }
-                        panel.show_notification(&format!("Session '{}' deleted", id), true);
-                        panel.clear_session();
-                        panel.refresh();
-                        let mut cfg = panel.config().clone();
-                        cfg.session_id = None;
-                        if let Err(e) = cfg.save() {
-                            eprintln!("Failed to save config after deleting session: {}", e);
-                        }
-                        panel.show_notification("Session deleted", true);
-                    }
-                    Err(e) => {
-                        panel.show_notification(&format!("Failed to delete session: {}", e), false);
-                        if panel.selected_id().as_deref() == Some(&*id) {
-                            *panel.selected_id_mut() = None;
-                        }
-                        panel.refresh();
-                    }
-                }
-            }
-            PanelAction::Export { session_id } => {
-                let output_path = if panel.export_path().is_empty() {
-                    PathBuf::from(format!("{}.json", session_id))
-                } else {
-                    PathBuf::from(panel.export_path())
-                };
-                match crate::sessions::export_session(&sessions_dir, &session_id, &output_path) {
-                    Ok(()) => panel.show_notification(&format!("Exported to {}", output_path.display()), true),
-                    Err(e) => panel.show_notification(&format!("Export failed: {}", e), false),
-                }
-            }
-            PanelAction::Import => {
-                let input_path = if panel.import_path().is_empty() {
-                    PathBuf::from("session.json")
-                } else {
-                    PathBuf::from(panel.import_path())
-                };
-                match crate::sessions::import_session(&sessions_dir, &input_path) {
-                    Ok(new_id) => {
-                        panel.show_notification(&format!("Imported session: {}", new_id), true);
-                        panel.refresh();
-                    }
-                    Err(e) => {
-                        panel.show_notification(&format!("Import failed: {}", e), false);
-                    }
-                }
-            }
-        }
+        super::sessions_actions::apply_sessions_action(self, action);
     }
 
     /// Get the selected session's chat area state (immutable view).
