@@ -1,6 +1,7 @@
 //! Unit tests for the `client` module (see `super`).
 
 use super::*;
+use crate::types::ToolCall;
 
 #[test]
 fn test_build_request_reasoning_effort() {
