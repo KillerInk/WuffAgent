@@ -2,13 +2,9 @@ use std::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub mod http;
-pub mod pipeline;
 pub mod session;
 pub mod sse;
 
-pub use pipeline::ChatPipeline;
-
-use base64::Engine;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1078,18 +1074,6 @@ impl From<reqwest::Error> for Error {
     fn from(err: reqwest::Error) -> Self {
         Error::Http(err.to_string())
     }
-}
-
-/// Convert an attached image (egui source from the UI) into the `data:` URI
-/// form used in model requests. Only `Bytes` sources carry a payload to send;
-/// texture/URI references have none and return `None`.
-pub fn image_source_data_uri(source: &egui::ImageSource<'static>) -> Option<String> {
-    let bytes = match source {
-        egui::ImageSource::Bytes { bytes, .. } => bytes,
-        _ => return None,
-    };
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes.as_ref());
-    Some(format!("data:image/png;base64,{}", b64))
 }
 
 #[cfg(test)]
