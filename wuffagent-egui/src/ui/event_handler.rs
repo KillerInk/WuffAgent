@@ -348,7 +348,7 @@ impl ChatApp {
                     // A new run is already in flight (rare race): fall back
                     // to the queue; it is drained when that run ends.
                     if let Some(rt) = self.session_store.get_mut(&sid) {
-                        rt.chat_state.queued_messages.push(message);
+                        rt.chat_state.queued_messages.push(*message);
                     }
                 } else {
                     self.start_pipeline_for_session(

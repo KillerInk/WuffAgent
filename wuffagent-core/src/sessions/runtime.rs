@@ -5,27 +5,9 @@ use tokio_util::sync::CancellationToken;
 use crate::agents::AgentEngine;
 use crate::client::ChatPipeline;
 
-/// A message sent while the AI is still working. Displayed in the chat
-/// immediately and — via the pipeline's injection channel — handed to the
-/// RUNNING agent loop, which injects it into the current turn at the next LLM
-/// round boundary (the earliest point the model can see it), instead of
-/// waiting for the whole run to finish.
-///
-/// The `queued_messages` fallback queue (see [`ChatAreaState::queued_messages`])
-/// holds a `QueuedMessage` only when injection was not possible (the run
-/// already finished or was cancelled before delivery, or the message is
-/// re-delivered while a new run is already in flight); those are processed as
-/// the next turn once the current run (and any earlier queued messages)
-/// finishes.
-#[derive(Clone, Debug)]
-pub struct QueuedMessage {
-    pub text: String,
-    pub image: Option<egui::ImageSource<'static>>,
-    /// System prompt resolved from the selected agent at send time.
-    pub agent_prompt: String,
-    /// Tool policy (allowed_tools + shell config) resolved from the selected agent.
-    pub tool_policy: crate::client::pipeline::ChatToolPolicy,
-}
+// QueuedMessage lives in the types brick (AppEvent::UserMessageDrained
+// embeds it); re-exported here so crate::sessions::QueuedMessage stays stable.
+pub use crate::types::QueuedMessage;
 
 /// A tool call currently executing, shown as a live card at the end of the
 /// transcript (spinner + args + live output tail) until its completion event

@@ -219,7 +219,7 @@ impl AgentEngine {
             while let Ok(message) = rx.try_recv() {
                 if let Some(tx) = &self.event_tx {
                     let _ = tx.lock().unwrap().send(AppEvent::UserMessageDrained {
-                        message,
+                        message: Box::new(message),
                         session_id: self.agent_session_id.clone().unwrap_or_default(),
                     });
                 }

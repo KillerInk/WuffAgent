@@ -6,62 +6,13 @@ use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::agents::config::ShellConfig;
 use crate::agents::AgentEngine;
 use crate::types::{AppEvent, ReasoningEffort};
 
-/// The selected chat profile's tool policy, carried onto the chat path so the
-/// chat agent runs with that profile's tool set, shell restrictions, handoff
-/// rights, reasoning effort, and trim configuration (instead of the old
-/// "all tools + allow-all shell" default).
-#[derive(Clone, Debug)]
-pub struct ChatToolPolicy {
-    /// Tool names the profile authorizes. The chat agent is given all available
-    /// tools plus `shell`, so an empty list does not strip tools from chat.
-    pub allowed_tools: Vec<String>,
-    /// The profile's shell config (allowlist/enabled/timeout).
-    pub shell_config: ShellConfig,
-    /// The selected profile's name (used for the chat agent's identity and
-    /// handoff markers, e.g. "[Handoff from 'architect' to 'coder']").
-    pub agent_name: String,
-    /// Whether the chat agent may hand off the session via the `handoff` tool
-    /// (the profile's `handoff_enabled` flag).
-    pub handoff_enabled: bool,
-    /// Agent names the profile may hand off to (empty = any enabled agent).
-    pub handoff_targets: Vec<String>,
-    /// Whether the chat agent may restart WuffAgent via the `restart` tool
-    /// (the profile's `restart_enabled` flag).
-    pub restart_enabled: bool,
-    /// The profile's reasoning effort (Off = inherit the global toggle).
-    pub reasoning_effort: ReasoningEffort,
-    /// The profile's context-trimming configuration.
-    pub trim_config: crate::trimming::config::TrimConfig,
-}
-
-impl ChatToolPolicy {
-    /// A permissive policy: all tools + an unrestricted (allow-all) shell.
-    /// Used when no profile is selected or none is found.
-    pub fn unrestricted() -> Self {
-        Self {
-            allowed_tools: Vec::new(),
-            shell_config: ShellConfig {
-                shell_enabled: true,
-                allowed_commands: Vec::new(),
-                ..ShellConfig::default()
-            },
-            agent_name: "chat".to_string(),
-            // Permissive = may hand off to any enabled agent (empty targets).
-            // Without this, "Auto" chat could never hand off to a profile,
-            // even though every other tool is unrestricted.
-            handoff_enabled: true,
-            handoff_targets: Vec::new(),
-            // Permissive = may restart (and rebuild) too.
-            restart_enabled: true,
-            reasoning_effort: ReasoningEffort::default(),
-            trim_config: crate::trimming::config::TrimConfig::default(),
-        }
-    }
-}
+// ChatToolPolicy lives in the types brick (QueuedMessage embeds it, and
+// QueuedMessage must live where AppEvent lives); re-exported here so the
+// crate::client::pipeline::ChatToolPolicy path stays stable.
+pub use crate::types::ChatToolPolicy;
 
 /// ChatPipeline routes chat requests through the AgentEngine's tool pipeline,
 /// using the selected agent's system prompt instead of routing through the
@@ -257,7 +208,7 @@ impl ChatPipeline {
             let rx = holder.lock().unwrap();
             while let Ok(message) = rx.try_recv() {
                 let _ = self.event_tx.send(AppEvent::UserMessageDrained {
-                    message,
+                    message: Box::new(message),
                     session_id: self.session_id.clone(),
                 });
             }
