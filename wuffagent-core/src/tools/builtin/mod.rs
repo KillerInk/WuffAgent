@@ -1,6 +1,6 @@
 pub mod calculation;
 pub mod fetch_url;
-pub mod file_io;
+pub mod fileio;
 pub mod handoff;
 pub(crate) mod html;
 pub mod memory;
@@ -12,7 +12,7 @@ pub mod web_search;
 
 pub use calculation::CalculationTool;
 pub use fetch_url::FetchUrlTool;
-pub use file_io::{
+pub use fileio::{
     AppendFileTool, ApplyDiffTool, CopyTool, DeleteTool, FileInfoTool, ListDirTool, MkdirTool,
     MoveTool, ReadFileTool, SearchFilesTool, WriteFileTool,
 };

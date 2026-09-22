@@ -1,7 +1,9 @@
 //! Unit tests for the `file_io` module (see `super`).
 
-use super::*;
+use std::fs;
 use std::io::Read;
+
+use super::*;
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("wuff_file_io_{}_{}", tag, std::process::id()));
