@@ -1035,7 +1035,7 @@ impl Agent {
                                 name, id
                             );
                             // Live tool card: args preview + progress sink.
-                            let args_preview = crate::types::tool_args_summary(&name, &args);
+                            let args_preview = crate::tools::tool_args_summary(&name, &args);
                             if let Some(ref tx) = ready_tx {
                                 if let Ok(g) = tx.lock() {
                                     let _ = g.send(crate::types::AppEvent::ToolCallStart {
@@ -1265,7 +1265,7 @@ impl Agent {
                             self.send_event(crate::types::AppEvent::ToolCallStart {
                                 tool_name: call.function.name.clone(),
                                 call_id: call.id.clone(),
-                                args_preview: crate::types::tool_args_summary(
+                                args_preview: crate::tools::tool_args_summary(
                                     &call.function.name,
                                     &call.function.arguments,
                                 ),
@@ -1373,7 +1373,7 @@ impl Agent {
                         self.send_event(crate::types::AppEvent::ToolCallStart {
                             tool_name: call.function.name.clone(),
                             call_id: call.id.clone(),
-                            args_preview: crate::types::tool_args_summary(
+                            args_preview: crate::tools::tool_args_summary(
                                 &call.function.name,
                                 &call.function.arguments,
                             ),

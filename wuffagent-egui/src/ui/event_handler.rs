@@ -217,7 +217,7 @@ impl ChatApp {
                         .active_tools
                         .retain(|t| t.call_id != call_id);
                     let header = if args_preview.is_empty() {
-                        crate::types::tool_call_header(&tool_name, &result)
+                        crate::tools::tool_call_header(&tool_name, &result)
                     } else {
                         format!("🔧 {}: {}", tool_name, args_preview)
                     };
