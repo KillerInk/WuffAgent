@@ -1,4 +1,3 @@
-use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A chat message with a role (system/user/assistant/tool) and content.
@@ -669,18 +668,6 @@ pub enum AppEvent {
         message: Box<QueuedMessage>,
         session_id: String,
     },
-}
-
-/// Convert an attached image (egui source from the UI) into the `data:` URI
-/// form used in model requests. Only `Bytes` sources carry a payload to send;
-/// texture/URI references have none and return `None`.
-pub fn image_source_data_uri(source: &egui::ImageSource<'static>) -> Option<String> {
-    let bytes = match source {
-        egui::ImageSource::Bytes { bytes, .. } => bytes,
-        _ => return None,
-    };
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes.as_ref());
-    Some(format!("data:image/png;base64,{}", b64))
 }
 
 /// Format the current time as a human-readable timestamp string.
