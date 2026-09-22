@@ -13,6 +13,7 @@ pub mod agent;
 pub mod config;
 pub mod engine;
 pub mod improvement;
+pub mod manager;
 pub mod traits;
 pub mod types;
 
