@@ -14,7 +14,7 @@ use crate::types::{AppEvent, ReasoningEffort};
 /// chat agent runs with that profile's tool set, shell restrictions, handoff
 /// rights, reasoning effort, and trim configuration (instead of the old
 /// "all tools + allow-all shell" default).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChatToolPolicy {
     /// Tool names the profile authorizes. The chat agent is given all available
     /// tools plus `shell`, so an empty list does not strip tools from chat.
@@ -83,9 +83,22 @@ pub struct ChatPipeline {
     reasoning_effort: ReasoningEffort,
     /// Session ID for routing events.
     session_id: String,
+    /// Sender half of the mid-run injection channel. `inject()` (UI thread)
+    /// hands user messages sent while this run is active to the running agent
+    /// loop, which picks them up at the next LLM round boundary.
+    injection_tx: Mutex<mpsc::Sender<crate::sessions::QueuedMessage>>,
+    /// Receiver half of the CURRENT run's injection channel, shared with the
+    /// running task (the agent loop drains it at round boundaries; the engine
+    /// drains the remainder after the loop ends). `cancel()` drains it before
+    /// aborting the task so a late message is never lost. `None` between runs.
+    /// (The outer `Mutex` is touched only from the UI thread; the inner
+    /// `Mutex` serializes the task-side and cancel-side drains, so each
+    /// message is consumed exactly once.)
+    injection_rx: Mutex<Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>>,
 }
 
-// Safe: only AtomicPtr+CancellationToken is used, no actual concurrency.
+// Safe: AtomicPtr+CancellationToken + std mpsc ends (all `Send`/`Sync`
+// through the `Mutex`es); the raw ptr is only swapped from the UI thread.
 unsafe impl Send for ChatPipeline {}
 unsafe impl Sync for ChatPipeline {}
 
@@ -96,6 +109,12 @@ impl ChatPipeline {
         reasoning_effort: ReasoningEffort,
         session_id: String,
     ) -> Self {
+        // Pre-start channel: its receiver is dropped immediately so an
+        // `inject()` before `start()` simply fails (nothing is running yet —
+        // the UI then falls back to the per-session queue). `start()` swaps in
+        // a fresh channel for each run.
+        let (injection_tx, _injection_rx) = mpsc::channel();
+        drop(_injection_rx);
         Self {
             agent_engine,
             current_token: AtomicPtr::new(Box::into_raw(Box::new(CancellationToken::new()))),
@@ -103,7 +122,22 @@ impl ChatPipeline {
             event_tx,
             reasoning_effort,
             session_id,
+            injection_tx: Mutex::new(injection_tx),
+            injection_rx: Mutex::new(None),
         }
+    }
+
+    /// Hand a user message (sent while this run is active) to the running
+    /// agent loop for immediate injection.
+    ///
+    /// Returns `true` when the message was accepted: the agent loop picks it
+    /// up at the next LLM round boundary (the earliest point the model can
+    /// see it) and appends it to the current turn; if the run ends before
+    /// that, the engine hands it back to the UI to run as the next turn.
+    /// Returns `false` when no run is live (the UI falls back to the
+    /// per-session `queued_messages` queue).
+    pub fn inject(&self, message: crate::sessions::QueuedMessage) -> bool {
+        self.injection_tx.lock().unwrap().send(message).is_ok()
     }
 
     /// Start a chat session with the given prompt, system prompt, and tool policy.
@@ -136,15 +170,26 @@ impl ChatPipeline {
         let system_prompt = system_prompt.to_string();
         let tool_policy = tool_policy.clone();
         let image = image.map(str::to_string);
+        // Fresh injection channel for this run: the UI can `inject()` user
+        // messages into it any time, and the running task wires the receiver
+        // into the agent (drained at LLM round boundaries). The shared clone
+        // also serves the cancel-time remainder drain in `cancel()`.
+        let (injection_tx, injection_rx) = mpsc::channel();
+        *self.injection_tx.lock().unwrap() = injection_tx;
+        let injection_holder = Arc::new(Mutex::new(injection_rx));
+        *self.injection_rx.lock().unwrap() = Some(Arc::clone(&injection_holder));
         let handle = tokio::spawn(async move {
             // Wire the event tx into the engine so chain events reach the UI,
-            // and apply the current reasoning effort setting.
+            // apply the current reasoning effort setting, and attach the
+            // mid-run injection channel (user messages sent while this run is
+            // active are injected at the next LLM round boundary).
             let inner_engine = (*agent_engine).clone();
             let engine = Arc::new(
                 inner_engine
                     .with_event_tx(Arc::new(Mutex::new(event_tx.clone())))
                     .with_reasoning_effort(reasoning_effort)
-                    .with_session_id(session_id.clone()),
+                    .with_session_id(session_id.clone())
+                    .with_injection_channel(Some(injection_holder)),
             );
 
             tracing::info!("[CHAT PIPELINE] Starting chat with prompt: {}", prompt);
@@ -196,6 +241,19 @@ impl ChatPipeline {
         if !ptr.is_null() {
             unsafe { (*ptr).cancel() };
         }
+        // Drain any user messages that were injected but not yet consumed
+        // (the task is about to be aborted and would drop them): hand them
+        // back to the UI so they run as the next turn instead of being lost.
+        if let Some(holder) = self.injection_rx.lock().unwrap().as_ref() {
+            let rx = holder.lock().unwrap();
+            while let Ok(message) = rx.try_recv() {
+                let _ = self.event_tx.send(AppEvent::UserMessageDrained {
+                    message,
+                    session_id: self.session_id.clone(),
+                });
+            }
+        }
+        *self.injection_rx.lock().unwrap() = None;
         // Abort the running task if any
         if let Some(handle) = self.task_handle.lock().unwrap().take() {
             handle.abort();

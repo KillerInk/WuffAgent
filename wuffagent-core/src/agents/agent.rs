@@ -187,6 +187,12 @@ pub struct Agent {
     restart_mailbox: Option<Arc<Mutex<Option<crate::agents::types::RestartRequest>>>>,
     /// I1: trajectory stats of the last completed `run_llm_loop`.
     run_stats: RunStats,
+    /// Mid-run injection channel (UI → this run), if the chat pipeline
+    /// attached one. The agent loop drains it at LLM round boundaries: a user
+    /// message sent while the run is active is appended to the current turn
+    /// and seen by the model on the very next LLM call. Moved to the next
+    /// agent on a `handoff` so the whole chain keeps receiving injections.
+    injection_rx: Option<Arc<Mutex<std::sync::mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
 }
 
 impl Agent {
@@ -275,7 +281,19 @@ impl Agent {
             handoff_mailbox,
             restart_mailbox,
             run_stats: RunStats::default(),
+            injection_rx: None,
         }
+    }
+
+    /// Attach the current run's mid-run injection channel (see the
+    /// `injection_rx` field). Only the chat path sets this; plan/registry
+    /// agents run without a live UI and never receive injections.
+    pub fn with_injection_channel(
+        mut self,
+        rx: Arc<Mutex<std::sync::mpsc::Receiver<crate::sessions::QueuedMessage>>>,
+    ) -> Self {
+        self.injection_rx = Some(rx);
+        self
     }
 
     /// Build the throwaway request list for the current turn: the fresh system
@@ -525,6 +543,9 @@ impl Agent {
                 self.memory.clone(),
                 self.agent_session_id.clone(),
             );
+            // The whole handoff chain is still the same turn: keep receiving
+            // user injections on the next agent too.
+            next.injection_rx = self.injection_rx.take();
             // Memory injection is query-aware on the handoff task.
             let mut next_messages = next.build_initial_messages(&req.task);
             current_name = req.agent.clone();
@@ -773,7 +794,12 @@ impl Agent {
         // `messages` is the nudge, so re-extracting per verification attempt
         // would make the judge grade the response against the nudge text
         // instead of what the user actually asked.
-        let original_request = self.extract_original_request(messages);
+        //
+        // `mut`: mid-run user injections (the chat pipeline's injection
+        // channel) extend the turn's request as they arrive, so the
+        // verification judge grades the final response against the FULL
+        // request — original text plus everything the user added.
+        let mut original_request = self.extract_original_request(messages);
 
         // I1: mark where THIS run's messages start, so trajectory stats can
         // be counted without including earlier turns of the conversation.
@@ -781,6 +807,48 @@ impl Agent {
         let outcome: RunOutcome = loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
+            }
+
+            // ── Mid-run user injections ───────────────────────────────────
+            // Messages the user sent while this run is active arrive on the
+            // injection channel (the UI pushes them in at send time instead
+            // of queueing them behind the whole run). The model can only see
+            // new input at an LLM round boundary, so the top of the loop —
+            // just before the next LLM call — is the earliest point one can
+            // land: append each message to the current turn (request list +
+            // shared store) and let the next round react to it. Drained
+            // BEFORE the handoff/restart checks so a message sent during a
+            // long tool call (e.g. a `restart` build) is recorded in the
+            // store and survives the handoff snapshot / process relaunch.
+            if let Some(holder) = &self.injection_rx {
+                let rx = holder.lock().unwrap();
+                while let Ok(injected) = rx.try_recv() {
+                    let image = injected
+                        .image
+                        .as_ref()
+                        .and_then(crate::types::image_source_data_uri);
+                    let user_msg = Message {
+                        role: "user".to_string(),
+                        content: injected.text.clone(),
+                        timestamp: crate::types::format_timestamp(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                        image,
+                    };
+                    tracing::info!(
+                        "[AGENT] Agent '{}' injecting user message sent mid-run into the running turn: {}",
+                        self.config.name,
+                        injected.text
+                    );
+                    messages.push(user_msg.clone());
+                    self.record_in_store(&user_msg);
+                    // The injected message is part of this turn's request now.
+                    original_request.push_str(&format!(
+                        "\n[User added while the agent was working: {}]",
+                        injected.text
+                    ));
+                }
             }
 
             // A pending handoff (written by the `handoff` tool this turn)

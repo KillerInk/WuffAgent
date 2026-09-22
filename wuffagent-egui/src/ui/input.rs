@@ -264,8 +264,11 @@ impl ChatApp {
         let _drop_zone = ui.allocate_space(egui::Vec2::new(ui.available_width(), 10.0));
     }
 
-    /// Attempt to send `input` as a new user message: immediately when the
-    /// session is idle, or queued behind the running turn while generating.
+    /// Attempt to send `input` as a new user message. When the session is
+    /// idle it starts a new turn immediately; while the agent is working the
+    /// message is displayed at once and injected into the RUNNING agent loop
+    /// (picked up at its next LLM round boundary), falling back to the
+    /// per-session queue only when injection is not possible.
     /// Returns `true` when the message was accepted (so callers can clear
     /// the input box), `false` when validation failed or nothing happened.
     fn handle_send_input(&mut self, input: &str) -> bool {
@@ -284,33 +287,58 @@ impl ChatApp {
 
         if let Some(runtime) = self.session_store.get(&sid) {
             if runtime.chat_state.is_generating {
-                // AI is still working: display the message immediately and queue it
-                // to run as the next turn once the current run (and any earlier
-                // queued messages) finishes.
-                // Resolve the agent prompt/policy first â€” these borrow `self`
-                // and can't be called while `cs` holds a mutable borrow of the store.
+                // AI is still working: display the message immediately and hand
+                // it to the RUNNING agent loop - the agent picks it up at its
+                // next LLM round boundary (the earliest point the model can
+                // see it) and reacts within the current turn, instead of
+                // waiting for the whole run to finish.
+                // Resolve the agent prompt/policy first - these borrow `self`
+                // and can't be called while a mutable borrow of the store is
+                // held.
                 let agent = runtime.selected_agent.clone().unwrap_or_default();
                 let agent_prompt = self.resolve_agent_prompt(&agent);
                 let tool_policy = self.resolve_tool_policy(&agent);
+                let image = self
+                    .session_store
+                    .get_mut(&sid)
+                    .and_then(|cs| cs.chat_state.pending_image.take());
+                let queued = crate::sessions::QueuedMessage {
+                    text: input.to_string(),
+                    image,
+                    agent_prompt,
+                    tool_policy,
+                };
+                let image_b64 = pending_image_b64(queued.image.as_ref());
+                // Fast path: inject into the running agent loop. If the run
+                // already ended (race), the send fails and the message falls
+                // back to the per-session queue, which is drained when a run
+                // ends.
+                let injected = self
+                    .session_store
+                    .get(&sid)
+                    .map(|rt| rt.pipeline.inject(queued.clone()))
+                    .unwrap_or(false);
                 if let Some(cs) = self.session_store.get_mut(&sid) {
                     cs.chat_state.messages.push(crate::types::ChatMessage {
                         kind: MessageKind::Normal,
                         role: "user".to_string(),
                         content: input.to_string(),
                         timestamp: crate::types::format_timestamp(),
-                        image: pending_image_b64(cs.chat_state.pending_image.as_ref()),
+                        image: image_b64,
                     });
                     cs.chat_state.input_text.clear();
-                    cs.chat_state.queued_messages.push(super::state::QueuedMessage {
-                        text: input.to_string(),
-                        image: cs.chat_state.pending_image.take(),
-                        agent_prompt,
-                        tool_policy,
-                    });
-                    cs.chat_state.show_notification(
-                        &format!("Queued â€” will run after the current task ({} waiting)", cs.chat_state.queued_messages.len()),
-                        true,
-                    );
+                    if injected {
+                        cs.chat_state.show_notification(
+                            "Sent to the running agent - picked up at its next step",
+                            true,
+                        );
+                    } else {
+                        cs.chat_state.queued_messages.push(queued);
+                        cs.chat_state.show_notification(
+                            &format!("Queued - will run after the current task ({} waiting)", cs.chat_state.queued_messages.len()),
+                            true,
+                        );
+                    }
                 }
             } else {
                 self.send_message_to_session(&sid);
@@ -577,7 +605,7 @@ impl ChatApp {
     }
 
     /// Start a fresh pipeline run for `text` in the given session.
-    fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: crate::client::pipeline::ChatToolPolicy, already_displayed: bool) {
+    pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: crate::client::pipeline::ChatToolPolicy, already_displayed: bool) {
         tracing::info!("[CHAT PATH] start_pipeline_for_session called with: {}", text);
 
         // Convert the attached image (if any) into the two forms we need:
@@ -880,3 +908,4 @@ fn pending_image_b64(source: Option<&egui::ImageSource<'static>>) -> Option<Stri
         _ => None,
     }
 }
+

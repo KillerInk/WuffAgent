@@ -6,9 +6,18 @@ use crate::agents::AgentEngine;
 use crate::client::ChatPipeline;
 
 /// A message sent while the AI is still working. Displayed in the chat
-/// immediately and processed as the next turn once the current run (and any
-/// earlier queued messages) finishes.
-#[derive(Clone)]
+/// immediately and — via the pipeline's injection channel — handed to the
+/// RUNNING agent loop, which injects it into the current turn at the next LLM
+/// round boundary (the earliest point the model can see it), instead of
+/// waiting for the whole run to finish.
+///
+/// The `queued_messages` fallback queue (see [`ChatAreaState::queued_messages`])
+/// holds a `QueuedMessage` only when injection was not possible (the run
+/// already finished or was cancelled before delivery, or the message is
+/// re-delivered while a new run is already in flight); those are processed as
+/// the next turn once the current run (and any earlier queued messages)
+/// finishes.
+#[derive(Clone, Debug)]
 pub struct QueuedMessage {
     pub text: String,
     pub image: Option<egui::ImageSource<'static>>,
@@ -82,7 +91,10 @@ pub struct ChatAreaState {
     pub pending_image: Option<egui::ImageSource<'static>>,
     /// Status shown in the status bar for this session.
     pub status: crate::types::AppStatus,
-    /// Messages queued while this session's run was still active.
+    /// Fallback queue for messages that could not be injected into the
+    /// running agent loop (the run finished/cancelled before delivery, or the
+    /// message was re-delivered while a new run was already in flight).
+    /// Drained as the next turn when the current run ends.
     pub queued_messages: Vec<QueuedMessage>,
     /// Tool calls currently executing (live cards). Populated on
     /// `ToolCallStart`, updated by `ToolCallProgress`, drained on

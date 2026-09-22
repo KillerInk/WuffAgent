@@ -9,9 +9,6 @@ use crate::tools::ToolManager;
 
 use crate::types::{AppEvent, AppStatus};
 
-/// A message sent while the AI is still working (now stored per-session in core).
-pub use crate::sessions::QueuedMessage;
-
 /// A tokio `Runtime` (held in an `Arc`) that is dropped on a dedicated plain
 /// OS thread.
 ///

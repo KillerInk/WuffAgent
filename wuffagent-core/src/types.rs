@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A chat message with a role (system/user/assistant/tool) and content.
@@ -360,6 +361,28 @@ pub enum AppEvent {
         exe_path: Option<String>,
         session_id: String,
     },
+    /// A user message sent while this session's run was active arrived too
+    /// late to be injected into the running agent loop (the loop had already
+    /// ended — e.g. it landed during the final verification call — or the run
+    /// was cancelled). The message was already displayed in the chat at send
+    /// time, and `agent_prompt` / `tool_policy` were resolved at send time;
+    /// the UI runs it as the next turn.
+    UserMessageDrained {
+        message: crate::sessions::QueuedMessage,
+        session_id: String,
+    },
+}
+
+/// Convert an attached image (egui source from the UI) into the `data:` URI
+/// form used in model requests. Only `Bytes` sources carry a payload to send;
+/// texture/URI references have none and return `None`.
+pub fn image_source_data_uri(source: &egui::ImageSource<'static>) -> Option<String> {
+    let bytes = match source {
+        egui::ImageSource::Bytes { bytes, .. } => bytes,
+        _ => return None,
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes.as_ref());
+    Some(format!("data:image/png;base64,{}", b64))
 }
 
 /// Format the current time as a human-readable timestamp string.

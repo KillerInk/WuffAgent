@@ -26,6 +26,7 @@ impl ChatApp {
             | AppEvent::ImprovementSuggested { session_id, .. }
             | AppEvent::AgentHandoff { session_id, .. }
             | AppEvent::RestartRequested { session_id, .. }
+            | AppEvent::UserMessageDrained { session_id, .. }
             => session_id.clone(),
         };
         match event {
@@ -338,6 +339,36 @@ impl ChatApp {
                     );
                 }
                 self.perform_restart(reason, exe_path);
+            }
+            AppEvent::UserMessageDrained { message, .. } => {
+                // A message the user sent while this run was active arrived
+                // too late to be injected into the running agent loop (the
+                // run had already ended - e.g. it landed during the final
+                // verification call - or the run was cancelled). It was
+                // already displayed in the chat at send time, so
+                // `already_displayed = true`.
+                tracing::info!(text = %message.text, "User message drained after run ended - starting next turn");
+                let generating = self
+                    .session_store
+                    .get(&sid)
+                    .map(|r| r.chat_state.is_generating)
+                    .unwrap_or(false);
+                if generating {
+                    // A new run is already in flight (rare race): fall back
+                    // to the queue; it is drained when that run ends.
+                    if let Some(rt) = self.session_store.get_mut(&sid) {
+                        rt.chat_state.queued_messages.push(message);
+                    }
+                } else {
+                    self.start_pipeline_for_session(
+                        &sid,
+                        &message.text,
+                        message.image,
+                        message.agent_prompt,
+                        message.tool_policy,
+                        true,
+                    );
+                }
             }
         }
     }

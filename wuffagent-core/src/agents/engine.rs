@@ -30,6 +30,11 @@ pub struct AgentEngine {
     pub(super) agents_search_dirs: Vec<std::path::PathBuf>,
     /// Completed task count, shared across clones; throttles post-task work.
     tasks_completed: Arc<AtomicUsize>,
+    /// Mid-run injection channel for the current run (UI → agent loop), if a
+    /// per-run channel was attached via `with_injection_channel`. The agent
+    /// loop drains it at LLM round boundaries; `execute_with_tools` drains the
+    /// remainder after the loop ends.
+    injection_rx: Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
 }
 
 /// Run an LLM memory-maintenance step at most once every N completed tasks.
@@ -62,7 +67,21 @@ impl AgentEngine {
             agents_dir: None,
             agents_search_dirs: Vec::new(),
             tasks_completed: Arc::new(AtomicUsize::new(0)),
+            injection_rx: None,
         }
+    }
+
+    /// Attach the current run's mid-run injection channel (the chat pipeline
+    /// creates one per `start()` and wires it in here). A user message sent
+    /// while the run is active is injected into the current turn at the next
+    /// LLM round boundary — the earliest point the model can see it — and any
+    /// remainder is handed back to the UI as the next turn.
+    pub fn with_injection_channel(
+        mut self,
+        rx: Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
+    ) -> Self {
+        self.injection_rx = rx;
+        self
     }
 
     /// Set the agents directory used by the chat path to resolve handoff
@@ -182,8 +201,30 @@ impl AgentEngine {
             self.memory.clone(),
             self.agent_session_id.clone(),
         );
+        // Mid-run injection channel: the agent loop drains it at LLM round
+        // boundaries (user messages sent while this run is active are
+        // injected into the current turn as soon as the model can see them).
+        if let Some(rx) = &self.injection_rx {
+            agent = agent.with_injection_channel(Arc::clone(rx));
+        }
 
         let result = agent.execute(request, image, cancel_token).await;
+
+        // User messages that arrived after the agent loop had already ended
+        // (e.g. during the final verification call) can no longer reach the
+        // model this turn — hand them back to the UI to run as the next turn.
+        // Runs BEFORE post-task maintenance so the UI is not kept waiting.
+        if let Some(rx) = &self.injection_rx {
+            let rx = rx.lock().unwrap();
+            while let Ok(message) = rx.try_recv() {
+                if let Some(tx) = &self.event_tx {
+                    let _ = tx.lock().unwrap().send(AppEvent::UserMessageDrained {
+                        message,
+                        session_id: self.agent_session_id.clone().unwrap_or_default(),
+                    });
+                }
+            }
+        }
 
         // Post-task: throttled LLM memory maintenance + optional self-improvement
         // suggestions. Both are opt-in via MemoryConfig and never fail the task.
