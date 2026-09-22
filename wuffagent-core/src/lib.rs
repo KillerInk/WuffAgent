@@ -9,11 +9,12 @@
 //! ├── client         (ChatClient: HTTP/SSE streaming) → uses types
 //! ├── config         (Config, ConnectionType) → re-exports agents::config, memory::types
 //! ├── config_types   (shared re-exports) → uses agents::config, memory::types
-//! ├── agents         (Agent, AgentEngine) → uses llm, client, tools, types, sessions, memory
+//! ├── agents         (Agent, AgentEngine, ChatPipeline) → uses llm, client, tools, types, sessions, memory
 //! │   ├── config     (AgentConfig, ShellConfig, WorkerConfig)
 //! │   ├── types      (AgentId)
 //! │   ├── traits     (AgentError)
 //! │   ├── engine
+//! │   ├── chat_pipeline
 //! │   └── agent
 //! ├── tools          (ToolManager, ToolRegistry) → uses types
 //! │   ├── builtin
@@ -36,6 +37,8 @@
 //! - `memory` depends on `llm` and `types`.
 //! - `client` depends on `usage` (one log line per completed LLM call);
 //!   `usage` depends only on `config`/`types`, so no cycle.
+//! - `client` never depends on `agents` (ChatPipeline lives in
+//!   `agents::chat_pipeline`); only `agents` may depend on `client`.
 //! - No circular dependencies exist between top-level modules.
 
 pub mod agents;
@@ -52,7 +55,7 @@ pub mod types;
 pub mod usage;
 
 // Common UI-facing types re-exported for convenient access from egui consumers.
-pub use agents::AgentEngine;
+pub use agents::{AgentEngine, ChatPipeline};
 pub use client::ChatClient;
 pub use config::Config;
 pub use server::ServerManager;

@@ -6,13 +6,9 @@ use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::agents::AgentEngine;
-use crate::types::{AppEvent, ReasoningEffort};
+use crate::types::{AppEvent, ChatToolPolicy, QueuedMessage, ReasoningEffort};
 
-// ChatToolPolicy lives in the types brick (QueuedMessage embeds it, and
-// QueuedMessage must live where AppEvent lives); re-exported here so the
-// crate::client::pipeline::ChatToolPolicy path stays stable.
-pub use crate::types::ChatToolPolicy;
+use super::AgentEngine;
 
 /// ChatPipeline routes chat requests through the AgentEngine's tool pipeline,
 /// using the selected agent's system prompt instead of routing through the
@@ -37,7 +33,7 @@ pub struct ChatPipeline {
     /// Sender half of the mid-run injection channel. `inject()` (UI thread)
     /// hands user messages sent while this run is active to the running agent
     /// loop, which picks them up at the next LLM round boundary.
-    injection_tx: Mutex<mpsc::Sender<crate::sessions::QueuedMessage>>,
+    injection_tx: Mutex<mpsc::Sender<QueuedMessage>>,
     /// Receiver half of the CURRENT run's injection channel, shared with the
     /// running task (the agent loop drains it at round boundaries; the engine
     /// drains the remainder after the loop ends). `cancel()` drains it before
@@ -45,7 +41,7 @@ pub struct ChatPipeline {
     /// (The outer `Mutex` is touched only from the UI thread; the inner
     /// `Mutex` serializes the task-side and cancel-side drains, so each
     /// message is consumed exactly once.)
-    injection_rx: Mutex<Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>>,
+    injection_rx: Mutex<Option<Arc<Mutex<mpsc::Receiver<QueuedMessage>>>>>,
 }
 
 // Safe: AtomicPtr+CancellationToken + std mpsc ends (all `Send`/`Sync`
@@ -87,7 +83,7 @@ impl ChatPipeline {
     /// that, the engine hands it back to the UI to run as the next turn.
     /// Returns `false` when no run is live (the UI falls back to the
     /// per-session `queued_messages` queue).
-    pub fn inject(&self, message: crate::sessions::QueuedMessage) -> bool {
+    pub fn inject(&self, message: QueuedMessage) -> bool {
         self.injection_tx.lock().unwrap().send(message).is_ok()
     }
 

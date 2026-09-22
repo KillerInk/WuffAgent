@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::AgentEngine;
-use crate::client::ChatPipeline;
+use crate::agents::ChatPipeline;
 
 // QueuedMessage lives in the types brick (AppEvent::UserMessageDrained
 // embeds it); re-exported here so crate::sessions::QueuedMessage stays stable.

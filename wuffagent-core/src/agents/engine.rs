@@ -154,7 +154,7 @@ impl AgentEngine {
         &self,
         request: &str,
         system_prompt: &str,
-        tool_policy: &crate::client::pipeline::ChatToolPolicy,
+        tool_policy: &crate::types::ChatToolPolicy,
         image: Option<&str>,
         cancel_token: &CancellationToken,
     ) -> Result<String, String> {

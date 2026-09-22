@@ -528,7 +528,7 @@ impl ChatApp {
     /// Resolve the tool policy for an agent profile by name. An empty name
     /// ("Auto") or a profile not found yields an unrestricted policy (all tools
     /// + allow-all shell, no handoff).
-    fn resolve_tool_policy(&self, agent_name: &str) -> crate::client::pipeline::ChatToolPolicy {
+    fn resolve_tool_policy(&self, agent_name: &str) -> crate::types::ChatToolPolicy {
         let names: Vec<&str> = if agent_name.is_empty() {
             vec!["general", "generalist"]
         } else {
@@ -536,7 +536,7 @@ impl ChatApp {
         };
         let policy = self.load_agent_config(&names);
         match policy {
-            Some(cfg) => crate::client::pipeline::ChatToolPolicy {
+            Some(cfg) => crate::types::ChatToolPolicy {
                 allowed_tools: cfg.allowed_tools,
                 shell_config: cfg.shell_config,
                 agent_name: cfg.name,
@@ -546,7 +546,7 @@ impl ChatApp {
                 reasoning_effort: cfg.reasoning_effort,
                 trim_config: cfg.trim_config,
             },
-            None => crate::client::pipeline::ChatToolPolicy::unrestricted(),
+            None => crate::types::ChatToolPolicy::unrestricted(),
         }
     }
 
@@ -605,7 +605,7 @@ impl ChatApp {
     }
 
     /// Start a fresh pipeline run for `text` in the given session.
-    pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: crate::client::pipeline::ChatToolPolicy, already_displayed: bool) {
+    pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: crate::types::ChatToolPolicy, already_displayed: bool) {
         tracing::info!("[CHAT PATH] start_pipeline_for_session called with: {}", text);
 
         // Convert the attached image (if any) into the two forms we need:
@@ -662,7 +662,7 @@ impl ChatApp {
             // mutated by every session in parallel (a cross-session data race).
             let new_engine = runtime.engine.clone().with_client(runtime.client.clone());
             runtime.engine = new_engine;
-            let pipeline = crate::client::ChatPipeline::new(
+            let pipeline = crate::agents::ChatPipeline::new(
                 Arc::new(runtime.engine.clone()),
                 pending_tx,
                 self.reasoning_effort,
