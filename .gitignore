@@ -2,7 +2,6 @@
 /.hermes/*
 /debug.log
 /plans/*
-/$null
 /bug_report.md
 /memories/general.json
 /memories/user_profile.json
