@@ -4,11 +4,14 @@
 //! reasoning, timestamp); all items are re-exported here so
 //! `crate::types::X` paths are unchanged for callers.
 //!
-//! Sole external dependency: `egui::ImageSource` in `QueuedMessage.image`
-//! (documented exception; the data-URI migration is deferred).
+//! External exception (the one documented egui image path, removed by the
+//! deferred data-URI migration): `egui::ImageSource` in
+//! `QueuedMessage.image`, plus `image.rs::image_source_data_uri`, which
+//! converts it to the `data:` URI form used in model requests.
 
 mod chat_ui;
 mod events;
+mod image;
 mod message;
 mod policy;
 mod reasoning;
@@ -17,6 +20,7 @@ mod usage;
 
 pub use chat_ui::{AppStatus, ChatMessage, MessageKind};
 pub use events::AppEvent;
+pub use image::image_source_data_uri;
 pub use message::{Message, ToolCall, ToolFunction};
 pub use policy::{
     ChatToolPolicy, ImprovementSuggestion, NewAgentProposal, QueuedMessage, ShellConfig,

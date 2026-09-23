@@ -38,9 +38,11 @@
 //! ```
 //!
 //! Key invariants:
-//! - `types` has no internal dependencies. Sole external exception:
-//!   `QueuedMessage.image` uses `egui::ImageSource` (documented; the
-//!   data-URI migration is deferred).
+//! - `types` has no internal dependencies. External exceptions (the one
+//!   documented egui image path, removed by the deferred data-URI
+//!   migration): `QueuedMessage.image` uses `egui::ImageSource`, and
+//!   `types/image.rs` provides `image_source_data_uri` to convert it to
+//!   the `data:` URI form used in model requests.
 //! - One documented residual 3-cycle: `client → sessions → agents → client`.
 //!   Each edge is justified: client persists sessions via
 //!   `client/session.rs` free fns; `sessions/runtime.rs` drives

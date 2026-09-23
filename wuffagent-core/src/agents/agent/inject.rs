@@ -33,7 +33,7 @@ impl Agent {
             let image = injected
                 .image
                 .as_ref()
-                .and_then(Self::image_source_data_uri);
+                .and_then(crate::types::image_source_data_uri);
             let user_msg = Message {
                 role: "user".to_string(),
                 content: injected.text.clone(),
