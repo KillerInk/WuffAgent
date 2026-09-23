@@ -666,277 +666,32 @@ impl Agent {
             // inline, exactly as before.
             if let Some(calls) = &tool_calls {
                 if !calls.is_empty() {
-                    for call in calls {
-                        if cancel_token.is_cancelled() {
-                            // Stop early-started runs that have not been
-                            // collected yet so nothing keeps executing in
-                            // the background for a dead turn.
-                            pending_tool_runs.abort_all();
-                            return Err("Cancelled".to_string());
-                        }
-                        if truncated_ids.contains(&call.id) {
-                            // Truncated mid-stream: the call cannot be
-                            // executed. Abort an early-started run (defensive
-                            // — the ready callback only fires for complete
-                            // arguments) and report the truncation as the
-                            // tool result so the model retries with a smaller
-                            // payload.
-                            let early = pending_tool_runs.take(&call.id);
-                            if let Some(handle) = early {
-                                handle.abort();
-                            } else {
-                                self.send_event(crate::types::AppEvent::ToolCallStart {
-                                    tool_name: call.function.name.clone(),
-                                    call_id: call.id.clone(),
-                                    args_preview:
-                                        "(arguments truncated by model output limit)".to_string(),
-                                    session_id: self.session_id(),
-                                });
-                            }
-                            let result_str = format!(
-                                "Error: tool call arguments for '{}' were truncated (the model ran out of output tokens mid-argument), so the tool did not execute. Retry with a smaller payload - e.g. split the content across multiple tool calls or use a more targeted edit.",
-                                call.function.name
-                            );
-                            self.send_event(crate::types::AppEvent::ToolCallError {
-                                tool_name: call.function.name.clone(),
-                                call_id: call.id.clone(),
-                                error: result_str.clone(),
-                                session_id: self.session_id(),
-                            });
-                            let tool_msg = Message {
-                                role: "tool".to_string(),
-                                content: result_str,
-                                timestamp: crate::types::format_timestamp(),
-                                tool_calls: None,
-                                tool_call_id: Some(call.id.clone()),
-                                reasoning_content: None,
-                                image: None,
-                            };
-                            messages.push(tool_msg.clone());
-                            self.record_in_store(&tool_msg);
-                            continue;
-                        }
-                        // Bind the handle out of the map before awaiting: the
-                        // mutex guard must not live across the await (the
-                        // enclosing future must stay Send).
-                        let early_handle = pending_tool_runs.take(&call.id);
-                        let result_str: String = if let Some(handle) = early_handle {
-                            match handle.await {
-                                Ok(Ok(s)) => s,
-                                Ok(Err(bad_args)) => {
-                                    tracing::warn!(
-                                        "[AGENT] Bad args for '{}': {}",
-                                        call.function.name,
-                                        bad_args
-                                    );
-                                    self.send_event(crate::types::AppEvent::ToolCallError {
-                                        tool_name: call.function.name.clone(),
-                                        call_id: call.id.clone(),
-                                        error: bad_args.clone(),
-                                        session_id: self.session_id(),
-                                    });
-                                    format!("Error: {}", bad_args)
-                                }
-                                Err(join_err) => {
-                                    let e = format!("tool task failed: {}", join_err);
-                                    self.send_event(crate::types::AppEvent::ToolCallError {
-                                        tool_name: call.function.name.clone(),
-                                        call_id: call.id.clone(),
-                                        error: e.clone(),
-                                        session_id: self.session_id(),
-                                    });
-                                    format!("Error: {}", e)
-                                }
-                            }
-                        } else {
-                            // Inline fallback: the stream ended while this
-                            // call was still the active one.
-                            self.send_event(crate::types::AppEvent::ToolCallStart {
-                                tool_name: call.function.name.clone(),
-                                call_id: call.id.clone(),
-                                args_preview: crate::tools::tool_args_summary(
-                                    &call.function.name,
-                                    &call.function.arguments,
-                                ),
-                                session_id: self.session_id(),
-                            });
-                            let params = match crate::tools::manager::parse_tool_args(
-                                &call.function.arguments,
-                            ) {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "[AGENT] Bad args for '{}': {}",
-                                        call.function.name,
-                                        e
-                                    );
-                                    self.send_event(crate::types::AppEvent::ToolCallError {
-                                        tool_name: call.function.name.clone(),
-                                        call_id: call.id.clone(),
-                                        error: e.clone(),
-                                        session_id: self.session_id(),
-                                    });
-                                    let bad_args_msg = Message {
-                                        role: "tool".to_string(),
-                                        content: format!("Error: {}", e),
-                                        timestamp: crate::types::format_timestamp(),
-                                        tool_calls: None,
-                                        tool_call_id: Some(call.id.clone()),
-                                        reasoning_content: None,
-                                        image: None,
-                                    };
-                                    messages.push(bad_args_msg.clone());
-                                    self.record_in_store(&bad_args_msg);
-                                    continue;
-                                }
-                            };
-                            let manager = tool_manager.clone();
-                            let progress = self.tool_progress_for(&call.function.name, &call.id);
-                            let tool_result = manager
-                                .execute_with_progress(&call.function.name, params, &progress)
-                                .await;
-                            // Tools must always return *something*: an empty result
-                            // string becomes an empty `role: "tool"` message, which
-                            // the model/server rejects.
-                            match tool_result {
-                                Ok(output) => {
-                                    let s = format!("{}", output);
-                                    if s.trim().is_empty() {
-                                        "(no output)".to_string()
-                                    } else {
-                                        s
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "[AGENT] Tool '{}' failed: {}",
-                                        call.function.name,
-                                        e
-                                    );
-                                    format!("Error: {}", e)
-                                }
-                            }
-                        };
-                        // Early-started calls sent their ToolCallStart mid-stream;
-                        // emit the completion in call order now.
-                        self.send_event(crate::types::AppEvent::ToolCallComplete {
-                            tool_name: call.function.name.clone(),
-                            call_id: call.id.clone(),
-                            result: result_str.clone(),
-                            session_id: self.session_id(),
-                        });
-                        let tool_msg = Message {
-                            role: "tool".to_string(),
-                            content: result_str,
-                            timestamp: crate::types::format_timestamp(),
-                            tool_calls: None,
-                            tool_call_id: Some(call.id.clone()),
-                            reasoning_content: None,
-                            image: None,
-                        };
-                        messages.push(tool_msg.clone());
-                        self.record_in_store(&tool_msg);
-                    }
+                    super::tool_calls::run_native_tool_calls(
+                        self,
+                        calls,
+                        &pending_tool_runs,
+                        cancel_token,
+                        &truncated_ids,
+                        messages,
+                        &tool_manager,
+                    )
+                    .await?;
                     continue;
                 }
             }
 
             // ── Fallback: text-embedded tool calls (non-native models) ──
-            if tool_defs.as_ref().map(|d| d.is_empty()).unwrap_or(false) {
-                // No tools offered — skip text parsing entirely.
-            } else {
-                let mut embedded = Vec::new();
-                if let Some(bash_calls) = self.extract_bash_as_tool_calls(&display_content) {
-                    embedded.extend(bash_calls);
-                }
-                if embedded.is_empty() {
-                    if let Some(json_calls) = self.parse_tool_calls(&display_content) {
-                        embedded.extend(json_calls);
-                    }
-                }
-                if !embedded.is_empty() {
-                    for call in &embedded {
-                        if cancel_token.is_cancelled() {
-                            return Err("Cancelled".to_string());
-                        }
-                        self.send_event(crate::types::AppEvent::ToolCallStart {
-                            tool_name: call.function.name.clone(),
-                            call_id: call.id.clone(),
-                            args_preview: crate::tools::tool_args_summary(
-                                &call.function.name,
-                                &call.function.arguments,
-                            ),
-                            session_id: self.session_id(),
-                        });
-                        let params = match crate::tools::manager::parse_tool_args(
-                            &call.function.arguments,
-                        ) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                self.send_event(crate::types::AppEvent::ToolCallError {
-                                    tool_name: call.function.name.clone(),
-                                    call_id: call.id.clone(),
-                                    error: e.clone(),
-                                    session_id: self.session_id(),
-                                });
-                                continue;
-                            }
-                        };
-                        let manager = tool_manager.clone();
-                        let progress = self.tool_progress_for(&call.function.name, &call.id);
-                        let tool_result = manager
-                            .execute_with_progress(&call.function.name, params, &progress)
-                            .await;
-                        let result_str = match tool_result {
-                            Ok(output) => {
-                                let s = format!("{}", output);
-                                if s.trim().is_empty() {
-                                    "(no output)".to_string()
-                                } else {
-                                    s
-                                }
-                            }
-                            Err(e) => format!("Error: {}", e),
-                        };
-                        self.send_event(crate::types::AppEvent::ToolCallComplete {
-                            tool_name: call.function.name.clone(),
-                            call_id: call.id.clone(),
-                            result: result_str.clone(),
-                            session_id: self.session_id(),
-                        });
-                        // History entry in API-native shape (id links the result).
-                        let fb_assistant = Message {
-                            role: "assistant".to_string(),
-                            content: String::new(),
-                            timestamp: crate::types::format_timestamp(),
-                            tool_calls: Some(vec![crate::types::ToolCall {
-                                id: call.id.clone(),
-                                call_type: call._call_type.clone(),
-                                function: crate::types::ToolFunction {
-                                    name: call.function.name.clone(),
-                                    arguments: call.function.arguments.clone(),
-                                },
-                            }]),
-                            tool_call_id: None,
-                            reasoning_content: None,
-                            image: None,
-                        };
-                        messages.push(fb_assistant.clone());
-                        self.record_in_store(&fb_assistant);
-                        let fb_tool = Message {
-                            role: "tool".to_string(),
-                            content: result_str,
-                            timestamp: crate::types::format_timestamp(),
-                            tool_calls: None,
-                            tool_call_id: Some(call.id.clone()),
-                            reasoning_content: None,
-                            image: None,
-                        };
-                        messages.push(fb_tool.clone());
-                        self.record_in_store(&fb_tool);
-                    }
-                    continue;
-                }
+            if super::tool_calls::run_text_embedded_calls(
+                self,
+                &tool_defs,
+                &display_content,
+                cancel_token,
+                messages,
+                &tool_manager,
+            )
+            .await?
+            {
+                continue;
             }
 
             // ── No more tool calls ──────────────────────────────────────
