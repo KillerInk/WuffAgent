@@ -427,11 +427,18 @@ impl ContextTrimming {
     /// candidate has content left. Messages whose content reaches the floor are
     /// set to a placeholder and skipped, so no message — in particular no
     /// `role: "tool"` result — ever ends up with empty content.
+    /// `min_shrink_chars`: only messages with content LONGER than this are
+    /// candidates. Collapsing a message at the floor writes the 41-char
+    /// placeholder, so shrinking a message of 41 chars or fewer GROWS the
+    /// total — pass 0 for pre-tail rounds (existing behavior) and the
+    /// placeholder length for the last-resort tail stage, so the fresh user
+    /// request is never destroyed for no savings.
     fn truncate_largest_message(
         messages: &mut [Message],
         target_tokens: usize,
         protect_from: usize,
         never_shrink_reads: bool,
+        min_shrink_chars: usize,
     ) -> bool {
         let leading_system = messages.first().map(|m| m.role.as_str()) == Some("system");
         let read_calls = if never_shrink_reads {
@@ -450,7 +457,7 @@ impl ContextTrimming {
             let best = (0..messages.len())
                 .filter(|&i| !(i == 0 && leading_system))
                 .filter(|&i| i < protect_from)
-                .filter(|&i| !messages[i].content.is_empty())
+                .filter(|&i| messages[i].content.chars().count() > min_shrink_chars)
                 .filter(|&i| messages[i].content != TRUNCATED_PLACEHOLDER)
                 // A halved file snapshot invites the model to hallucinate
                 // line contents it no longer has — file content is either
@@ -695,7 +702,28 @@ impl ContextTrimming {
 
         // Fallback: if still over budget, truncate the largest shrinkable
         // message (protected tail excluded) to force it under.
-        Self::truncate_largest_message(messages, target_chars, protect_from, never_shrink_reads);
+        Self::truncate_largest_message(messages, target_chars, protect_from, never_shrink_reads, 0);
+
+        // Last resort: the protected tail ITSELF is over budget — a single
+        // huge fresh tool result or a pasted user message. The fresh round is
+        // normally never removed or shrunk (the model must read fresh output
+        // in full), but an unshrinkable tail means the request overflows
+        // n_ctx and the server rejects it outright — a halved snapshot beats
+        // a hard failure. This stage also relaxes the read_file exemption:
+        // the fresh read's pair cannot be removed (that would orphan the
+        // live tool call), so halving is the only in-place option left.
+        // Tail messages at or below the placeholder length are left alone:
+        // collapsing them would grow the total, never shrink it.
+        if Self::message_char_count(messages) > target_chars {
+            let all = messages.len();
+            Self::truncate_largest_message(
+                messages,
+                target_chars,
+                all,
+                false,
+                TRUNCATED_PLACEHOLDER.chars().count(),
+            );
+        }
 
         let final_count = messages.len();
         let final_chars = Self::message_char_count(messages);

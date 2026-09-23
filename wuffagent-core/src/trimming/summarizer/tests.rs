@@ -745,6 +745,99 @@ fn test_trim_messages_idempotent_second_call_noop() {
     assert_eq!(before, after, "second trim must not modify the list");
 }
 
+#[test]
+fn test_trim_shrinks_huge_fresh_tool_result_last_resort() {
+    // The fresh round (last assistant tool call + its result) alone exceeds
+    // the target; almost nothing pre-tail can be removed or summarized.
+    // Without the last-resort tail shrink the list stays over budget and the
+    // next request overflows n_ctx; with it, the tool result is halved down.
+    let mut messages = vec![
+        Message {
+            role: "system".into(),
+            content: "sys".into(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        },
+        user_msg("read the big file"),
+        assistant_tool_call("call_1", "{\"path\":\"big.txt\"}"),
+        tool_result("call_1", &"x".repeat(50_000)),
+    ];
+
+    let trimming = ContextTrimming::new();
+    let target = 1_000;
+    trimming.trim_messages(&mut messages, target, &make_config());
+
+    assert_pairs_intact(&messages);
+    assert_eq!(messages.len(), 4, "nothing should be removed");
+    let total = ContextTrimming::message_char_count(&messages);
+    assert!(
+        total <= target,
+        "tail shrink must bring the list under budget (total={total}, target={target})"
+    );
+    assert!(!messages[3].content.is_empty(), "tool result must not be emptied");
+}
+
+#[test]
+fn test_trim_last_resort_shrinks_fresh_read_file() {
+    // A fresh read_file result inside the protected tail is exempt from the
+    // normal shrinkers (file content is all-or-nothing), but when the tail
+    // alone exceeds the budget the last-resort stage must halve it anyway —
+    // removing the pair would orphan the live tool call.
+    let mut messages = vec![
+        user_msg("read the file"),
+        assistant_call_named("call_1", "read_file", "{\"path\":\"a.txt\"}"),
+        tool_result("call_1", &"line of content\n".repeat(30_000)),
+    ];
+
+    let trimming = ContextTrimming::new();
+    let target = 2_000;
+    trimming.trim_messages(&mut messages, target, &make_config());
+
+    assert_pairs_intact(&messages);
+    assert_eq!(messages.len(), 3, "nothing should be removed");
+    let total = ContextTrimming::message_char_count(&messages);
+    assert!(
+        total <= target,
+        "read_file tail must be halved under budget (total={total}, target={target})"
+    );
+}
+
+#[test]
+fn test_trim_tail_shrink_never_destroys_short_user_request() {
+    // When nothing can fit the budget (an oversized system prompt eats the
+    // whole window), the last-resort tail shrink must leave a SHORT user
+    // request untouched — collapsing it to the 41-char placeholder would
+    // grow the total instead of shrinking it.
+    let mut messages = vec![
+        Message {
+            role: "system".into(),
+            content: "S".repeat(5_000),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        },
+        user_msg("the current request"),
+    ];
+
+    let trimming = ContextTrimming::new();
+    trimming.trim_messages(&mut messages, 1_000, &make_config());
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[1].content, "the current request",
+        "the fresh user request must survive verbatim"
+    );
+    assert_eq!(
+        messages[0].content, "S".repeat(5_000),
+        "the leading system prompt must never be shrunk"
+    );
+}
+
 // ── Never leave a partial file snapshot ────────────────────────────────────
 
 #[test]
@@ -822,7 +915,7 @@ fn test_truncate_never_halves_read_file_result_when_flag_on() {
         user_msg("q2"),
     ];
     // Tail starts at the last user message (index 3).
-    let did = ContextTrimming::truncate_largest_message(&mut messages, 100, 3, true);
+    let did = ContextTrimming::truncate_largest_message(&mut messages, 100, 3, true, 0);
 
     assert!(did, "something must have been truncated");
     assert_eq!(

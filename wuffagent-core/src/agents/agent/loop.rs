@@ -21,6 +21,29 @@ const MAX_VERIFICATION_ATTEMPTS: u32 = 2;
 /// handoff loops (A→B→A→…) — each hop is a full agent run, so this also
 /// caps the total work a single queued turn can trigger.
 const MAX_HANDOFF_DEPTH: usize = 8;
+
+/// Rough char allowance per attached image: the server turns the image into
+/// a model-dependent number of vision tokens (the base64 payload size is
+/// unrelated to that count), so a fixed ~2k-token (~8k-char at 4 chars/token)
+/// allowance is reserved per image instead of counting the payload.
+pub(crate) const ESTIMATED_IMAGE_CHARS: usize = 8_000;
+
+/// Per-request char overhead that `message_char_count` never sees: the
+/// serialized tool schemas (sent with EVERY request) plus a fixed allowance
+/// per attached image. The trim budget is a percentage of n_ctx in char
+/// units, so it must reserve this — otherwise the request can exceed n_ctx
+/// while the message list alone is still below the 90% trigger (and even
+/// after trimming to the 50% target or the 85% overflow-retry budget).
+pub(crate) fn request_overhead_chars(
+    tool_defs: Option<&[crate::tools::ToolDefinition]>,
+    messages: &[Message],
+) -> usize {
+    let schema_chars = tool_defs
+        .map(|defs| serde_json::to_string(defs).map(|s| s.chars().count()).unwrap_or(0))
+        .unwrap_or(0);
+    let images = messages.iter().filter(|m| m.image.is_some()).count();
+    schema_chars + images * ESTIMATED_IMAGE_CHARS
+}
 /// Outcome of one agent's LLM loop.
 pub(crate) enum RunOutcome {
     /// The turn completed; the assistant's final text.
@@ -404,11 +427,17 @@ impl Agent {
             // (50% of n_ctx) so the following rounds have headroom.
             if self.client.n_ctx() > 0 {
                 let msg_count = messages.len();
-                let total_chars = crate::trimming::message_char_count(messages);
+                // The request also carries the tool schemas and attached
+                // images, which `message_char_count` does not count — reserve
+                // that overhead so the budget covers the ACTUAL request size.
+                let overhead_chars = request_overhead_chars(tool_defs.as_deref(), messages);
+                let total_chars = crate::trimming::message_char_count(messages) + overhead_chars;
                 if msg_count > 4 && total_chars > self.client.trim_trigger_chars() {
                     // Target in char units: 50% of n_ctx tokens converted to
-                    // chars via the client's calibrated chars-per-token ratio.
-                    let target_chars = self.client.trim_target_chars();
+                    // chars via the client's calibrated chars-per-token ratio,
+                    // minus the per-request overhead so messages + overhead
+                    // together stay under the target.
+                    let target_chars = self.client.trim_target_chars().saturating_sub(overhead_chars);
                     let removed = self.trimming.trim_messages(
                         messages,
                         target_chars,
@@ -618,7 +647,13 @@ impl Agent {
                                 "[AGENT] Agent '{}' request exceeded context ({} tokens, n_ctx={}); force-trimming and retrying",
                                 self.config.name, ov.n_prompt, ov.n_ctx
                             );
-                            let target = self.client.overflow_retry_char_budget(&ov);
+                            let target = self
+                                .client
+                                .overflow_retry_char_budget(&ov)
+                                .saturating_sub(request_overhead_chars(
+                                    tool_defs.as_deref(),
+                                    messages,
+                                ));
                             let removed = self
                                 .trimming
                                 .trim_messages(messages, target, &self.config.trim_config);

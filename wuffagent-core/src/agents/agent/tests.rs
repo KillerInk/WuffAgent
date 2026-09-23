@@ -770,3 +770,54 @@ fn test_is_storable_nudge_vs_user_typed_nudge() {
     };
     assert!(Agent::is_storable(&typed));
 }
+
+/// The trim budget must reserve the per-request overhead (tool schemas +
+/// images) that `message_char_count` does not count, or the request can
+/// exceed n_ctx while the messages alone are under the trim target.
+#[test]
+fn test_request_overhead_counts_tool_schemas_and_images() {
+    let mut msgs = vec![Message {
+        role: "user".to_string(),
+        content: "hi".to_string(),
+        timestamp: String::new(),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+        image: None,
+    }];
+
+    // No tools, no images: zero overhead.
+    assert_eq!(super::r#loop::request_overhead_chars(None, &msgs), 0);
+
+    // Each attached image adds the fixed allowance (NOT the payload size).
+    msgs[0].image = Some("data:image/png;base64,QUJD".to_string());
+    assert_eq!(
+        super::r#loop::request_overhead_chars(None, &msgs),
+        super::r#loop::ESTIMATED_IMAGE_CHARS
+    );
+
+    // Tool schemas add their serialized JSON length, on top of the image.
+    let defs: Vec<crate::tools::ToolDefinition> = (0..3)
+        .map(|i| crate::tools::ToolDefinition {
+            type_name: "function".to_string(),
+            function: crate::tools::ToolFunctionSpec {
+                name: format!("tool_{i}"),
+                description: "does a thing".to_string(),
+                parameters: crate::tools::JsonSchema {
+                    type_name: "object".to_string(),
+                    properties: None,
+                    required: vec![],
+                },
+            },
+        })
+        .collect();
+    let expected_schema = serde_json::to_string(&defs).unwrap().chars().count();
+    assert_eq!(
+        super::r#loop::request_overhead_chars(Some(&defs), &msgs),
+        expected_schema + super::r#loop::ESTIMATED_IMAGE_CHARS
+    );
+    assert!(
+        expected_schema > 100,
+        "sanity: three tool schemas must serialize to more than 100 chars"
+    );
+}
