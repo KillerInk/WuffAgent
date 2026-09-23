@@ -344,36 +344,7 @@ impl Agent {
             // BEFORE the handoff/restart checks so a message sent during a
             // long tool call (e.g. a `restart` build) is recorded in the
             // store and survives the handoff snapshot / process relaunch.
-            if let Some(holder) = &self.injection_rx {
-                let rx = holder.lock().unwrap();
-                while let Ok(injected) = rx.try_recv() {
-                    let image = injected
-                        .image
-                        .as_ref()
-                        .and_then(Self::image_source_data_uri);
-                    let user_msg = Message {
-                        role: "user".to_string(),
-                        content: injected.text.clone(),
-                        timestamp: crate::types::format_timestamp(),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        image,
-                    };
-                    tracing::info!(
-                        "[AGENT] Agent '{}' injecting user message sent mid-run into the running turn: {}",
-                        self.config.name,
-                        injected.text
-                    );
-                    messages.push(user_msg.clone());
-                    self.record_in_store(&user_msg);
-                    // The injected message is part of this turn's request now.
-                    original_request.push_str(&format!(
-                        "\n[User added while the agent was working: {}]",
-                        injected.text
-                    ));
-                }
-            }
+            self.drain_injections(messages, &mut original_request);
 
             // A pending handoff (written by the `handoff` tool this turn)
             // ends this agent's run: `execute` switches to the target agent.
