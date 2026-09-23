@@ -484,14 +484,13 @@ impl Agent {
             // background at that point, so tools run while the model keeps
             // thinking. Results are collected in call order after the stream
             // ends (see the native tool-call block further down).
-            let pending_tool_runs: Arc<
-                Mutex<
-                    std::collections::HashMap<
-                        String,
-                        tokio::task::JoinHandle<Result<String, String>>,
-                    >,
-                >,
-            > = Arc::new(Mutex::new(std::collections::HashMap::new()));
+            let pending_tool_runs: Arc<super::tool_exec::PendingToolRuns> = Arc::new(
+                super::tool_exec::PendingToolRuns::new(
+                    super::tool_exec::EventSink::new(self.event_tx.clone(), self.session_id()),
+                    tool_manager.clone(),
+                    cancel_token.clone(),
+                ),
+            );
 
             let (assistant_msg, usage) = {
                 self.client
@@ -503,13 +502,9 @@ impl Agent {
                     let tx = self.event_tx.clone();
                     let sid = self.session_id();
                     let rt_attempt = round_thinking.clone();
-                    let ready_tx = self.event_tx.clone();
-                    let ready_sid = self.session_id();
                     let pp_tx = self.event_tx.clone();
                     let pp_sid = self.session_id();
-                    let ready_pending = Arc::clone(&pending_tool_runs);
-                    let ready_manager = tool_manager.clone();
-                    let ready_cancel = cancel_token.clone();
+                    let ready = pending_tool_runs.ready();
                     match ChatClient::stream_with_messages_arc(
                         &self.client,
                         messages,
@@ -529,87 +524,7 @@ impl Agent {
                             }
                             Ok(())
                         },
-                        move |call: crate::types::ToolCall| {
-                            // Early-start this tool call while the model is
-                            // still streaming: the SSE layer only reports a
-                            // call once its arguments are complete, so it is
-                            // safe to execute now.
-                            if call.id.is_empty() {
-                                return;
-                            }
-                            let id = call.id.clone();
-                            if ready_pending.lock().unwrap().contains_key(&id) {
-                                return; // defensive: already started
-                            }
-                            let name = call.function.name.clone();
-                            let args = call.function.arguments.clone();
-                            tracing::debug!(
-                                "[AGENT] Early-starting tool '{}' (id={}) while model is still streaming",
-                                name, id
-                            );
-                            // Live tool card: args preview + progress sink.
-                            let args_preview = crate::tools::tool_args_summary(&name, &args);
-                            if let Some(ref tx) = ready_tx {
-                                if let Ok(g) = tx.lock() {
-                                    let _ = g.send(crate::types::AppEvent::ToolCallStart {
-                                        tool_name: name.clone(),
-                                        call_id: id.clone(),
-                                        args_preview,
-                                        session_id: ready_sid.clone(),
-                                    });
-                                }
-                            }
-                            let progress = match &ready_tx {
-                                Some(tx) => {
-                                    let tx = std::sync::Arc::clone(tx);
-                                    let p_name = name.clone();
-                                    let p_id = id.clone();
-                                    let p_sid = ready_sid.clone();
-                                    crate::tools::types::ToolProgress {
-                                        on_progress: Some(std::sync::Arc::new(move |text: &str| {
-                                            if let Ok(g) = tx.lock() {
-                                                let _ = g.send(crate::types::AppEvent::ToolCallProgress {
-                                                    tool_name: p_name.clone(),
-                                                    call_id: p_id.clone(),
-                                                    text: text.to_string(),
-                                                    session_id: p_sid.clone(),
-                                                });
-                                            }
-                                        })),
-                                    }
-                                }
-                                None => crate::tools::types::ToolProgress::none(),
-                            };
-                            let tool_mgr = ready_manager.clone();
-                            let token = ready_cancel.clone();
-                            let handle = tokio::spawn(async move {
-                                let params = match crate::tools::manager::parse_tool_args(&args) {
-                                    Ok(p) => p,
-                                    Err(e) => return Err(e),
-                                };
-                                let result = tokio::select! {
-                                    r = tool_mgr.execute_with_progress(&name, params, &progress) => r,
-                                    _ = token.cancelled() => {
-                                        return Ok(format!(
-                                            "Error: Cancelled (tool '{}' aborted)",
-                                            name
-                                        ))
-                                    }
-                                };
-                                Ok(match result {
-                                    Ok(output) => {
-                                        let s = format!("{}", output);
-                                        if s.trim().is_empty() {
-                                            "(no output)".to_string()
-                                        } else {
-                                            s
-                                        }
-                                    }
-                                    Err(e) => format!("Error: {}", e),
-                                })
-                            });
-                            ready_pending.lock().unwrap().insert(id, handle);
-                        },
+                        ready,
                         move |pp: crate::types::PromptProgress| {
                             // Live prompt-processing progress (llama.cpp):
                             // forward to the UI for the status bar PP speed.
@@ -630,9 +545,7 @@ impl Agent {
                     {
                         Ok((msg, usage)) => break (msg, usage),
                         Err(crate::client::Error::Cancelled) => {
-                            for h in pending_tool_runs.lock().unwrap().values() {
-                                h.abort();
-                            }
+                            pending_tool_runs.abort_all();
                             return Err("Cancelled".to_string());
                         }
                         Err(e) if attempt == 1 => {
@@ -663,16 +576,12 @@ impl Agent {
                                 self.config.name, removed, target
                             );
                             self.client.note_prompt_chars(crate::trimming::message_char_count(messages));
-                            for h in pending_tool_runs.lock().unwrap().values() {
-                                h.abort();
-                            }
-                            pending_tool_runs.lock().unwrap().clear();
+                            pending_tool_runs.abort_all();
+                            pending_tool_runs.clear();
                             continue;
                         }
                         Err(e) => {
-                            for h in pending_tool_runs.lock().unwrap().values() {
-                                h.abort();
-                            }
+                            pending_tool_runs.abort_all();
                             return Err(format!("LLM call failed: {}", e));
                         }
                     }
@@ -762,9 +671,7 @@ impl Agent {
                             // Stop early-started runs that have not been
                             // collected yet so nothing keeps executing in
                             // the background for a dead turn.
-                            for h in pending_tool_runs.lock().unwrap().values() {
-                                h.abort();
-                            }
+                            pending_tool_runs.abort_all();
                             return Err("Cancelled".to_string());
                         }
                         if truncated_ids.contains(&call.id) {
@@ -774,7 +681,7 @@ impl Agent {
                             // arguments) and report the truncation as the
                             // tool result so the model retries with a smaller
                             // payload.
-                            let early = pending_tool_runs.lock().unwrap().remove(&call.id);
+                            let early = pending_tool_runs.take(&call.id);
                             if let Some(handle) = early {
                                 handle.abort();
                             } else {
@@ -812,7 +719,7 @@ impl Agent {
                         // Bind the handle out of the map before awaiting: the
                         // mutex guard must not live across the await (the
                         // enclosing future must stay Send).
-                        let early_handle = pending_tool_runs.lock().unwrap().remove(&call.id);
+                        let early_handle = pending_tool_runs.take(&call.id);
                         let result_str: String = if let Some(handle) = early_handle {
                             match handle.await {
                                 Ok(Ok(s)) => s,

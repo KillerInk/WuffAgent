@@ -13,6 +13,7 @@ pub(crate) mod memory_sync;
 pub(crate) mod prompt;
 pub(crate) mod r#loop;
 pub(crate) mod stats;
+pub(crate) mod tool_exec;
 pub(crate) mod toolcall_parse;
 pub(crate) mod verify;
 
