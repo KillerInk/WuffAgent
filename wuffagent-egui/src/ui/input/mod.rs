@@ -1,12 +1,13 @@
-﻿use std::path::PathBuf;
 use std::sync::Arc;
 
-use base64::Engine;
 use eframe::egui;
 
 use super::state::ChatApp;
-use wuffagent_core::types::{AppStatus, MessageKind};
 use super::theme::Theme;
+use wuffagent_core::types::{AppStatus, MessageKind};
+
+mod agent_profile;
+mod images;
 
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
@@ -69,7 +70,7 @@ impl ChatApp {
             // Input area: text field + button row below
             let input_width = ui.available_width();
             ui.vertical(|ui| {
-                // Text input â€” constrained width, multiline
+                // Text input — constrained width, multiline
                 ui.scope(|ui| {
                     ui.set_max_width(input_width);
                     // We can't bind to chat_state.input_text directly due to borrowing,
@@ -89,7 +90,7 @@ impl ChatApp {
                         .inner_margin(egui::Margin::same(6))
                         .show(ui, |ui| ui.add(text_edit))
                         .inner;
-                    // Send on Ctrl+Enter (allowed while generating â€” queues the
+                    // Send on Ctrl+Enter (allowed while generating — queues the
                     // message to run after the current task finishes).
                     let modifiers = ui.ctx().input(|i| i.modifiers);
                     if response.has_focus()
@@ -254,7 +255,7 @@ impl ChatApp {
                 });
             });
         } else {
-            // No session selected â€” show empty input
+            // No session selected — show empty input
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Select or create a session to start chatting").size(12.0).color(theme.text_secondary));
             });
@@ -308,7 +309,7 @@ impl ChatApp {
                     agent_prompt,
                     tool_policy,
                 };
-                let image_b64 = pending_image_b64(queued.image.as_ref());
+                let image_b64 = images::pending_image_b64(queued.image.as_ref());
                 // Fast path: inject into the running agent loop. If the run
                 // already ended (race), the send fails and the message falls
                 // back to the per-session queue, which is drained when a run
@@ -347,104 +348,7 @@ impl ChatApp {
         true
     }
 
-    /// Paste an image from the system clipboard into the selected session's
-    /// pending-image slot. No-op when the clipboard holds no image (text is
-    /// pasted by egui itself; an empty clipboard simply does nothing).
-    fn paste_image_from_clipboard(&mut self) {
-        if self.selected_session_id.is_none() {
-            return;
-        }
-        if let Some(rgba) = clipboard_image_pixels() {
-            self.attach_rgba(rgba, "clipboard");
-        }
-    }
-
-    /// "Attach image" button: try the system clipboard first (the screenshot
-    /// flow), then fall back to a file picker for common image formats.
-    fn attach_image_from_clipboard_or_file(&mut self) {
-        if self.selected_session_id.is_none() {
-            return;
-        }
-        if let Some(rgba) = clipboard_image_pixels() {
-            if self.attach_rgba(rgba, "clipboard") {
-                return;
-            }
-        }
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
-            .pick_file()
-        {
-            match image_pixels_from_file(&path) {
-                Some(rgba) => {
-                    self.attach_rgba(rgba, "file");
-                }
-                None => self.notify_chat(
-                    &format!(
-                        "Could not read image file: {}",
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    ),
-                    false,
-                ),
-            }
-        }
-    }
-
-    /// Store RGBA8 pixels as the session's pending image (re-encoded as PNG).
-    /// Replaces any previously attached image (one image per message).
-    /// Returns true on success.
-    fn attach_rgba(&mut self, rgba: (u32, u32, Vec<u8>), source: &str) -> bool {
-        let sid = match self.selected_session_id.clone() {
-            Some(sid) => sid,
-            None => return false,
-        };
-        let (w, h, bytes) = rgba;
-        let expected = w.saturating_mul(h).saturating_mul(4) as usize;
-        if w == 0 || h == 0 || bytes.len() != expected {
-            tracing::warn!(
-                "[IMAGE] bad pixel data from {}: {}x{} ({} bytes, expected {})",
-                source,
-                w,
-                h,
-                bytes.len(),
-                expected
-            );
-            return false;
-        }
-        let png = match png_bytes_from_rgba(w, h, &bytes) {
-            Some(p) => p,
-            None => {
-                tracing::warn!("[IMAGE] PNG encoding failed for {} image", source);
-                return false;
-            }
-        };
-        let png_len = png.len();
-        if let Some(runtime) = self.session_store.get_mut(&sid) {
-            // URI unique per content: egui's bytes loader keeps the FIRST
-            // payload stored for a URI, so a fixed URI would show a stale
-            // image whenever a different one is attached (per-session
-            // pending images would also collide).
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hasher::write(&mut hasher, png.as_slice());
-            let hash = std::hash::Hasher::finish(&hasher);
-            runtime.chat_state.pending_image = Some(egui::ImageSource::Bytes {
-                uri: format!("bytes://attached_image_{hash:016x}.png").into(),
-                bytes: png.into(),
-            });
-        }
-        tracing::info!(
-            "[IMAGE] attached {}x{} image from {} ({} KB PNG)",
-            w,
-            h,
-            source,
-            png_len / 1024
-        );
-        true
-    }
-
-    /// Show a brief system notification in the selected session's chat area.
-    fn notify_chat(&mut self, msg: &str, success: bool) {
+    pub(super) fn notify_chat(&mut self, msg: &str, success: bool) {
         if let Some(sid) = self.selected_session_id.clone() {
             if let Some(runtime) = self.session_store.get_mut(&sid) {
                 runtime.chat_state.show_notification(msg, success);
@@ -454,7 +358,7 @@ impl ChatApp {
 
     /// Continue the current session's conversation: re-invoke the session's agent
     /// on the preserved conversation store with a "continue" turn. No checkpoint
-    /// machinery â€” the pipeline simply resumes on the existing messages.
+    /// machinery — the pipeline simply resumes on the existing messages.
     pub(super) fn continue_generation(&mut self) {
         self.continue_generation_note("Continue from where you left off.");
     }
@@ -483,8 +387,7 @@ impl ChatApp {
         self.start_pipeline_for_session(&sid, note, None, agent_prompt, tool_policy, false);
     }
 
-    /// Snapshot the selected session's input text (empty string if no session).
-    fn input_text_snapshot(&self) -> String {
+    pub(super) fn input_text_snapshot(&self) -> String {
         self.selected_session_id
             .as_ref()
             .and_then(|sid| self.session_store.get(sid))
@@ -492,7 +395,7 @@ impl ChatApp {
             .unwrap_or_default()
     }
 
-    fn validate_input(&self, text: &str) -> Result<(), String> {
+    pub(super) fn validate_input(&self, text: &str) -> Result<(), String> {
         if text.trim().is_empty() {
             return Err("Message cannot be empty".to_string());
         }
@@ -525,85 +428,6 @@ impl ChatApp {
         self.start_pipeline_for_session(sid, &input, image, agent_prompt, tool_policy, false);
     }
 
-    /// Resolve the tool policy for an agent profile by name. An empty name
-    /// ("Auto") or a profile not found yields an unrestricted policy (all tools
-    /// + allow-all shell, no handoff).
-    fn resolve_tool_policy(&self, agent_name: &str) -> wuffagent_core::types::ChatToolPolicy {
-        let names: Vec<&str> = if agent_name.is_empty() {
-            vec!["general", "generalist"]
-        } else {
-            vec![agent_name]
-        };
-        let policy = self.load_agent_config(&names);
-        match policy {
-            Some(cfg) => wuffagent_core::types::ChatToolPolicy {
-                allowed_tools: cfg.allowed_tools,
-                shell_config: cfg.shell_config,
-                agent_name: cfg.name,
-                handoff_enabled: cfg.handoff_enabled,
-                handoff_targets: cfg.handoff_targets,
-                restart_enabled: cfg.restart_enabled,
-                reasoning_effort: cfg.reasoning_effort,
-                trim_config: cfg.trim_config,
-            },
-            None => wuffagent_core::types::ChatToolPolicy::unrestricted(),
-        }
-    }
-
-    /// The known agents directories in priority order: the config-dir
-    /// `agents/` first, then the project-level `agents/` dirs (cwd, exe dir) —
-    /// the same discovery set the UI agent dialog, the improvements panel (F3/F4), and the bootstrap engine use.
-    pub(super) fn agents_dirs(&self) -> Vec<PathBuf> {
-        let agents_dir = self.config.file_path
-            .parent()
-            .map(|p| p.join("agents"))
-            .unwrap_or_else(|| self.config.file_path.clone());
-        let mut dirs = vec![agents_dir];
-        if let Ok(cwd) = std::env::current_dir() {
-            let d = cwd.join("agents");
-            if !dirs.contains(&d) {
-                dirs.push(d);
-            }
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                let d = exe_dir.join("agents");
-                if !dirs.contains(&d) {
-                    dirs.push(d);
-                }
-            }
-        }
-        dirs
-    }
-
-    /// Load the first matching agent profile (by `name`) from the known agents
-    /// directories, handling both current `AgentConfig` and legacy `WorkerConfig`
-    /// (via the core loader, which preserves every field incl. handoff settings).
-    fn load_agent_config(&self, names: &[&str]) -> Option<wuffagent_core::agents::config::AgentConfig> {
-        let dirs = self.agents_dirs();
-        for name in names {
-            if let Some(cfg) = wuffagent_core::agents::config::load_agent_from_dirs(&dirs, name) {
-                return Some(cfg);
-            }
-        }
-        None
-    }
-
-    /// Resolve the system prompt for an agent profile by name (empty = "Auto"
-    /// -> the general profile).
-    fn resolve_agent_prompt(&self, agent_name: &str) -> String {
-        let names: Vec<&str> = if agent_name.is_empty() {
-            vec!["general", "generalist"]
-        } else {
-            vec![agent_name]
-        };
-        let prompt = self.load_agent_system_prompt(&names);
-        if prompt.is_empty() {
-            tracing::warn!("No agent system prompt found - chat will run without one");
-        }
-        prompt
-    }
-
     /// Start a fresh pipeline run for `text` in the given session.
     pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: wuffagent_core::types::ChatToolPolicy, already_displayed: bool) {
         tracing::info!("[CHAT PATH] start_pipeline_for_session called with: {}", text);
@@ -612,7 +436,7 @@ impl ChatApp {
         // raw base64 for the chat display (`ChatMessage.image`) and a `data:`
         // URI for the model request (core serializes it into an OpenAI-style
         // `image_url` content part on the user message).
-        let image_b64 = pending_image_b64(image.as_ref());
+        let image_b64 = images::pending_image_b64(image.as_ref());
         let image_data_uri =
             image_b64.as_deref().map(|b64| format!("data:image/png;base64,{}", b64));
 
@@ -658,7 +482,7 @@ impl ChatApp {
             runtime.client.set_n_ctx(effective_n_ctx);
             // Rebind the per-session engine to this session's client so the
             // agent chat loop runs against THIS session's isolated conversation
-            // store â€” not the shared bootstrap engine's client, which would be
+            // store — not the shared bootstrap engine's client, which would be
             // mutated by every session in parallel (a cross-session data race).
             let new_engine = runtime.engine.clone().with_client(runtime.client.clone());
             runtime.engine = new_engine;
@@ -695,7 +519,7 @@ impl ChatApp {
         );
         // The message is already displayed in the chat (pushed at queue time);
         // start_pipeline_for_session won't push it again. Remove it from the queue
-        // and hand off â€” `start_pipeline_for_session` re-borrows the store, so the
+        // and hand off — `start_pipeline_for_session` re-borrows the store, so the
         // mutable borrow above must have ended (it has, via `cloned()`).
         if let Some(runtime) = self.session_store.get_mut(sid) {
             runtime.chat_state.queued_messages.remove(0);
@@ -708,10 +532,10 @@ impl ChatApp {
     /// already finished, clear the generating state and commit any partial
     /// stream.
     ///
-    /// This catches the cases where a terminal event never arrives â€” most
+    /// This catches the cases where a terminal event never arrives — most
     /// commonly when a new `start_pipeline_for_session` call aborts a task that
     /// was in the middle of emitting its final event, or when the task panics
-    /// â€” so the chat-area spinner can no longer spin forever.
+    /// — so the chat-area spinner can no longer spin forever.
     pub(super) fn sweep_finished_pipelines(&mut self) {
         // Collect the ids that need finalizing (we can't mutate the store while
         // iterating it).
@@ -750,88 +574,6 @@ impl ChatApp {
         }
     }
 
-    /// Load the system prompt of the first matching agent profile.
-    /// Searches the same agents directories as `get_agent_names` and
-    /// matches the profile's `name` field (not the file name).
-    /// Returns an empty string when no candidate profile exists.
-    fn load_agent_system_prompt(&self, names: &[&str]) -> String {
-        let dirs = self.agents_dirs();
-
-        let mut prompt = String::new();
-        for dir in &dirs {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                        continue;
-                    }
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::AgentConfig>(&content) {
-                            if names.iter().any(|n| cfg.name == *n) {
-                                prompt = cfg.system_prompt;
-                                break;
-                            }
-                        } else if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::WorkerConfig>(&content) {
-                            if names.iter().any(|n| cfg.name == *n) {
-                                prompt = cfg.system_prompt;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if !prompt.is_empty() {
-                break;
-            }
-        }
-
-        // The handoff hint is appended by `Agent::build_system_prompt`
-        // when the profile has `handoff_enabled` â€” mirroring it here would
-        // advertise handoffs the chat agent is not allowed to make.
-
-        prompt
-    }
-
-    /// Return the list of agent names from all known agents directories.
-    fn get_agent_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-
-        // Helper: scan a directory for agent names
-        let mut scan_dir = |dir: PathBuf| {
-            if dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(&dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                            continue;
-                        }
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::AgentConfig>(&content) {
-                                if cfg.enabled && seen.insert(cfg.name.clone()) {
-                                    names.push(cfg.name);
-                                }
-                            } else if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::WorkerConfig>(&content) {
-                                if cfg.enabled && seen.insert(cfg.name.clone()) {
-                                    names.push(cfg.name);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        // Scan all known agents directories (config dir first, then the
-        // project-level `agents/` dirs) — same discovery set as the UI agent
-        // dialog, so the selector lists the same profiles it can edit.
-        for dir in self.agents_dirs() {
-            scan_dir(dir);
-        }
-
-        names
-    }
-
     pub(super) fn stop_generation(&mut self) {
         tracing::info!("[CANCEL] Stopping all generation");
 
@@ -858,54 +600,3 @@ impl ChatApp {
         }
     }
 }
-
-/// RGBA8 pixels (width, height, bytes) from the system clipboard, or `None`.
-///
-/// egui-winit can only paste TEXT from the clipboard: with an image-only
-/// clipboard it logs "arboard paste error" and emits no event at all for the
-/// key press, so image pastes are handled here instead. When the clipboard
-/// also holds text, egui's own text paste already ran, so we return `None`
-/// to avoid duplicating it.
-fn clipboard_image_pixels() -> Option<(u32, u32, Vec<u8>)> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    if clipboard.get_text().is_ok() {
-        return None;
-    }
-    let img = match clipboard.get_image() {
-        Ok(img) => img,
-        Err(e) => {
-            tracing::debug!("[IMAGE] clipboard has no image: {}", e);
-            return None;
-        }
-    };
-    if img.width == 0 || img.height == 0 || img.bytes.is_empty() {
-        return None;
-    }
-    Some((img.width as u32, img.height as u32, img.bytes.into_owned()))
-}
-
-/// Decode an image file (png/jpg/jpeg/webp/bmp/gif) into RGBA8 pixels.
-fn image_pixels_from_file(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
-    let img = image::open(path).ok()?.into_rgba8();
-    Some((img.width(), img.height(), img.into_raw()))
-}
-
-/// Encode RGBA8 pixels as PNG bytes.
-fn png_bytes_from_rgba(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
-    let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())?;
-    let mut buf = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
-    Some(buf.into_inner())
-}
-
-/// Raw base64 (STANDARD) of a pending image's PNG bytes, for the chat display
-/// (`ChatMessage.image`). Only `Bytes`-based sources carry the payload.
-fn pending_image_b64(source: Option<&egui::ImageSource<'static>>) -> Option<String> {
-    match source? {
-        egui::ImageSource::Bytes { bytes, .. } => {
-            Some(base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()))
-        }
-        _ => None,
-    }
-}
-
