@@ -3,9 +3,11 @@
 //! helpers. Pure code motion from the old file_io.rs (F1).
 
 mod common;
+mod edits;
 mod ops;
 
 pub(crate) use common::*;
+pub(crate) use edits::*;
 pub(crate) use ops::*;
 
 use std::collections::HashMap;
