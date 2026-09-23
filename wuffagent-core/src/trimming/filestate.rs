@@ -29,6 +29,11 @@
 //! marker: even a marker keeps the model believing it has seen the file, and
 //! it then hallucinates line contents it no longer has. Removal makes the
 //! absence explicit — if the file matters, the model re-reads it.
+//!
+//! Exception: a round that ALSO carries a current, protected read of another
+//! file (read multiple times, or large — see [`is_protected_read`]) is kept;
+//! the stale read in it is collapsed to a one-line marker in place instead,
+//! so the other file's working snapshot is not sacrificed.
 
 use std::collections::HashMap;
 
@@ -95,6 +100,35 @@ pub struct FileStateIndex {
     pub last_read: HashMap<String, usize>,
     /// Index of the newest *successful* file mutation per normalized path.
     pub last_mutate: HashMap<String, usize>,
+    /// How many times each normalized path was read in this conversation
+    /// (failed reads count too — they occupy a round like any other read).
+    /// Feeds [`is_protected_read`]; taken over the FULL list, so "read
+    /// multiple times" means what it says even after the freshness pass has
+    /// dropped old snapshots.
+    pub read_count: HashMap<String, usize>,
+}
+
+/// A current snapshot is worth protecting from age-based removal (its pair is
+/// deferred to the end of the removal order) when the file was read at least
+/// this many times in the conversation — the model is actively working on it
+/// and would otherwise edit from a stale memory of the trimmed snapshot.
+const PROTECTED_READ_MIN_COUNT: usize = 2;
+
+/// …or when the snapshot itself is at least this large — re-reading a big
+/// file costs real tokens and a round, so its current snapshot stays in
+/// context as long as the budget allows.
+const PROTECTED_READ_MIN_CHARS: usize = 4096;
+
+/// True if the current snapshot of `key` is worth protecting from age-based
+/// removal: the file was read multiple times in this conversation (the model
+/// is actively working on it) or the snapshot is large (re-reading it is
+/// expensive). See the age pass of `ContextTrimming::trim_messages`.
+pub fn is_protected_read(index: &FileStateIndex, key: &str, snapshot: &str) -> bool {
+    index
+        .read_count
+        .get(key)
+        .is_some_and(|&count| count >= PROTECTED_READ_MIN_COUNT)
+        || snapshot.len() >= PROTECTED_READ_MIN_CHARS
 }
 
 /// Map a successful file-tool call to the paths it mutated (v1 table):
@@ -163,7 +197,9 @@ pub fn build_file_state_index(messages: &[Message]) -> FileStateIndex {
 
         if name == "read_file" {
             if let Some(path) = params.get::<String>("path") {
-                index.last_read.insert(normalize_path(&path), i);
+                let key = normalize_path(&path);
+                index.last_read.insert(key.clone(), i);
+                *index.read_count.entry(key).or_insert(0) += 1;
             }
             continue;
         }
@@ -261,8 +297,15 @@ pub fn invalidate_stale_reads(
 /// contiguous run of `role: "tool"` messages containing `i`, plus the
 /// `assistant` message immediately before the run that issued the calls.
 /// Removing the pair as a unit keeps call/result pairing intact (no orphaned
-/// `tool_call_id`, no dangling call). Messages at/after `protect_from` (the
-/// protected tail) are never touched. Returns the number of messages removed.
+/// `tool_call_id`, no dangling call).
+///
+/// Exception: if the round ALSO carries a protected current read of another
+/// file (see [`is_protected_read`]), removing it wholesale would delete the
+/// model's working snapshot of that file — so the stale read is collapsed to
+/// a one-line marker IN PLACE (the legacy form) and the round is kept.
+///
+/// Messages at/after `protect_from` (the protected tail) are never touched.
+/// Returns the number of messages removed (in-place marks are not counted).
 pub fn remove_stale_read_pairs(
     messages: &mut Vec<Message>,
     protect_from: usize,
@@ -270,6 +313,10 @@ pub fn remove_stale_read_pairs(
 ) -> usize {
     let calls = call_map(messages);
     let mut spans: Vec<(usize, usize)> = Vec::new();
+    // (index, marker) for stale reads whose round must be kept: the round
+    // also carries a protected current read of another file, so the stale
+    // read is marked in place instead of dragging the round down.
+    let mut marks: Vec<(usize, String)> = Vec::new();
 
     for i in 0..protect_from.min(messages.len()) {
         let m = &messages[i];
@@ -285,10 +332,11 @@ pub fn remove_stale_read_pairs(
         if name != "read_file" {
             continue;
         }
-        // Markers are dropped unconditionally; raw snapshots need the
-        // freshness verdict.
-        let drop = if is_file_marker(&m.content) {
-            true
+        // Markers are dropped unconditionally and need no rewriting; raw
+        // snapshots need the freshness verdict and remember which marker a
+        // kept round would get.
+        let kept_marker: Option<String> = if is_file_marker(&m.content) {
+            None
         } else {
             let Ok(params) = parse_tool_args(args) else {
                 continue;
@@ -299,11 +347,14 @@ pub fn remove_stale_read_pairs(
             let key = normalize_path(&path);
             let is_stale = index.last_mutate.get(&key).is_some_and(|&mi| mi > i);
             let is_superseded = index.last_read.get(&key).is_some_and(|&ri| ri > i);
-            is_stale || is_superseded
+            if is_stale {
+                Some(stale_marker(&path))
+            } else if is_superseded {
+                Some(superseded_marker(&path))
+            } else {
+                continue; // current: newest snapshot, nothing mutated since
+            }
         };
-        if !drop {
-            continue;
-        }
         // Span = the full round: walk back over the contiguous tool run to
         // its start, then include the assistant message that issued it.
         let mut start = i;
@@ -320,9 +371,27 @@ pub fn remove_stale_read_pairs(
         while end < protect_from && messages[end].role == "tool" {
             end += 1;
         }
+        // A round that also carries a protected current read of another file
+        // is kept: dropping it wholesale would delete that snapshot and the
+        // model would edit from a stale memory of the file.
+        if round_holds_protected_read(messages, &calls, index, start, end, i) {
+            if let Some(marker) = kept_marker {
+                marks.push((i, marker));
+            }
+            continue;
+        }
         spans.push((start, end));
     }
 
+    if !marks.is_empty() {
+        tracing::info!(
+            "trimming: marked {} stale read(s) in place: their round(s) carry a protected current read of another file",
+            marks.len()
+        );
+        for (i, marker) in marks {
+            messages[i].content = marker;
+        }
+    }
     if spans.is_empty() {
         return 0;
     }
@@ -342,6 +411,58 @@ pub fn remove_stale_read_pairs(
         removed += e - s;
     }
     removed
+}
+
+/// True if the round span `start..end` contains a `read_file` result (other
+/// than `except`) whose snapshot is CURRENT — the newest read of its path
+/// with no successful mutation since — and worth protecting (see
+/// [`is_protected_read`]).
+fn round_holds_protected_read(
+    messages: &[Message],
+    calls: &HashMap<String, (String, String)>,
+    index: &FileStateIndex,
+    start: usize,
+    end: usize,
+    except: usize,
+) -> bool {
+    for (offset, m) in messages[start..end].iter().enumerate() {
+        let j = start + offset;
+        if j == except || m.role != "tool" {
+            continue;
+        }
+        if is_file_marker(&m.content) {
+            continue;
+        }
+        let Some(call_id) = m.tool_call_id.as_deref() else {
+            continue;
+        };
+        let Some((name, args)) = calls.get(call_id) else {
+            continue;
+        };
+        if name != "read_file" {
+            continue;
+        }
+        let Ok(params) = parse_tool_args(args) else {
+            continue;
+        };
+        let Some(path) = params.get::<String>("path") else {
+            continue;
+        };
+        let key = normalize_path(&path);
+        let Some(&latest) = index.last_read.get(&key) else {
+            continue;
+        };
+        if latest != j {
+            continue; // not the newest read of this path
+        }
+        if index.last_mutate.get(&key).is_some_and(|&mi| mi > j) {
+            continue; // stale: not a working snapshot
+        }
+        if is_protected_read(index, &key, &m.content) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

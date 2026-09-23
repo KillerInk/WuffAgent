@@ -565,3 +565,159 @@ fn test_remove_same_round_two_stale_reads_one_span() {
     assert_eq!(messages.len(), 6);
     assert_pairs_intact(&messages);
 }
+
+// ── Protected reads (active/large files keep their current snapshot) ───────
+
+#[test]
+fn test_index_counts_reads_per_path() {
+    let messages = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c1", "one"),
+        assistant_call("c2", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c2", "two"),
+        assistant_call("c3", "read_file", "{\"path\":\"b.rs\"}"),
+        tool_result("c3", "three"),
+        assistant_call(
+            "c4",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"x\"}",
+        ),
+        tool_result("c4", "ok"),
+        assistant_call("c5", "read_file", "{\"path\":\"a.rs\"}"),
+        tool_result("c5", "four"),
+    ];
+    let index = build_file_state_index(&messages);
+    assert_eq!(index.read_count.get("a.rs"), Some(&3));
+    assert_eq!(index.read_count.get("b.rs"), Some(&1));
+    // Indices point at tool results (even positions here are assistants).
+    assert_eq!(index.last_read.get("a.rs"), Some(&10));
+    assert_eq!(index.last_mutate.get("a.rs"), Some(&8));
+}
+
+#[test]
+fn test_is_protected_read_criteria() {
+    let small_once = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"small.rs\"}"),
+        tool_result("c1", "tiny"),
+    ];
+    let index = build_file_state_index(&small_once);
+    assert!(
+        !is_protected_read(&index, "small.rs", "tiny"),
+        "small file read once: not protected"
+    );
+
+    let big = "x".repeat(5000);
+    let big_once = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"big.rs\"}"),
+        tool_result("c1", &big),
+    ];
+    let index = build_file_state_index(&big_once);
+    assert!(
+        is_protected_read(&index, "big.rs", &big),
+        "large snapshot: protected even after a single read"
+    );
+
+    let small_twice = vec![
+        msg("user", "q"),
+        assistant_call("c1", "read_file", "{\"path\":\"work.rs\"}"),
+        tool_result("c1", "v1"),
+        assistant_call("c2", "read_file", "{\"path\":\"work.rs\"}"),
+        tool_result("c2", "v2"),
+    ];
+    let index = build_file_state_index(&small_twice);
+    assert!(
+        is_protected_read(&index, "work.rs", "v2"),
+        "file read twice (actively worked on): protected"
+    );
+}
+
+#[test]
+fn test_shared_round_kept_when_it_carries_protected_read() {
+    // One round reads A and B; A is then mutated. B's large snapshot is the
+    // model's working copy of that file: the round must STAY and only the
+    // stale A result is collapsed to a marker in place.
+    let big_b = "B".repeat(5000);
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_calls(&[
+            ("c1", "read_file", "{\"path\":\"a.rs\"}"),
+            ("c2", "read_file", "{\"path\":\"b.rs\"}"),
+        ]),
+        tool_result("c1", "old-a"),
+        tool_result("c2", &big_b),
+        assistant_call(
+            "c3",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
+        tool_result("c3", "ok"),
+        msg("user", "q2"),
+    ];
+    let index = build_file_state_index(&messages);
+    let removed = remove_stale_read_pairs(&mut messages, 6, &index);
+
+    assert_eq!(removed, 0, "the shared round must not be removed");
+    let c1 = messages
+        .iter()
+        .find(|m| m.tool_call_id.as_deref() == Some("c1"))
+        .unwrap();
+    assert_eq!(
+        c1.content,
+        stale_marker("a.rs"),
+        "the stale read is marked in place"
+    );
+    let c2 = messages
+        .iter()
+        .find(|m| m.tool_call_id.as_deref() == Some("c2"))
+        .unwrap();
+    assert_eq!(c2.content, big_b, "the protected read stays in full");
+    assert_pairs_intact(&messages);
+
+    // Idempotent: the next pass finds the marker, keeps the round again, and
+    // changes nothing.
+    let index2 = build_file_state_index(&messages);
+    let before: Vec<(String, String)> = messages
+        .iter()
+        .map(|m| (m.role.clone(), m.content.clone()))
+        .collect();
+    assert_eq!(remove_stale_read_pairs(&mut messages, 6, &index2), 0);
+    let after: Vec<(String, String)> = messages
+        .iter()
+        .map(|m| (m.role.clone(), m.content.clone()))
+        .collect();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn test_shared_round_removed_when_other_read_not_protected() {
+    // Same shape as the protected case but B is small and read once: legacy
+    // behavior — the round is removed wholesale.
+    let mut messages = vec![
+        msg("user", "q"),
+        assistant_calls(&[
+            ("c1", "read_file", "{\"path\":\"a.rs\"}"),
+            ("c2", "read_file", "{\"path\":\"b.rs\"}"),
+        ]),
+        tool_result("c1", "old-a"),
+        tool_result("c2", "small-b"),
+        assistant_call(
+            "c3",
+            "write_file",
+            "{\"path\":\"a.rs\",\"content\":\"new\"}",
+        ),
+        tool_result("c3", "ok"),
+        msg("user", "q2"),
+    ];
+    let index = build_file_state_index(&messages);
+    let removed = remove_stale_read_pairs(&mut messages, 6, &index);
+
+    assert_eq!(removed, 3, "assistant + both results go as one span");
+    assert!(
+        !messages.iter().any(|m| m.tool_call_id.as_deref() == Some("c2")),
+        "the non-protected read goes with the round"
+    );
+    assert_pairs_intact(&messages);
+}

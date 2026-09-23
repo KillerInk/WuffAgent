@@ -4,6 +4,8 @@ This file provides guidance to agents when working with code in this repository.
 
 Rust 2021 Cargo workspace: `wuffagent-core` (shared lib, crate name `wuffagent_core`) + `wuffagent-egui` (eframe 0.36 GUI binary that depends on core; core also depends on `egui` 0.36 directly for `egui::ImageSource` in the chat state, and the UI uses `egui_plot` 0.37 for the usage chart).
 
+all files have to be UTF-8 encoded and use CRLF! no BOM!
+
 ## Commands
 
 - Build: `cargo build` (all) / `cargo build -p wuffagent-core` / `cargo build -p wuffagent-egui`

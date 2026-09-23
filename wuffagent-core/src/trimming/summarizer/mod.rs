@@ -6,6 +6,7 @@ use super::classifier::{classify_content, ContentType};
 use super::config::TrimConfig;
 use super::filestate;
 use crate::types::Message;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 mod kinds;
@@ -180,6 +181,107 @@ impl ContextTrimming {
         j.max(i + 1)
     }
 
+    /// True if the message at `i` participates in a tool pair: an assistant
+    /// message carrying `tool_calls`, or a tool result whose `tool_call_id`
+    /// matches one of them. Removing participants must remove the whole pair
+    /// as a unit (see `tool_pair_end`).
+    fn is_paired_at(messages: &[Message], i: usize) -> bool {
+        let m = &messages[i];
+        if m.role == "assistant" {
+            return m.tool_calls.is_some();
+        }
+        if m.role == "tool" {
+            if let Some(id) = m.tool_call_id.as_deref() {
+                return messages
+                    .iter()
+                    .filter(|a| a.role == "assistant")
+                    .filter_map(|a| a.tool_calls.as_ref())
+                    .flatten()
+                    .any(|tc| tc.id == id);
+            }
+        }
+        false
+    }
+
+    /// Age-based removal sweep: drop oldest messages — tool pairs (assistant
+    /// call + its results) as a unit, plain turns singly — until the list
+    /// fits `target_chars` or the protected tail is reached.
+    ///
+    /// Pairs containing a tool result whose call id is in `protected_reads`
+    /// (the CURRENT snapshot of a file the model read multiple times or that
+    /// is large — see the freshness pass of `trim_messages`) are skipped by
+    /// this sweep: they are only removed once everything else is gone, so
+    /// the model keeps its working snapshot of actively-edited files as long
+    /// as the budget allows. `trim_messages` runs a second sweep with an
+    /// empty set when the budget still cannot be met, so the trim always
+    /// converges. Returns the number of messages removed.
+    fn age_sweep(
+        messages: &mut Vec<Message>,
+        target_chars: usize,
+        start: usize,
+        protected_reads: &HashSet<String>,
+    ) -> usize {
+        let mut removed = 0;
+        let mut keep_from = start;
+        loop {
+            if Self::message_char_count(messages) <= target_chars {
+                break;
+            }
+            if keep_from >= messages.len() {
+                break;
+            }
+            // Recompute the protected tail each iteration: removing a message
+            // before it shifts the tail index down, so a stale value would let
+            // the pointer run past it and orphan the fresh tool results.
+            let protect_from = Self::protected_tail_start(messages);
+            // Stop before the protected tail: everything from the last user
+            // message / last assistant tool-call onward is the current round
+            // the AI has not read yet.
+            if keep_from >= protect_from {
+                break;
+            }
+            // Never remove the last user message — in agent mode it is the
+            // task the whole conversation is about, and the server requires at
+            // least one user message (a 500 if the last message is not a user).
+            // Skip it (advance keep_from) so we can still trim messages AFTER it.
+            if let Some(lui) = messages.iter().rposition(|m| m.role == "user") {
+                if keep_from == lui {
+                    keep_from += 1;
+                    continue;
+                }
+            }
+            // Tool pairs (assistant with tool_calls + its tool results): remove
+            // the entire pair as a unit. The model has already consumed these
+            // results in an older round, so they are safe to drop. Removing the
+            // assistant AND all its tool results together keeps pairing intact.
+            if Self::is_paired_at(messages, keep_from) {
+                let pair_end = Self::tool_pair_end(messages, keep_from);
+                if !protected_reads.is_empty()
+                    && (keep_from..pair_end).any(|j| {
+                        messages[j].role == "tool"
+                            && messages[j]
+                                .tool_call_id
+                                .as_ref()
+                                .is_some_and(|id| protected_reads.contains(id))
+                    })
+                {
+                    // This round carries the model's working snapshot of a file
+                    // it is actively editing: defer it (a second sweep removes
+                    // it if the budget cannot be met any other way).
+                    keep_from = pair_end;
+                    continue;
+                }
+                messages.drain(keep_from..pair_end);
+                removed += pair_end - keep_from;
+                continue;
+            }
+            // Plain user/assistant turn: remove it.
+            messages.remove(keep_from);
+            removed += 1;
+        }
+        removed
+    }
+
     /// Last-resort shrink: halve the largest messages (measured by
     /// `message_tokens`, i.e. content + reasoning + tool-call args — the same
     /// metric the budget uses) until the total fits `target_tokens` or no
@@ -341,10 +443,34 @@ impl ContextTrimming {
         // longer has, so the WHOLE tool pair (assistant call + tool result)
         // is removed. If the file still matters, the model re-reads it.
         // Pre-tail only.
+        //
+        // The same pass decides which CURRENT reads the age-based removal
+        // below must DEFER: the model is actively working on files it read
+        // multiple times (or that are large), and if their latest snapshot
+        // is trimmed away it edits from a stale memory of the file and only
+        // notices ("search text not found") after a failed apply_diff.
+        let mut protected_reads: HashSet<String> = HashSet::new();
         if config.stale_file_invalidation {
             let index = filestate::build_file_state_index(messages);
             if !index.last_read.is_empty() {
                 let protect_from = Self::protected_tail_start(messages);
+                for (path, &i) in &index.last_read {
+                    if i >= protect_from {
+                        continue; // inside the protected tail: already safe
+                    }
+                    let m = &messages[i];
+                    if filestate::is_file_marker(&m.content) {
+                        continue; // already collapsed: no working snapshot
+                    }
+                    if index.last_mutate.get(path).is_some_and(|&mi| mi > i) {
+                        continue; // stale: the freshness pass removes it
+                    }
+                    if filestate::is_protected_read(&index, path, &m.content) {
+                        if let Some(id) = m.tool_call_id.clone() {
+                            protected_reads.insert(id);
+                        }
+                    }
+                }
                 let dropped = filestate::remove_stale_read_pairs(messages, protect_from, &index);
                 if dropped > 0 {
                     removed += dropped;
@@ -355,7 +481,7 @@ impl ContextTrimming {
             }
         }
 
-        let mut keep_from = if messages.first().map(|m| m.role.as_str()) == Some("system") {
+        let keep_from = if messages.first().map(|m| m.role.as_str()) == Some("system") {
             1
         } else {
             0
@@ -372,76 +498,24 @@ impl ContextTrimming {
         // read fresh tool output before it can be trimmed.
         let protect_from = Self::protected_tail_start(messages);
         tracing::info!(
-            "trimming: trim_messages called (messages={}, chars={}, target={}, keep_from={}, protect_from={})",
+            "trimming: trim_messages called (messages={}, chars={}, target={}, keep_from={}, protect_from={}, protected_reads={})",
             initial_count,
             initial_chars,
             target_chars,
             keep_from,
-            protect_from
+            protect_from,
+            protected_reads.len()
         );
 
-        // `is_paired` marks tool-call participants at index `i` (an assistant
-        // message carrying tool_calls, or a tool result whose tool_call_id
-        // matches one). Recomputed each removal because indices shift.
-        fn is_paired_at(messages: &[Message], i: usize) -> bool {
-            let m = &messages[i];
-            if m.role == "assistant" {
-                return m.tool_calls.is_some();
-            }
-            if m.role == "tool" {
-                if let Some(id) = m.tool_call_id.as_deref() {
-                    return messages
-                        .iter()
-                        .filter(|a| a.role == "assistant")
-                        .filter_map(|a| a.tool_calls.as_ref())
-                        .flatten()
-                        .any(|tc| tc.id == id);
-                }
-            }
-            false
-        }
-
-        loop {
-            let prompt_len = Self::message_char_count(messages);
-            if prompt_len <= target_chars {
-                break;
-            }
-            if keep_from >= messages.len() {
-                break;
-            }
-            // Recompute the protected tail each iteration: removing a message
-            // before it shifts the tail index down, so a stale value would let
-            // the pointer run past it and orphan the fresh tool results.
-            let protect_from = Self::protected_tail_start(messages);
-            // Stop before the protected tail: everything from the last user
-            // message / last assistant tool-call onward is the current round the
-            // AI has not read yet.
-            if keep_from >= protect_from {
-                break;
-            }
-            // Never remove the last user message — in agent mode it is the
-            // task the whole conversation is about, and the server requires at
-            // least one user message (a 500 if the last message is not a user).
-            // Skip it (advance keep_from) so we can still trim messages AFTER it.
-            if let Some(lui) = messages.iter().rposition(|m| m.role == "user") {
-                if keep_from == lui {
-                    keep_from += 1;
-                    continue;
-                }
-            }
-            // Tool pairs (assistant with tool_calls + its tool results): remove
-            // the entire pair as a unit. The model has already consumed these
-            // results in an older round, so they are safe to drop. Removing the
-            // assistant AND all its tool results together keeps pairing intact.
-            if is_paired_at(messages, keep_from) {
-                let pair_end = Self::tool_pair_end(messages, keep_from);
-                messages.drain(keep_from..pair_end);
-                removed += pair_end - keep_from;
-                continue;
-            }
-            // Plain user/assistant turn: remove it.
-            messages.remove(keep_from);
-            removed += 1;
+        // Age-based removal: oldest first, tool pairs as units, stopping
+        // before the protected tail. Pairs holding a protected current file
+        // snapshot (see the freshness pass) are deferred to a second sweep.
+        removed += Self::age_sweep(messages, target_chars, keep_from, &protected_reads);
+        if Self::message_char_count(messages) > target_chars {
+            // Still over budget: the protected snapshots can no longer defer
+            // removal — sweep again without protection (oldest first) so the
+            // trim always converges.
+            removed += Self::age_sweep(messages, target_chars, keep_from, &HashSet::new());
         }
 
         // Second pass: compress already-consumed tool rounds in place
