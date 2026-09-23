@@ -14,6 +14,7 @@ fn layout_dbg_enabled() -> bool {
 
 mod bubbles;
 mod tool_cards;
+mod tool_json;
 
 impl ChatApp {
     /// Threshold in pixels to consider the user as "at bottom"
