@@ -102,7 +102,8 @@ pub struct ChatApp {
     pub selected_session_id: Option<String>,
     /// The sessions sidebar widget (manages its own list + selection).
     pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
-    /// Reasoning effort for reasoning models (Off = omitted from requests).
+    /// Reasoning effort for reasoning models (live session toggle; Off
+    /// explicitly disables Qwen3 thinking via `enable_thinking: false`).
     pub reasoning_effort: wuffagent_core::types::ReasoningEffort,
 
     // ── Dialogs & panels (transient UI windows) ──────────────────────

@@ -12,9 +12,16 @@ pub struct ChatRequest {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<crate::tools::ToolDefinition>>,
-    /// Reasoning effort for reasoning models (omitted when Off).
+    /// Reasoning effort for reasoning models (omitted when Off; see
+    /// [`reasoning_wire`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Qwen3-style chat-template kwargs. `enable_thinking` makes the
+    /// thinking on/off state explicit: Qwen3.x defaults to thinking ON
+    /// (and `reasoning_effort` has no off-level), so `Off` must disable it
+    /// here. Ignored by backends whose templates lack the kwarg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<ChatTemplateKwargs>,
     /// Request options for streaming (e.g. include_usage).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
@@ -24,9 +31,31 @@ pub struct ChatRequest {
     pub return_progress: Option<bool>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChatTemplateKwargs {
+    /// Qwen3 chat-template switch: `true` = thinking mode on,
+    /// `false` = off (also skips the thinking prefix).
+    pub enable_thinking: bool,
+}
+
 #[derive(Serialize, Debug)]
 pub struct StreamOptions {
     pub include_usage: bool,
+}
+
+/// Wire fields for a reasoning-effort setting: the `reasoning_effort` value
+/// plus the explicit Qwen3-style `enable_thinking` kwarg. Single source of
+/// truth for every request-construction site — see
+/// [`crate::types::ReasoningEffort`] for the level→wire mapping.
+pub fn reasoning_wire(
+    effort: crate::types::ReasoningEffort,
+) -> (Option<String>, Option<ChatTemplateKwargs>) {
+    (
+        effort.as_wire_value().map(str::to_string),
+        Some(ChatTemplateKwargs {
+            enable_thinking: effort.enable_thinking(),
+        }),
+    )
 }
 
 #[derive(Deserialize, Debug)]
@@ -118,12 +147,14 @@ pub fn build_request(
         image: None,
     });
 
+    let (reasoning_effort, chat_template_kwargs) = reasoning_wire(reasoning_effort);
     ChatRequest {
         model: "local".to_string(),
         messages,
         stream,
         tools: tools.map(|t| t.to_vec()),
-        reasoning_effort: reasoning_effort.as_wire_value().map(|s| s.to_string()),
+        reasoning_effort,
+        chat_template_kwargs,
         stream_options: Some(StreamOptions {
             include_usage: true,
         }),

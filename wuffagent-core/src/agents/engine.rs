@@ -174,9 +174,12 @@ impl AgentEngine {
                                          // config lets a profile like "coder" restrict the shell to its allowlist.
         chat_config.allowed_tools = tool_policy.allowed_tools.clone();
         chat_config.shell_config = tool_policy.shell_config.clone();
-        // Carry over the profile's reasoning effort and trim config so the
-        // chat agent behaves like the profile it came from.
-        chat_config.reasoning_effort = tool_policy.reasoning_effort;
+        // Trim config comes from the profile. Reasoning effort deliberately
+        // does NOT: on the interactive chat path the live UI setting wins —
+        // the pipeline already applied it to the client (`with_reasoning_effort`),
+        // and `Off` below makes the agent inherit it. The profile's effort
+        // still shapes autonomous runs and handoff targets (where `Agent::new`
+        // applies it), but must not override the user's in-session toggle.
         chat_config.trim_config = tool_policy.trim_config.clone();
         // Handoff: the profile's flag/targets gate the `handoff` tool, and the
         // agents dir is where target profiles are resolved from.

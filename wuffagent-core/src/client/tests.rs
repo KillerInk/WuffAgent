@@ -7,7 +7,9 @@ use crate::types::ToolCall;
 fn test_build_request_reasoning_effort() {
     let mut client = ChatClient::new("http://localhost:8080");
 
-    // Off: field omitted from JSON entirely
+    // Off: `reasoning_effort` omitted, thinking explicitly disabled via the
+    // Qwen3 chat-template kwarg (Qwen3.x defaults to thinking ON at xhigh and
+    // has no off-level for `reasoning_effort`).
     client.set_reasoning_effort(crate::types::ReasoningEffort::Off);
     let request = build_request(
         &client.system_prompt,
@@ -19,10 +21,18 @@ fn test_build_request_reasoning_effort() {
         4096,
     );
     assert!(request.reasoning_effort.is_none());
+    assert_eq!(
+        request.chat_template_kwargs,
+        Some(http::ChatTemplateKwargs {
+            enable_thinking: false
+        })
+    );
     let json = serde_json::to_string(&request).unwrap();
     assert!(!json.contains("reasoning_effort"));
+    assert!(json.contains(r#""chat_template_kwargs":{"enable_thinking":false}"#));
 
-    // High: serialized as "xhigh" (Qwen3 template wire value)
+    // High: serialized as "xhigh" (Qwen3 template wire value) with thinking
+    // explicitly enabled.
     client.set_reasoning_effort(crate::types::ReasoningEffort::High);
     let request = build_request(
         &client.system_prompt,
@@ -34,8 +44,42 @@ fn test_build_request_reasoning_effort() {
         4096,
     );
     assert_eq!(request.reasoning_effort.as_deref(), Some("xhigh"));
+    assert_eq!(
+        request.chat_template_kwargs,
+        Some(http::ChatTemplateKwargs {
+            enable_thinking: true
+        })
+    );
     let json = serde_json::to_string(&request).unwrap();
     assert!(json.contains(r#""reasoning_effort":"xhigh""#));
+    assert!(json.contains(r#""chat_template_kwargs":{"enable_thinking":true}"#));
+}
+
+#[test]
+fn test_reasoning_wire_all_levels() {
+    use crate::types::ReasoningEffort;
+    use http::ChatTemplateKwargs;
+
+    // (effort, enable_thinking) per level — the single source of truth for
+    // every request-construction site.
+    let cases = [
+        (ReasoningEffort::Off, None, false),
+        (ReasoningEffort::Low, Some("low"), true),
+        (ReasoningEffort::Medium, Some("medium"), true),
+        (ReasoningEffort::High, Some("xhigh"), true),
+    ];
+    for (effort, wire, thinking) in cases {
+        assert_eq!(effort.enable_thinking(), thinking, "enable_thinking({effort:?})");
+        let (reasoning_effort, chat_template_kwargs) = http::reasoning_wire(effort);
+        assert_eq!(reasoning_effort.as_deref(), wire, "reasoning_effort({effort:?})");
+        assert_eq!(
+            chat_template_kwargs,
+            Some(ChatTemplateKwargs {
+                enable_thinking: thinking
+            }),
+            "chat_template_kwargs({effort:?})"
+        );
+    }
 }
 
 #[test]

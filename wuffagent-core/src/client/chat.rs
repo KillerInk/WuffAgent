@@ -32,12 +32,14 @@ impl ChatClient {
         tools: Option<&[crate::tools::ToolDefinition]>,
     ) -> Result<(String, Option<Usage>), Error> {
         let mut msgs = messages.to_vec();
+        let (reasoning_effort, chat_template_kwargs) = http::reasoning_wire(self.reasoning_effort);
         let request = ChatRequest {
             model: "local".to_string(),
             messages: msgs.clone(),
             stream: false,
             tools: tools.map(|t| t.to_vec()),
-            reasoning_effort: self.reasoning_effort.as_wire_value().map(|s| s.to_string()),
+            reasoning_effort,
+            chat_template_kwargs,
             stream_options: Some(http::StreamOptions {
                 include_usage: true,
             }),
@@ -64,15 +66,15 @@ impl ChatClient {
                     );
                     let target = self.overflow_retry_char_budget(&ov);
                     Self::trim_to_token_budget_messages(&mut msgs, target);
+                    let (reasoning_effort, chat_template_kwargs) =
+                        http::reasoning_wire(self.reasoning_effort);
                     let request2 = ChatRequest {
                         model: "local".to_string(),
                         messages: msgs.clone(),
                         stream: false,
                         tools: tools.map(|t| t.to_vec()),
-                        reasoning_effort: self
-                            .reasoning_effort
-                            .as_wire_value()
-                            .map(|s| s.to_string()),
+                        reasoning_effort,
+                        chat_template_kwargs,
                         stream_options: Some(http::StreamOptions {
                             include_usage: true,
                         }),
@@ -265,15 +267,15 @@ impl ChatClient {
         let base_url = client.url();
         let api_key = client.settings.api_key();
 
+        let (reasoning_effort, chat_template_kwargs) =
+            http::reasoning_wire(client.reasoning_effort);
         let request = ChatRequest {
             model: "local".to_string(),
             messages: messages.to_vec(),
             stream: true,
             tools: tools.map(|t| t.to_vec()),
-            reasoning_effort: client
-                .reasoning_effort
-                .as_wire_value()
-                .map(|s| s.to_string()),
+            reasoning_effort,
+            chat_template_kwargs,
             stream_options: Some(http::StreamOptions {
                 include_usage: true,
             }),

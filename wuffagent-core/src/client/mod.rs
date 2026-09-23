@@ -113,7 +113,8 @@ pub struct ChatClient {
     /// pushes. `new()` creates a private instance for standalone clients.
     settings: ConnectionSettings,
     system_prompt: String,
-    /// Reasoning effort level for reasoning models (Off = omitted from requests).
+    /// Reasoning effort level for reasoning models (see `types::ReasoningEffort`
+    /// for the wire mapping; Off disables Qwen3 thinking via `enable_thinking`).
     reasoning_effort: crate::types::ReasoningEffort,
     conversation: Arc<Mutex<Vec<Message>>>,
     /// Shared so `ChatClient::clone` is a cheap pointer bump instead of

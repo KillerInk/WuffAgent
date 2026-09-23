@@ -3,7 +3,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Reasoning effort level sent to the model server (Qwen3/llama.cpp style).
-/// Serialized as a lowercase string; `Off` is omitted from requests entirely.
+///
+/// Wire semantics (see [`ReasoningEffort::as_wire_value`] /
+/// [`ReasoningEffort::enable_thinking`] and `client::http::reasoning_wire`):
+/// every level is made EXPLICIT on the wire so the toggle works regardless of
+/// the backend's default. Qwen3.x (e.g. Qwen3.8) defaults to thinking ON at
+/// `xhigh` and has no `reasoning_effort` off-level (only xhigh/medium/low), so
+/// `Off` disables thinking via the Qwen3 chat-template kwarg
+/// `chat_template_kwargs: {enable_thinking: false}`; on-levels send
+/// `reasoning_effort` plus `enable_thinking: true` (which also switches
+/// thinking ON on backends that default it off, e.g. llama.cpp Qwen3).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -23,6 +32,14 @@ impl ReasoningEffort {
             ReasoningEffort::Medium => Some("medium"),
             ReasoningEffort::High => Some("xhigh"),
         }
+    }
+
+    /// Whether the Qwen3-style `chat_template_kwargs.enable_thinking` should
+    /// be `true` (thinking on) or `false` (thinking off) on the wire. Sent
+    /// with every request so the on/off state does not depend on the
+    /// backend's default; ignored by backends whose templates lack the kwarg.
+    pub fn enable_thinking(self) -> bool {
+        matches!(self, ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High)
     }
 
     /// Short name for dropdown items.
