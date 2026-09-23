@@ -100,9 +100,16 @@ impl ImprovementsPanel {
                             let current_prompt = agent_manager
                                 .get_agent(&imp.agent_name)
                                 .map(|c| c.system_prompt.clone());
-                            ui.horizontal(|ui| {
-                                if let Some(cur) = &current_prompt {
-                                    ui.vertical(|ui| {
+                            // Equal columns: a plain ui.horizontal lets the
+                            // read-only side (a long unwrapped label whose
+                            // desired size is the full line length) eat the
+                            // whole row and squeeze the editable side into
+                            // an unreadable sliver. ui.columns pins each side
+                            // to half the width.
+                            if let Some(cur) = &current_prompt {
+                                ui.columns(2, |mut cols| {
+                                    {
+                                        let ui = &mut cols[0];
                                         ui.label(
                                             egui::RichText::new("Current (read-only)")
                                                 .strong()
@@ -117,17 +124,35 @@ impl ImprovementsPanel {
                                                         .size(11.0),
                                                 );
                                             });
-                                    });
-                                    ui.separator();
-                                }
+                                    }
+                                    {
+                                        let ui = &mut cols[1];
+                                        ui.label(
+                                            egui::RichText::new("Proposed (editable)").strong(),
+                                        );
+                                        let mut buf = imp
+                                            .edited_prompt
+                                            .as_deref()
+                                            .unwrap_or(new_prompt)
+                                            .to_string();
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut buf)
+                                                .desired_width(f32::INFINITY)
+                                                .desired_rows(6),
+                                        );
+                                        // F1: persist the edited value in place so
+                                        // the user's changes survive across frames
+                                        // and are what gets applied on Approve.
+                                        imp.edited_prompt = Some(buf);
+                                    }
+                                });
+                            } else {
+                                // No current prompt to compare against: the
+                                // proposed side gets the full width.
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        egui::RichText::new(if current_prompt.is_some() {
-                                            "Proposed (editable)"
-                                        } else {
-                                            "Proposed system prompt (editable)"
-                                        })
-                                        .strong(),
+                                        egui::RichText::new("Proposed system prompt (editable)")
+                                            .strong(),
                                     );
                                     let mut buf = imp
                                         .edited_prompt
@@ -139,12 +164,9 @@ impl ImprovementsPanel {
                                             .desired_width(f32::INFINITY)
                                             .desired_rows(6),
                                     );
-                                    // F1: persist the edited value in place so
-                                    // the user's changes survive across frames
-                                    // and are what gets applied on Approve.
                                     imp.edited_prompt = Some(buf);
                                 });
-                            });
+                            }
                             ui.checkbox(&mut imp.apply_prompt, "Apply prompt change");
                         }
 
