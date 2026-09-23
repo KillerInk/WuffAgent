@@ -76,6 +76,11 @@ impl Session {
     /// 3. Exact duplicate messages (same role, content, tool_call_id and
     ///    tool_calls) are collapsed to their first occurrence — the previous
     ///    writer re-appended whole history blocks, so this repairs those files.
+    /// 4. Tool call arguments that are not a complete JSON object (the model
+    ///    hit its output limit mid-argument) are replaced with `{}` —
+    ///    incomplete arguments make OpenAI-compatible servers reject every
+    ///    request that replays this history (HTTP 500 "failed to parse tool
+    ///    call arguments").
     pub fn sanitize(&mut self) {
         // 1. Extract system prompts out of the stored history.
         let mut extracted: Option<String> = None;
@@ -115,6 +120,12 @@ impl Session {
             kept.push(m);
         }
         self.messages = kept;
+
+        // 4. Repair truncated tool call arguments in place so the history is
+        // safe to replay to the server (see invariant 4 in the docs).
+        for m in &mut self.messages {
+            crate::tools::manager::repair_truncated_tool_calls(m);
+        }
     }
 }
 

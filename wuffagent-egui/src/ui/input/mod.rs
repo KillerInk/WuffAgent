@@ -19,7 +19,7 @@ impl ChatApp {
         // The agent selection is per-session (SessionRuntime.selected_agent).
         // `pending_image` is cloned so the preview below can draw it without
         // holding a borrow of the store.
-        let (has_session, pending_image, is_generating, input_len, has_history, selected_agent) =
+        let (has_session, pending_image, is_generating, has_history, selected_agent) =
             self.selected_session_id
                 .as_ref()
                 .and_then(|sid| self.session_store.get(sid))
@@ -28,25 +28,13 @@ impl ChatApp {
                         true,
                         r.chat_state.pending_image.clone(),
                         r.chat_state.is_generating,
-                        r.chat_state.input_text.len(),
                         !r.chat_state.messages.is_empty(),
                         r.selected_agent.clone(),
                     )
                 })
-                .unwrap_or((false, None, false, 0, false, None));
+                .unwrap_or((false, None, false, false, None));
 
         if has_session {
-            // Validate input length
-            const MAX_MESSAGE_LENGTH: usize = 4000;
-            if input_len > MAX_MESSAGE_LENGTH {
-                ui.horizontal(|ui| {
-                    ui.colored_label(
-                        theme.error,
-                        format!("Message too long (max {} characters, current: {})", MAX_MESSAGE_LENGTH, input_len),
-                    );
-                });
-            }
-
             // Image preview: the image that will be attached to the next
             // message (pasted with Ctrl/Cmd+V, or added via the attach button).
             if let Some(img) = pending_image.clone() {
@@ -398,10 +386,6 @@ impl ChatApp {
     pub(super) fn validate_input(&self, text: &str) -> Result<(), String> {
         if text.trim().is_empty() {
             return Err("Message cannot be empty".to_string());
-        }
-        const MAX_MESSAGE_LENGTH: usize = 4000;
-        if text.len() > MAX_MESSAGE_LENGTH {
-            return Err(format!("Message too long (max {} characters)", text.len()));
         }
         Ok(())
     }

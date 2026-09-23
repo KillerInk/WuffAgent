@@ -80,3 +80,77 @@ fn test_with_handoff_tool_swaps_entry() {
         .collect();
     assert_eq!(defs.len(), 1);
 }
+
+/// Build an assistant message with the given (id, name, arguments) calls.
+fn assistant_msg_with_calls(calls: Vec<(&str, &str, &str)>) -> Message {
+    Message {
+        role: "assistant".to_string(),
+        content: String::new(),
+        timestamp: String::new(),
+        tool_calls: Some(
+            calls
+                .into_iter()
+                .map(|(id, name, arguments)| crate::types::ToolCall {
+                    id: id.to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::types::ToolFunction {
+                        name: name.to_string(),
+                        arguments: arguments.to_string(),
+                    },
+                })
+                .collect(),
+        ),
+        tool_call_id: None,
+        reasoning_content: None,
+        image: None,
+    }
+}
+
+#[test]
+fn test_tool_args_complete() {
+    assert!(tool_args_complete(r#"{"path":"a.txt","content":"x"}"#));
+    assert!(tool_args_complete("{}"));
+    // Truncated mid-string — the shape left behind when the model's output
+    // limit is hit inside an argument.
+    assert!(!tool_args_complete(r#"{"content":"use super::state"#));
+    // Valid JSON but not an object.
+    assert!(!tool_args_complete(r#""just a string""#));
+    assert!(!tool_args_complete("42"));
+    // Empty or cut-off JSON.
+    assert!(!tool_args_complete(""));
+    assert!(!tool_args_complete("{"));
+}
+
+#[test]
+fn test_repair_truncated_tool_calls_repairs_only_truncated() {
+    let mut msg = assistant_msg_with_calls(vec![
+        ("call_ok", "read_file", r#"{"path":"a.txt"}"#),
+        ("call_trunc", "write_file", r#"{"content":"use super::state::ChatApp;"#),
+        ("call_empty", "shell", ""),
+    ]);
+    let repaired = repair_truncated_tool_calls(&mut msg);
+    assert_eq!(
+        repaired,
+        vec!["call_trunc".to_string(), "call_empty".to_string()],
+        "only the incomplete calls are reported"
+    );
+    let calls = msg.tool_calls.as_ref().unwrap();
+    assert_eq!(
+        calls[0].function.arguments,
+        r#"{"path":"a.txt"}"#,
+        "complete calls are left untouched"
+    );
+    assert_eq!(
+        calls[1].function.arguments,
+        "{}",
+        "truncated call is repaired to an empty object"
+    );
+    assert_eq!(calls[2].function.arguments, "{}");
+}
+
+#[test]
+fn test_repair_truncated_tool_calls_noop_without_calls() {
+    let mut msg = assistant_msg_with_calls(Vec::new());
+    msg.tool_calls = None;
+    assert!(repair_truncated_tool_calls(&mut msg).is_empty());
+}

@@ -5,6 +5,7 @@ use crate::tools::registry::ToolRegistry;
 use crate::tools::types::{
     ToolError, ToolLogger, ToolOutput, ToolParams, ToolProgress, ToolResult, TracingToolLogger,
 };
+use crate::types::Message;
 
 /// Parse raw tool-call argument JSON into `ToolParams`.
 ///
@@ -29,6 +30,41 @@ pub fn parse_tool_args(arguments: &str) -> Result<ToolParams, String> {
         }
     }
     Ok(ToolParams { values })
+}
+
+/// Whether raw tool-call arguments form a complete JSON object.
+///
+/// A model that hits its max-output-token limit mid-argument leaves truncated
+/// JSON behind (unterminated string, unbalanced braces). Such arguments must
+/// never be persisted or replayed to the server: OpenAI-compatible servers
+/// parse every tool call in the conversation history on each request and
+/// reject the whole request with HTTP 500 ("failed to parse tool call
+/// arguments") when they find an incomplete one.
+pub fn tool_args_complete(arguments: &str) -> bool {
+    matches!(
+        serde_json::from_str::<serde_json::Value>(arguments),
+        Ok(serde_json::Value::Object(_))
+    )
+}
+
+/// Repair a message's tool calls in place: the arguments of any call that is
+/// not a complete JSON object are replaced with `{}` so the message can be
+/// stored and replayed to the server safely.
+///
+/// Returns the ids of the repaired (i.e. truncated) calls so callers can
+/// report the truncation to the model instead of executing them.
+pub fn repair_truncated_tool_calls(message: &mut Message) -> Vec<String> {
+    let Some(calls) = message.tool_calls.as_mut() else {
+        return Vec::new();
+    };
+    let mut repaired = Vec::new();
+    for call in calls.iter_mut() {
+        if !tool_args_complete(&call.function.arguments) {
+            repaired.push(call.id.clone());
+            call.function.arguments = "{}".to_string();
+        }
+    }
+    repaired
 }
 
 /// High-level orchestrator that exposes tool execution to the rest of the application.

@@ -699,7 +699,7 @@ impl Agent {
 
             // Record the assistant turn (content + native calls + reasoning).
             // Kept in the throwaway request list AND recorded in the store once.
-            let assistant_msg_rec = Message {
+            let mut assistant_msg_rec = Message {
                 role: "assistant".to_string(),
                 content: content.clone(),
                 timestamp: crate::types::format_timestamp(),
@@ -708,6 +708,27 @@ impl Agent {
                 reasoning_content: reasoning.clone(),
                 image: None,
             };
+            // A tool call whose arguments are not a complete JSON object was
+            // cut off by the model's output limit (the stream ended mid-
+            // argument). Never store or replay such a call raw: OpenAI-
+            // compatible servers parse every tool call in the history on each
+            // request and reject the whole request with a 500 when they find
+            // an incomplete one. Repair the arguments to `{}` before the turn
+            // is recorded anywhere; the execution loop below reports the
+            // truncation as a tool result so the model can retry with a
+            // smaller payload.
+            let truncated_ids: std::collections::HashSet<String> =
+                crate::tools::manager::repair_truncated_tool_calls(&mut assistant_msg_rec)
+                    .into_iter()
+                    .collect();
+            if !truncated_ids.is_empty() {
+                tracing::warn!(
+                    "[AGENT] Agent '{}' had {} truncated tool call(s) (model output limit reached mid-argument): {:?}; arguments repaired before storing",
+                    self.config.name,
+                    truncated_ids.len(),
+                    truncated_ids
+                );
+            }
             messages.push(assistant_msg_rec.clone());
             self.record_in_store(&assistant_msg_rec);
 
@@ -745,6 +766,48 @@ impl Agent {
                                 h.abort();
                             }
                             return Err("Cancelled".to_string());
+                        }
+                        if truncated_ids.contains(&call.id) {
+                            // Truncated mid-stream: the call cannot be
+                            // executed. Abort an early-started run (defensive
+                            // — the ready callback only fires for complete
+                            // arguments) and report the truncation as the
+                            // tool result so the model retries with a smaller
+                            // payload.
+                            let early = pending_tool_runs.lock().unwrap().remove(&call.id);
+                            if let Some(handle) = early {
+                                handle.abort();
+                            } else {
+                                self.send_event(crate::types::AppEvent::ToolCallStart {
+                                    tool_name: call.function.name.clone(),
+                                    call_id: call.id.clone(),
+                                    args_preview:
+                                        "(arguments truncated by model output limit)".to_string(),
+                                    session_id: self.session_id(),
+                                });
+                            }
+                            let result_str = format!(
+                                "Error: tool call arguments for '{}' were truncated (the model ran out of output tokens mid-argument), so the tool did not execute. Retry with a smaller payload - e.g. split the content across multiple tool calls or use a more targeted edit.",
+                                call.function.name
+                            );
+                            self.send_event(crate::types::AppEvent::ToolCallError {
+                                tool_name: call.function.name.clone(),
+                                call_id: call.id.clone(),
+                                error: result_str.clone(),
+                                session_id: self.session_id(),
+                            });
+                            let tool_msg = Message {
+                                role: "tool".to_string(),
+                                content: result_str,
+                                timestamp: crate::types::format_timestamp(),
+                                tool_calls: None,
+                                tool_call_id: Some(call.id.clone()),
+                                reasoning_content: None,
+                                image: None,
+                            };
+                            messages.push(tool_msg.clone());
+                            self.record_in_store(&tool_msg);
+                            continue;
                         }
                         // Bind the handle out of the map before awaiting: the
                         // mutex guard must not live across the await (the

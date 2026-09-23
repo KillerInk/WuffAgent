@@ -25,6 +25,9 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
         PanelAction::Rename { id, new_name } => {
             if let Some(mut s) = wuffagent_core::sessions::load_session(&sessions_dir, &id) {
                 s.name = new_name.clone();
+                // Heal legacy/corrupted history (incl. truncated tool call
+                // arguments) while we have the session in hand.
+                s.sanitize();
                 let _ = wuffagent_core::sessions::save_session(&sessions_dir, &s);
             }
             if let Some(runtime) = app.session_store.get_mut(&id) {
