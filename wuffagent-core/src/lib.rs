@@ -15,8 +15,8 @@
 //! ├── config_types   (shared re-exports) → agents::config, memory::types
 //! ├── agents         (Agent, AgentEngine, ChatPipeline) → llm, client, tools,
 //! │                  memory, trimming, sessions (QueuedMessage), types
-//! │   ├── agent      (Agent: loop, prompt, verify, toolcall_parse,
-//! │   │               memory_sync, stats)
+//! │   ├── agent      (Agent: execute, loop, prompt, verify, toolcall_parse,
+//! │   │               tool_exec, tool_calls, inject, memory_sync, stats)
 //! │   ├── config     (AgentConfig, ShellConfig, WorkerConfig,
 //! │   │               profiles, load)
 //! │   ├── types      (AgentId, RunStats, Handoff/RestartRequest)

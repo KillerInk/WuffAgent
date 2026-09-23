@@ -1,14 +1,16 @@
-//! Output verification: judge call + outcome persistence.
+//! Output verification: judge call + outcome persistence + the loop's
+//! verify-&-complete section (extracted A5).
 //! Split out of agents/agent.rs (A1).
 
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
+use super::r#loop::{MAX_VERIFICATION_ATTEMPTS, RunOutcome};
 use super::truncate_chars;
 use super::Agent;
 use crate::memory::{MemoryEntry, MemoryManager, MemoryType};
-use crate::types::Message;
+use crate::types::{Message, Usage};
 
 /// Maximum characters of tool output to include in summary.
 const TOOL_OUTPUT_SUMMARY_CHARS: usize = 200;
@@ -250,6 +252,129 @@ impl Agent {
                 self.config.name,
                 e
             ),
+        }
+    }
+}
+
+/// Mutable verification bookkeeping for one run: the attempt counter and
+/// the last NEEDS_FIX reason seen (S1 outcome evidence).
+pub(crate) struct VerificationState {
+    /// Number of verification attempts made this run.
+    pub(crate) attempts: u32,
+    /// The last NEEDS_FIX judge reason seen this run (S1 outcome evidence).
+    pub(crate) last_failed_reason: String,
+}
+
+impl VerificationState {
+    pub(crate) fn new() -> Self {
+        Self {
+            attempts: 0,
+            last_failed_reason: String::new(),
+        }
+    }
+}
+
+impl Agent {
+    /// Run the loop's final section for a round with no tool calls: judge
+    /// the response against the tool outputs it relied on, either nudge a
+    /// retry (NEEDS_FIX within budget → `Ok(None)`) or complete the turn
+    /// (StreamComplete + `RunOutcome::Completed` → `Ok(Some(outcome))`),
+    /// persisting S1 verification-outcome lessons where applicable.
+    pub(crate) async fn verify_or_complete(
+        &self,
+        messages: &mut Vec<Message>,
+        display_content: String,
+        usage: Option<Usage>,
+        original_request: &str,
+        cancel_token: &CancellationToken,
+        state: &mut VerificationState,
+    ) -> Result<Option<RunOutcome>, String> {
+        // ── No more tool calls ──────────────────────────────────────
+        if state.attempts >= MAX_VERIFICATION_ATTEMPTS {
+            // S1: the nudge loop was exhausted without a passing verdict —
+            // record it as negative evidence.
+            self.store_verification_outcome(
+                "gave_up",
+                state.attempts,
+                &state.last_failed_reason,
+                original_request,
+            );
+            tracing::info!(
+                "[AGENT] Agent '{}' completed ({} verification attempts)",
+                self.config.name,
+                state.attempts
+            );
+            self.send_event(crate::types::AppEvent::StreamComplete {
+                content: display_content.clone(),
+                usage,
+                session_id: self.session_id(),
+            });
+            return Ok(Some(RunOutcome::Completed(display_content)));
+        }
+        state.attempts += 1;
+
+        let verification_result = self
+            .verify_tool_outputs(messages, original_request, &display_content, cancel_token)
+            .await;
+        match verification_result {
+            Ok(verdict) if verdict.verified => {
+                // S1: a pass that needed a retry is negative evidence for
+                // the first attempt (a first-try pass stays unrecorded —
+                // no noise).
+                if state.attempts > 1 {
+                    self.store_verification_outcome(
+                        "verified_after_retry",
+                        state.attempts,
+                        &state.last_failed_reason,
+                        original_request,
+                    );
+                }
+                tracing::info!(
+                    "[AGENT] Agent '{}' completed (verified)",
+                    self.config.name
+                );
+                self.send_event(crate::types::AppEvent::StreamComplete {
+                    content: display_content.clone(),
+                    usage,
+                    session_id: self.session_id(),
+                });
+                Ok(Some(RunOutcome::Completed(display_content)))
+            }
+            Ok(verdict) => {
+                if !verdict.judge_reason.trim().is_empty() {
+                    state.last_failed_reason = verdict.judge_reason.clone();
+                }
+                tracing::warn!(
+                    "[AGENT] Agent '{}' verification failed (attempt {}/{}): {}, feeding feedback to LLM",
+                    self.config.name,
+                    state.attempts,
+                    MAX_VERIFICATION_ATTEMPTS,
+                    truncate_chars(&verdict.judge_reason, 200)
+                );
+                messages.push(Message {
+                    role: "user".to_string(),
+                    content: super::VERIFICATION_NUDGE.to_string(),
+                    timestamp: String::new(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    image: None,
+                });
+                Ok(None)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[AGENT] Agent '{}' verification error: {}, proceeding with response",
+                    self.config.name,
+                    e
+                );
+                self.send_event(crate::types::AppEvent::StreamComplete {
+                    content: display_content.clone(),
+                    usage,
+                    session_id: self.session_id(),
+                });
+                Ok(Some(RunOutcome::Completed(display_content)))
+            }
         }
     }
 }

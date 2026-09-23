@@ -9,6 +9,7 @@ use crate::tools::ToolManager;
 use crate::trimming::ContextTrimming;
 use crate::types::Message;
 
+pub(crate) mod execute;
 pub(crate) mod inject;
 pub(crate) mod memory_sync;
 pub(crate) mod prompt;
