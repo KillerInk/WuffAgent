@@ -1,7 +1,5 @@
 use super::*;
 
-/// Build a manager with a queued-response LLM and a specific batch size.
-
 // --- Maintenance pass tests ---
 
 /// Mock LLM returning a queued sequence of maintenance-actions JSON
@@ -71,6 +69,7 @@ impl LlmClient for QueuedLlm {
     }
 }
 
+/// Build a manager with a queued-response LLM and a specific batch size.
 fn manager_with_queued_llm(
     dir: &std::path::Path,
     responses: Vec<String>,
