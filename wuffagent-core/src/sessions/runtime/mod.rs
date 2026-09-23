@@ -76,7 +76,6 @@ pub struct ChatAreaState {
     /// re-add the whole segment and the live gauge would inflate quadratically.
     /// Reset by `commit_stream`.
     pub live_tokens_added: f64,
-    pub pending_image: Option<egui::ImageSource<'static>>,
     /// Status shown in the status bar for this session.
     pub status: crate::types::AppStatus,
     /// Fallback queue for messages that could not be injected into the
@@ -117,7 +116,6 @@ impl Default for ChatAreaState {
             live_gen_started: None,
             live_tokens_added: 0.0,
             prompt_progress: None,
-            pending_image: None,
             status: crate::types::AppStatus::Stopped,
             queued_messages: Vec::new(),
             active_tools: Vec::new(),

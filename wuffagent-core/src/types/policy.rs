@@ -252,9 +252,10 @@ impl ChatToolPolicy {
 #[derive(Clone, Debug)]
 pub struct QueuedMessage {
     pub text: String,
-    /// Documented exception: the one egui type in the types brick. A
-    /// data-URI migration (String instead of ImageSource) is deferred.
-    pub image: Option<egui::ImageSource<'static>>,
+    /// Attached image as a `data:` URI (`data:image/png;base64,...`), or
+    /// `None`. The egui layer converts the attached `ImageSource` to this
+    /// form before the message crosses into core.
+    pub image: Option<String>,
     /// System prompt resolved from the selected agent at send time.
     pub agent_prompt: String,
     /// Tool policy (allowed_tools + shell config) resolved from the selected agent.

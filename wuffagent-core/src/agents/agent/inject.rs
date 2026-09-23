@@ -30,10 +30,8 @@ impl Agent {
         };
         let rx = holder.lock().unwrap();
         while let Ok(injected) = rx.try_recv() {
-            let image = injected
-                .image
-                .as_ref()
-                .and_then(crate::types::image_source_data_uri);
+            // `image` arrives as a `data:` URI string (the egui layer
+            // converted the attached `ImageSource` before crossing into core).
             let user_msg = Message {
                 role: "user".to_string(),
                 content: injected.text.clone(),
@@ -41,7 +39,7 @@ impl Agent {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
-                image,
+                image: injected.image.clone(),
             };
             tracing::info!(
                 "[AGENT] Agent '{}' injecting user message sent mid-run into the running turn: {}",

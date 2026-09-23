@@ -1,6 +1,7 @@
 //! Image attach/clipboard plumbing for the chat input: reading an image
 //! off the system clipboard or from a file, storing it as the session's
-//! pending image (re-encoded as PNG), and base64-encoding it for display.
+//! pending image (re-encoded as PNG), and converting it to the `data:` URI
+//! form core expects and the raw base64 the chat display renders.
 
 use base64::Engine;
 use eframe::egui;
@@ -52,9 +53,9 @@ impl ChatApp {
         }
     }
 
-    /// Store RGBA8 pixels as the session's pending image (re-encoded as PNG).
-    /// Replaces any previously attached image (one image per message).
-    /// Returns true on success.
+    /// Store RGBA8 pixels as the selected session's pending image (re-encoded
+    /// as PNG). Replaces any previously attached image (one image per
+    /// message). Returns true on success.
     fn attach_rgba(&mut self, rgba: (u32, u32, Vec<u8>), source: &str) -> bool {
         let sid = match self.selected_session_id.clone() {
             Some(sid) => sid,
@@ -81,19 +82,20 @@ impl ChatApp {
             }
         };
         let png_len = png.len();
-        if let Some(runtime) = self.session_store.get_mut(&sid) {
-            // URI unique per content: egui's bytes loader keeps the FIRST
-            // payload stored for a URI, so a fixed URI would show a stale
-            // image whenever a different one is attached (per-session
-            // pending images would also collide).
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hasher::write(&mut hasher, png.as_slice());
-            let hash = std::hash::Hasher::finish(&hasher);
-            runtime.chat_state.pending_image = Some(egui::ImageSource::Bytes {
+        // URI unique per content: egui's bytes loader keeps the FIRST
+        // payload stored for a URI, so a fixed URI would show a stale
+        // image whenever a different one is attached (per-session
+        // pending images would also collide).
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write(&mut hasher, png.as_slice());
+        let hash = std::hash::Hasher::finish(&hasher);
+        self.pending_images.insert(
+            sid,
+            egui::ImageSource::Bytes {
                 uri: format!("bytes://attached_image_{hash:016x}.png").into(),
                 bytes: png.into(),
-            });
-        }
+            },
+        );
         tracing::info!(
             "[IMAGE] attached {}x{} image from {} ({} KB PNG)",
             w,
@@ -144,13 +146,24 @@ fn png_bytes_from_rgba(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     Some(buf.into_inner())
 }
 
-/// Raw base64 (STANDARD) of a pending image's PNG bytes, for the chat display
-/// (`ChatMessage.image`). Only `Bytes`-based sources carry the payload.
-pub(super) fn pending_image_b64(source: Option<&egui::ImageSource<'static>>) -> Option<String> {
-    match source? {
-        egui::ImageSource::Bytes { bytes, .. } => {
-            Some(base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()))
-        }
-        _ => None,
-    }
+/// `data:` URI form of a pending image's PNG bytes — the
+/// `data:image/png;base64,` + STANDARD base64 string that core's
+/// `QueuedMessage.image` expects for model requests.
+///
+/// Only `Bytes`-based sources carry a payload.
+pub(super) fn image_source_data_uri(source: &egui::ImageSource<'static>) -> Option<String> {
+    let egui::ImageSource::Bytes { bytes, .. } = source else {
+        return None;
+    };
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes.as_ref())
+    ))
+}
+
+/// Raw base64 (STANDARD) of a `data:` URI image, for the chat display
+/// (`ChatMessage.image`). Returns `None` for non-`data:image/png;base64,`
+/// URIs.
+pub(super) fn data_uri_b64(uri: Option<&str>) -> Option<String> {
+    uri.and_then(|u| u.strip_prefix("data:image/png;base64,")).map(str::to_string)
 }

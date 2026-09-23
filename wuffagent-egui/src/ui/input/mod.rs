@@ -18,21 +18,25 @@ impl ChatApp {
         // hold an immutable borrow of `self` across the self-mutating UI closures.
         // The agent selection is per-session (SessionRuntime.selected_agent).
         // `pending_image` is cloned so the preview below can draw it without
-        // holding a borrow of the store.
-        let (has_session, pending_image, is_generating, has_history, selected_agent) =
+        // holding a borrow of the pending-image map.
+        let pending_image = self
+            .selected_session_id
+            .as_ref()
+            .and_then(|sid| self.pending_images.get(sid))
+            .cloned();
+        let (has_session, is_generating, has_history, selected_agent) =
             self.selected_session_id
                 .as_ref()
                 .and_then(|sid| self.session_store.get(sid))
                 .map(|r| {
                     (
                         true,
-                        r.chat_state.pending_image.clone(),
                         r.chat_state.is_generating,
                         !r.chat_state.messages.is_empty(),
                         r.selected_agent.clone(),
                     )
                 })
-                .unwrap_or((false, None, false, false, None));
+                .unwrap_or((false, false, false, None));
 
         if has_session {
             // Image preview: the image that will be attached to the next
@@ -46,9 +50,7 @@ impl ChatApp {
                         .clicked()
                     {
                         if let Some(sid) = self.selected_session_id.clone() {
-                            if let Some(runtime) = self.session_store.get_mut(&sid) {
-                                runtime.chat_state.pending_image = None;
-                            }
+                            self.pending_images.remove(&sid);
                         }
                     }
                 });
@@ -287,17 +289,17 @@ impl ChatApp {
                 let agent = runtime.selected_agent.clone().unwrap_or_default();
                 let agent_prompt = self.resolve_agent_prompt(&agent);
                 let tool_policy = self.resolve_tool_policy(&agent);
-                let image = self
-                    .session_store
-                    .get_mut(&sid)
-                    .and_then(|cs| cs.chat_state.pending_image.take());
+                // Attached image (if any): the UI keeps the egui source in
+                // `pending_images`; core receives the `data:` URI form.
+                let image_source = self.pending_images.remove(&sid);
+                let image = image_source.as_ref().and_then(images::image_source_data_uri);
                 let queued = wuffagent_core::sessions::QueuedMessage {
                     text: input.to_string(),
                     image,
                     agent_prompt,
                     tool_policy,
                 };
-                let image_b64 = images::pending_image_b64(queued.image.as_ref());
+                let image_b64 = images::data_uri_b64(queued.image.as_deref());
                 // Fast path: inject into the running agent loop. If the run
                 // already ended (race), the send fails and the message falls
                 // back to the per-session queue, which is drained when a run
@@ -402,27 +404,28 @@ impl ChatApp {
             return;
         }
 
-        let image = if let Some(runtime) = self.session_store.get_mut(sid) {
-            runtime.chat_state.pending_image.take()
-        } else {
-            None
-        };
+        // Attached image (if any): convert the egui source to the `data:`
+        // URI form core expects.
+        let image = self
+            .pending_images
+            .remove(sid)
+            .as_ref()
+            .and_then(images::image_source_data_uri);
         let agent_prompt = self.resolve_agent_prompt(&agent);
         let tool_policy = self.resolve_tool_policy(&agent);
         self.start_pipeline_for_session(sid, &input, image, agent_prompt, tool_policy, false);
     }
 
     /// Start a fresh pipeline run for `text` in the given session.
-    pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<egui::ImageSource<'static>>, agent_prompt: String, tool_policy: wuffagent_core::types::ChatToolPolicy, already_displayed: bool) {
+    pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<String>, agent_prompt: String, tool_policy: wuffagent_core::types::ChatToolPolicy, already_displayed: bool) {
         tracing::info!("[CHAT PATH] start_pipeline_for_session called with: {}", text);
 
-        // Convert the attached image (if any) into the two forms we need:
-        // raw base64 for the chat display (`ChatMessage.image`) and a `data:`
-        // URI for the model request (core serializes it into an OpenAI-style
-        // `image_url` content part on the user message).
-        let image_b64 = images::pending_image_b64(image.as_ref());
-        let image_data_uri =
-            image_b64.as_deref().map(|b64| format!("data:image/png;base64,{}", b64));
+        // `image` arrives as a `data:` URI (the egui layer converted the
+        // attached `ImageSource`); derive the raw base64 for the chat
+        // display (`ChatMessage.image`). Core serializes the URI into an
+        // OpenAI-style `image_url` content part on the user message.
+        let image_b64 = images::data_uri_b64(image.as_deref());
+        let image_data_uri = image;
 
         if let Some(runtime) = self.session_store.get_mut(sid) {
             runtime.chat_state.is_generating = true;

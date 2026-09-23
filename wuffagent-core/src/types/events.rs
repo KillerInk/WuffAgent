@@ -115,9 +115,8 @@ pub enum AppEvent {
     /// time, and `agent_prompt` / `tool_policy` were resolved at send time;
     /// the UI runs it as the next turn.
     UserMessageDrained {
-        /// Boxed: QueuedMessage (with its egui image payload) is the
-        /// largest variant; boxing keeps AppEvent small
-        /// (clippy::large_enum_variant).
+        /// Boxed: QueuedMessage is the largest variant; boxing keeps
+        /// AppEvent small (clippy::large_enum_variant).
         message: Box<QueuedMessage>,
         session_id: String,
     },

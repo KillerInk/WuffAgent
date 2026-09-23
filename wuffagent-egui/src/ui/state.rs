@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use eframe::egui;
+
 use wuffagent_core::config::Config;
 use wuffagent_core::server::ServerManager;
 use wuffagent_core::tools::ToolManager;
@@ -100,6 +102,11 @@ pub struct ChatApp {
     pub session_store: HashMap<String, wuffagent_core::sessions::SessionRuntime>,
     /// ID of the currently selected session (None = no session selected).
     pub selected_session_id: Option<String>,
+    /// Attached-but-unsent image per session (pasted or attached, not yet
+    /// sent). The egui-side half of the image flow: the UI keeps the
+    /// `ImageSource` for preview rendering and converts it to a `data:` URI
+    /// when the message crosses into core (`QueuedMessage.image`).
+    pub pending_images: HashMap<String, egui::ImageSource<'static>>,
     /// The sessions sidebar widget (manages its own list + selection).
     pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
     /// Reasoning effort for reasoning models (live session toggle; Off
@@ -198,6 +205,7 @@ impl ChatApp {
             last_synced_base_url: String::new(),
             session_store,
             selected_session_id,
+            pending_images: HashMap::new(),
             sessions_panel,
             status: AppStatus::Stopped,
             show_settings: false,

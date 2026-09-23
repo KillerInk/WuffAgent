@@ -67,6 +67,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             match wuffagent_core::sessions::delete_session(&sessions_dir, &id) {
                 Ok(()) => {
                     app.session_store.remove(&id);
+                    app.pending_images.remove(&id);
                     if app.selected_session_id.as_deref() == Some(&*id) {
                         app.selected_session_id = None;
                     }
