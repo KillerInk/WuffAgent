@@ -61,6 +61,9 @@ fn test_save_and_reload_with_messages() {
 #[test]
 fn test_list_sessions() {
     let dir = std::env::temp_dir().join("wuffagent_test_sessions3");
+    // Self-heal: the shared temp dir survives interrupted runs (cleanup
+    // errors are swallowed), which would inflate the count below.
+    let _ = fs::remove_dir_all(&dir);
     let _ = fs::create_dir_all(&dir);
     let _s1 = create_session(&dir, "First");
     let _s2 = create_session(&dir, "Second");
