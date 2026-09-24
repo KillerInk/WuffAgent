@@ -1,8 +1,12 @@
 //! `Agent::execute` — entry point + handoff/restart routing (extracted A5).
 //!
-//! Runs the LLM loop for one turn, follows `handoff` tool calls across agent
-//! profiles on the same conversation store (capped by `MAX_HANDOFF_DEPTH`),
-//! and resolves `restart` requests into UI events.
+//! Runs the LLM loop for one turn, follows in-turn `handoff` tool calls
+//! across agent profiles on the same conversation store (capped by
+//! `MAX_HANDOFF_DEPTH`), resolves `restart` requests into UI events, and
+//! forks `sub_session` handoffs: the parent turn ends (marker + terminal
+//! `StreamComplete` + `SubSessionHandoff`) and the UI creates the clean
+//! sub-session. `hand_back` requests end the sub-session turn the same way
+//! (`AgentHandBack`, step 11).
 
 use tokio_util::sync::CancellationToken;
 
@@ -69,7 +73,11 @@ impl Agent {
         // chains report "B -> C", not "A -> C".
         let mut current_name = self.config.name.clone();
         loop {
-            let mut req = match outcome {
+            // Match on a reference: the sub-session handoff must break
+            // WITHOUT moving `outcome` so the final match below can consume
+            // it; the in-turn case clones the request (cheap — a few strings
+            // and a profile).
+            let mut req = match &outcome {
                 RunOutcome::Completed(_) => break,
                 // A restart request ends the run (handled in the final match
                 // below); `_` keeps `outcome` un-moved like the Completed arm.
@@ -77,7 +85,11 @@ impl Agent {
                 // A hand-back request also ends the run (handled in the
                 // final match below) — it is not part of the in-turn chain.
                 RunOutcome::HandBack(_) => break,
-                RunOutcome::Handoff(req) => req,
+                // A sub-session handoff ends the run too: the fork (marker,
+                // terminal StreamComplete, SubSessionHandoff) is handled in
+                // the final match below.
+                RunOutcome::Handoff(r) if r.sub_session => break,
+                RunOutcome::Handoff(r) => r.clone(),
             };
             hops += 1;
             if hops > MAX_HANDOFF_DEPTH {
@@ -174,8 +186,48 @@ impl Agent {
 
         match outcome {
             RunOutcome::Completed(content) => Ok(content),
-            RunOutcome::Handoff(_) => {
-                unreachable!("handoff outcomes are consumed by the chain loop")
+            RunOutcome::Handoff(req) => {
+                if !req.sub_session {
+                    unreachable!("in-turn handoff outcomes are consumed by the chain loop")
+                }
+                // Sub-session fork: end the parent turn without chaining.
+                // Record the fork in the parent store (a user-role marker,
+                // like the in-turn handoff marker) so the transcript — and
+                // every later turn, including after a reload — shows where
+                // the work went.
+                let marker_content = format!(
+                    "[Handed off to '{}' (sub-session)] {}",
+                    req.agent, req.task
+                );
+                let marker = Message {
+                    role: "user".to_string(),
+                    content: marker_content.clone(),
+                    timestamp: crate::types::format_timestamp(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    image: None,
+                };
+                self.record_in_store(&marker);
+                // Terminal StreamComplete for the parent: clears its
+                // generating state and persists the parent session (the
+                // marker is already in the store). If the parent streamed
+                // text this turn the UI commits that buffer; the marker
+                // text is only the fallback for a completely silent turn.
+                self.send_event(crate::types::AppEvent::StreamComplete {
+                    content: marker_content,
+                    usage: None,
+                    session_id: self.session_id(),
+                });
+                // Tell the UI to fork the clean sub-session and start its
+                // first turn with `task`. Sent AFTER the StreamComplete so
+                // the parent is idle and saved before the sub-session runs.
+                self.send_event(crate::types::AppEvent::SubSessionHandoff {
+                    parent_session_id: self.session_id(),
+                    agent: req.agent,
+                    task: req.task,
+                });
+                Ok("Handed off to a sub-session".to_string())
             }
             // Placeholder until the `hand_back` tool lands (step 11): the
             // mailbox check that produces this outcome is added there.

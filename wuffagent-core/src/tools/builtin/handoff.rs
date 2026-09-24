@@ -45,11 +45,16 @@ impl HandoffTool {
             .filter(|name| targets.is_empty() || targets.iter().any(|t| t == name))
             .collect::<Vec<_>>();
         let description = format!(
-            "Hand off the session to another agent so it continues the SAME conversation \
-             with its own tools and instructions. Call it when your part of the work is \
-             done and a different specialist should take over (e.g. after writing a plan, \
-             hand off to a coder to implement it). Your turn ends when you call it. \
-             Available agents: {}.",
+            "Hand off the session to another agent. Two modes: by default the target \
+             continues the SAME conversation (it sees the full history) with its own \
+             tools and instructions — call it when your part of the work is done and a \
+             different specialist should take over (e.g. after writing a plan, hand off \
+             to a coder to implement it). With sub_session: true the target instead \
+             starts a CLEAN sub-session containing only this handoff message (fresh \
+             context, own tab, own session file) — use it for self-contained work the \
+             user should be able to follow separately; the sub-session agent can later \
+             return the session with its `hand_back` tool. Your turn ends when you call \
+             it. Available agents: {}.",
             if available.is_empty() {
                 "none".to_string()
             } else {
@@ -166,7 +171,15 @@ impl Tool for HandoffTool {
                         "task".to_string(),
                         crate::tools::types::FieldSchema {
                             type_name: "string".to_string(),
-                            description: "What the target agent should do next; include the key context it needs (it also sees the full conversation)".to_string(),
+                            description: "What the target agent should do next; include the key context it needs (it also sees the full conversation in in-turn handoffs)".to_string(),
+                            nullable: false,
+                        },
+                    );
+                    map.insert(
+                        "sub_session".to_string(),
+                        crate::tools::types::FieldSchema {
+                            type_name: "boolean".to_string(),
+                            description: "If true, the target starts a CLEAN sub-session containing only this handoff message (own context, own tab, own session file; it can return with its `hand_back` tool). Default false = continue the same conversation".to_string(),
                             nullable: false,
                         },
                     );
@@ -191,6 +204,8 @@ impl Tool for HandoffTool {
             .get("task")
             .unwrap_or_else(|| "Continue the task at hand.".to_string());
         let task = task.trim().to_string();
+        // Optional boolean; absent (or malformed) → in-turn handoff.
+        let sub_session = params.get::<bool>("sub_session").unwrap_or(false);
 
         let config = self.resolve(agent).map_err(ToolError::InvalidParams)?;
 
@@ -205,16 +220,19 @@ impl Tool for HandoffTool {
                 agent: config.name.clone(),
                 config,
                 task,
-                // The `sub_session` tool parameter is wired in step 5; until
-                // then every handoff chains in-turn on the same store.
-                sub_session: false,
+                sub_session,
             });
         }
 
         Ok(ToolOutput::Success(serde_json::json!({
             "status": "handoff_queued",
             "to": agent,
-            "note": "Your turn ends now; the session continues with the target agent."
+            "sub_session": sub_session,
+            "note": if sub_session {
+                "Your turn ends now; a clean sub-session will continue with the target agent."
+            } else {
+                "Your turn ends now; the session continues with the target agent."
+            }
         })))
     }
 }
