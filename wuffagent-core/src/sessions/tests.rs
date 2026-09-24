@@ -76,6 +76,7 @@ fn test_save_session_meta_persists_agent_and_reasoning() {
         reasoning_mode: crate::types::ReasoningMode::Explicit(
             crate::types::ReasoningEffort::High,
         ),
+        parent_session_id: None,
     };
     let conv = std::sync::Arc::new(std::sync::Mutex::new(vec![Message {
         role: "user".to_string(),
@@ -128,9 +129,72 @@ fn test_save_session_meta_persists_agent_and_reasoning() {
         .unwrap_or_else(|| panic!("legacy session must load:\n{}", raw));
     assert_eq!(loaded_legacy.selected_agent, None);
     assert_eq!(loaded_legacy.reasoning_mode, crate::types::ReasoningMode::Auto);
+    assert_eq!(loaded_legacy.parent_session_id, None);
     assert_eq!(loaded_legacy.selected_agent, None);
     assert_eq!(loaded_legacy.selected_agent, None);
     assert_eq!(loaded_legacy.reasoning_mode, crate::types::ReasoningMode::Auto);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The sub-session parent link must survive a save/reload round-trip — this
+/// is what makes `hand_back` know where to return across an app restart.
+#[test]
+fn test_save_session_meta_persists_parent_session_id() {
+    use crate::sessions::persist::save_session as persist_save_session;
+    use std::collections::VecDeque;
+
+    let dir = std::env::temp_dir().join("wuffagent_test_sessions_parent");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::create_dir_all(&dir);
+    let session = create_session(&dir, "sub session");
+
+    let meta = crate::sessions::SessionMeta {
+        selected_agent: Some("coder".to_string()),
+        reasoning_mode: crate::types::ReasoningMode::Auto,
+        parent_session_id: Some("parent_id_123".to_string()),
+    };
+    let conv = std::sync::Arc::new(std::sync::Mutex::new(vec![Message {
+        role: "user".to_string(),
+        content: "hi".to_string(),
+        timestamp: String::new(),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+        image: None,
+    }]));
+    persist_save_session(
+        Some(&session.id),
+        &dir,
+        &conv,
+        "",
+        &meta,
+        None,
+        &std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
+        &std::sync::Arc::new(std::sync::Mutex::new(false)),
+    )
+    .unwrap();
+
+    let loaded = load_session(&dir, &session.id).unwrap();
+    assert_eq!(loaded.parent_session_id.as_deref(), Some("parent_id_123"));
+
+    // A legacy session file without the field must load with no parent link.
+    let legacy_id = "session_legacy_parent";
+    let value = serde_json::json!({
+        "id": legacy_id,
+        "name": "legacy",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "messages": Vec::<Message>::new(),
+        "system_prompt": "",
+        "status": "Active"
+    });
+    let legacy_file = dir.join(format!("{}.json", legacy_id));
+    fs::write(&legacy_file, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    let raw = fs::read_to_string(&legacy_file).unwrap();
+    let loaded_legacy = load_session(&dir, legacy_id)
+        .unwrap_or_else(|| panic!("legacy session must load:\n{}", raw));
+    assert_eq!(loaded_legacy.parent_session_id, None);
 
     let _ = fs::remove_dir_all(&dir);
 }

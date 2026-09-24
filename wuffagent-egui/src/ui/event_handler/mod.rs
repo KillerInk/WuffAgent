@@ -73,11 +73,14 @@ impl ChatApp {
                     // switch so follow-up messages (and the next queued one)
                     // run under the new profile.
                     runtime.selected_agent = Some(to.clone());
-                    // Persist the switch with the session file on the next save.
-                    runtime.client.set_session_meta(wuffagent_core::sessions::SessionMeta {
-                        selected_agent: runtime.selected_agent.clone(),
-                        reasoning_mode: runtime.reasoning_mode,
-                    });
+                    // Persist the switch with the session file on the next
+                    // save. Update only the selection; cloning the existing
+                    // meta first keeps non-UI fields (the sub-session parent
+                    // link) intact.
+                    let mut meta = runtime.client.session_meta().clone();
+                    meta.selected_agent = runtime.selected_agent.clone();
+                    meta.reasoning_mode = runtime.reasoning_mode;
+                    runtime.client.set_session_meta(meta);
                     // Visible banner in the chat transcript.
                     runtime.chat_state.push_message(
                         MessageKind::Normal,

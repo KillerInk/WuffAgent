@@ -31,6 +31,12 @@ pub struct SessionMeta {
     /// Reasoning-effort selection for the session's chat runs.
     #[serde(default)]
     pub reasoning_mode: ReasoningMode,
+    /// Parent session id for sub-sessions created via a sub-session handoff
+    /// (`None` = top-level session; old files without the field load as
+    /// `None`). This is the `hand_back` link: a sub-session's agent knows
+    /// where to return the session to.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -51,6 +57,11 @@ pub struct Session {
     /// (`Auto` = follow the selected agent profile's own effort).
     #[serde(default)]
     pub reasoning_mode: ReasoningMode,
+    /// Parent session id for sub-sessions created via a sub-session handoff
+    /// (`None` = top-level session). Stamped from [`SessionMeta`] on save;
+    /// old files without the field load as `None`.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
 }
 
 impl Session {
@@ -66,6 +77,7 @@ impl Session {
             status: SessionStatus::Active,
             selected_agent: None,
             reasoning_mode: ReasoningMode::default(),
+            parent_session_id: None,
         }
     }
 

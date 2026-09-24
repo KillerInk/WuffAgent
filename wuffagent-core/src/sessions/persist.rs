@@ -80,9 +80,11 @@ pub fn save_session(
         session.system_prompt = system_prompt.to_string();
     }
     // Stamp the current per-session UI selections (chosen agent + reasoning
-    // mode) so they persist with the session.
+    // mode) so they persist with the session, plus the sub-session parent
+    // link (None for top-level sessions).
     session.selected_agent = meta.selected_agent.clone();
     session.reasoning_mode = meta.reasoning_mode;
+    session.parent_session_id = meta.parent_session_id.clone();
     session.id = id.to_string();
     // Retry with exponential backoff for transient failures
     let mut retries = 0;

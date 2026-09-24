@@ -376,13 +376,15 @@ impl SessionRuntime {
             }
         }
         // Load the session (if any) and restore the per-session selections
-        // from the file: the on-disk name, the chosen agent profile, and the
-        // reasoning-effort mode (old files without the fields → None/Auto).
+        // from the file: the on-disk name, the chosen agent profile, the
+        // reasoning-effort mode, and the sub-session parent link (old files
+        // without the fields → None/Auto/None).
         let loaded = client.load_session();
         let name = loaded.as_ref().map(|s| s.name.clone()).unwrap_or(name);
         let meta = loaded.map(|s| crate::sessions::SessionMeta {
             selected_agent: s.selected_agent,
             reasoning_mode: s.reasoning_mode,
+            parent_session_id: s.parent_session_id,
         }).unwrap_or_default();
         client.set_session_meta(meta.clone());
         // Keep the session client's forced wire level in sync with the mode

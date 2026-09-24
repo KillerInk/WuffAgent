@@ -245,10 +245,12 @@ impl ChatApp {
     /// chat pipeline re-applies the mode on every run anyway).
     pub fn sync_session_meta(&mut self, id: &str) {
         if let Some(runtime) = self.session_store.get_mut(id) {
-            runtime.client.set_session_meta(wuffagent_core::sessions::SessionMeta {
-                selected_agent: runtime.selected_agent.clone(),
-                reasoning_mode: runtime.reasoning_mode,
-            });
+            // Update only the UI selections; clone the existing meta first so
+            // non-UI fields (the sub-session parent link) survive the sync.
+            let mut meta = runtime.client.session_meta().clone();
+            meta.selected_agent = runtime.selected_agent.clone();
+            meta.reasoning_mode = runtime.reasoning_mode;
+            runtime.client.set_session_meta(meta);
             runtime.client.set_reasoning_effort(match runtime.reasoning_mode {
                 wuffagent_core::types::ReasoningMode::Auto => {
                     wuffagent_core::types::ReasoningEffort::Off
