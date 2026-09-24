@@ -243,6 +243,13 @@ fn bootstrap() -> (
     // failures are logged and retryable from the MCP panel).
     mcp_manager.auto_connect_enabled();
 
+    // T2: MCP management tools (`mcp_list` / `mcp_add_server` /
+    // `mcp_connect` / `mcp_disconnect` / `mcp_remove_server` /
+    // `mcp_refresh_tools` / `mcp_set_tool_enabled`) — bound to the app's
+    // McpManager; shared-registry tools gated by `allowed_tools`.
+    builtin::register_mcp_tools(&registry, mcp_manager.clone())
+        .expect("Failed to register MCP management tools");
+
     let server = ServerManager::new(
         &config.server_path,
         &config.model_path,

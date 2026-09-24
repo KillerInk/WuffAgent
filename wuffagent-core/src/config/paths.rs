@@ -7,8 +7,26 @@ pub fn get_wuffagent_home() -> PathBuf {
         .join(".wuffagent")
 }
 
-/// Returns the path to the config file.
+/// Test override for [`get_config_path`] (tools that persist to the app
+/// config file point it at a temp file). `OnceLock` so the override needs no
+/// lock of its own; tests set/restore it around each test.
+static TEST_CONFIG_PATH: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+fn test_config_path() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    TEST_CONFIG_PATH.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Set (or clear with `None`) the test override for the config file path.
+pub fn set_config_path_for_testing(path: Option<PathBuf>) {
+    *test_config_path().lock().unwrap() = path;
+}
+
+/// Returns the path to the config file (the test override wins when set).
 pub fn get_config_path() -> PathBuf {
+    if let Some(p) = test_config_path().lock().unwrap().clone() {
+        return p;
+    }
     get_wuffagent_home().join("config.json")
 }
 

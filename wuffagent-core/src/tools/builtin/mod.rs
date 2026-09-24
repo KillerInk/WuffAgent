@@ -5,6 +5,7 @@ pub mod fileio;
 pub mod handoff;
 pub(crate) mod html;
 pub mod memory;
+pub mod mcp;
 pub mod restart;
 pub mod search;
 pub mod shell;
@@ -20,6 +21,10 @@ pub use fileio::{
 };
 pub use memory::{
     ConsolidateMemoriesTool, DeleteMemoryTool, SaveMemoryTool, SearchMemoryTool, UpdateMemoryTool,
+};
+pub use mcp::{
+    McpAddServerTool, McpConnectTool, McpDisconnectTool, McpListTool, McpRemoveServerTool,
+    McpRefreshToolsTool, McpSetToolEnabledTool,
 };
 pub use search::SearchContentTool;
 pub use shell::{ShellConfig, ShellTool};
@@ -226,6 +231,71 @@ pub fn register_agent_tools(
         loaded_at: std::time::Instant::now(),
     })?;
 
+    Ok(())
+}
+
+/// Register the MCP management tools (T2): `mcp_list`, `mcp_add_server`,
+/// `mcp_connect`, `mcp_disconnect`, `mcp_remove_server`, `mcp_refresh_tools`,
+/// `mcp_set_tool_enabled`.
+///
+/// Shared-registry tools (not per-execution): they wrap the app's
+/// [`McpManager`] (which already owns its dedicated runtime — the `*_sync`
+/// ops run on a worker thread inside each tool call, so the tool thread never
+/// blocks a runtime context). Visibility is gated per profile through
+/// `allowed_tools` like any other tool.
+pub fn register_mcp_tools(
+    registry: &crate::tools::registry::ToolRegistry,
+    mcp: std::sync::Arc<crate::tools::mcp::McpManager>,
+) -> crate::tools::types::ToolResult<()> {
+    let tools: Vec<(&str, &str, std::sync::Arc<dyn Tool>)> = vec![
+        (
+            "mcp_list",
+            "List configured MCP servers with live status, transport and their tools (registry names mcp__<server>__<tool>)",
+            std::sync::Arc::new(McpListTool::new(mcp.clone())),
+        ),
+        (
+            "mcp_add_server",
+            "Add or replace an MCP server (stdio command/args/env or http url/headers); persists to config.json and connects when enabled",
+            std::sync::Arc::new(McpAddServerTool::new(mcp.clone())),
+        ),
+        (
+            "mcp_connect",
+            "Connect an MCP server (handshake + tools/list + register enabled tools)",
+            std::sync::Arc::new(McpConnectTool::new(mcp.clone())),
+        ),
+        (
+            "mcp_disconnect",
+            "Disconnect an MCP server (unregister its tools, kill its process)",
+            std::sync::Arc::new(McpDisconnectTool::new(mcp.clone())),
+        ),
+        (
+            "mcp_remove_server",
+            "Remove an MCP server from the live state and from config.json",
+            std::sync::Arc::new(McpRemoveServerTool::new(mcp.clone())),
+        ),
+        (
+            "mcp_refresh_tools",
+            "Re-list a connected MCP server's tools and re-register the enabled ones",
+            std::sync::Arc::new(McpRefreshToolsTool::new(mcp.clone())),
+        ),
+        (
+            "mcp_set_tool_enabled",
+            "Enable or disable one MCP server tool (registers/unregisters mcp__<server>__<tool>)",
+            std::sync::Arc::new(McpSetToolEnabledTool::new(mcp)),
+        ),
+    ];
+    for (name, description, tool) in tools {
+        registry.register(ToolEntry {
+            tool,
+            metadata: ToolMetadata {
+                name: name.to_string(),
+                version: "1.0.0".to_string(),
+                description: description.to_string(),
+                dependencies: vec![],
+            },
+            loaded_at: std::time::Instant::now(),
+        })?;
+    }
     Ok(())
 }
 
