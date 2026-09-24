@@ -107,7 +107,7 @@ impl ImprovementsPanel {
                             // an unreadable sliver. ui.columns pins each side
                             // to half the width.
                             if let Some(cur) = &current_prompt {
-                                ui.columns(2, |mut cols| {
+                                ui.columns(2, |cols| {
                                     {
                                         let ui = &mut cols[0];
                                         ui.label(
