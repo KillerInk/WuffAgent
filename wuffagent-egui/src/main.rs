@@ -323,6 +323,14 @@ fn bootstrap() -> (
             .expect("Failed to register agent-profile tools");
     }
 
+    // T3b: runtime plugin management tools (`reload_plugins` /
+    // `add_plugin_path`) — bound to the shared registry itself, so an agent
+    // can load a native plugin into the very registry it reads from (new
+    // tools visible from the next message). Shared-registry tools gated by
+    // `allowed_tools` like any other tool.
+    builtin::register_plugin_tools(&registry, registry.clone())
+        .expect("Failed to register plugin management tools");
+
     let agent_engine = AgentEngine::new(
         llm_client,
         tool_manager_for_engine,

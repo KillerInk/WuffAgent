@@ -12,6 +12,10 @@ use crate::tools::types::{
 /// WuffAgent rebuild can be slow, so this is deliberately generous.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// How long a `test_cmd` may run before it is considered to have hung. Mirrors
+/// `BUILD_TIMEOUT` — a full workspace test run can be slow.
+const TEST_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// The secondary self-build target directory. A WuffAgent self-restart only
 /// ever uses TWO builds — the default `cargo build` output (`target/debug`)
 /// and this second copy — and alternates between them on each restart, because
@@ -53,23 +57,26 @@ impl RestartTool {
 }
 
 /// Run `cmd` in the OS shell, blocking, with a timeout. Output is captured to a
-/// temp log (so a long build cannot deadlock on a full pipe) and its tail is
-/// returned on failure for the model to act on. `cwd` (if given) is the
+/// temp log (so a long build/test cannot deadlock on a full pipe) and its tail
+/// is returned on failure for the model to act on. `kind` labels the command in
+/// messages ("build" / "test") and selects the timeout. `cwd` (if given) is the
 /// working directory; otherwise the current process directory is inherited.
-fn run_build(cmd: &str, cwd: Option<&std::path::Path>) -> Result<(), String> {
+fn run_command(kind: &str, cmd: &str, cwd: Option<&std::path::Path>) -> Result<(), String> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let log_path = std::env::temp_dir().join(format!(
-        "wuffagent_restart_build_{}_{}.log",
+        "wuffagent_restart_{}_{}_{}.log",
+        kind,
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
 
+    let timeout = if kind == "test" { TEST_TIMEOUT } else { BUILD_TIMEOUT };
     let stdout_file = std::fs::File::create(&log_path)
-        .map_err(|e| format!("failed to create build log {:?}: {}", log_path, e))?;
+        .map_err(|e| format!("failed to create {} log {:?}: {}", kind, log_path, e))?;
     let stderr_file = std::fs::OpenOptions::new()
         .append(true)
         .open(&log_path)
-        .map_err(|e| format!("failed to open build log {:?}: {}", log_path, e))?;
+        .map_err(|e| format!("failed to open {} log {:?}: {}", kind, log_path, e))?;
 
     let (program, args): (String, Vec<&str>) = if cfg!(windows) {
         (
@@ -92,7 +99,7 @@ fn run_build(cmd: &str, cwd: Option<&std::path::Path>) -> Result<(), String> {
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_file(&log_path);
-            return Err(format!("failed to run build command '{}': {}", cmd, e));
+            return Err(format!("failed to run {} command '{}': {}", kind, cmd, e));
         }
     };
 
@@ -106,21 +113,22 @@ fn run_build(cmd: &str, cwd: Option<&std::path::Path>) -> Result<(), String> {
                     Ok(())
                 } else {
                     Err(format!(
-                        "build command '{}' failed ({}) — output tail:\n{}",
-                        cmd, status, tail
+                        "{} command '{}' failed ({}) — output tail:\n{}",
+                        kind, cmd, status, tail
                     ))
                 };
             }
             Ok(None) => {
-                if start.elapsed() > BUILD_TIMEOUT {
+                if start.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
                     let tail = read_tail(&log_path, 2000);
                     let _ = std::fs::remove_file(&log_path);
                     return Err(format!(
-                        "build command '{}' timed out after {}s — output tail:\n{}",
+                        "{} command '{}' timed out after {}s — output tail:\n{}",
+                        kind,
                         cmd,
-                        BUILD_TIMEOUT.as_secs(),
+                        timeout.as_secs(),
                         tail
                     ));
                 }
@@ -128,7 +136,7 @@ fn run_build(cmd: &str, cwd: Option<&std::path::Path>) -> Result<(), String> {
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&log_path);
-                return Err(format!("failed to wait on build command '{}': {}", cmd, e));
+                return Err(format!("failed to wait on {} command '{}': {}", kind, cmd, e));
             }
         }
     }
@@ -234,7 +242,7 @@ impl Tool for RestartTool {
          WuffAgent's own source: edit, then restart to build, load the new code, and pick the work back up). \
          Parameters: reason (required) — what you changed and why you are restarting, shown to the user \
          and used to resume. build_cmd (optional) — a command to run FIRST; on failure the restart is \
-         skipped so you can fix it. exe_path (optional) — the binary to launch. \
+         skipped so you can fix it. test_cmd (optional) — a command to run AFTER a successful build and BEFORE the restart; on failure the restart is skipped (order: build → test → restart). exe_path (optional) — the binary to launch. \
          For WuffAgent itself, omit BOTH build_cmd and exe_path: the tool then builds and launches the \
          OTHER of WuffAgent's two standard builds — the default `cargo build` output (target/debug) and a \
          second copy (target/relaunch) — alternating between them on every restart, because on Windows the \
@@ -268,6 +276,14 @@ impl Tool for RestartTool {
                         },
                     );
                     map.insert(
+                        "test_cmd".to_string(),
+                        FieldSchema {
+                            type_name: "string".to_string(),
+                            description: "Optional command to run AFTER build_cmd succeeds and BEFORE the restart (e.g. a test suite); if it fails the restart is skipped. Omit it for a fast build-only restart".to_string(),
+                            nullable: true,
+                        },
+                    );
+                    map.insert(
                         "exe_path".to_string(),
                         FieldSchema {
                             type_name: "string".to_string(),
@@ -294,6 +310,10 @@ impl Tool for RestartTool {
         }
         let build_cmd_param: Option<String> = params
             .get::<String>("build_cmd")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let test_cmd_param: Option<String> = params
+            .get::<String>("test_cmd")
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let exe_path_param: Option<String> = params
@@ -328,7 +348,16 @@ impl Tool for RestartTool {
         // failure return an error output so the model can fix the build and
         // retry; do NOT queue a restart.
         if let Some(cmd) = &build_cmd {
-            if let Err(e) = run_build(cmd, build_cwd.as_deref()) {
+            if let Err(e) = run_command("build", cmd, build_cwd.as_deref()) {
+                return Ok(ToolOutput::Error(e));
+            }
+        }
+
+        // Optionally test after the build (T4): a broken-but-compiling change
+        // (or a failing test) must not take the app down. Same fail-fast
+        // behaviour as the build gate.
+        if let Some(cmd) = &test_cmd_param {
+            if let Err(e) = run_command("test", cmd, build_cwd.as_deref()) {
                 return Ok(ToolOutput::Error(e));
             }
         }
@@ -338,6 +367,7 @@ impl Tool for RestartTool {
         let response = serde_json::json!({
             "status": "restart_queued",
             "build_cmd": build_cmd.as_ref(),
+            "test_cmd": test_cmd_param.as_ref(),
             "exe_path": exe_path.as_ref(),
             "note": "WuffAgent will now restart and resume this session. Stop now."
         });

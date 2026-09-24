@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::tools::registry::ToolRegistry;
 use crate::tools::types::{
@@ -72,6 +72,10 @@ pub struct ToolManager {
     registry: Arc<ToolRegistry>,
     logger: Arc<dyn ToolLogger>,
     allowlist: Option<Vec<String>>,
+    /// Discovery paths the ORIGINAL registry scans (T3b). Shared with every
+    /// manager built from this one so a rebuilt registry keeps scanning the
+    /// same plugin directories.
+    discovery_paths: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Clone for ToolManager {
@@ -80,16 +84,19 @@ impl Clone for ToolManager {
             registry: self.registry.clone(),
             logger: self.logger.clone(),
             allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
         }
     }
 }
 
 impl ToolManager {
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
+        let discovery_paths = Arc::new(Mutex::new(registry.discovery_paths()));
         Self {
             registry,
             logger: Arc::new(TracingToolLogger),
             allowlist: None,
+            discovery_paths,
         }
     }
 
@@ -100,6 +107,7 @@ impl ToolManager {
             registry,
             logger: Arc::new(TracingToolLogger),
             allowlist: None,
+            discovery_paths: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -109,7 +117,13 @@ impl ToolManager {
             registry: self.registry.clone(),
             logger: self.logger.clone(),
             allowlist: Some(names.to_vec()),
+            discovery_paths: self.discovery_paths.clone(),
         }
+    }
+
+    /// The shared discovery-path list (a copy).
+    fn discovery_paths(&self) -> Vec<PathBuf> {
+        self.discovery_paths.lock().unwrap().clone()
     }
 
     /// Rebuild a registry from the current one, swapping the shared `shell` tool
@@ -141,7 +155,7 @@ impl ToolManager {
                 loaded_at: std::time::Instant::now(),
             });
         }
-        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
             let _ = registry.register(entry);
         }
@@ -157,6 +171,7 @@ impl ToolManager {
             registry: self.rebuild_registry(Some(cfg)),
             logger: self.logger.clone(),
             allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
         }
     }
 
@@ -183,7 +198,7 @@ impl ToolManager {
             metadata: meta,
             loaded_at: std::time::Instant::now(),
         });
-        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
             let _ = registry.register(entry);
         }
@@ -191,6 +206,7 @@ impl ToolManager {
             registry: std::sync::Arc::new(registry),
             logger: self.logger.clone(),
             allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
         }
     }
 
@@ -217,7 +233,7 @@ impl ToolManager {
             metadata: meta,
             loaded_at: std::time::Instant::now(),
         });
-        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
             let _ = registry.register(entry);
         }
@@ -225,6 +241,7 @@ impl ToolManager {
             registry: std::sync::Arc::new(registry),
             logger: self.logger.clone(),
             allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
         }
     }
 
@@ -235,7 +252,7 @@ impl ToolManager {
     pub fn without_handoff(&self) -> Self {
         let mut entries = self.registry.list();
         entries.retain(|e| e.metadata.name != "handoff");
-        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
             let _ = registry.register(entry);
         }
@@ -243,6 +260,7 @@ impl ToolManager {
             registry: std::sync::Arc::new(registry),
             logger: self.logger.clone(),
             allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
         }
     }
 
@@ -251,7 +269,7 @@ impl ToolManager {
     pub fn without_restart(&self) -> Self {
         let mut entries = self.registry.list();
         entries.retain(|e| e.metadata.name != "restart");
-        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
             let _ = registry.register(entry);
         }
@@ -259,6 +277,7 @@ impl ToolManager {
             registry: std::sync::Arc::new(registry),
             logger: self.logger.clone(),
             allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
         }
     }
 
@@ -268,7 +287,7 @@ impl ToolManager {
     pub fn without_shell(&self) -> Self {
         let mut entries = self.registry.list();
         entries.retain(|e| e.metadata.name != "shell");
-        let registry = ToolRegistry::new(vec![], self.logger.clone());
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
             let _ = registry.register(entry);
         }
@@ -276,6 +295,7 @@ impl ToolManager {
             registry: std::sync::Arc::new(registry),
             logger: self.logger.clone(),
             allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
         }
     }
 
@@ -360,11 +380,16 @@ impl ToolManager {
         }
     }
 
-    /// Add a discovery path and rescan for plugins.
+    /// Add a discovery path (shared with every manager built from this one)
+    /// and rescan for plugins (T3b). Returns the number of plugins newly
+    /// loaded by the rescan.
     pub fn add_discovery_path(&self, path: PathBuf) -> ToolResult<usize> {
-        // The registry currently uses a RwLock; we need to add paths dynamically.
-        // For now we rely on the initial paths passed at construction.
-        let _ = path;
+        let mut shared = self.discovery_paths.lock().unwrap();
+        if !shared.iter().any(|p| p == &path) {
+            shared.push(path.clone());
+        }
+        drop(shared);
+        self.registry.add_discovery_path(path);
         self.registry.discover_plugins()
     }
 

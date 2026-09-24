@@ -1,9 +1,32 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use crate::tools::types::{Tool, ToolError, ToolLogger, ToolMetadata, ToolSchema};
+
+/// Outcome of one plugin file during a discovery scan (T3b). The scan itself
+/// never fails on a single bad file — this is how the agent (via the
+/// `reload_plugins` tool) sees exactly what happened to each `.dll`/`.so`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginLoadOutcome {
+    /// The plugin file that was scanned.
+    pub path: PathBuf,
+    /// `loaded` (newly registered), `skipped` (tool name already registered),
+    /// or `failed`.
+    pub status: PluginLoadStatus,
+    /// The tool name the plugin registered under (loaded/skipped only).
+    pub tool_name: Option<String>,
+    /// Error text (failed only).
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PluginLoadStatus {
+    Loaded,
+    Skipped,
+    Failed,
+}
 
 /// Internal entry wrapping a loaded tool.
 pub struct ToolEntry {
@@ -24,7 +47,10 @@ impl Clone for ToolEntry {
 /// Discovers, registers, and manages tool instances.
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, ToolEntry>>,
-    discovery_paths: Vec<PathBuf>,
+    /// Mutex-guarded because T3b's `add_discovery_path` appends at runtime
+    /// (the `reload_plugins` / `add_plugin_path` tools) while discovery scans
+    /// read the list.
+    discovery_paths: Mutex<Vec<PathBuf>>,
     logger: Arc<dyn ToolLogger>,
 }
 
@@ -32,9 +58,27 @@ impl ToolRegistry {
     pub fn new(discovery_paths: Vec<PathBuf>, logger: Arc<dyn ToolLogger>) -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
-            discovery_paths,
+            discovery_paths: Mutex::new(discovery_paths),
             logger,
         }
+    }
+
+    /// Add an extra directory to scan for plugin files (T3b). Idempotent: a
+    /// path already present is not added again. Returns `true` when the path
+    /// was new. Does NOT trigger a scan — call `discover_plugins` when the
+    /// plugin should actually load.
+    pub fn add_discovery_path(&self, path: PathBuf) -> bool {
+        let mut paths = self.discovery_paths.lock().unwrap();
+        if paths.iter().any(|p| p == &path) {
+            return false;
+        }
+        paths.push(path);
+        true
+    }
+
+    /// The current discovery paths (a copy), for display in tool output.
+    pub fn discovery_paths(&self) -> Vec<PathBuf> {
+        self.discovery_paths.lock().unwrap().clone()
     }
 
     pub fn register(&self, entry: ToolEntry) -> Result<(), ToolError> {
@@ -106,15 +150,25 @@ impl ToolRegistry {
     }
 
     /// Scan all discovery paths for plugin files (.dll / .so) and load them.
-    /// Returns the number of plugins successfully loaded.
+    /// Returns the number of plugins successfully loaded (kept for the
+    /// startup call site; use [`Self::discover_plugins_detailed`] to see
+    /// per-file outcomes — a bad file never fails the scan, it is reported).
     pub fn discover_plugins(&self) -> Result<usize, ToolError> {
+        Ok(self.discover_plugins_detailed()?.iter().filter(|o| o.status == PluginLoadStatus::Loaded).count())
+    }
+
+    /// T3b: the same scan, with a per-file outcome for every plugin file seen
+    /// (`loaded` / `skipped` = already registered / `failed`). Never returns
+    /// `Err` for individual plugin files; `Err` only when a discovery path
+    /// itself cannot be read.
+    pub fn discover_plugins_detailed(&self) -> Result<Vec<PluginLoadOutcome>, ToolError> {
         let loader = crate::tools::dynamic::PluginLoader::new(self.logger.clone());
-        let mut loaded = 0;
-        for path in &self.discovery_paths {
+        let mut outcomes: Vec<PluginLoadOutcome> = Vec::new();
+        for path in self.discovery_paths() {
             if !path.exists() {
                 continue;
             }
-            let entries = std::fs::read_dir(path).map_err(|e| {
+            let entries = std::fs::read_dir(&path).map_err(|e| {
                 ToolError::PluginLoad(format!(
                     "Cannot read discovery path '{}': {}",
                     path.display(),
@@ -128,28 +182,63 @@ impl ToolRegistry {
                 if ext != Some("dll") && ext != Some("so") {
                     continue;
                 }
-                match loader.load(&file_path) {
-                    Ok(handle) => {
-                        let metadata = handle.metadata().clone();
-                        let tool = handle.create_tool()?;
-                        self.register(ToolEntry {
-                            tool,
-                            metadata,
-                            loaded_at: Instant::now(),
-                        })?;
-                        loaded += 1;
-                    }
+                match self.load_one_plugin(&loader, &file_path) {
+                    Ok(outcome) => outcomes.push(outcome),
                     Err(e) => {
                         tracing::warn!(
                             plugin = %file_path.display(),
                             error = %e,
                             "Failed to load plugin"
                         );
+                        outcomes.push(PluginLoadOutcome {
+                            path: file_path,
+                            status: PluginLoadStatus::Failed,
+                            tool_name: None,
+                            error: Some(e.to_string()),
+                        });
                     }
                 }
             }
         }
-        Ok(loaded)
+        Ok(outcomes)
+    }
+
+    /// Load + register a single plugin file, classifying the outcome.
+    /// `Err` means the library itself could not be loaded or the tool could
+    /// not be created (a `failed` outcome); a tool-name collision is a
+    /// `skipped` outcome (the tool is already available under that name).
+    fn load_one_plugin(
+        &self,
+        loader: &crate::tools::dynamic::PluginLoader,
+        file_path: &Path,
+    ) -> Result<PluginLoadOutcome, ToolError> {
+        let handle = loader.load(file_path)?;
+        let metadata = handle.metadata().clone();
+        let tool = handle.create_tool()?;
+        let name = tool.name().to_string();
+        match self.register(ToolEntry {
+            tool,
+            metadata,
+            loaded_at: Instant::now(),
+        }) {
+            Ok(()) => Ok(PluginLoadOutcome {
+                path: file_path.to_path_buf(),
+                status: PluginLoadStatus::Loaded,
+                tool_name: Some(name),
+                error: None,
+            }),
+            // Already registered (re-scan of an already-loaded plugin): the
+            // tool is available, so this is a skip, not a failure.
+            Err(ToolError::Validation(msg)) if msg.contains("already registered") => {
+                Ok(PluginLoadOutcome {
+                    path: file_path.to_path_buf(),
+                    status: PluginLoadStatus::Skipped,
+                    tool_name: Some(name),
+                    error: None,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

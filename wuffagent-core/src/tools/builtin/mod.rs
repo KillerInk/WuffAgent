@@ -6,6 +6,7 @@ pub mod handoff;
 pub(crate) mod html;
 pub mod memory;
 pub mod mcp;
+pub mod plugins;
 pub mod restart;
 pub mod search;
 pub mod shell;
@@ -26,6 +27,7 @@ pub use mcp::{
     McpAddServerTool, McpConnectTool, McpDisconnectTool, McpListTool, McpRemoveServerTool,
     McpRefreshToolsTool, McpSetToolEnabledTool,
 };
+pub use plugins::{AddPluginPathTool, ReloadPluginsTool};
 pub use search::SearchContentTool;
 pub use shell::{ShellConfig, ShellTool};
 pub use time::TimeTool;
@@ -307,6 +309,20 @@ pub fn register_mcp_tools(
         })?;
     }
     Ok(())
+}
+
+/// Register the T3b plugin-management tools: `reload_plugins` and
+/// `add_plugin_path`.
+///
+/// Shared-registry tools wrapping the app's [`ToolRegistry`] itself (the
+/// agent can load native plugin tools into the very registry it reads from —
+/// the new tools become visible from the next message). Per-profile
+/// visibility is gated through `allowed_tools` like any other tool.
+pub fn register_plugin_tools(
+    registry: &crate::tools::registry::ToolRegistry,
+    registry_arc: std::sync::Arc<crate::tools::registry::ToolRegistry>,
+) -> crate::tools::types::ToolResult<()> {
+    plugins::register_plugin_tools(registry, registry_arc)
 }
 
 /// Register memory tools that require a memory manager instance.

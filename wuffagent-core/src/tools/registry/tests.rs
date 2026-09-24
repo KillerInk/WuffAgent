@@ -107,3 +107,56 @@ fn test_to_tool_definitions() {
     assert_eq!(definitions[0].function.name, "calculation");
     assert_eq!(definitions[0].type_name, "function");
 }
+
+// ─── T3b: discovery paths ────────────────────────────────────────────────────
+
+#[test]
+fn test_add_discovery_path_idempotent() {
+    let registry = ToolRegistry::new(vec![], mock_logger());
+    let p = PathBuf::from("/tmp/wa-test-plugins");
+    assert!(registry.add_discovery_path(p.clone()), "first add is new");
+    assert!(!registry.add_discovery_path(p.clone()), "second add is a no-op");
+    assert_eq!(registry.discovery_paths(), vec![p]);
+}
+
+#[test]
+fn test_discovery_paths_seeded_at_construction() {
+    let seeded = PathBuf::from("/seeded");
+    let registry = ToolRegistry::new(vec![seeded.clone()], mock_logger());
+    assert_eq!(registry.discovery_paths(), vec![seeded]);
+}
+
+#[test]
+fn test_discover_plugins_empty_dir_loads_nothing() {
+    let dir = std::env::temp_dir().join(format!("wa-reg-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let registry = ToolRegistry::new(vec![dir.clone()], mock_logger());
+    let outcomes = registry.discover_plugins_detailed().unwrap();
+    assert!(outcomes.is_empty(), "empty dir has no plugin files: {:?}", outcomes);
+    assert_eq!(registry.discover_plugins().unwrap(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_discover_plugins_ignores_non_plugin_files() {
+    let dir = std::env::temp_dir().join(format!("wa-reg-ign-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("notes.txt"), "not a plugin").unwrap();
+    let registry = ToolRegistry::new(vec![dir.clone()], mock_logger());
+    let outcomes = registry.discover_plugins_detailed().unwrap();
+    assert!(outcomes.is_empty(), "non-.dll/.so files are skipped: {:?}", outcomes);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_discover_plugins_broken_dll_reports_failed_not_err() {
+    let dir = std::env::temp_dir().join(format!("wa-reg-bad-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("bogus.dll"), b"definitely not a PE file").unwrap();
+    let registry = ToolRegistry::new(vec![dir.clone()], mock_logger());
+    let outcomes = registry.discover_plugins_detailed().unwrap();
+    assert_eq!(outcomes.len(), 1, "one file scanned");
+    assert_eq!(outcomes[0].status, PluginLoadStatus::Failed);
+    assert!(outcomes[0].error.as_ref().unwrap().contains("bogus.dll"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
