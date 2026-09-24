@@ -19,14 +19,16 @@ impl ChatApp {
         // The agent selection is per-session (SessionRuntime.selected_agent).
         // `pending_image` is cloned so the preview below can draw it without
         // holding a borrow of the pending-image map.
-        let pending_image = self
-            .selected_session_id
-            .as_ref()
+        // Target the DISPLAYED session (active sub-session tab, else the
+        // selected one): the input box always sends where the user is looking.
+        let target = self.input_target_session_id();
+        let pending_image = target
+            .as_deref()
             .and_then(|sid| self.pending_images.get(sid))
             .cloned();
         let (has_session, is_generating, has_history, selected_agent) =
-            self.selected_session_id
-                .as_ref()
+            target
+                .as_deref()
                 .and_then(|sid| self.session_store.get(sid))
                 .map(|r| {
                     (
@@ -49,7 +51,7 @@ impl ChatApp {
                         .add(egui::Button::new("x").min_size(egui::vec2(18.0, 18.0)))
                         .clicked()
                     {
-                        if let Some(sid) = self.selected_session_id.clone() {
+                        if let Some(sid) = target.clone() {
                             self.pending_images.remove(&sid);
                         }
                     }
@@ -113,8 +115,8 @@ impl ChatApp {
                     if response.has_focus() && paste_attempted {
                         self.paste_image_from_clipboard();
                     }
-                    // Sync back to chat_state
-                    if let Some(sid) = &self.selected_session_id {
+                    // Sync back to chat_state (of the displayed session)
+                    if let Some(sid) = &target {
                         if let Some(runtime) = self.session_store.get_mut(sid) {
                             runtime.chat_state.input_text = local_text;
                         }
@@ -145,23 +147,21 @@ impl ChatApp {
                             }
                         });
                     if let Some(next) = next_agent {
-                        if let Some(sid) = self.selected_session_id.clone() {
+                        if let Some(sid) = target.clone() {
                             if let Some(runtime) = self.session_store.get_mut(&sid) {
                                 runtime.selected_agent = Some(next);
                             }
                         }
                         // Persist the choice with the session file on the next
                         // save (and keep the client's wire level in sync).
-                        if let Some(sid) = self.selected_session_id.clone() {
+                        if let Some(sid) = target.clone() {
                             self.sync_session_meta(&sid);
                         }
-                    } else if let Some(sid) = self.selected_session_id.clone() {
+                    } else if let Some(sid) = target.clone() {
                         if let Some(runtime) = self.session_store.get_mut(&sid) {
                             runtime.selected_agent = None;
                         }
-                        if let Some(sid) = self.selected_session_id.clone() {
-                            self.sync_session_meta(&sid);
-                        }
+                        self.sync_session_meta(&sid);
                     }
                     ui.add_space(6.0);
 
@@ -170,9 +170,8 @@ impl ChatApp {
                     // explicit level overrides it for this session. Bound to the
                     // current session's SessionRuntime.reasoning_mode and
                     // persisted with the session file.
-                    let mut next_mode = self
-                        .selected_session_id
-                        .as_ref()
+                    let mut next_mode = target
+                        .as_deref()
                         .and_then(|sid| self.session_store.get(sid))
                         .map(|rt| rt.reasoning_mode)
                         .unwrap_or_default();
@@ -195,7 +194,7 @@ impl ChatApp {
                         });
                     // `next_mode` only changes when the user picked a new entry:
                     // apply it to the session runtime + client immediately.
-                    if let Some(sid) = self.selected_session_id.clone() {
+                    if let Some(sid) = target.clone() {
                         let changed = if let Some(runtime) = self.session_store.get_mut(&sid) {
                             let changed = runtime.reasoning_mode != next_mode;
                             runtime.reasoning_mode = next_mode;
@@ -242,7 +241,7 @@ impl ChatApp {
                         let input = self.input_text_snapshot().trim().to_string();
                         if !input.is_empty() && self.handle_send_input(&input) {
                             // Accepted (queued or started): clear the input box.
-                            if let Some(sid) = self.selected_session_id.clone() {
+                            if let Some(sid) = target.clone() {
                                 if let Some(runtime) = self.session_store.get_mut(&sid) {
                                     runtime.chat_state.input_text.clear();
                                 }
@@ -293,8 +292,8 @@ impl ChatApp {
     /// Returns `true` when the message was accepted (so callers can clear
     /// the input box), `false` when validation failed or nothing happened.
     fn handle_send_input(&mut self, input: &str) -> bool {
-        // Get the selected session
-        let sid = match self.selected_session_id.clone() {
+        // Get the displayed session (active sub-session tab, else selected)
+        let sid = match self.input_target_session_id() {
             Some(sid) => sid,
             None => return false,
         };
@@ -369,7 +368,7 @@ impl ChatApp {
     }
 
     pub(super) fn notify_chat(&mut self, msg: &str, success: bool) {
-        if let Some(sid) = self.selected_session_id.clone() {
+        if let Some(sid) = self.input_target_session_id() {
             if let Some(runtime) = self.session_store.get_mut(&sid) {
                 runtime.chat_state.show_notification(msg, success);
             }
@@ -387,7 +386,7 @@ impl ChatApp {
     /// by the post-restart auto-resume, which carries the reason the agent gave
     /// for restarting so the (newly reloaded) agent picks the work back up.
     pub(super) fn continue_generation_note(&mut self, note: &str) {
-        let sid = match self.selected_session_id.clone() {
+        let sid = match self.input_target_session_id() {
             Some(sid) => sid,
             None => return,
         };
@@ -397,9 +396,8 @@ impl ChatApp {
             }
         }
         let agent = self
-            .selected_session_id
-            .as_ref()
-            .and_then(|sid| self.session_store.get(sid))
+            .session_store
+            .get(&sid)
             .and_then(|r| r.selected_agent.clone())
             .unwrap_or_default();
         let agent_prompt = self.resolve_agent_prompt(&agent);
@@ -408,8 +406,8 @@ impl ChatApp {
     }
 
     pub(super) fn input_text_snapshot(&self) -> String {
-        self.selected_session_id
-            .as_ref()
+        self.input_target_session_id()
+            .as_deref()
             .and_then(|sid| self.session_store.get(sid))
             .map(|r| r.chat_state.input_text.clone())
             .unwrap_or_default()
@@ -594,12 +592,13 @@ impl ChatApp {
     pub(super) fn stop_generation(&mut self) {
         tracing::info!("[CANCEL] Stopping all generation");
 
-        // Cancel the pipeline in the selected session
-        if let Some(sid) = self.selected_session_id.clone() {
-            if let Some(runtime) = self.session_store.get(&sid) {
+        // Cancel the pipeline in the displayed session
+        let sid = self.input_target_session_id();
+        if let Some(sid) = &sid {
+            if let Some(runtime) = self.session_store.get(sid) {
                 runtime.cancel();
             }
-            if let Some(runtime) = self.session_store.get_mut(&sid) {
+            if let Some(runtime) = self.session_store.get_mut(sid) {
                 runtime.chat_state.is_generating = false;
                 runtime.chat_state.pending_error = None;
             }
@@ -607,13 +606,13 @@ impl ChatApp {
 
         // Flush any in-progress streamed text into the display, then persist the
         // session.
-        if let Some(sid) = self.selected_session_id.clone() {
-            if let Some(runtime) = self.session_store.get_mut(&sid) {
+        if let Some(sid) = &sid {
+            if let Some(runtime) = self.session_store.get_mut(sid) {
                 runtime.chat_state.commit_stream();
             }
-        }
-        if let Err(e) = self.save_session() {
-            tracing::warn!("Failed to save session after stop: {}", e);
+            if let Err(e) = self.save_session_for(sid) {
+                tracing::warn!("Failed to save session after stop: {}", e);
+            }
         }
     }
 }

@@ -53,11 +53,11 @@ impl ChatApp {
         }
     }
 
-    /// Store RGBA8 pixels as the selected session's pending image (re-encoded
-    /// as PNG). Replaces any previously attached image (one image per
-    /// message). Returns true on success.
+    /// Store RGBA8 pixels as the displayed session's pending image
+    /// (re-encoded as PNG). Replaces any previously attached image (one image
+    /// per message). Returns true on success.
     fn attach_rgba(&mut self, rgba: (u32, u32, Vec<u8>), source: &str) -> bool {
-        let sid = match self.selected_session_id.clone() {
+        let sid = match self.input_target_session_id() {
             Some(sid) => sid,
             None => return false,
         };

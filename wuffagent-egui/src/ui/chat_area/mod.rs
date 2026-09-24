@@ -24,16 +24,24 @@ impl ChatApp {
         LAYOUT_DBG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let theme = Theme::from_name(&self.config.theme);
 
+        // Sub-session tab bar (main tab + one tab per open sub-session).
+        // Only shown while at least one sub-session tab is open, so plain
+        // sessions keep their current look.
+        if self.displayed_session_id().is_some() && !self.sub_session_tabs.is_empty() {
+            self.draw_sub_session_tabs(ui, &theme);
+        }
+
         // Get the current session's chat state, or show empty state
         // Rebuild the shared message snapshot only when it is stale: the selected
         // session changed, an in-place edit set `display_dirty`, or the message
         // count changed (append/remove). Otherwise reuse it — a per-frame redraw is
         // then an O(1) `Arc::clone` rather than a deep clone of every message
         // (which copies large tool outputs + base64 images and is the main lag).
-        let selected = self.selected_session_id.clone();
-        let current_len = self
-            .selected_session_id
-            .as_ref()
+        // Re-key on the DISPLAYED session (active sub-session tab, else the
+        // selected one) so the tab bar swaps the chat area per tab.
+        let selected = self.displayed_session_id().map(|s| s.to_string());
+        let current_len = selected
+            .as_deref()
             .and_then(|sid| self.session_store.get(sid))
             .map(|r| r.chat_state.messages.len())
             .unwrap_or(0);
@@ -41,21 +49,22 @@ impl ChatApp {
             || self.display_dirty
             || current_len != self.snapshot_len
         {
-            let msgs = self
-                .selected_session_id
-                .as_ref()
+            let msgs = selected
+                .as_deref()
                 .and_then(|sid| self.session_store.get(sid))
                 .map(|r| r.chat_state.messages.clone())
                 .unwrap_or_default();
             self.snapshot_len = msgs.len();
-            self.snapshot_session = selected;
+            // Clone so `selected` stays usable below (error card, streaming,
+            // scroll state) — the snapshot only records which session it holds.
+            self.snapshot_session = selected.clone();
             self.display_snapshot = std::sync::Arc::new(msgs);
             self.display_dirty = false;
         }
         let messages = self.display_snapshot.clone();
 
         // Show pending error as a subtle red-tinted card (from the current session)
-        if let Some(sid) = &self.selected_session_id {
+        if let Some(sid) = &selected {
             if let Some(runtime) = self.session_store.get(sid) {
                 if let Some(err) = &runtime.chat_state.pending_error {
                     egui::Frame::NONE
@@ -78,9 +87,8 @@ impl ChatApp {
 
         // Snapshot streaming state up front so the scroll closure can call
         // `&mut self` helpers without holding an immutable borrow of the store.
-        let (streaming, is_streaming) = self
-            .selected_session_id
-            .as_ref()
+        let (streaming, is_streaming) = selected
+            .as_deref()
             .and_then(|sid| self.session_store.get(sid))
             .filter(|r| r.chat_state.is_generating)
             .map(|r| {
@@ -93,9 +101,8 @@ impl ChatApp {
 
         // Live tool cards (small: name + args preview + output tail) — snapshotted
         // for the same reason as the streaming state above.
-        let active_tools: Vec<wuffagent_core::sessions::ActiveTool> = self
-            .selected_session_id
-            .as_ref()
+        let active_tools: Vec<wuffagent_core::sessions::ActiveTool> = selected
+            .as_deref()
             .and_then(|sid| self.session_store.get(sid))
             .map(|r| r.chat_state.active_tools.clone())
             .unwrap_or_default();
@@ -105,10 +112,10 @@ impl ChatApp {
             .id_salt("chat_scroll")
             .auto_shrink([false, true])
             .stick_to_bottom(
-                self.selected_session_id.as_ref().map(|sid| {
+                selected.as_deref().map(|sid| {
                     self.session_store.get(sid).map(|r| r.chat_state.scroll_to_bottom_requested).unwrap_or(false)
                 }).unwrap_or(false) ||
-                self.selected_session_id.as_ref().map(|sid| {
+                selected.as_deref().map(|sid| {
                     self.session_store.get(sid).map(|r| r.chat_state.at_bottom).unwrap_or(false)
                 }).unwrap_or(false)
             )
@@ -159,7 +166,7 @@ impl ChatApp {
         // Update scroll state for the current session.
         // Compute `at_bottom` (immutable self borrow) before mutating the store.
         let at_bottom = self.is_at_bottom_from_output(&scroll_output);
-        if let Some(sid) = &self.selected_session_id {
+        if let Some(sid) = &selected {
             if let Some(runtime) = self.session_store.get_mut(sid) {
                 runtime.chat_state.scroll_to_bottom_requested = false;
                 runtime.chat_state.at_bottom = at_bottom;
@@ -179,15 +186,82 @@ impl ChatApp {
 
         // Show scroll-to-bottom button when not at bottom and opacity > 0.
         // Snapshot the opacity first so we can call an `&mut self` helper.
-        let (button_visible, button_opacity) = self
-            .selected_session_id
-            .as_ref()
+        let (button_visible, button_opacity) = selected
+            .as_deref()
             .and_then(|sid| self.session_store.get(sid))
             .map(|r| (r.chat_state.button_visible, r.chat_state.button_opacity))
             .unwrap_or((false, 0.0));
         if button_visible && button_opacity > 0.01 {
             self.draw_scroll_to_bottom_button(ui, &theme, button_opacity);
         }
+    }
+
+    /// Tab bar for sub-sessions: the main tab (currently selected session)
+    /// plus one tab per open sub-session. Clicking a tab makes it the
+    /// displayed session (the chat area re-keys on it); the × on a sub-tab
+    /// closes it (the session file stays in the session list). A sub-tab shows
+    /// a running dot while its session's turn is generating.
+    fn draw_sub_session_tabs(&mut self, ui: &mut egui::Ui, theme: &Theme) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.set_min_height(30.0);
+            // Main tab (the currently selected session)
+            let main_name = self
+                .selected_session_id
+                .as_ref()
+                .and_then(|sid| self.session_store.get(sid))
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| "Session".to_string());
+            let main_active = self.active_tab.is_none();
+            if ui
+                .selectable_label(
+                    main_active,
+                    egui::RichText::new(main_name).color(if main_active { theme.text_primary } else { theme.text_dim }),
+                )
+                .clicked()
+            {
+                self.active_tab = None;
+            }
+            // One tab per open sub-session
+            for sub_id in self.sub_session_tabs.clone() {
+                let (label, generating) = self
+                    .session_store
+                    .get(&sub_id)
+                    .map(|r| (r.name.clone(), r.chat_state.is_generating))
+                    .unwrap_or_else(|| (sub_id.clone(), false));
+                let active = self.active_tab.as_deref() == Some(sub_id.as_str());
+                let mut text = label;
+                if generating {
+                    text = format!("● {}", text);
+                }
+                if ui
+                    .selectable_label(
+                        active,
+                        egui::RichText::new(text).color(if active { theme.text_primary } else { theme.text_dim }),
+                    )
+                    .clicked()
+                {
+                    self.active_tab = Some(sub_id.clone());
+                }
+                let close = ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("×").size(12.0).color(theme.text_dim))
+                            .min_size(egui::vec2(18.0, 18.0))
+                            .fill(egui::Color32::TRANSPARENT),
+                    )
+                    .on_hover_text("Close tab (the session stays in the session list)");
+                if close.clicked() {
+                    if self.active_tab.as_deref() == Some(sub_id.as_str()) {
+                        self.active_tab = None;
+                    }
+                    self.sub_session_tabs.retain(|t| t != &sub_id);
+                }
+                ui.add_space(2.0);
+            }
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
     }
 
     /// Placeholder shown for sessions without any messages yet.
@@ -288,9 +362,9 @@ impl ChatApp {
             .stroke(egui::Stroke::new(1.0, border_color))
             .corner_radius(18);
             if ui.add(scroll_btn).clicked() {
-                // Trigger auto-scroll on next frame
-                if let Some(sid) = &self.selected_session_id {
-                    if let Some(runtime) = self.session_store.get_mut(sid) {
+                // Trigger auto-scroll on next frame (for the displayed session)
+                if let Some(sid) = self.displayed_session_id().map(|s| s.to_string()) {
+                    if let Some(runtime) = self.session_store.get_mut(&sid) {
                         runtime.chat_state.scroll_to_bottom_requested = true;
                     }
                 }
@@ -387,7 +461,7 @@ impl ChatApp {
     /// save (✓) / cancel (✕). A rated message shows the chosen button
     /// highlighted with both buttons disabled (no double-save).
     fn draw_feedback_row(&mut self, ui: &mut egui::Ui, index: usize, theme: &Theme) {
-        let Some(sid) = self.selected_session_id.clone() else {
+        let Some(sid) = self.displayed_session_id().map(|s| s.to_string()) else {
             return;
         };
         let (rated, comment_open, mut comment) = match self.session_store.get(&sid) {

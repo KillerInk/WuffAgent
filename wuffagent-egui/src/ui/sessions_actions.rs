@@ -75,6 +75,11 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
                 Ok(()) => {
                     app.session_store.remove(&id);
                     app.pending_images.remove(&id);
+                    // Close any open sub-session tab for the deleted session.
+                    app.sub_session_tabs.retain(|t| t != &id);
+                    if app.active_tab.as_deref() == Some(id.as_str()) {
+                        app.active_tab = None;
+                    }
                     if app.selected_session_id.as_deref() == Some(&*id) {
                         app.selected_session_id = None;
                     }

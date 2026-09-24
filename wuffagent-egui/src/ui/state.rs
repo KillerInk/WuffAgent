@@ -102,6 +102,16 @@ pub struct ChatApp {
     pub session_store: HashMap<String, wuffagent_core::sessions::SessionRuntime>,
     /// ID of the currently selected session (None = no session selected).
     pub selected_session_id: Option<String>,
+    /// Open sub-session tab ids (order = display order). A sub-session is a
+    /// clean context forked from a sub-session handoff; its session file
+    /// carries a `parent_session_id` back to the forking session. The tabs
+    /// are global live views — they stay open while the user switches
+    /// sessions (a closed tab's session remains in the session list).
+    pub sub_session_tabs: Vec<String>,
+    /// The tab shown in the chat area: a sub-session id, or None = the main
+    /// (selected) session tab. Reset to None when the selected session
+    /// changes (the user switched to another session in the sidebar).
+    pub active_tab: Option<String>,
     /// Attached-but-unsent image per session (pasted or attached, not yet
     /// sent). The egui-side half of the image flow: the UI keeps the
     /// `ImageSource` for preview rendering and converts it to a `data:` URI
@@ -201,6 +211,8 @@ impl ChatApp {
             last_synced_base_url: String::new(),
             session_store,
             selected_session_id,
+            sub_session_tabs: Vec::new(),
+            active_tab: None,
             pending_images: HashMap::new(),
             sessions_panel,
             status: AppStatus::Stopped,
@@ -290,6 +302,21 @@ impl ChatApp {
         action: super::sessions_actions::PanelAction,
     ) {
         super::sessions_actions::apply_sessions_action(self, action);
+    }
+
+    /// The session currently displayed in the chat area: the active sub-
+    /// session tab if one is open, otherwise the selected (main) session.
+    pub fn displayed_session_id(&self) -> Option<&str> {
+        self.active_tab
+            .as_deref()
+            .or(self.selected_session_id.as_deref())
+    }
+
+    /// Owned form of [`Self::displayed_session_id`] — the id to target with
+    /// input-area operations (send/stop/attach, agent/reasoning selection,
+    /// input text): the session the user is currently looking at.
+    pub fn input_target_session_id(&self) -> Option<String> {
+        self.displayed_session_id().map(|s| s.to_string())
     }
 
     /// Get the selected session's chat area state (immutable view).

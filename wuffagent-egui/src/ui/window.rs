@@ -198,6 +198,10 @@ impl ChatApp {
     }
 
     pub fn switch_session(&mut self, id: &str) {
+        // Back to the main tab: the displayed session follows the selection
+        // (open sub-session tabs stay open as global live views).
+        self.active_tab = None;
+
         // Save the current session before switching
         if let Err(e) = self.save_session() {
             eprintln!("Failed to save session before switch: {}", e);
