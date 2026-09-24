@@ -54,9 +54,13 @@ pub use http::{
     build_request, build_stream_request, send_message, ChatRequest, Choice, NonStreamResult,
     Response,
 };
-pub use session::{
-    clear_history, clear_save_failure, clear_session_messages, enqueue_save_failure,
-    has_save_failure, load_session, retry_pending_saves, save_session, trim_conversation,
+pub use session::{clear_history, clear_session_messages, trim_conversation};
+// Session persistence orchestrators moved to `crate::sessions::persist`
+// (Phase 2, E2a); re-exported here so `client::{save_session, load_session, ...}`
+// keep resolving for backward compatibility.
+pub use crate::sessions::persist::{
+    clear_save_failure, enqueue_save_failure, has_save_failure, load_session,
+    retry_pending_saves, save_session,
 };
 pub use sse::{
     add_streaming_messages, looks_like_complete_json, process_sse_line, stream_message,

@@ -1,8 +1,14 @@
-//! Unit tests for the `session` module (see `super`).
+//! Unit tests for the `session` module (see `super`). The save/load/retry
+//! persistence tests exercise the orchestrators that now live in
+//! `crate::sessions::persist` (Phase 2, E2a) — only the import paths moved;
+//! the test logic is unchanged.
 
 use super::*;
 use crate::client::{estimate_conversation_tokens, trim_to_token_budget};
+use crate::sessions::persist::{load_session, retry_pending_saves, save_session};
+use crate::sessions::session_exists;
 use crate::trimming::message_char_count;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -131,7 +137,7 @@ async fn test_save_session_creates_new_if_missing() {
 
     assert!(result.is_ok());
     assert!(
-        sessions::session_exists(&session_dir, session_id),
+        session_exists(&session_dir, session_id),
         "session file should exist for id={}",
         session_id
     );

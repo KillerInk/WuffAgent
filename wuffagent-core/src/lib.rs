@@ -8,7 +8,7 @@
 //! │                  → no internal dependencies
 //! ├── llm            (LlmClient trait, ChatClientAdapter) → client, types
 //! ├── client         (ChatClient: HTTP/SSE streaming) → types, trimming, usage,
-//! │                  sessions (session persistence fns), tools (ToolDefinition
+//! │                  sessions::persist (save/load), tools (ToolDefinition
 //! │                  in request types)
 //! ├── config         (Config, ConnectionType) → re-exports agents::config,
 //! │                  memory::types
@@ -42,11 +42,13 @@
 //!   Images cross the core boundary as `data:` URI strings
 //!   (`QueuedMessage.image`, `Message.image`); the egui layer converts the
 //!   attached `ImageSource` to that form before a message enters core.
-//! - One documented residual 3-cycle: `client → sessions → agents → client`.
-//!   Each edge is justified: client persists sessions via
-//!   `client/session.rs` free fns; `sessions/runtime.rs` drives
-//!   `AgentEngine`; the streaming tool path (`agents/agent/loop.rs`) needs
-//!   `ChatClient` directly. No 2-cycles exist between top-level modules.
+//! - Persistence orchestration (save/load/retry) now lives in
+//!   `sessions::persist` (Phase 2, E2a) — client no longer owns it, so its
+//!   `client → sessions` edge of the 3-cycle `client → sessions → agents →
+//!   client` is reduced to a thin save/load call. The other two edges remain
+//!   and are justified: `sessions/runtime.rs` drives `AgentEngine`; the
+//!   streaming tool path (`agents/agent/loop.rs`) needs `ChatClient` directly.
+//!   No 2-cycles exist between top-level modules.
 //! - `client` never depends on `agents` (ChatPipeline lives in
 //!   `agents::chat_pipeline`); only `agents` may depend on `client`.
 //! - `config` re-exports from `agents::config` and `memory::types`;

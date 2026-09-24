@@ -1,12 +1,16 @@
 //! Session persistence methods for ChatClient (thin orchestration over the
-//! free functions in client/session.rs). Split out of the client facade (C1).
+//! free functions in `crate::sessions::persist`). Split out of the client
+//! facade (C1).
 
-use super::session::{self, save_session};
 use super::ChatClient;
+use crate::sessions::persist::{
+    clear_save_failure, enqueue_save_failure, has_save_failure, load_session,
+    retry_pending_saves, save_session,
+};
 
 impl ChatClient {
     pub fn load_session(&mut self) -> Option<crate::sessions::Session> {
-        session::load_session(
+        load_session(
             self.session_id.as_deref(),
             &self.session_dir,
             &self.conversation,
@@ -29,12 +33,12 @@ impl ChatClient {
 
     /// Enqueue a pending save and set the failure flag for UI notification.
     pub fn enqueue_save_failure(&self, error: &anyhow::Error) {
-        session::enqueue_save_failure(&self.save_queue, &self.save_failed, error);
+        enqueue_save_failure(&self.save_queue, &self.save_failed, error);
     }
 
     /// Try to retry any pending saves and clear the queue on success.
     pub fn retry_pending_saves(&self) {
-        let _ = session::retry_pending_saves(&self.save_queue, &self.save_failed, &|| {
+        let _ = retry_pending_saves(&self.save_queue, &self.save_failed, &|| {
             save_session(
                 self.session_id.as_deref(),
                 &self.session_dir,
@@ -49,11 +53,11 @@ impl ChatClient {
 
     /// Returns true if there is a pending save failure notification to show.
     pub fn has_save_failure(&self) -> bool {
-        session::has_save_failure(&self.save_failed)
+        has_save_failure(&self.save_failed)
     }
 
     /// Clear the save failure flag (call after a successful save or user dismissal).
     pub fn clear_save_failure(&self) {
-        session::clear_save_failure(&self.save_failed);
+        clear_save_failure(&self.save_failed);
     }
 }
