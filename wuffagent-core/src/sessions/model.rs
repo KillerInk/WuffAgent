@@ -1,4 +1,4 @@
-use crate::types::Message;
+use crate::types::{Message, ReasoningMode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,22 @@ impl std::fmt::Display for SessionStatus {
     }
 }
 
+/// Per-session UI selections persisted with the session file: which agent
+/// profile the chat input points at and the reasoning-effort mode
+/// (`Auto` = follow the agent profile's own `reasoning_effort`).
+///
+/// Carried by [`ChatClient`](crate::client::ChatClient) and stamped onto the
+/// [`Session`] by `persist::save_session` on every save.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct SessionMeta {
+    /// Selected agent profile name (`None` = "Auto" → general profile).
+    #[serde(default)]
+    pub selected_agent: Option<String>,
+    /// Reasoning-effort selection for the session's chat runs.
+    #[serde(default)]
+    pub reasoning_mode: ReasoningMode,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Session {
     pub id: String,
@@ -27,6 +43,14 @@ pub struct Session {
     pub system_prompt: String,
     #[serde(default)]
     pub status: SessionStatus,
+    /// Selected agent profile in this session's chat input (`None` = "Auto").
+    /// Restored on load so the input selector keeps its choice per session.
+    #[serde(default)]
+    pub selected_agent: Option<String>,
+    /// Reasoning-effort selection for this session's chat runs
+    /// (`Auto` = follow the selected agent profile's own effort).
+    #[serde(default)]
+    pub reasoning_mode: ReasoningMode,
 }
 
 impl Session {
@@ -40,6 +64,8 @@ impl Session {
             messages: Vec::new(),
             system_prompt: String::new(),
             status: SessionStatus::Active,
+            selected_agent: None,
+            reasoning_mode: ReasoningMode::default(),
         }
     }
 

@@ -48,8 +48,14 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             );
 
             // Default the new session agent to "general" (per-session
-            // selection shown in the input selector).
+            // selection shown in the input selector) and record both
+            // selections on the client so the first save persists them with
+            // the session file.
             runtime.selected_agent = Some("general".to_string());
+            runtime.client.set_session_meta(wuffagent_core::sessions::SessionMeta {
+                selected_agent: runtime.selected_agent.clone(),
+                reasoning_mode: runtime.reasoning_mode,
+            });
 
             app.session_store.insert(session.id.clone(), runtime);
             *panel.selected_id_mut() = Some(session.id.clone());

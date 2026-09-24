@@ -206,7 +206,9 @@ pub struct ChatToolPolicy {
     /// Whether the chat agent may restart WuffAgent via the `restart` tool
     /// (the profile's `restart_enabled` flag).
     pub restart_enabled: bool,
-    /// The profile's reasoning effort (Off = inherit the global toggle).
+    /// The profile's reasoning effort (Off = profile unset → inherit the
+    /// client's forced level, which the chat pipeline resets to Off in Auto
+    /// mode). Used by the chat path when the session's reasoning mode is Auto.
     pub reasoning_effort: ReasoningEffort,
     /// The profile's context-trimming configuration.
     pub trim_config: TrimConfig,

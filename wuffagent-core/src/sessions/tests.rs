@@ -1,4 +1,4 @@
-//! Unit tests for the `sessions` module (see `super`).
+﻿//! Unit tests for the `sessions` module (see `super`).
 
 use super::*;
 use crate::types::Message;
@@ -54,6 +54,83 @@ fn test_save_and_reload_with_messages() {
     assert_eq!(reloaded.messages.len(), 2);
     assert_eq!(reloaded.messages[0].content, "Hello");
     assert_eq!(reloaded.messages[1].content, "Hi there!");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Saving with a `SessionMeta` must stamp the per-session selections onto the
+/// session file, and they must survive a reload (this is what restores the
+/// agent choice + reasoning mode across a restart).
+#[test]
+fn test_save_session_meta_persists_agent_and_reasoning() {
+    use crate::sessions::persist::save_session as persist_save_session;
+    use std::collections::VecDeque;
+
+    let dir = std::env::temp_dir().join("wuffagent_test_sessions_meta");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::create_dir_all(&dir);
+    let session = create_session(&dir, "meta session");
+
+    let meta = crate::sessions::SessionMeta {
+        selected_agent: Some("coder".to_string()),
+        reasoning_mode: crate::types::ReasoningMode::Explicit(
+            crate::types::ReasoningEffort::High,
+        ),
+    };
+    let conv = std::sync::Arc::new(std::sync::Mutex::new(vec![Message {
+        role: "user".to_string(),
+        content: "hi".to_string(),
+        timestamp: String::new(),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+        image: None,
+    }]));
+    persist_save_session(
+        Some(&session.id),
+        &dir,
+        &conv,
+        "",
+        &meta,
+        None,
+        &std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
+        &std::sync::Arc::new(std::sync::Mutex::new(false)),
+    )
+    .unwrap();
+
+    let loaded = load_session(&dir, &session.id).unwrap();
+    assert_eq!(loaded.selected_agent.as_deref(), Some("coder"));
+    assert_eq!(
+        loaded.reasoning_mode,
+        crate::types::ReasoningMode::Explicit(crate::types::ReasoningEffort::High)
+    );
+    assert_eq!(loaded.messages.len(), 1);
+
+    // A legacy session file without the fields must load with defaults.
+    let legacy_id = "session_legacy_meta";
+    let value = serde_json::json!({
+        "id": legacy_id,
+        "name": "legacy",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "messages": Vec::<Message>::new(),
+        "system_prompt": "",
+        "status": "Active"
+    });
+    let legacy_file = dir.join(format!("{}.json", legacy_id));
+    fs::write(&legacy_file, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    // Parse directly so a failure surfaces the real serde error, then go
+    // through the public loader for the defaults assertions.
+    let raw = fs::read_to_string(&legacy_file).unwrap();
+    let _parsed: Session = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("legacy session JSON must still parse: {}\n{}", e, raw));
+    let loaded_legacy = load_session(&dir, legacy_id)
+        .unwrap_or_else(|| panic!("legacy session must load:\n{}", raw));
+    assert_eq!(loaded_legacy.selected_agent, None);
+    assert_eq!(loaded_legacy.reasoning_mode, crate::types::ReasoningMode::Auto);
+    assert_eq!(loaded_legacy.selected_agent, None);
+    assert_eq!(loaded_legacy.selected_agent, None);
+    assert_eq!(loaded_legacy.reasoning_mode, crate::types::ReasoningMode::Auto);
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -180,7 +257,7 @@ fn test_save_session_creates_file_when_missing() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// ── Session Encryption Tests ──────────────────────────────────────────
+// â”€â”€ Session Encryption Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn test_session_encrypt_decrypt_roundtrip() {
@@ -231,7 +308,7 @@ fn test_session_encrypt_decrypt_unicode() {
     let mut session = Session::new("Unicode Session");
     session.add_message(Message {
         role: "user".to_string(),
-        content: "こんにちは世界 🌍 émojis Ñoño 中文".to_string(),
+        content: "ã“ã‚“ã«ã¡ã¯ä¸–ç•Œ ðŸŒ Ã©mojis Ã‘oÃ±o ä¸­æ–‡".to_string(),
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
@@ -240,7 +317,7 @@ fn test_session_encrypt_decrypt_unicode() {
     });
     session.add_message(Message {
         role: "assistant".to_string(),
-        content: "你好！🎉 مرحبا".to_string(),
+        content: "ä½ å¥½ï¼ðŸŽ‰ Ù…Ø±Ø­Ø¨Ø§".to_string(),
         timestamp: String::new(),
         tool_calls: None,
         tool_call_id: None,
@@ -254,9 +331,9 @@ fn test_session_encrypt_decrypt_unicode() {
     assert_eq!(loaded.messages.len(), 2);
     assert_eq!(
         loaded.messages[0].content,
-        "こんにちは世界 🌍 émojis Ñoño 中文"
+        "ã“ã‚“ã«ã¡ã¯ä¸–ç•Œ ðŸŒ Ã©mojis Ã‘oÃ±o ä¸­æ–‡"
     );
-    assert_eq!(loaded.messages[1].content, "你好！🎉 مرحبا");
+    assert_eq!(loaded.messages[1].content, "ä½ å¥½ï¼ðŸŽ‰ Ù…Ø±Ø­Ø¨Ø§");
 
     let _ = fs::remove_dir_all(&dir);
 }

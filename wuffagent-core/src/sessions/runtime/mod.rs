@@ -313,7 +313,13 @@ pub struct SessionRuntime {
     /// The agent profile name selected for this session (changeable). Resolved
     /// to a system prompt + tool policy at send time; `None` until the UI
     /// picks one (new sessions default to a profile in the egui layer).
+    /// Persisted with the session file (restored in `create_from_config`).
     pub selected_agent: Option<String>,
+    /// Reasoning-effort selection for this session's chat runs (changeable in
+    /// the input dropdown): Auto (default) follows the selected agent
+    /// profile's own `reasoning_effort`; Explicit(e) forces level e.
+    /// Persisted with the session file (restored in `create_from_config`).
+    pub reasoning_mode: crate::types::ReasoningMode,
     /// Chat area state for UI display.
     pub chat_state: ChatAreaState,
 }
@@ -336,6 +342,7 @@ impl SessionRuntime {
             engine,
             cancel_token,
             selected_agent: None,
+            reasoning_mode: crate::types::ReasoningMode::default(),
             chat_state: ChatAreaState::default(),
         }
     }
@@ -361,7 +368,6 @@ impl SessionRuntime {
     ) -> Self {
         let mut client = crate::client::ChatClient::from_settings(connection.clone());
         client.set_session(Some(session_id.clone()), config.sessions_dir.clone());
-        client.set_reasoning_effort(config.reasoning_effort);
         client.set_max_messages(config.max_messages);
         client.set_n_ctx(config.n_ctx);
         if config.encryption_enabled {
@@ -369,7 +375,23 @@ impl SessionRuntime {
                 client.set_encryption_key(Some(key));
             }
         }
-        let name = client.load_session().map(|s| s.name).unwrap_or(name);
+        // Load the session (if any) and restore the per-session selections
+        // from the file: the on-disk name, the chosen agent profile, and the
+        // reasoning-effort mode (old files without the fields → None/Auto).
+        let loaded = client.load_session();
+        let name = loaded.as_ref().map(|s| s.name.clone()).unwrap_or(name);
+        let meta = loaded.map(|s| crate::sessions::SessionMeta {
+            selected_agent: s.selected_agent,
+            reasoning_mode: s.reasoning_mode,
+        }).unwrap_or_default();
+        client.set_session_meta(meta.clone());
+        // Keep the session client's forced wire level in sync with the mode
+        // (Auto = no forced level; the pipeline re-applies the mode per run
+        // anyway, so this only covers non-pipeline requests on this client).
+        client.set_reasoning_effort(match meta.reasoning_mode {
+            crate::types::ReasoningMode::Auto => crate::types::ReasoningEffort::Off,
+            crate::types::ReasoningMode::Explicit(e) => e,
+        });
 
         // Route tool-call events into the shared channel.
         client.set_tool_event_sender(event_tx.clone());
@@ -385,7 +407,7 @@ impl SessionRuntime {
         let pipeline = ChatPipeline::new(
             Arc::new(engine.clone()),
             event_tx,
-            config.reasoning_effort,
+            meta.reasoning_mode,
             session_id.clone(),
         );
 
@@ -396,7 +418,8 @@ impl SessionRuntime {
             pipeline,
             engine,
             cancel_token: CancellationToken::new(),
-            selected_agent: None,
+            selected_agent: meta.selected_agent,
+            reasoning_mode: meta.reasoning_mode,
             chat_state: ChatAreaState::default(),
         }
     }

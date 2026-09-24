@@ -150,38 +150,68 @@ impl ChatApp {
                                 runtime.selected_agent = Some(next);
                             }
                         }
+                        // Persist the choice with the session file on the next
+                        // save (and keep the client's wire level in sync).
+                        if let Some(sid) = self.selected_session_id.clone() {
+                            self.sync_session_meta(&sid);
+                        }
                     } else if let Some(sid) = self.selected_session_id.clone() {
                         if let Some(runtime) = self.session_store.get_mut(&sid) {
                             runtime.selected_agent = None;
                         }
+                        if let Some(sid) = self.selected_session_id.clone() {
+                            self.sync_session_meta(&sid);
+                        }
                     }
                     ui.add_space(6.0);
 
-                    // Reasoning effort dropdown (applied immediately on change)
+                    // Per-session reasoning dropdown: Auto (default) follows the
+                    // selected agent profile's own reasoning_effort; picking an
+                    // explicit level overrides it for this session. Bound to the
+                    // current session's SessionRuntime.reasoning_mode and
+                    // persisted with the session file.
+                    let mut next_mode = self
+                        .selected_session_id
+                        .as_ref()
+                        .and_then(|sid| self.session_store.get(sid))
+                        .map(|rt| rt.reasoning_mode)
+                        .unwrap_or_default();
                     egui::ComboBox::from_id_salt("reasoning_effort")
                         .width(130.0)
-                        .selected_text(self.reasoning_effort.label())
+                        .selected_text(next_mode.label())
                         .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut next_mode,
+                                wuffagent_core::types::ReasoningMode::Auto,
+                                "Auto (agent default)",
+                            );
                             for variant in wuffagent_core::types::ReasoningEffort::VARIANTS {
-                                if ui
-                                    .selectable_value(&mut self.reasoning_effort, variant, variant.label())
-                                    .changed()
-                                {
-                                    // Apply to the selected session's client (clone sid
-                                    // so we don't hold an immutable borrow across).
-                                    let sid = self.selected_session_id.clone();
-                                    if let Some(sid) = sid {
-                                        if let Some(runtime) = self.session_store.get_mut(&sid) {
-                                            runtime.client.set_reasoning_effort(self.reasoning_effort);
-                                        }
-                                    }
-                                    tracing::info!(
-                                        "Reasoning effort changed to {:?}",
-                                        self.reasoning_effort
-                                    );
-                                }
+                                ui.selectable_value(
+                                    &mut next_mode,
+                                    wuffagent_core::types::ReasoningMode::Explicit(variant),
+                                    variant.label(),
+                                );
                             }
                         });
+                    // `next_mode` only changes when the user picked a new entry:
+                    // apply it to the session runtime + client immediately.
+                    if let Some(sid) = self.selected_session_id.clone() {
+                        let changed = if let Some(runtime) = self.session_store.get_mut(&sid) {
+                            let changed = runtime.reasoning_mode != next_mode;
+                            runtime.reasoning_mode = next_mode;
+                            changed
+                        } else {
+                            false
+                        };
+                        if changed {
+                            tracing::info!(
+                                "Reasoning mode changed to {:?} for session {}",
+                                next_mode,
+                                sid
+                            );
+                        }
+                        self.sync_session_meta(&sid);
+                    }
                     ui.add_space(6.0);
 
                     // Attach an image to the next message: clipboard first
@@ -476,7 +506,7 @@ impl ChatApp {
             let pipeline = wuffagent_core::agents::ChatPipeline::new(
                 Arc::new(runtime.engine.clone()),
                 pending_tx,
-                self.reasoning_effort,
+                runtime.reasoning_mode,
                 sid.to_string(),
             );
             runtime.pipeline = pipeline;

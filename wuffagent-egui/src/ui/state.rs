@@ -109,9 +109,6 @@ pub struct ChatApp {
     pub pending_images: HashMap<String, egui::ImageSource<'static>>,
     /// The sessions sidebar widget (manages its own list + selection).
     pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
-    /// Reasoning effort for reasoning models (live session toggle; Off
-    /// explicitly disables Qwen3 thinking via `enable_thinking: false`).
-    pub reasoning_effort: wuffagent_core::types::ReasoningEffort,
 
     // ── Dialogs & panels (transient UI windows) ──────────────────────
     pub status: AppStatus,
@@ -186,7 +183,6 @@ impl ChatApp {
         mcp_manager: Arc<wuffagent_core::tools::mcp::McpManager>,
         auto_resume_reason: Option<String>,
     ) -> Self {
-        let reasoning_effort = config.reasoning_effort;
         // Build the sessions sidebar widget, pre-selecting the active session.
         let mut panel = super::sessions_panel::SessionsPanel::new(&Arc::new(Mutex::new(config.clone())));
         if let Some(id) = &selected_session_id {
@@ -218,7 +214,6 @@ impl ChatApp {
             mcp_panel: super::mcp_panel::McpPanel::new(),
             pending_tx: Some(Arc::new(Mutex::new(event_tx))),
             pending_rx: Some(event_rx),
-            reasoning_effort,
             improvements_panel: super::improvements::ImprovementsPanel::new(),
             display_snapshot: std::sync::Arc::new(Vec::new()),
             snapshot_session: None,
@@ -234,9 +229,33 @@ impl ChatApp {
     }
 
     /// Centralized config save — all callers should use this.
+    ///
+    /// Note: the reasoning-effort selection is per-session (stored in the
+    /// session file via `SessionRuntime.reasoning_mode`), not part of the
+    /// global config — `config.reasoning_effort` only seeds non-session
+    /// clients (bootstrap engine, non-streaming adapter, memory LLM).
     pub fn save_config(&mut self) -> Result<(), wuffagent_core::config::Error> {
-        self.config.reasoning_effort = self.reasoning_effort;
         self.config.save()
+    }
+
+    /// Sync the selected session's per-session UI selections (chosen agent
+    /// profile + reasoning-effort mode) into its client so the next
+    /// `save_session` persists them with the session file. Also keeps the
+    /// client's forced wire level in sync for non-pipeline requests (the
+    /// chat pipeline re-applies the mode on every run anyway).
+    pub fn sync_session_meta(&mut self, id: &str) {
+        if let Some(runtime) = self.session_store.get_mut(id) {
+            runtime.client.set_session_meta(wuffagent_core::sessions::SessionMeta {
+                selected_agent: runtime.selected_agent.clone(),
+                reasoning_mode: runtime.reasoning_mode,
+            });
+            runtime.client.set_reasoning_effort(match runtime.reasoning_mode {
+                wuffagent_core::types::ReasoningMode::Auto => {
+                    wuffagent_core::types::ReasoningEffort::Off
+                }
+                wuffagent_core::types::ReasoningMode::Explicit(e) => e,
+            });
+        }
     }
 
     /// Save the selected session's conversation.
@@ -314,6 +333,28 @@ impl ChatApp {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         };
+        // T4: when switching to a DIFFERENT binary, back up the currently
+        // running exe to `<exe>.prev` — a rollback point for the case where
+        // the new binary crashes on startup. Best-effort: a copy failure
+        // (e.g. permissions) is logged, never fatal.
+        if let Ok(current) = std::env::current_exe() {
+            let same = current
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&exe);
+            if !same {
+                let prev = current.with_file_name(format!(
+                    "{}.prev",
+                    current
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                ));
+                match std::fs::copy(&current, &prev) {
+                    Ok(_) => tracing::info!(backup = %prev.display(), "Backed up running exe before restart"),
+                    Err(e) => tracing::warn!(backup = %prev.display(), error = %e, "Could not back up running exe before restart (continuing)"),
+                }
+            }
+        }
         let args: Vec<String> = std::env::args().skip(1).collect();
         match std::process::Command::new(&exe).args(&args).spawn() {
             Ok(_) => self.pending_restart = true,

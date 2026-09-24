@@ -35,6 +35,11 @@ pub struct AgentEngine {
     /// loop drains it at LLM round boundaries; `execute_with_tools` drains the
     /// remainder after the loop ends.
     injection_rx: Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
+    /// Reasoning-effort selection for the chat path (see
+    /// `with_reasoning_mode`): Auto follows the selected agent profile's own
+    /// effort; Explicit forces a level. The client's forced wire level is
+    /// kept in sync by `with_reasoning_mode`.
+    reasoning_mode: crate::types::ReasoningMode,
 }
 
 /// Run an LLM memory-maintenance step at most once every N completed tasks.
@@ -68,6 +73,7 @@ impl AgentEngine {
             agents_search_dirs: Vec::new(),
             tasks_completed: Arc::new(AtomicUsize::new(0)),
             injection_rx: None,
+            reasoning_mode: crate::types::ReasoningMode::default(),
         }
     }
 
@@ -120,15 +126,29 @@ impl AgentEngine {
         self
     }
 
-    /// Return a clone of the engine with the LLM client's reasoning effort
-    /// updated (used so the agent tool loop honors the current UI setting).
-    pub fn with_reasoning_effort(self, effort: crate::types::ReasoningEffort) -> Self {
+    /// Return a clone of the engine with the reasoning-effort mode applied:
+    /// the client's forced wire level is set to the explicit level (or `Off`
+    /// for Auto, so the profile's own effort — applied by `Agent::new` — is
+    /// the only one in effect), and the mode is remembered so
+    /// `execute_with_tools` can resolve the chat agent's effort.
+    pub fn with_reasoning_mode(self, mode: crate::types::ReasoningMode) -> Self {
         let mut client = (*self.client).clone();
-        client.set_reasoning_effort(effort);
+        client.set_reasoning_effort(match mode {
+            crate::types::ReasoningMode::Auto => crate::types::ReasoningEffort::Off,
+            crate::types::ReasoningMode::Explicit(e) => e,
+        });
         Self {
             client: Arc::new(client),
+            reasoning_mode: mode,
             ..self
         }
+    }
+
+    /// Return a clone of the engine with the LLM client's reasoning effort
+    /// updated (used so the agent tool loop honors the current UI setting).
+    /// Equivalent to `with_reasoning_mode(ReasoningMode::Explicit(effort))`.
+    pub fn with_reasoning_effort(self, effort: crate::types::ReasoningEffort) -> Self {
+        self.with_reasoning_mode(crate::types::ReasoningMode::Explicit(effort))
     }
 
     /// Set the session ID for this engine.
@@ -174,12 +194,19 @@ impl AgentEngine {
                                          // config lets a profile like "coder" restrict the shell to its allowlist.
         chat_config.allowed_tools = tool_policy.allowed_tools.clone();
         chat_config.shell_config = tool_policy.shell_config.clone();
-        // Trim config comes from the profile. Reasoning effort deliberately
-        // does NOT: on the interactive chat path the live UI setting wins —
-        // the pipeline already applied it to the client (`with_reasoning_effort`),
-        // and `Off` below makes the agent inherit it. The profile's effort
-        // still shapes autonomous runs and handoff targets (where `Agent::new`
-        // applies it), but must not override the user's in-session toggle.
+        // Trim config comes from the profile. Reasoning effort depends on the
+        // session's ReasoningMode (applied by the chat pipeline via
+        // `with_reasoning_mode`):
+        // - Auto: the SELECTED profile's own effort wins — the UI resolved it
+        //   into `tool_policy.reasoning_effort`, and `Agent::new` applies it
+        //   (Off there = profile unset → inherit the client's, which the
+        //   pipeline reset to Off, so nothing leaks in).
+        // - Explicit: the pipeline already forced the level on the client, so
+        //   `Off` below makes the chat agent inherit it.
+        chat_config.reasoning_effort = match self.reasoning_mode {
+            crate::types::ReasoningMode::Auto => tool_policy.reasoning_effort,
+            crate::types::ReasoningMode::Explicit(_) => crate::types::ReasoningEffort::Off,
+        };
         chat_config.trim_config = tool_policy.trim_config.clone();
         // Handoff: the profile's flag/targets gate the `handoff` tool, and the
         // agents dir is where target profiles are resolved from.

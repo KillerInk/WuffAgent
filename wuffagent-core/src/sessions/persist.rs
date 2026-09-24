@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     decrypt_and_load_session, load_session as load_session_disk, save_session_atomic,
-    save_session_encrypted, session_exists, Session,
+    save_session_encrypted, session_exists, Session, SessionMeta,
 };
 use crate::types::Message;
 
@@ -28,11 +28,16 @@ use crate::types::Message;
 /// `system_prompt` is persisted in the session's dedicated field — never in
 /// `messages`. The stored history is sanitized before writing so legacy files
 /// that accumulated stray system messages or duplicate blocks heal in place.
+///
+/// `meta` carries the per-session UI selections (chosen agent profile +
+/// reasoning-effort mode); it is stamped onto the session so both survive
+/// with the file (old files without the fields load as `None`/Auto).
 pub fn save_session(
     session_id: Option<&str>,
     session_dir: &std::path::Path,
     conversation: &Arc<Mutex<Vec<Message>>>,
     system_prompt: &str,
+    meta: &SessionMeta,
     encryption_key: Option<&[u8; 32]>,
     save_queue: &Arc<Mutex<VecDeque<()>>>,
     save_failed: &Arc<Mutex<bool>>,
@@ -74,6 +79,10 @@ pub fn save_session(
     if !system_prompt.is_empty() || session.system_prompt.is_empty() {
         session.system_prompt = system_prompt.to_string();
     }
+    // Stamp the current per-session UI selections (chosen agent + reasoning
+    // mode) so they persist with the session.
+    session.selected_agent = meta.selected_agent.clone();
+    session.reasoning_mode = meta.reasoning_mode;
     session.id = id.to_string();
     // Retry with exponential backoff for transient failures
     let mut retries = 0;

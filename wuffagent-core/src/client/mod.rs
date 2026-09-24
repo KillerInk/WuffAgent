@@ -172,6 +172,11 @@ pub struct ChatClient {
     /// interior-mutable like the other per-client fields, since the client
     /// handle is cloned and shared.
     agent_name: Arc<Mutex<String>>,
+    /// Per-session UI selections (chosen agent profile + reasoning-effort
+    /// mode) stamped onto the `Session` by `persist::save_session` on every
+    /// save, so both persist with the session file. Set by the UI when the
+    /// user changes the agent/reasoning selection and when a session loads.
+    session_meta: crate::sessions::SessionMeta,
 }
 
 impl ChatClient {
@@ -242,6 +247,7 @@ impl ChatClient {
             tool_event_tx: Arc::new(Mutex::new(None)),
             usage_recorder: Arc::new(crate::usage::recorder::UsageRecorder::default_recorder()),
             agent_name: Arc::new(Mutex::new("chat".to_string())),
+            session_meta: crate::sessions::SessionMeta::default(),
         }
     }
 
@@ -375,6 +381,17 @@ impl ChatClient {
         self.reasoning_effort
     }
 
+    /// Set the per-session UI selections persisted with the session file
+    /// (chosen agent profile + reasoning-effort mode). Call whenever the UI
+    /// changes either selection or a session is loaded.
+    pub fn set_session_meta(&mut self, meta: crate::sessions::SessionMeta) {
+        self.session_meta = meta;
+    }
+
+    pub fn session_meta(&self) -> &crate::sessions::SessionMeta {
+        &self.session_meta
+    }
+
     pub fn conversation(&self) -> &Arc<Mutex<Vec<Message>>> {
         &self.conversation
     }
@@ -390,6 +407,7 @@ impl ChatClient {
                 &self.session_dir,
                 &self.conversation,
                 &self.system_prompt,
+                &self.session_meta,
                 self.encryption_key.as_ref(),
                 &self.save_queue,
                 &self.save_failed,

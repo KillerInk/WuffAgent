@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::types::{AppEvent, ChatToolPolicy, QueuedMessage, ReasoningEffort};
+use crate::types::{AppEvent, ChatToolPolicy, QueuedMessage, ReasoningMode};
 
 use super::AgentEngine;
 
@@ -26,8 +26,10 @@ pub struct ChatPipeline {
     task_handle: Mutex<Option<JoinHandle<()>>>,
     /// Event sender for forwarding pipeline events to the UI.
     event_tx: mpsc::Sender<AppEvent>,
-    /// Reasoning effort level.
-    reasoning_effort: ReasoningEffort,
+    /// Reasoning-effort selection for this session's runs: Auto (default)
+    /// follows the selected agent profile's own `reasoning_effort`;
+    /// Explicit(e) forces level e for every run.
+    reasoning_mode: ReasoningMode,
     /// Session ID for routing events.
     session_id: String,
     /// Sender half of the mid-run injection channel. `inject()` (UI thread)
@@ -53,7 +55,7 @@ impl ChatPipeline {
     pub fn new(
         agent_engine: Arc<AgentEngine>,
         event_tx: mpsc::Sender<AppEvent>,
-        reasoning_effort: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
         session_id: String,
     ) -> Self {
         // Pre-start channel: its receiver is dropped immediately so an
@@ -67,7 +69,7 @@ impl ChatPipeline {
             current_token: AtomicPtr::new(Box::into_raw(Box::new(CancellationToken::new()))),
             task_handle: Mutex::new(None),
             event_tx,
-            reasoning_effort,
+            reasoning_mode,
             session_id,
             injection_tx: Mutex::new(injection_tx),
             injection_rx: Mutex::new(None),
@@ -117,7 +119,7 @@ impl ChatPipeline {
         let agent_engine = self.agent_engine.clone();
         let cancel_token = unsafe { &*new_ptr };
         let event_tx = self.event_tx.clone();
-        let reasoning_effort = self.reasoning_effort;
+        let reasoning_mode = self.reasoning_mode;
         let session_id = self.session_id.clone();
         let prompt = prompt.to_string();
         let system_prompt = system_prompt.to_string();
@@ -133,14 +135,15 @@ impl ChatPipeline {
         *self.injection_rx.lock().unwrap() = Some(Arc::clone(&injection_holder));
         let handle = tokio::spawn(async move {
             // Wire the event tx into the engine so chain events reach the UI,
-            // apply the current reasoning effort setting, and attach the
+            // apply the session's reasoning-effort mode (Auto = agent
+            // profile's own effort; Explicit = forced level), and attach the
             // mid-run injection channel (user messages sent while this run is
             // active are injected at the next LLM round boundary).
             let inner_engine = (*agent_engine).clone();
             let engine = Arc::new(
                 inner_engine
                     .with_event_tx(Arc::new(Mutex::new(event_tx.clone())))
-                    .with_reasoning_effort(reasoning_effort)
+                    .with_reasoning_mode(reasoning_mode)
                     .with_session_id(session_id.clone())
                     .with_injection_channel(Some(injection_holder)),
             );

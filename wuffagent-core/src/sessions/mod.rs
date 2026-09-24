@@ -1,7 +1,7 @@
 pub mod model;
 pub mod persist;
 pub mod runtime;
-pub use model::{Session, SessionStatus};
+pub use model::{Session, SessionMeta, SessionStatus};
 pub use runtime::{ActiveTool, ChatAreaState, QueuedMessage, SessionRuntime};
 
 use std::fs;

@@ -21,7 +21,7 @@ pub use policy::{
     ChatToolPolicy, ImprovementSuggestion, NewAgentProposal, QueuedMessage, ShellConfig,
     TrimConfig,
 };
-pub use reasoning::ReasoningEffort;
+pub use reasoning::{ReasoningEffort, ReasoningMode};
 pub use timestamp::{format_timestamp, timestamp_day, timestamp_time};
 pub use usage::{LlamaTimings, PromptProgress, Usage};
 
