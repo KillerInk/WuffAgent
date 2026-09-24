@@ -4,8 +4,9 @@ use uuid::Uuid;
 /// A pending request to hand the session over to another agent profile.
 ///
 /// Written by the `handoff` tool into the per-execution mailbox and consumed
-/// by `Agent::execute`, which switches to the target agent on the same
-/// conversation store.
+/// by `Agent::execute`, which either switches to the target agent on the same
+/// conversation store (in-turn chain) or — when `sub_session` is set — ends
+/// this turn and lets the UI fork a clean sub-session for the target.
 #[derive(Clone, Debug)]
 pub struct HandoffRequest {
     /// Target agent name.
@@ -14,6 +15,29 @@ pub struct HandoffRequest {
     pub config: super::config::AgentConfig,
     /// Handoff instructions for the target agent (used as its task / memory
     /// query and shown in the UI banner).
+    pub task: String,
+    /// When true, the handoff forks a CLEAN sub-session instead of chaining
+    /// in-turn on the same store: the target agent starts with only its own
+    /// system prompt + this task, in a new session whose `parent_session_id`
+    /// points back to this one (the `hand_back` link).
+    pub sub_session: bool,
+}
+
+/// A pending request to hand the session back to its parent session (written
+/// by the `hand_back` tool into the per-execution mailbox; only sub-sessions
+/// — sessions whose session meta carries a `parent_session_id` — get the
+/// tool).
+///
+/// The agent loop picks it up after the tool round and returns
+/// `RunOutcome::HandBack`; `Agent::execute` records a marker in the
+/// sub-session store, emits an [`crate::types::AppEvent::AgentHandBack`]
+/// (carrying both session ids), and ends the turn. The UI then posts `task`
+/// into the parent session, where the original agent resumes with its full
+/// history.
+#[derive(Clone, Debug)]
+pub struct HandBackRequest {
+    /// What the parent session should do next with the returned work (shown
+    /// in the parent's turn and used as its task / memory query).
     pub task: String,
 }
 

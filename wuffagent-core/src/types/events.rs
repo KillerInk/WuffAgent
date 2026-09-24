@@ -90,6 +90,28 @@ pub enum AppEvent {
         suggestions: Vec<ImprovementSuggestion>,
         session_id: String,
     },
+    /// The running agent (in `parent_session_id`) called `handoff(...,
+    /// sub_session: true)`: the parent turn ended, and the UI must fork a
+    /// CLEAN sub-session for `agent` (fresh store: only the target's system
+    /// prompt + `task`, with its session meta carrying
+    /// `parent_session_id = parent_session_id` — the `hand_back` link) and
+    /// start its first turn with `task`. No `session_id` field: the UI
+    /// routes on the explicit ids (the parent's generating state is already
+    /// cleared by the parent's own terminal `StreamComplete`).
+    SubSessionHandoff {
+        parent_session_id: String,
+        agent: String,
+        task: String,
+    },
+    /// The running agent (in a sub-session) called the `hand_back` tool: the
+    /// sub-session turn ended, and the UI must post `task` into
+    /// `to_session_id` (the parent, resolved from the sub-session's session
+    /// meta), where the original agent resumes with its full history.
+    AgentHandBack {
+        from_session_id: String,
+        to_session_id: String,
+        task: String,
+    },
     /// The session switched agents: the running agent called the `handoff`
     /// tool and the target agent now continues the same conversation.
     AgentHandoff {

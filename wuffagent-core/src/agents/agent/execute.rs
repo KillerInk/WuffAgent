@@ -74,6 +74,9 @@ impl Agent {
                 // A restart request ends the run (handled in the final match
                 // below); `_` keeps `outcome` un-moved like the Completed arm.
                 RunOutcome::Restart(_) => break,
+                // A hand-back request also ends the run (handled in the
+                // final match below) — it is not part of the in-turn chain.
+                RunOutcome::HandBack(_) => break,
                 RunOutcome::Handoff(req) => req,
             };
             hops += 1;
@@ -174,6 +177,9 @@ impl Agent {
             RunOutcome::Handoff(_) => {
                 unreachable!("handoff outcomes are consumed by the chain loop")
             }
+            // Placeholder until the `hand_back` tool lands (step 11): the
+            // mailbox check that produces this outcome is added there.
+            RunOutcome::HandBack(_) => unreachable!("hand_back is wired in step 11"),
             // A restart request ends the turn: record a marker so the session
             // shows the transition, then notify the UI to relaunch the
             // (optionally newly built) binary. The marker file + auto-resume

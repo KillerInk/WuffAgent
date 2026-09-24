@@ -205,6 +205,9 @@ impl Tool for HandoffTool {
                 agent: config.name.clone(),
                 config,
                 task,
+                // The `sub_session` tool parameter is wired in step 5; until
+                // then every handoff chains in-turn on the same store.
+                sub_session: false,
             });
         }
 

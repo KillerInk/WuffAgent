@@ -29,6 +29,14 @@ impl ChatApp {
             | AppEvent::McpConfigChanged { session_id, .. }
             | AppEvent::RestartRequested { session_id, .. }
             | AppEvent::UserMessageDrained { session_id, .. } => session_id.clone(),
+            // The sub-session events carry no `session_id`: route them by
+            // the explicit ids they own. `SubSessionHandoff` concerns the
+            // parent (whose turn just ended); `AgentHandBack` the sub-session
+            // (whose turn just ended).
+            AppEvent::SubSessionHandoff { parent_session_id, .. } => {
+                parent_session_id.clone()
+            }
+            AppEvent::AgentHandBack { from_session_id, .. } => from_session_id.clone(),
         };
         match event {
             // Stream lifecycle arms: see `stream.rs`.
@@ -88,6 +96,30 @@ impl ChatApp {
                         &format!("🔀 Handoff: {} → {} — {}", from, to, task),
                     );
                 }
+            }
+            AppEvent::SubSessionHandoff { parent_session_id, agent, task } => {
+                // Placeholder (step 16 wires the full handler: create the sub
+                // runtime, open its tab, post the first turn).
+                tracing::info!(
+                    parent_session_id,
+                    agent,
+                    "Sub-session handoff (handler pending, step 16)"
+                );
+                let _ = task;
+            }
+            AppEvent::AgentHandBack {
+                from_session_id,
+                to_session_id,
+                task,
+            } => {
+                // Placeholder (step 17 wires the full handler: focus the
+                // parent tab, post the hand-back turn into the parent).
+                tracing::info!(
+                    from_session_id,
+                    to_session_id,
+                    "Agent hand-back (handler pending, step 17)"
+                );
+                let _ = task;
             }
             AppEvent::ImprovementSuggested { agent_name, suggestions, session_id: _ } => {
                 tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");

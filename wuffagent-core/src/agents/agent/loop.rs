@@ -56,6 +56,11 @@ pub(crate) enum RunOutcome {
     /// the UI can relaunch the (optionally newly built) binary and resume
     /// this session automatically.
     Restart(crate::agents::types::RestartRequest),
+    /// The `hand_back` tool was called (this session is a sub-session);
+    /// `execute` records a marker, emits `AgentHandBack` with the parent
+    /// session id, and ends the turn so the UI can post the task into the
+    /// parent session.
+    HandBack(crate::agents::types::HandBackRequest),
 }
 
 impl Agent {

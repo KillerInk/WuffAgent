@@ -186,6 +186,7 @@ async fn test_truncated_tool_call_repaired_before_storing() {
         super::r#loop::RunOutcome::Completed(content) => assert_eq!(content, "Done."),
         super::r#loop::RunOutcome::Handoff(_) => panic!("unexpected handoff outcome"),
         super::r#loop::RunOutcome::Restart(_) => panic!("unexpected restart outcome"),
+        super::r#loop::RunOutcome::HandBack(_) => panic!("unexpected hand-back outcome"),
     }
 
     // Invariant: the shared store never holds incomplete tool call arguments.
