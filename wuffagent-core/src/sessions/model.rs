@@ -68,7 +68,15 @@ impl Session {
     pub fn new(name: &str) -> Self {
         let now = Utc::now();
         Self {
-            id: format!("session_{}", now.timestamp_millis()),
+            // Millisecond timestamp keeps ids sortable/recognizable; the
+            // 8-hex random suffix prevents collisions when two sessions are
+            // created within the same millisecond (which would otherwise make
+            // the second `save_session` silently overwrite the first's file).
+            id: format!(
+                "session_{}_{}",
+                now.timestamp_millis(),
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            ),
             name: name.to_string(),
             created_at: now,
             updated_at: now,

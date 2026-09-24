@@ -216,6 +216,25 @@ fn test_list_sessions() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Rapidly created sessions must not collide: ids used to be
+/// `session_{millis}`, so two sessions created within the same millisecond
+/// shared an id and the second save silently overwrote the first's file.
+#[test]
+fn test_rapid_session_creation_unique_ids() {
+    let dir = std::env::temp_dir().join("wuffagent_test_sessions_rapid");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::create_dir_all(&dir);
+
+    let mut ids = std::collections::HashSet::new();
+    for i in 0..20 {
+        let s = create_session(&dir, &format!("Rapid {i}"));
+        assert!(ids.insert(s.id.clone()), "duplicate id: {}", s.id);
+    }
+    assert_eq!(list_sessions(&dir).len(), 20);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn test_delete_session() {
     let dir = std::env::temp_dir().join("wuffagent_test_sessions4");
