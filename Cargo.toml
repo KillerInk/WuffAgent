@@ -2,6 +2,7 @@
 members = [
     "wuffagent-core",
     "wuffagent-egui",
+    "plugins/hello_plugin",
 ]
 resolver = "2"
 

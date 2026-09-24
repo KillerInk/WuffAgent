@@ -171,8 +171,11 @@ fn bootstrap() -> (
     }
 
     let logger = Arc::new(TracingToolLogger);
+    // Default plugin discovery dir: `<config dir>/plugins` — i.e.
+    // `~/.wuffagent/plugins/`, next to `agents/` and `sessions/` (the
+    // config dir is the directory holding config.json).
     let discovery_paths: Vec<std::path::PathBuf> = vec![
-        dirs::config_dir().map(|d| d.join("wuffagent").join("plugins")),
+        config.file_path.parent().map(|p| p.join("plugins")),
     ]
     .into_iter()
     .flatten()

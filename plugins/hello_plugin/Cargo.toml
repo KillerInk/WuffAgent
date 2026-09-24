@@ -1,0 +1,12 @@
+[package]
+name = "hello_plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal WuffAgent plugin: the `hello` tool (reference implementation of the plugin ABI)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wuffagent-core = { path = "../../wuffagent-core" }
+serde_json = "1"

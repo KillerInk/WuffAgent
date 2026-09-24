@@ -1,4 +1,6 @@
-//! Minimal WuffAgent plugin (T3b ABI documentation + buildable skeleton).
+//! Minimal WuffAgent plugin — the `hello` tool.
+//!
+//! Reference implementation of the WuffAgent plugin ABI.
 //!
 //! A WuffAgent plugin is a `cdylib` that exports two C symbols:
 //!
@@ -10,21 +12,18 @@
 //! Build (debug, from the repo root):
 //!
 //! ```sh
-//! cargo rustc -p wuffagent-core --example hello_plugin -- --crate-type cdylib
+//! cargo build -p hello_plugin
 //! # Windows:  target/debug/hello_plugin.dll
 //! # macOS:    target/debug/libhello_plugin.dylib   (rename to .so to be scanned)
 //! # Linux:    target/debug/libhello_plugin.so
 //! ```
 //!
-//! Install: copy the `.dll`/`.so` into the platform plugins dir
-//! (`dirs::config_dir()/wuffagent/plugins` — on Windows that is
-//! `%APPDATA%\wuffagent\plugins`), then in WuffAgent call the
+//! Install: copy the `.dll`/`.so` into the plugins dir
+//! (`~/.wuffagent/plugins/` — the plugins subdir of WuffAgent's config
+//! directory, next to `agents/` and `sessions/`), then in WuffAgent call the
 //! `reload_plugins` tool (or restart the app). The `hello` tool is available
 //! to any agent whose profile does not restrict it out of `allowed_tools`
 //! (empty `allowed_tools` = all tools).
-//!
-//! To build this example as a cdylib:
-//! `cargo rustc -p wuffagent-core --example hello_plugin -- --crate-type cdylib`
 
 use wuffagent_core::tools::types::{
     FieldSchema, JsonSchema, PluginTool, Tool, ToolMetadata, ToolOutput, ToolParams, ToolResult,
