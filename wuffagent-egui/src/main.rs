@@ -291,6 +291,20 @@ fn bootstrap() -> (
         }
     }
 
+    // T1: agent-profile self-modification tools (`list_agents` /
+    // `edit_agent_profile`) — bound to the same discovery set as the UI's
+    // agent selector (primary + project-level search dirs). Shared-registry
+    // tools; per-profile visibility is gated by `allowed_tools` like any
+    // other tool.
+    {
+        let mut agent_manager = wuffagent_core::agents::manager::AgentManager::new(agents_dir.clone());
+        for dir in &agents_search_dirs {
+            agent_manager.add_search_dir(dir.clone());
+        }
+        builtin::register_agent_tools(&registry, Arc::new(agent_manager))
+            .expect("Failed to register agent-profile tools");
+    }
+
     let agent_engine = AgentEngine::new(
         llm_client,
         tool_manager_for_engine,

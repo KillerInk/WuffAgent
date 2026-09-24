@@ -265,6 +265,85 @@ impl Default for AgentConfig {
     }
 }
 
+/// Parse a single agent JSON file: the current `AgentConfig` format first,
+/// then the legacy `WorkerConfig` format (migrated, including
+/// `can_invoke` → `handoff_targets` and `restart_enabled: true`). No
+/// enabled/disabled filtering; `agents_dir` is left empty for the caller to
+/// anchor.
+fn parse_agent_file(path: &Path) -> Option<AgentConfig> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return None;
+    };
+    if let Ok(cfg) = serde_json::from_str::<AgentConfig>(&content) {
+        return Some(cfg);
+    }
+    let legacy = serde_json::from_str::<WorkerConfig>(&content).ok()?;
+    Some(AgentConfig {
+        name: legacy.name,
+        description: legacy.description,
+        system_prompt: legacy.system_prompt,
+        allowed_tools: legacy.allowed_tools,
+        enabled: legacy.enabled,
+        task_timeout_ms: if legacy.task_timeout_ms > 0 {
+            legacy.task_timeout_ms
+        } else {
+            60_000
+        },
+        shell_config: legacy.shell_config,
+        agents_dir: PathBuf::new(),
+        agents_search_dirs: Vec::new(),
+        custom_prompts: HashMap::new(),
+        reasoning_effort: legacy.reasoning_effort,
+        trim_config: crate::trimming::config::TrimConfig::default(),
+        handoff_enabled: legacy.handoff_enabled,
+        handoff_targets: legacy.can_invoke,
+        restart_enabled: true,
+    })
+}
+
+/// All profiles in a single directory, with their on-disk file paths.
+///
+/// Same parsing/migration rules as discovery (`AgentManager::load_from_dir`),
+/// but DISABLED profiles are included as well (an editor must be able to find
+/// them to re-enable them), and the file path is reported so callers can
+/// write back in place. Unparseable files are skipped (discovery already
+/// logs them).
+pub fn list_agent_files(dir: &Path) -> Vec<(PathBuf, AgentConfig)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(cfg) = parse_agent_file(&path) {
+            out.push((path, cfg));
+        }
+    }
+    out
+}
+
+/// Locate the on-disk file of a profile by its `name` field across an
+/// ORDERED list of directories (primary first); the first directory
+/// containing the profile wins (same dedup rule as discovery).
+///
+/// Unlike [`load_agent_from_dirs`], DISABLED profiles are found too (an
+/// editor needs to re-enable them), and the tuple carries the containing
+/// directory + file path so callers can write back IN PLACE (F3 pattern)
+/// instead of into the primary dir.
+pub fn find_agent_file(dirs: &[PathBuf], name: &str) -> Option<(PathBuf, PathBuf, AgentConfig)> {
+    for dir in dirs {
+        for (path, cfg) in list_agent_files(dir) {
+            if cfg.name == name {
+                return Some((dir.clone(), path, cfg));
+            }
+        }
+    }
+    None
+}
+
 /// Load an enabled agent profile by name from a directory of agent JSON files.
 ///
 /// Tries the current `AgentConfig` format first, then the legacy
@@ -272,54 +351,15 @@ impl Default for AgentConfig {
 /// and `handoff_enabled`). Returns `None` when no file matches `name` or the
 /// matched profile is not enabled.
 pub fn load_agent_from_dir(dir: &Path, name: &str) -> Option<AgentConfig> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Ok(mut cfg) = serde_json::from_str::<AgentConfig>(&content) {
-            if cfg.name == name {
-                if !cfg.enabled {
-                    return None;
-                }
-                // Anchor the agents dir to the directory we actually scanned so
-                // further (chained) handoffs resolve targets from the same place.
-                cfg.agents_dir = dir.to_path_buf();
-                return Some(cfg);
+    for (_, mut cfg) in list_agent_files(dir) {
+        if cfg.name == name {
+            if !cfg.enabled {
+                return None;
             }
-            continue;
-        }
-        if let Ok(legacy) = serde_json::from_str::<WorkerConfig>(&content) {
-            if legacy.name == name {
-                if !legacy.enabled {
-                    return None;
-                }
-                return Some(AgentConfig {
-                    name: legacy.name,
-                    description: legacy.description,
-                    system_prompt: legacy.system_prompt,
-                    allowed_tools: legacy.allowed_tools,
-                    enabled: legacy.enabled,
-                    task_timeout_ms: if legacy.task_timeout_ms > 0 {
-                        legacy.task_timeout_ms
-                    } else {
-                        60_000
-                    },
-                    shell_config: legacy.shell_config,
-                    agents_dir: dir.to_path_buf(),
-                    agents_search_dirs: Vec::new(),
-                    custom_prompts: HashMap::new(),
-                    reasoning_effort: legacy.reasoning_effort,
-                    trim_config: crate::trimming::config::TrimConfig::default(),
-                    handoff_enabled: legacy.handoff_enabled,
-                    handoff_targets: legacy.can_invoke,
-                    restart_enabled: true,
-                });
-            }
+            // Anchor the agents dir to the directory we actually scanned so
+            // further (chained) handoffs resolve targets from the same place.
+            cfg.agents_dir = dir.to_path_buf();
+            return Some(cfg);
         }
     }
     None

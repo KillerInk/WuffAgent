@@ -243,7 +243,13 @@ impl AgentManager {
     /// Failures are logged but never abort the caller: history is a safety
     /// net, not a correctness dependency of the edit itself.
     fn snapshot_agent(&self, name: &str) {
-        let src = self.agents_dir.join(format!("{}.json", name));
+        self.snapshot_file(name, &self.agents_dir.join(format!("{}.json", name)));
+    }
+
+    /// Copy `src` into the history dir under `name` (keeping at most
+    /// [`Self::HISTORY_SNAPSHOTS_KEEP`] snapshots). No-op when `src` does not
+    /// exist; failures are logged but never abort the caller.
+    fn snapshot_file(&self, name: &str, src: &Path) {
         if !src.is_file() {
             return;
         }
@@ -256,12 +262,67 @@ impl AgentManager {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let dst = self.next_snapshot_path(name, now);
-        if let Err(e) = std::fs::copy(&src, &dst) {
+        if let Err(e) = std::fs::copy(src, &dst) {
             tracing::warn!("Failed to snapshot agent '{}' history: {}", name, e);
             return;
         }
         tracing::info!("Snapshotted agent config '{}': {:?}", name, dst);
         self.prune_history(name);
+    }
+
+    /// Ensure the profile's on-disk file sits at the conventional
+    /// `agents_dir/<name>.json` path.
+    ///
+    /// A profile's identity is its `name` FIELD, not its file name, so
+    /// profiles occasionally live in oddly-named files (e.g. `general.json`
+    /// holding `"name": "generalist"`). When `actual` differs from the
+    /// conventional path, it is snapshotted first (F4), renamed to the
+    /// conventional path, and the edit is left to touch a single predictable
+    /// file with a restorable pre-edit state.
+    ///
+    /// Returns the path `edit_agent`/`revert_agent` operate on. No-op (and a
+    /// plain `Ok` of the conventional path) when the file is already there or
+    /// does not exist.
+    pub fn canonicalize_profile_file(
+        &self,
+        name: &str,
+        actual: &Path,
+    ) -> Result<PathBuf, crate::agents::AgentError> {
+        let conventional = self.agents_dir.join(format!("{}.json", name));
+        if actual == conventional.as_path() || !actual.is_file() {
+            return Ok(conventional);
+        }
+        self.snapshot_file(name, actual);
+        std::fs::create_dir_all(&self.agents_dir).map_err(|e| {
+            crate::agents::AgentError::ConfigError(format!(
+                "Failed to create agents directory {:?}: {}",
+                self.agents_dir, e
+            ))
+        })?;
+        if conventional.exists() {
+            // A conventional file for the same profile name already exists
+            // (duplicate profile). Preserve it in history, then let the
+            // renamed file become the sole canonical copy.
+            self.snapshot_file(name, &conventional);
+            std::fs::remove_file(&conventional).map_err(|e| {
+                crate::agents::AgentError::ConfigError(format!(
+                    "Failed to remove duplicate profile file {:?}: {}",
+                    conventional, e
+                ))
+            })?;
+        }
+        std::fs::rename(actual, &conventional).map_err(|e| {
+            crate::agents::AgentError::ConfigError(format!(
+                "Failed to rename profile file {:?} to {:?}: {}",
+                actual, conventional, e
+            ))
+        })?;
+        tracing::info!(
+            "Canonicalized agent profile '{}' to {}",
+            name,
+            conventional.display()
+        );
+        Ok(conventional)
     }
 
     /// Choose the destination path for the next snapshot of `name` at

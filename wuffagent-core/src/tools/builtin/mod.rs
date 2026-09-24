@@ -1,3 +1,4 @@
+pub mod agent_profile;
 pub mod calculation;
 pub mod fetch_url;
 pub mod fileio;
@@ -10,6 +11,7 @@ pub mod shell;
 pub mod time;
 pub mod web_search;
 
+pub use agent_profile::{EditAgentProfileTool, ListAgentsTool};
 pub use calculation::CalculationTool;
 pub use fetch_url::FetchUrlTool;
 pub use fileio::{
@@ -182,6 +184,43 @@ pub fn register_builtins(
             name: "shell".to_string(),
             version: "1.0.0".to_string(),
             description: "Execute shell commands on the local system".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+    })?;
+
+    Ok(())
+}
+
+/// Register the agent-profile self-modification tools (T1): `list_agents`
+/// and `edit_agent_profile`.
+///
+/// Shared-registry tools (not per-execution): they need no per-run state, so
+/// they are registered once with an [`AgentManager`] bound to the same
+/// discovery set the UI agent selector uses (primary dir + search dirs).
+/// Visibility is gated per profile through `allowed_tools` like any other
+/// tool; removing the tools from a profile requires `allow_self_removal`.
+pub fn register_agent_tools(
+    registry: &crate::tools::registry::ToolRegistry,
+    agent_manager: std::sync::Arc<crate::agents::manager::AgentManager>,
+) -> crate::tools::types::ToolResult<()> {
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(ListAgentsTool::new(agent_manager.clone())),
+        metadata: ToolMetadata {
+            name: "list_agents".to_string(),
+            version: "1.0.0".to_string(),
+            description: "List all agent profiles (name, description, enabled, path, allowed_tools, handoff/restart settings, prompt preview)".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+    })?;
+
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(EditAgentProfileTool::new(agent_manager)),
+        metadata: ToolMetadata {
+            name: "edit_agent_profile".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Edit an agent profile by name (fields omitted are left unchanged; pre-edit snapshot, rename via new_name)".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
