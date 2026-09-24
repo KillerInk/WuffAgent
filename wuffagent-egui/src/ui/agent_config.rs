@@ -431,6 +431,9 @@ impl AgentConfigDialog {
             // The agent editor has no restart toggle yet; keep the default
             // (enabled) so created/edited profiles can restart WuffAgent.
             restart_enabled: true,
+            // The agent editor has no hand_back toggle yet; keep the default
+            // (enabled) so sub-session agents can return to their parent.
+            hand_back_enabled: true,
         };
 
         // Ensure the directory exists before saving

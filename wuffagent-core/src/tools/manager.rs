@@ -261,6 +261,46 @@ impl ToolManager {
         }
     }
 
+    /// Create a new ToolManager whose `hand_back` entry is replaced by the
+    /// provided per-execution tool (same rebuild pattern as
+    /// [`Self::with_handoff_tool`]). Used by `Agent::new` to give sub-session
+    /// agents (sessions whose meta carries a `parent_session_id`) a hand-back
+    /// tool wired to their own mailbox.
+    pub fn with_hand_back_tool(&self, tool: crate::tools::builtin::hand_back::HandBackTool) -> Self {
+        let mut entries = self.registry.list();
+        tracing::debug!(
+            entries = entries.len(),
+            "Rebuilding per-agent tool registry (with per-execution hand_back tool)"
+        );
+        let meta = entries
+            .iter()
+            .find(|e| e.metadata.name == "hand_back")
+            .map(|e| e.metadata.clone())
+            .unwrap_or_else(|| crate::tools::types::ToolMetadata {
+                name: "hand_back".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Return this sub-session to its parent session".to_string(),
+                dependencies: vec![],
+            });
+        entries.retain(|e| e.metadata.name != "hand_back");
+        entries.push(crate::tools::registry::ToolEntry {
+            tool: std::sync::Arc::new(tool),
+            metadata: meta,
+            loaded_at: std::time::Instant::now(),
+            plugin: None,
+        });
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
+        }
+    }
+
     /// Create a new ToolManager where the `handoff` tool is removed from the
     /// schema entirely. Used for agents whose `handoff_enabled` is false —
     /// including target agents in a handoff chain built on top of a manager
@@ -268,6 +308,25 @@ impl ToolManager {
     pub fn without_handoff(&self) -> Self {
         let mut entries = self.registry.list();
         entries.retain(|e| e.metadata.name != "handoff");
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
+        }
+    }
+
+    /// Create a new ToolManager where the `hand_back` tool is removed from the
+    /// schema entirely. Used for agents without a sub-session parent link —
+    /// including in-turn handoff targets built on top of a manager that
+    /// already carries a per-execution hand_back tool.
+    pub fn without_hand_back(&self) -> Self {
+        let mut entries = self.registry.list();
+        entries.retain(|e| e.metadata.name != "hand_back");
         let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
             let _ = registry.register(entry);

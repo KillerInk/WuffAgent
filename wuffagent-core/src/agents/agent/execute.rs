@@ -229,9 +229,45 @@ impl Agent {
                 });
                 Ok("Handed off to a sub-session".to_string())
             }
-            // Placeholder until the `hand_back` tool lands (step 11): the
-            // mailbox check that produces this outcome is added there.
-            RunOutcome::HandBack(_) => unreachable!("hand_back is wired in step 11"),
+            // Hand-back: this session is a sub-session returning to its
+            // parent. Record a marker in the SUB store so the transcript
+            // shows the return, emit AgentHandBack (both session ids) so the
+            // UI can post the task into the parent session, and end the turn
+            // with a terminal StreamComplete for this (sub) session so its
+            // generating state clears and its file saves.
+            RunOutcome::HandBack(req) => {
+                let to_session_id = self
+                    .client
+                    .session_meta()
+                    .parent_session_id
+                    .clone()
+                    .expect("hand_back is only advertised to sub-sessions (parent_session_id set)");
+                let marker_content = format!("[Handed back to parent session] {}", req.task);
+                let marker = Message {
+                    role: "user".to_string(),
+                    content: marker_content.clone(),
+                    timestamp: crate::types::format_timestamp(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    image: None,
+                };
+                self.record_in_store(&marker);
+                // Terminal StreamComplete for the sub session: if the agent
+                // streamed text this turn the UI commits that buffer; the
+                // marker text is only the fallback for a silent turn.
+                self.send_event(crate::types::AppEvent::StreamComplete {
+                    content: marker_content,
+                    usage: None,
+                    session_id: self.session_id(),
+                });
+                self.send_event(crate::types::AppEvent::AgentHandBack {
+                    from_session_id: self.session_id(),
+                    to_session_id,
+                    task: req.task,
+                });
+                Ok("Handed back to the parent session".to_string())
+            }
             // A restart request ends the turn: record a marker so the session
             // shows the transition, then notify the UI to relaunch the
             // (optionally newly built) binary. The marker file + auto-resume

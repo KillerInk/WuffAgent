@@ -13,6 +13,7 @@ use crate::tools::registry::ToolRegistry;
 use crate::tools::types::TracingToolLogger;
 
 mod context;
+mod hand_back;
 mod handoff;
 mod outcomes;
 mod schema;

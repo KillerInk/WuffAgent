@@ -178,6 +178,20 @@ impl Agent {
                 return Ok(RunOutcome::Restart(req));
             }
 
+            // A pending hand-back (written by the `hand_back` tool this turn;
+            // only sub-sessions get the tool) ends this agent's run: `execute`
+            // records a marker, emits AgentHandBack with the parent session
+            // id, and ends the turn so the UI can post the task into the
+            // parent session.
+            if let Some(req) = self.take_pending_hand_back() {
+                tracing::info!(
+                    "[AGENT] Agent '{}' hand-back requested via the hand_back tool; ending this agent's turn (task='{}')",
+                    self.config.name,
+                    req.task
+                );
+                return Ok(RunOutcome::HandBack(req));
+            }
+
             // Rate-limit LLM calls to avoid hitting API rate limits.
             let elapsed = self.last_llm_call_at.elapsed();
             if elapsed < LLM_RATE_LIMIT_DELAY {

@@ -225,6 +225,12 @@ pub struct AgentConfig {
     /// profile.
     #[serde(default = "default_true")]
     pub restart_enabled: bool,
+    /// Whether this agent may return the session to its parent via the
+    /// `hand_back` tool (only meaningful in a sub-session — a session whose
+    /// meta carries a `parent_session_id`). Defaults to true so it can be
+    /// turned off per profile.
+    #[serde(default = "default_true")]
+    pub hand_back_enabled: bool,
 }
 
 fn default_enabled_agent() -> bool {
@@ -261,6 +267,7 @@ impl Default for AgentConfig {
             handoff_enabled: false,
             handoff_targets: Vec::new(),
             restart_enabled: true,
+            hand_back_enabled: true,
         }
     }
 }
@@ -298,6 +305,7 @@ fn parse_agent_file(path: &Path) -> Option<AgentConfig> {
         handoff_enabled: legacy.handoff_enabled,
         handoff_targets: legacy.can_invoke,
         restart_enabled: true,
+        hand_back_enabled: true,
     })
 }
 
@@ -523,6 +531,7 @@ impl AgentConfig {
                             handoff_enabled: legacy.handoff_enabled,
                             handoff_targets: legacy.can_invoke,
                             restart_enabled: true,
+                            hand_back_enabled: true,
                         };
                         agents.push(config);
                     } else {

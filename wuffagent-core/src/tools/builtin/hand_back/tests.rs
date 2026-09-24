@@ -1,0 +1,66 @@
+//! Unit tests for the `hand_back` module (see `super`).
+
+use super::*;
+
+fn mailbox() -> Arc<Mutex<Option<HandBackRequest>>> {
+    Arc::new(Mutex::new(None))
+}
+
+fn params(task: &str) -> ToolParams {
+    ToolParams {
+        values: serde_json::to_value(serde_json::json!({ "task": task }))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    }
+}
+
+#[test]
+fn test_hand_back_writes_mailbox() {
+    let mailbox = mailbox();
+    let tool = HandBackTool::new(mailbox.clone());
+
+    let result = tool.execute(params("Implement the plan."));
+    assert!(result.is_ok(), "unexpected error: {:?}", result);
+
+    let req = mailbox.lock().unwrap().take().expect("request written");
+    assert_eq!(req.task, "Implement the plan.");
+}
+
+#[test]
+fn test_hand_back_missing_task_errors() {
+    let mailbox = mailbox();
+    let tool = HandBackTool::new(mailbox.clone());
+
+    let p = ToolParams {
+        values: std::collections::HashMap::new(),
+    };
+    let err = tool.execute(p).unwrap_err();
+    assert!(matches!(err, ToolError::InvalidParams(_)));
+    assert!(mailbox.lock().unwrap().is_none());
+}
+
+#[test]
+fn test_hand_back_empty_task_errors() {
+    let mailbox = mailbox();
+    let tool = HandBackTool::new(mailbox.clone());
+
+    let err = tool.execute(params("   ")).unwrap_err();
+    assert!(matches!(err, ToolError::InvalidParams(_)));
+    assert!(mailbox.lock().unwrap().is_none());
+}
+
+#[test]
+fn test_hand_back_rejects_second_pending() {
+    let mailbox = mailbox();
+    let tool = HandBackTool::new(mailbox.clone());
+
+    assert!(tool.execute(params("First")).is_ok());
+    let err = tool.execute(params("Second")).unwrap_err();
+    assert!(matches!(err, ToolError::Execution(_)));
+    let req = mailbox.lock().unwrap().take().expect("original request kept");
+    assert_eq!(req.task, "First");
+}

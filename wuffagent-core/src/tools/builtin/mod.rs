@@ -2,6 +2,7 @@ pub mod agent_profile;
 pub mod calculation;
 pub mod fetch_url;
 pub mod fileio;
+pub mod hand_back;
 pub mod handoff;
 pub(crate) mod html;
 pub mod memory;
@@ -40,6 +41,10 @@ pub use handoff::HandoffTool;
 // `Agent::new` for agents with `restart_enabled`, not registered in
 // `register_builtins`.
 pub use restart::RestartTool;
+// NOTE: HandBackTool is also per-execution (own mailbox) — injected by
+// `Agent::new` for sub-session agents (`hand_back_enabled` + a session meta
+// with a `parent_session_id`), not registered in `register_builtins`.
+pub use hand_back::HandBackTool;
 
 use crate::tools::registry::ToolEntry;
 use crate::tools::types::{Tool, ToolMetadata};

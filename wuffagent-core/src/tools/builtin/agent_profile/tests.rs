@@ -39,6 +39,7 @@ fn make_agent(name: &str, prompt: &str) -> AgentConfig {
         handoff_enabled: false,
         handoff_targets: Vec::new(),
         restart_enabled: false,
+        hand_back_enabled: false,
     }
 }
 

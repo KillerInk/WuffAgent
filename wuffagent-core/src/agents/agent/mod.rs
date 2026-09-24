@@ -71,6 +71,11 @@ pub struct Agent {
     /// The `restart` tool writes a request here; `run_llm_loop` picks it up
     /// before the next LLM round.
     restart_mailbox: Option<Arc<Mutex<Option<crate::agents::types::RestartRequest>>>>,
+    /// Per-execution hand-back mailbox, present only when `hand_back_enabled`
+    /// AND the session is a sub-session (its meta carries a
+    /// `parent_session_id`). The `hand_back` tool writes a request here;
+    /// `run_llm_loop` picks it up before the next LLM round.
+    hand_back_mailbox: Option<Arc<Mutex<Option<crate::agents::types::HandBackRequest>>>>,
     /// I1: trajectory stats of the last completed `run_llm_loop`.
     run_stats: RunStats,
     /// Mid-run injection channel (UI → this run), if the chat pipeline
@@ -111,7 +116,7 @@ impl Agent {
         // allow-all shell. All other tools are shared. This is what makes an
         // agent's `shell` respect its per-agent restrictions on both the chat and
         // /plan paths.
-        let (tool_manager, handoff_mailbox, restart_mailbox) = {
+        let (tool_manager, handoff_mailbox, restart_mailbox, hand_back_mailbox) = {
             let shared = tool_manager.lock().unwrap();
             // The shell tool is advertised only when the agent's
             // `shell_enabled` is true. A disabled shell is removed from the
@@ -151,7 +156,25 @@ impl Agent {
                 // handoff chain (the shared base manager may carry one).
                 (tm.without_restart(), None)
             };
-            (Arc::new(Mutex::new(tm)), handoff_mailbox, restart_mailbox)
+            // The hand_back tool is advertised only when `hand_back_enabled`
+            // AND this session is a sub-session (its meta carries a
+            // `parent_session_id` — where to return to). Same flag-gated,
+            // per-execution injection as the tools above; the sub-session
+            // condition comes from the shared session client, so an in-turn
+            // handoff target inside a sub-session inherits the tool (with its
+            // own fresh mailbox) when its profile allows it.
+            let (tm, hand_back_mailbox) =
+                if config.hand_back_enabled && client.session_meta().parent_session_id.is_some() {
+                    let mailbox = Arc::new(Mutex::new(None));
+                    let tool = crate::tools::builtin::hand_back::HandBackTool::new(mailbox.clone());
+                    (tm.with_hand_back_tool(tool), Some(mailbox))
+                } else {
+                    // Drop any hand_back tool inherited from a previous agent
+                    // in a handoff chain (the shared base manager may carry
+                    // one).
+                    (tm.without_hand_back(), None)
+                };
+            (Arc::new(Mutex::new(tm)), handoff_mailbox, restart_mailbox, hand_back_mailbox)
         };
         Self {
             config,
@@ -166,6 +189,7 @@ impl Agent {
             trimming: ContextTrimming::new(),
             handoff_mailbox,
             restart_mailbox,
+            hand_back_mailbox,
             run_stats: RunStats::default(),
             injection_rx: None,
         }
@@ -297,6 +321,14 @@ impl Agent {
     /// Take a pending restart request written by the `restart` tool (if any).
     pub(crate) fn take_pending_restart(&self) -> Option<crate::agents::types::RestartRequest> {
         self.restart_mailbox
+            .as_ref()
+            .and_then(|m| m.lock().unwrap().take())
+    }
+
+    /// Take a pending hand-back request written by the `hand_back` tool (if
+    /// any).
+    pub(crate) fn take_pending_hand_back(&self) -> Option<crate::agents::types::HandBackRequest> {
+        self.hand_back_mailbox
             .as_ref()
             .and_then(|m| m.lock().unwrap().take())
     }
