@@ -62,6 +62,44 @@ const DANGEROUS_PATTERNS: &[&str] = &[
     "kill -9 -1",
 ];
 
+/// Whether a byte can be part of an identifier/cmdlet/option token
+/// (letters, digits, `_`, `-`, `.`). Used by `detect_dangerous` so dangerous
+/// patterns match whole tokens, not substrings of longer names.
+fn is_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
+}
+
+/// Find the first dangerous pattern in `command`, or `None`.
+///
+/// Matching is case-insensitive and token-aware: a pattern only triggers
+/// when it sits at token edges. `is_token_byte` treats letters, digits,
+/// `_`, `-` and `.` as token characters (they form identifiers, cmdlets
+/// and options), so a pattern whose first/last character is a token
+/// character must not be embedded in a longer token:
+/// - `format C:\` is blocked, but `ImageFormat`, `Format-Hex` and
+///   `ffmpeg -format mp4` are not.
+/// - Patterns starting/ending with a non-token character (`> /dev/sda`,
+///   `del C:\`, `$(rm`) keep plain substring semantics.
+fn detect_dangerous(command: &str, patterns: &[Regex]) -> Option<&'static str> {
+    let lower = command.to_lowercase();
+    let bytes = lower.as_bytes();
+    for (idx, re) in patterns.iter().enumerate() {
+        for m in re.find_iter(&lower) {
+            let pat = DANGEROUS_PATTERNS[idx].as_bytes();
+            let first_is_token = is_token_byte(pat[0]);
+            let last_is_token = is_token_byte(*pat.last().unwrap_or(&0));
+            let before_ok =
+                !first_is_token || m.start() == 0 || !is_token_byte(bytes[m.start() - 1]);
+            let after_ok =
+                !last_is_token || m.end() == bytes.len() || !is_token_byte(bytes[m.end()]);
+            if before_ok && after_ok {
+                return Some(DANGEROUS_PATTERNS[idx]);
+            }
+        }
+    }
+    None
+}
+
 /// Configuration for shell command execution.
 #[derive(Clone, Debug)]
 pub struct ShellConfig {
@@ -108,6 +146,9 @@ impl From<crate::agents::config::ShellConfig> for ShellConfig {
 pub struct ShellTool {
     config: Arc<ShellConfig>,
     compiled_regexes: Vec<Regex>,
+    /// Pre-compiled `DANGEROUS_PATTERNS` (escaped to literal strings) so the
+    /// hot path does not recompile them on every command.
+    dangerous_regexes: Vec<Regex>,
 }
 
 impl ShellTool {
@@ -117,9 +158,16 @@ impl ShellTool {
             .iter()
             .filter_map(|p| Regex::new(p).ok())
             .collect();
+        let dangerous_regexes: Vec<Regex> = DANGEROUS_PATTERNS
+            .iter()
+            // Lowercase the pattern as well: the command is matched against
+            // its lowercased form, so the regex must be too (e.g. `del C:\`).
+            .map(|p| Regex::new(&regex::escape(&p.to_lowercase())).expect("escaped pattern is a valid regex"))
+            .collect();
         Self {
             config: Arc::new(config),
             compiled_regexes,
+            dangerous_regexes,
         }
     }
 
@@ -131,18 +179,13 @@ impl ShellTool {
             ));
         }
 
-        // Check dangerous patterns first. Both sides are lowercased so the
-        // match is case-insensitive (e.g. `del C:\` still matches the `del c:\`
-        // pattern); matching on the raw command would let upper-cased variants
-        // slip through.
-        let lower_cmd = command.to_lowercase();
-        for dangerous in DANGEROUS_PATTERNS {
-            if lower_cmd.contains(dangerous.to_lowercase().as_str()) {
-                return Err(ToolError::Execution(format!(
-                    "Dangerous command pattern detected: {}",
-                    dangerous
-                )));
-            }
+        // Check dangerous patterns first (case-insensitive + token-aware, see
+        // `detect_dangerous`).
+        if let Some(dangerous) = detect_dangerous(command, &self.dangerous_regexes) {
+            return Err(ToolError::Execution(format!(
+                "Dangerous command pattern detected: {}",
+                dangerous
+            )));
         }
 
         // If allowlist is empty, allow all non-dangerous commands

@@ -61,6 +61,33 @@ fn test_new_dangerous_patterns() {
     assert!(tool.is_command_allowed("kill -9 1").is_err());
 }
 
+/// Token-aware dangerous matching: a standalone `format` (as in `format C:\`)
+/// is blocked, but `format` embedded in a longer token (cmdlets, options,
+/// .NET type names) must not be.
+#[test]
+fn test_dangerous_matching_is_token_aware() {
+    let config = ShellConfig {
+        enabled: true,
+        allowed_commands: vec![".*".to_string()], // allow all non-dangerous
+        ..Default::default()
+    };
+    let tool = ShellTool::new(config);
+
+    // Standalone `format` command -> blocked (case-insensitive).
+    assert!(tool.is_command_allowed("format C:\\").is_err());
+    assert!(tool.is_command_allowed("format c:").is_err());
+    assert!(tool.is_command_allowed("FORMAT C:").is_err());
+
+    // `format` inside longer tokens -> allowed.
+    assert!(tool.is_command_allowed("ImageFormat").is_ok());
+    assert!(tool
+        .is_command_allowed("powershell -NoProfile -c Format-Hex")
+        .is_ok());
+    assert!(tool.is_command_allowed("ffmpeg -format mp4 in.avi").is_ok());
+    assert!(tool.is_command_allowed("bash format.sh").is_ok());
+    assert!(tool.is_command_allowed("echo \"String.Format\"").is_ok());
+}
+
 /// Live-tail logic: lines are tracked across chunk boundaries, CRLF endings
 /// are normalized, blank lines are dropped, and the tail reports only the
 /// most recent lines (latest-tail semantics for the UI).
