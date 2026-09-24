@@ -30,6 +30,7 @@ use crate::tools::mcp::{McpManager, McpServerStatus};
 use crate::tools::types::{
     FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema,
 };
+use crate::types::AppEvent;
 
 /// The MCP management tool names (for docs / allowlist discussions).
 pub const MCP_TOOL_NAMES: &[&str] = &[
@@ -142,6 +143,26 @@ fn mcp_err(e: crate::tools::mcp::McpError) -> ToolError {
     ToolError::Execution(e.to_string())
 }
 
+/// Emit `AppEvent::McpConfigChanged` to the UI event channel, telling the UI
+/// that its in-memory `config.mcp_servers` list is stale and must be
+/// reloaded from disk. `session_id` is `None` when the change did not come
+/// from an agent run (e.g. the UI's own MCP panel — in which case the UI
+/// already has the updated list, but the event is still harmless).
+fn notify_config_changed(
+    events: &Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
+    session_id: Option<&str>,
+) {
+    let Some(tx) = events else {
+        return;
+    };
+    let sid = session_id
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let _ = tx.lock().unwrap().send(AppEvent::McpConfigChanged {
+        session_id: sid,
+    });
+}
+
 // ─── mcp_list ─────────────────────────────────────────────────────────────────
 
 /// Lists the configured MCP servers: live status, transport, and the
@@ -234,6 +255,11 @@ pub struct McpAddServerTool {
     /// Guarded so two concurrent calls (parallel tool execution) cannot
     /// interleave their config read-modify-writes.
     config_lock: Arc<Mutex<()>>,
+    /// Core → UI event channel (optional; set by the registration helper so
+    /// config changes can notify the UI). `session_id` identifies the agent
+    /// run that triggered the change.
+    events: Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
+    session_id: Option<String>,
 }
 
 impl McpAddServerTool {
@@ -241,7 +267,20 @@ impl McpAddServerTool {
         Self {
             manager,
             config_lock: Arc::new(Mutex::new(())),
+            events: None,
+            session_id: None,
         }
+    }
+
+    /// Attach the core → UI event channel so config changes can notify the UI.
+    pub fn with_events(
+        mut self,
+        events: Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>,
+        session_id: Option<String>,
+    ) -> Self {
+        self.events = Some(events);
+        self.session_id = session_id;
+        self
     }
 }
 
@@ -436,6 +475,9 @@ impl Tool for McpAddServerTool {
             }
             list
         });
+        // Tell the UI its in-memory mcp_servers list is stale (it must reload
+        // config.json so the MCP panel matches what the tool just wrote).
+        notify_config_changed(&self.events, self.session_id.as_deref());
 
         let mut result = serde_json::json!({
             "status": if is_new { "added" } else { "updated" },
@@ -606,6 +648,8 @@ impl Tool for McpDisconnectTool {
 pub struct McpRemoveServerTool {
     manager: Arc<McpManager>,
     config_lock: Arc<Mutex<()>>,
+    events: Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
+    session_id: Option<String>,
 }
 
 impl McpRemoveServerTool {
@@ -613,7 +657,20 @@ impl McpRemoveServerTool {
         Self {
             manager,
             config_lock: Arc::new(Mutex::new(())),
+            events: None,
+            session_id: None,
         }
+    }
+
+    /// Attach the core → UI event channel so config changes can notify the UI.
+    pub fn with_events(
+        mut self,
+        events: Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>,
+        session_id: Option<String>,
+    ) -> Self {
+        self.events = Some(events);
+        self.session_id = session_id;
+        self
     }
 }
 
@@ -673,6 +730,7 @@ impl Tool for McpRemoveServerTool {
         let (_updated, warn) = update_mcp_servers_in_config(move |current| {
             current.iter().filter(|c| c.name != name_for_cfg).cloned().collect()
         });
+        notify_config_changed(&self.events, self.session_id.as_deref());
 
         let mut result = serde_json::json!({
             "status": "removed",

@@ -475,7 +475,7 @@ fn apply_maintenance_actions(
         } else {
             Some(update.tags.clone())
         };
-        if let Err(e) = manager.update(&update.id, update.content.trim(), tags) {
+        if let Err(e) = manager.update(&update.id, Some(update.content.trim()), tags) {
             skipped.push(format!("update of {} failed: {}", update.id, e));
         }
     }

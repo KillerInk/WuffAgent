@@ -26,7 +26,7 @@ Give agents first-class tools to manage the MCP subsystem (same capabilities the
 
 1. **Shared-registry tools** (like T1's profile tools), NOT per-execution: they only need
    the app's `McpManager`, which is static for the process lifetime. Registered once in
-   `wuffagent-egui/src/main.rs` via `builtin::register_mcp_tools(registry, Arc<McpManager>)`,
+   `wuffagent-egui/src/main.rs` via `builtin::register_mcp_tools(registry, Arc<McpManager>, Option<Arc<Mutex<Sender<AppEvent>>>>, Option<String>)`,
    right after the MCP manager is created (before `AgentEngine`).
 2. **Gated by `allowed_tools`** like every other tool (empty list = all tools). An agent
    that wants MCP management lists the `mcp_*` names; agents that only *use* MCP tools
@@ -52,10 +52,12 @@ Give agents first-class tools to manage the MCP subsystem (same capabilities the
    (a `OnceLock<Mutex<Option<PathBuf>>>` in `config/paths.rs`) lets tests point
    `get_config_path()` at a temp file — the tools persist through it, so no test ever
    touches the real `~/.wuffagent/config.json`.
-7. **No new `AppEvent`**: the MCP panel re-renders its snapshot every frame, and the
-   registry mirrors connect/disconnect live, so agents and UI always agree. (The in-memory
-   `ChatApp.config` copy still shows the pre-edit `mcp_servers` list in the panel's edit
-   dialog until the app restarts — acceptable; live state is authoritative.)
+7. **`AppEvent::McpConfigChanged`** (added in T3a): `mcp_add_server` and
+   `mcp_remove_server` emit this event after persisting to `config.json`; the UI
+   handler reloads `config.mcp_servers` from disk so the in-memory copy (used by
+   the panel's edit dialog) stays in sync without an app restart. The event sender
+   is wired at registration time (`register_mcp_tools` takes an
+   `Option<Arc<Mutex<Sender<AppEvent>>>>` + `session_id`).
 
 ## Changes
 
@@ -66,7 +68,7 @@ Give agents first-class tools to manage the MCP subsystem (same capabilities the
 | `wuffagent-core/src/tools/builtin/mod.rs` | `pub mod mcp` + re-exports + `register_mcp_tools` |
 | `wuffagent-core/src/config/paths.rs` | `set_config_path_for_testing` override (OnceLock) |
 | `wuffagent-core/src/config/mod.rs` | re-export the test override |
-| `wuffagent-egui/src/main.rs` | `register_mcp_tools(&registry, mcp_manager.clone())` after the MCP manager is built |
+| `wuffagent-egui/src/main.rs` | `register_mcp_tools(&registry, mcp_manager.clone(), Some(Arc::new(Mutex::new(event_tx.clone()))), None)` after the MCP manager is built |
 
 ## Verified
 

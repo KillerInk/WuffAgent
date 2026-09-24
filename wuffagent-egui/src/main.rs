@@ -120,6 +120,8 @@ fn bootstrap() -> (
     Arc<ConnectionSettings>,
     Arc<wuffagent_core::memory::MemoryManager>,
     Arc<wuffagent_core::tools::McpManager>,
+    std::sync::mpsc::Sender<wuffagent_core::types::AppEvent>,
+    std::sync::mpsc::Receiver<wuffagent_core::types::AppEvent>,
 ) {
     // Default to `debug` for app crates, but silence the extremely chatty
     // `naga` WGSL shader compiler (pulled in by wgpu/egui) whose DEBUG-level
@@ -225,6 +227,11 @@ fn bootstrap() -> (
     memory_llm.set_n_ctx(config.n_ctx);
     let memory_llm_client = Arc::new(wuffagent_core::llm::ChatClientAdapter::new(memory_llm));
 
+    // Shared event channel: the UI polls the receiver each frame; the pipeline
+    // (and client tool events) write into the sender. Created before the
+    // initial runtime so it can be shared with the first session.
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<wuffagent_core::types::AppEvent>();
+
     builtin::register_builtins(&registry, &config.search_config).expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
         eprintln!("Warning: failed to discover plugins: {}", e);
@@ -247,7 +254,11 @@ fn bootstrap() -> (
     // `mcp_connect` / `mcp_disconnect` / `mcp_remove_server` /
     // `mcp_refresh_tools` / `mcp_set_tool_enabled`) — bound to the app's
     // McpManager; shared-registry tools gated by `allowed_tools`.
-    builtin::register_mcp_tools(&registry, mcp_manager.clone())
+    // The event sender lets the add/remove tools emit McpConfigChanged so the
+    // UI reloads config.json (session_id=None: app-level registration, the
+    // run-specific session is resolved by the UI when the event arrives).
+    let mcp_event_tx = std::sync::Arc::new(std::sync::Mutex::new(event_tx.clone()));
+    builtin::register_mcp_tools(&registry, mcp_manager.clone(), Some(mcp_event_tx), None)
         .expect("Failed to register MCP management tools");
 
     let server = ServerManager::new(
@@ -323,12 +334,18 @@ fn bootstrap() -> (
 
     let agent_engine = Arc::new(agent_engine);
 
-    (config, server, tool_manager, agent_engine, connection, memory_manager, mcp_manager)
+    (
+        config, server, tool_manager, agent_engine, connection, memory_manager, mcp_manager,
+        event_tx, event_rx,
+    )
 }
 
 #[tokio::main]
 async fn main() -> eframe::Result {
-    let (mut config, server, tool_manager, agent_engine, connection, memory_manager, mcp_manager) = bootstrap();
+    let (
+        mut config, server, tool_manager, agent_engine, connection, memory_manager, mcp_manager,
+        event_tx, event_rx,
+    ) = bootstrap();
 
     // Auto-resume after a restart: if a restart marker exists (written by the UI
     // just before relaunching), resume that session automatically. Point the
@@ -373,11 +390,6 @@ async fn main() -> eframe::Result {
     );
     
     // Initialize session store with the configured session
-    // Shared event channel: the UI polls the receiver each frame; the pipeline
-    // (and client tool events) write into the sender. Created before the
-    // initial runtime so it can be shared with the first session.
-    let (event_tx, event_rx) = std::sync::mpsc::channel::<wuffagent_core::types::AppEvent>();
-
     let mut session_store: std::collections::HashMap<String, wuffagent_core::sessions::SessionRuntime> = std::collections::HashMap::new();
     let mut selected_session_id: Option<String> = None;
 

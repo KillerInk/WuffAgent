@@ -26,6 +26,7 @@ impl ChatApp {
             | AppEvent::NCtxUpdated { session_id, .. }
             | AppEvent::ImprovementSuggested { session_id, .. }
             | AppEvent::AgentHandoff { session_id, .. }
+            | AppEvent::McpConfigChanged { session_id, .. }
             | AppEvent::RestartRequested { session_id, .. }
             | AppEvent::UserMessageDrained { session_id, .. } => session_id.clone(),
         };
@@ -83,6 +84,23 @@ impl ChatApp {
             AppEvent::ImprovementSuggested { agent_name, suggestions, session_id: _ } => {
                 tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");
                 self.improvements_panel.handle_improvement_suggested(&agent_name, suggestions);
+            }
+            AppEvent::McpConfigChanged { .. } => {
+                // An MCP management tool rewrote config.json's mcp_servers
+                // array; the in-memory list is stale. Reload it so the MCP
+                // panel (and any later reload) matches disk.
+                match wuffagent_core::config::Config::load(&self.config.file_path.clone()) {
+                    Ok(loaded) => {
+                        tracing::info!(
+                            count = loaded.mcp_servers.len(),
+                            "MCP config reloaded after McpConfigChanged"
+                        );
+                        self.config.mcp_servers = loaded.mcp_servers;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to reload MCP config after McpConfigChanged: {}", e);
+                    }
+                }
             }
             AppEvent::RestartRequested { reason, exe_path, .. } => {
                 tracing::info!(reason, "Restart requested");

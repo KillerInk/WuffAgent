@@ -289,17 +289,21 @@ impl MemoryManager {
 
     /// Update an existing memory entry by ID.
     ///
-    /// Updating an entry revives it (clears `supersedes`) and, when provided,
-    /// replaces its tags. Returns the updated entry.
+    /// `content` is optional: when `None` the entry's existing content is
+    /// kept (useful for retagging or reviving an entry without touching its
+    /// text). Updating an entry revives it (clears `supersedes`) and, when
+    /// provided, replaces its tags. Returns the updated entry.
     pub fn update(
         &self,
         id: &str,
-        content: &str,
+        content: Option<&str>,
         tags: Option<Vec<String>>,
     ) -> Result<MemoryEntry, String> {
         let mut entries = self.entries.lock().unwrap();
         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-            entry.content = content.to_string();
+            if let Some(content) = content {
+                entry.content = content.to_string();
+            }
             entry.supersedes = None;
             if let Some(tags) = tags {
                 entry.tags = tags;

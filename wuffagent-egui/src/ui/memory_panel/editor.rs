@@ -56,7 +56,7 @@ impl MemoryPanel {
                             .map(|t| t.trim().to_string())
                             .filter(|t| !t.is_empty())
                             .collect();
-                        match memory.update(&id, &self.edit_content, Some(tags)) {
+                        match memory.update(&id, Some(&self.edit_content), Some(tags)) {
                             Ok(updated) => {
                                 self.message = Some(format!("✓ Updated {}", short_id(&updated.id)));
                                 // Close the editor now that the edit is committed

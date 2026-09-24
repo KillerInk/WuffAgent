@@ -98,6 +98,14 @@ pub enum AppEvent {
         task: String,
         session_id: String,
     },
+    /// An MCP server configuration changed (a tool or the UI's MCP panel
+    /// added / removed / updated a server). `session_id` is the session whose
+    /// agent made the change (empty when the change came from the UI). The UI
+    /// reloads its in-memory `config.mcp_servers` from disk and redraws the
+    /// MCP panel so the panel and the live manager state stay in sync.
+    McpConfigChanged {
+        session_id: String,
+    },
     /// The agent asked to restart the WuffAgent process (optionally after a
     /// build). The UI saves the session, writes a restart marker, relaunches
     /// the (optionally newly built) binary, and closes the window; the new

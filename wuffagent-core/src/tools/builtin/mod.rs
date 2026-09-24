@@ -246,7 +246,17 @@ pub fn register_agent_tools(
 pub fn register_mcp_tools(
     registry: &crate::tools::registry::ToolRegistry,
     mcp: std::sync::Arc<crate::tools::mcp::McpManager>,
+    event_tx: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
+    session_id: Option<String>,
 ) -> crate::tools::types::ToolResult<()> {
+    let add = match &event_tx {
+        Some(tx) => McpAddServerTool::new(mcp.clone()).with_events(tx.clone(), session_id.clone()),
+        None => McpAddServerTool::new(mcp.clone()),
+    };
+    let remove = match &event_tx {
+        Some(tx) => McpRemoveServerTool::new(mcp.clone()).with_events(tx.clone(), session_id.clone()),
+        None => McpRemoveServerTool::new(mcp.clone()),
+    };
     let tools: Vec<(&str, &str, std::sync::Arc<dyn Tool>)> = vec![
         (
             "mcp_list",
@@ -256,7 +266,7 @@ pub fn register_mcp_tools(
         (
             "mcp_add_server",
             "Add or replace an MCP server (stdio command/args/env or http url/headers); persists to config.json and connects when enabled",
-            std::sync::Arc::new(McpAddServerTool::new(mcp.clone())),
+            std::sync::Arc::new(add),
         ),
         (
             "mcp_connect",
@@ -271,7 +281,7 @@ pub fn register_mcp_tools(
         (
             "mcp_remove_server",
             "Remove an MCP server from the live state and from config.json",
-            std::sync::Arc::new(McpRemoveServerTool::new(mcp.clone())),
+            std::sync::Arc::new(remove),
         ),
         (
             "mcp_refresh_tools",

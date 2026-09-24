@@ -208,7 +208,7 @@ fn test_update_replaces_tags_and_revives() {
     let updated = manager
         .update(
             &id,
-            "Refined content here for testing purposes",
+            Some("Refined content here for testing purposes"),
             Some(vec!["new".to_string()]),
         )
         .unwrap();
@@ -228,7 +228,7 @@ fn test_update_replaces_tags_and_revives() {
     let revived = manager
         .update(
             &id2,
-            "Revived memory content for the revival test now",
+            Some("Revived memory content for the revival test now"),
             None,
         )
         .unwrap();
@@ -239,6 +239,40 @@ fn test_update_replaces_tags_and_revives() {
         "tags unchanged when None is passed"
     );
     assert!(manager.get_recent(10).iter().any(|m| m.id == id2));
+}
+
+#[test]
+fn test_update_without_content_keeps_existing_text() {
+    let dir = tempdir().unwrap();
+    let config = MemoryConfig {
+        memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let manager = MemoryManager::new(config).unwrap();
+
+    let e = MemoryEntry::new(
+        MemoryType::Fact,
+        "Original content that must survive a tag-only update",
+        "test",
+        &["old"],
+    );
+    let id = e.id.clone();
+    manager.add(e).unwrap();
+
+    // Update with content = None: the existing content is kept, tags replaced.
+    let updated = manager
+        .update(&id, None, Some(vec!["new-tag".to_string(), "second".to_string()]))
+        .unwrap();
+    assert_eq!(updated.content, "Original content that must survive a tag-only update");
+    assert_eq!(updated.tags, vec!["new-tag", "second"]);
+    assert_eq!(updated.supersedes, None);
+
+    // Same at the on-disk level: the persisted entry must be unchanged.
+    let persisted = manager.find(&id).expect("entry still exists");
+    assert_eq!(
+        persisted.content, "Original content that must survive a tag-only update"
+    );
+    assert_eq!(persisted.tags, vec!["new-tag", "second"]);
 }
 
 #[test]
