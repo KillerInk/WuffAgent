@@ -346,7 +346,13 @@ impl Tool for McpAddServerTool {
          (default true) auto-connects at startup and connects immediately \
          unless connect_now=false. timeout_secs default 60. allowed_tools: \
          allowlist of the server's tool names (empty = all). The change is \
-         persisted to config.json's mcp_servers array and applied live."
+         persisted to config.json's mcp_servers array and applied live. \
+         NOTE: the live state of THIS process is the single source of truth — \
+         WuffAgent keeps config.json in memory and never reloads it, and the \
+         alternate self-restart build (other target/) reads the file only at \
+         ITS startup; so a server added at runtime may be missing in the \
+         alternate build until you add it there too (mcp_add_server) or \
+         restart the app normally (from outside WuffAgent)."
     }
 
     fn parameters_schema(&self) -> ToolSchema {
