@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
+use crate::tools::dynamic::PluginHandle;
 use crate::tools::types::{Tool, ToolError, ToolLogger, ToolMetadata, ToolSchema};
 
 /// Outcome of one plugin file during a discovery scan (T3b). The scan itself
@@ -33,6 +34,17 @@ pub struct ToolEntry {
     pub tool: Arc<dyn Tool>,
     pub metadata: ToolMetadata,
     pub loaded_at: Instant,
+    /// Keeps the plugin's DLL mapped for as long as this entry (and every
+    /// clone of it) is alive. `None` for built-in / MCP / per-execution tools.
+    ///
+    /// A plugin tool's vtable lives inside its DLL: if the last
+    /// `PluginHandle` were dropped while the tool is still registered,
+    /// `FreeLibrary` would unmap the DLL and the next vtable call
+    /// (`name()` / `parameters_schema()` / `execute()`) would crash with
+    /// STATUS_ACCESS_VIOLATION. Field order matters for drops: `tool` is
+    /// declared before `plugin` so the tool's drop glue (code from the DLL)
+    /// runs while the DLL is still mapped.
+    pub plugin: Option<PluginHandle>,
 }
 impl Clone for ToolEntry {
     fn clone(&self) -> Self {
@@ -40,6 +52,7 @@ impl Clone for ToolEntry {
             tool: self.tool.clone(),
             metadata: self.metadata.clone(),
             loaded_at: self.loaded_at,
+            plugin: self.plugin.clone(),
         }
     }
 }
@@ -90,8 +103,9 @@ impl ToolRegistry {
                 name
             )));
         }
+        let from_plugin = entry.plugin.is_some();
         map.insert(name.clone(), entry);
-        self.logger.log_tool_call(&name, &Default::default());
+        tracing::info!(tool = %name, from_plugin, "Tool registered");
         Ok(())
     }
 
@@ -164,6 +178,10 @@ impl ToolRegistry {
     pub fn discover_plugins_detailed(&self) -> Result<Vec<PluginLoadOutcome>, ToolError> {
         let loader = crate::tools::dynamic::PluginLoader::new(self.logger.clone());
         let mut outcomes: Vec<PluginLoadOutcome> = Vec::new();
+        tracing::info!(
+            paths = ?self.discovery_paths(),
+            "Scanning plugin directories"
+        );
         for path in self.discovery_paths() {
             if !path.exists() {
                 continue;
@@ -200,6 +218,25 @@ impl ToolRegistry {
                 }
             }
         }
+        let loaded = outcomes
+            .iter()
+            .filter(|o| o.status == PluginLoadStatus::Loaded)
+            .count();
+        let skipped = outcomes
+            .iter()
+            .filter(|o| o.status == PluginLoadStatus::Skipped)
+            .count();
+        let failed = outcomes
+            .iter()
+            .filter(|o| o.status == PluginLoadStatus::Failed)
+            .count();
+        tracing::info!(
+            files = outcomes.len(),
+            loaded,
+            skipped,
+            failed,
+            "Plugin scan complete"
+        );
         Ok(outcomes)
     }
 
@@ -212,6 +249,7 @@ impl ToolRegistry {
         loader: &crate::tools::dynamic::PluginLoader,
         file_path: &Path,
     ) -> Result<PluginLoadOutcome, ToolError> {
+        tracing::debug!(path = %file_path.display(), "Loading plugin file");
         let handle = loader.load(file_path)?;
         let metadata = handle.metadata().clone();
         let tool = handle.create_tool()?;
@@ -220,16 +258,29 @@ impl ToolRegistry {
             tool,
             metadata,
             loaded_at: Instant::now(),
+            // Keep the DLL mapped for the tool's whole registered lifetime
+            // (the entry's vtable lives inside the DLL — see `plugin`).
+            plugin: Some(handle),
         }) {
-            Ok(()) => Ok(PluginLoadOutcome {
-                path: file_path.to_path_buf(),
-                status: PluginLoadStatus::Loaded,
-                tool_name: Some(name),
-                error: None,
-            }),
+            Ok(()) => {
+                tracing::info!(
+                    tool = %name,
+                    path = %file_path.display(),
+                    "Plugin tool registered (DLL kept alive by the entry)"
+                );
+                Ok(PluginLoadOutcome {
+                    path: file_path.to_path_buf(),
+                    status: PluginLoadStatus::Loaded,
+                    tool_name: Some(name),
+                    error: None,
+                })
+            }
             // Already registered (re-scan of an already-loaded plugin): the
             // tool is available, so this is a skip, not a failure.
+            // (The freshly created handle/tool are dropped here; the earlier
+            // entry's keepalive still maps the DLL.)
             Err(ToolError::Validation(msg)) if msg.contains("already registered") => {
+                tracing::info!(tool = %name, "Plugin tool skipped (already registered)");
                 Ok(PluginLoadOutcome {
                     path: file_path.to_path_buf(),
                     status: PluginLoadStatus::Skipped,

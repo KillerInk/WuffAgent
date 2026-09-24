@@ -55,6 +55,7 @@ fn make_agent_with_shell(shell_enabled: bool) -> Agent {
                 dependencies: vec![],
             },
             loaded_at: std::time::Instant::now(),
+            plugin: None,
         })
         .unwrap();
     let tool_manager = Arc::new(Mutex::new(ToolManager::new(Arc::new(registry))));

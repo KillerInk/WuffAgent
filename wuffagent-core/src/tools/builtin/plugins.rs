@@ -222,6 +222,7 @@ pub fn register_plugin_tools(
                 dependencies: vec![],
             },
             loaded_at: std::time::Instant::now(),
+            plugin: None,
         })?;
     }
     Ok(())

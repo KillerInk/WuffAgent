@@ -319,6 +319,7 @@ impl McpManager {
                 dependencies: vec![],
             },
             loaded_at: Instant::now(),
+            plugin: None,
         };
         match self.inner.registry.register(entry) {
             Ok(()) => Some(full_name),

@@ -2,8 +2,12 @@
 //!
 //! Reference implementation of the WuffAgent plugin ABI.
 //!
-//! A WuffAgent plugin is a `cdylib` that exports two C symbols:
+//! A WuffAgent plugin is a `cdylib` that exports three C symbols:
 //!
+//!   * `wuff_tool_abi_version` -> `u32` (MUST equal
+//!     `wuffagent_core::tools::types::PLUGIN_ABI_VERSION` — the loader
+//!     rejects the plugin otherwise, so a stale DLL fails cleanly instead of
+//!     corrupting the host's heap)
 //!   * `wuff_tool_metadata` -> `*const ToolMetadata` (a leaked Box; the loader
 //!     clones the pointee and keeps the pointer for the process lifetime)
 //!   * `wuff_tool_create`   -> `PluginTool` (the tool instance, wrapped via
@@ -72,6 +76,15 @@ impl Tool for HelloTool {
             "from": "hello_plugin",
         })))
     }
+}
+
+/// `wuff_tool_abi_version` — the plugin ABI version this plugin was compiled
+/// against. The loader compares it with
+/// `wuffagent_core::tools::types::PLUGIN_ABI_VERSION` and rejects the plugin
+/// on mismatch (see that constant for why a stale DLL is dangerous).
+#[no_mangle]
+pub extern "C" fn wuff_tool_abi_version() -> u32 {
+    wuffagent_core::tools::types::PLUGIN_ABI_VERSION
 }
 
 /// `wuff_tool_metadata` — the loader reads `*const ToolMetadata` here and

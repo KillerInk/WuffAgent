@@ -18,6 +18,7 @@ fn register_calc(reg: &ToolRegistry) {
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })
     .unwrap();
 }

@@ -195,6 +195,16 @@ pub trait Tool: Send + Sync {
 
 // ─── FFI Plugin ABI ─────────────────────────────────────────────────────────
 
+/// The version of the WuffAgent plugin ABI.
+///
+/// Plugins MUST export `wuff_tool_abi_version() -> u32` returning this value
+/// (compiled in from the `wuffagent-core` they link against). The loader
+/// rejects a plugin whose value differs: between ABI versions the vtable
+/// layouts of `Tool`/`ToolSchema`/`ToolParams` etc. can change, and loading a
+/// stale DLL would then corrupt the host's heap (segfault / access violation
+/// deep in unrelated code) instead of failing cleanly.
+pub const PLUGIN_ABI_VERSION: u32 = 1;
+
 /// Opaque FFI-safe wrapper for passing trait objects across the plugin boundary.
 /// Plugins box their Tool and return this wrapper; the host converts it back.
 /// Uses two raw pointers (vtable + data) to represent the wide *mut dyn Tool pointer.

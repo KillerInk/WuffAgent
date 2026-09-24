@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::tools::builtin::{CalculationTool, ReadFileTool};
-use crate::tools::types::{ToolLogger, TracingToolLogger};
+use crate::tools::types::{ToolLogger, ToolOutput, ToolParams, TracingToolLogger};
 
 fn mock_logger() -> Arc<dyn ToolLogger> {
     Arc::new(TracingToolLogger)
@@ -18,6 +18,7 @@ fn make_entry(tool: Arc<dyn Tool>) -> ToolEntry {
             dependencies: vec![],
         },
         loaded_at: Instant::now(),
+        plugin: None,
     }
 }
 
@@ -158,5 +159,57 @@ fn test_discover_plugins_broken_dll_reports_failed_not_err() {
     assert_eq!(outcomes.len(), 1, "one file scanned");
     assert_eq!(outcomes[0].status, PluginLoadStatus::Failed);
     assert!(outcomes[0].error.as_ref().unwrap().contains("bogus.dll"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_plugin_tool_usable_after_discover_returns() {
+    // Regression test for the use-after-unload crash: `load_one_plugin` used
+    // to drop the `PluginHandle` (owner of the `Library`) when it returned,
+    // which unloaded the DLL while the registered `Arc<dyn Tool>` still
+    // carried the plugin's vtable. The next vtable call — e.g.
+    // `to_tool_definitions` when the agent loads its tool set — crashed with
+    // STATUS_ACCESS_VIOLATION.
+    let manifest = match std::env::var("CARGO_MANIFEST_DIR").ok() {
+        Some(m) => m,
+        None => return,
+    };
+    let dll = std::path::Path::new(&manifest)
+        .parent()
+        .unwrap()
+        .join("target/debug/hello_plugin.dll");
+    if !dll.exists() {
+        eprintln!("skipping: hello_plugin.dll not built (cargo build -p hello_plugin)");
+        return;
+    }
+    // Copy the DLL into a scratch dir so the scan only ever sees it.
+    let dir = std::env::temp_dir().join(format!("wa-reg-hello-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(&dll, dir.join("hello_plugin.dll")).unwrap();
+
+    let registry = ToolRegistry::new(vec![dir.clone()], mock_logger());
+    let outcomes = registry.discover_plugins_detailed().unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, PluginLoadStatus::Loaded);
+    assert_eq!(registry.list().len(), 1);
+
+    // `discover_plugins` has returned — the handle that loaded the DLL is
+    // gone from the loader's scope. Every call below goes through the
+    // plugin's vtable and must still work.
+    let tool = registry.get("hello").expect("hello registered");
+    assert_eq!(tool.name(), "hello");
+    assert_eq!(tool.parameters_schema().name, "hello");
+    match tool.execute(ToolParams::default()) {
+        Ok(ToolOutput::Success(_)) => {}
+        other => panic!("hello execute failed: {other:?}"),
+    }
+    assert_eq!(registry.to_tool_definitions().len(), 1);
+
+    // Drop the local tool clone FIRST (its Arc's drop glue lives in the DLL),
+    // then the registry (entry + keepalive handle → FreeLibrary), and only
+    // then remove the dir (the DLL file is locked while mapped).
+    drop(tool);
+    drop(registry);
     let _ = std::fs::remove_dir_all(&dir);
 }

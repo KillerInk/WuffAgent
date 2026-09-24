@@ -67,6 +67,7 @@ pub fn register_builtins(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     // Fetch a web page as plain text (companion to web_search).
@@ -79,6 +80,7 @@ pub fn register_builtins(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     // Named file tools (split from the old 14-action file_io god-tool so the
@@ -154,6 +156,7 @@ pub fn register_builtins(
                 dependencies: vec![],
             },
             loaded_at: std::time::Instant::now(),
+            plugin: None,
         })?;
     }
 
@@ -166,6 +169,7 @@ pub fn register_builtins(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     registry.register(ToolEntry {
@@ -177,6 +181,7 @@ pub fn register_builtins(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     registry.register(ToolEntry {
@@ -194,6 +199,7 @@ pub fn register_builtins(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     Ok(())
@@ -220,6 +226,7 @@ pub fn register_agent_tools(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     registry.register(ToolEntry {
@@ -231,6 +238,7 @@ pub fn register_agent_tools(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     Ok(())
@@ -306,6 +314,7 @@ pub fn register_mcp_tools(
                 dependencies: vec![],
             },
             loaded_at: std::time::Instant::now(),
+            plugin: None,
         })?;
     }
     Ok(())
@@ -341,6 +350,7 @@ pub fn register_memory_tools(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     registry.register(ToolEntry {
@@ -352,6 +362,7 @@ pub fn register_memory_tools(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     registry.register(ToolEntry {
@@ -363,6 +374,7 @@ pub fn register_memory_tools(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     registry.register(ToolEntry {
@@ -375,6 +387,7 @@ pub fn register_memory_tools(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     registry.register(ToolEntry {
@@ -386,6 +399,7 @@ pub fn register_memory_tools(
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
+        plugin: None,
     })?;
 
     Ok(())

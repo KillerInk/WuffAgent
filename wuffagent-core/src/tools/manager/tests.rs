@@ -23,6 +23,7 @@ fn manager_with_shell() -> ToolManager {
                 dependencies: vec![],
             },
             loaded_at: std::time::Instant::now(),
+            plugin: None,
         })
         .unwrap();
     ToolManager::new(Arc::new(registry))

@@ -134,6 +134,11 @@ impl ToolManager {
         shell_cfg: Option<crate::agents::config::ShellConfig>,
     ) -> Arc<ToolRegistry> {
         let mut entries = self.registry.list();
+        tracing::debug!(
+            entries = entries.len(),
+            per_agent_shell = shell_cfg.is_some(),
+            "Rebuilding per-agent tool registry"
+        );
         if let Some(cfg) = shell_cfg {
             let new_shell = crate::tools::builtin::shell::ShellTool::new(
                 crate::tools::builtin::shell::ShellConfig::from(cfg),
@@ -153,6 +158,7 @@ impl ToolManager {
                 tool: std::sync::Arc::new(new_shell),
                 metadata: meta,
                 loaded_at: std::time::Instant::now(),
+                plugin: None,
             });
         }
         let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
@@ -182,6 +188,10 @@ impl ToolManager {
     /// agents dir, and target allowlist.
     pub fn with_handoff_tool(&self, tool: crate::tools::builtin::handoff::HandoffTool) -> Self {
         let mut entries = self.registry.list();
+        tracing::debug!(
+            entries = entries.len(),
+            "Rebuilding per-agent tool registry (with per-execution handoff tool)"
+        );
         let meta = entries
             .iter()
             .find(|e| e.metadata.name == "handoff")
@@ -197,6 +207,7 @@ impl ToolManager {
             tool: std::sync::Arc::new(tool),
             metadata: meta,
             loaded_at: std::time::Instant::now(),
+            plugin: None,
         });
         let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
@@ -216,6 +227,10 @@ impl ToolManager {
     /// `restart_enabled` agents a restart tool wired to their own mailbox.
     pub fn with_restart_tool(&self, tool: crate::tools::builtin::restart::RestartTool) -> Self {
         let mut entries = self.registry.list();
+        tracing::debug!(
+            entries = entries.len(),
+            "Rebuilding per-agent tool registry (with per-execution restart tool)"
+        );
         let meta = entries
             .iter()
             .find(|e| e.metadata.name == "restart")
@@ -232,6 +247,7 @@ impl ToolManager {
             tool: std::sync::Arc::new(tool),
             metadata: meta,
             loaded_at: std::time::Instant::now(),
+            plugin: None,
         });
         let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
         for entry in entries {
