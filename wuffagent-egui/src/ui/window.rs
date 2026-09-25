@@ -65,7 +65,7 @@ impl ChatApp {
             let closed = dialog.show(ctx);
             if closed {
                 if let Err(e) = dialog.store.save(&get_presets_path()) {
-                    eprintln!("Failed to save presets: {}", e);
+                    tracing::warn!(error = %e, "Failed to save presets");
                 }
                 self.dialogs.presets_dialog = None;
             }
@@ -203,7 +203,7 @@ impl ChatApp {
 
         // Save the current session before switching
         if let Err(e) = self.save_session() {
-            eprintln!("Failed to save session before switch: {}", e);
+            tracing::warn!(error = %e, "Failed to save session before switch");
         }
 
         // Update the panel's selected_id so the UI reflects the switch immediately
@@ -376,11 +376,11 @@ impl eframe::App for ChatApp {
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         // Save config via centralized method
         if let Err(e) = self.save_config() {
-            eprintln!("Failed to save config: {}", e);
+            tracing::warn!(error = %e, "Failed to save config");
         }
         // Save current session via centralized method
         if let Err(e) = self.save_session() {
-            eprintln!("Failed to save session: {}", e);
+            tracing::warn!(error = %e, "Failed to save session");
         }
     }
 }

@@ -270,4 +270,66 @@ for line in sys.stdin:
         rx.await.unwrap().unwrap();
         manager.shutdown();
     }
+
+    #[tokio::test]
+    async fn allowlist_filters_tools_on_connect_and_refresh() {
+        let Some(python) = find_python() else {
+            eprintln!("python not available, skipping MCP allowlist test");
+            return;
+        };
+        let registry = Arc::new(ToolRegistry::new(Vec::new(), Arc::new(TracingToolLogger)));
+        let manager = McpManager::new(registry.clone());
+
+        // Allowlist keeps ONLY `echo` — `fail_tool` must never register.
+        manager
+            .upsert_server(crate::config::McpServerConfig {
+                name: "mock".to_string(),
+                transport: crate::config::McpTransport::Stdio {
+                    command: python.clone(),
+                    args: vec!["-c".to_string(), MOCK_SERVER_PY.to_string()],
+                    env: HashMap::new(),
+                    working_dir: None,
+                },
+                enabled: true,
+                timeout_secs: 10,
+                allowed_tools: vec!["echo".to_string()],
+            })
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let m2 = manager.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(m2.connect_sync("mock"));
+        });
+        let count = rx.await.unwrap().expect("connect with allowlist");
+        assert_eq!(count, 1, "only the allowlisted tool registers");
+        assert!(registry.get("mcp__mock__echo").is_some());
+        assert!(registry.get("mcp__mock__fail_tool").is_none());
+        // The server's tool list is filtered too (UI snapshot source).
+        let snap = manager.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].tools.len(), 1);
+        assert_eq!(snap[0].tools[0].name, "echo");
+
+        // Refresh re-applies the allowlist (server still reports both).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let m3 = manager.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(m3.refresh_tools_sync("mock"));
+        });
+        let count = rx.await.unwrap().expect("refresh with allowlist");
+        assert_eq!(count, 1);
+        assert!(registry.get("mcp__mock__echo").is_some());
+        assert!(registry.get("mcp__mock__fail_tool").is_none());
+
+        // Remove + shutdown (runtime dropped on a plain thread).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let m4 = manager.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(m4.remove_server_sync("mock"));
+        });
+        rx.await.unwrap().unwrap();
+        assert!(registry.get("mcp__mock__echo").is_none());
+        manager.shutdown();
+    }
 }

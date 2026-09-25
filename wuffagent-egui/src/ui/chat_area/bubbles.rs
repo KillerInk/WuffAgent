@@ -438,7 +438,7 @@ impl ChatApp {
                 }
             }
             if let Err(e) = self.save_session_for(&sid) {
-                eprintln!("Failed to save session after edit: {}", e);
+                tracing::warn!(error = %e, "Failed to save session after edit");
             }
         }
         
@@ -492,7 +492,7 @@ impl ChatApp {
                 }
             }
             if let Err(e) = self.save_session_for(&sid) {
-                eprintln!("Failed to save session after delete: {}", e);
+                tracing::warn!(error = %e, "Failed to save session after delete");
             }
         }
     }

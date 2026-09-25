@@ -65,7 +65,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
                 let mut cfg = panel.config().clone();
                 cfg.session_id = Some(session.id.clone());
                 if let Err(e) = cfg.save() {
-                    eprintln!("Failed to save config after creating session: {}", e);
+                    tracing::warn!(error = %e, "Failed to save config after creating session");
                 }
             }
             panel.refresh();
@@ -89,7 +89,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
                     let mut cfg = panel.config().clone();
                     cfg.session_id = None;
                     if let Err(e) = cfg.save() {
-                        eprintln!("Failed to save config after deleting session: {}", e);
+                        tracing::warn!(error = %e, "Failed to save config after deleting session");
                     }
                     panel.show_notification("Session deleted", true);
                 }

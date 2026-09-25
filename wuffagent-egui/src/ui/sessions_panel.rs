@@ -395,7 +395,7 @@ impl SessionsPanel {
                         // Update config so the selected session is loaded on next app start
                         self.config.session_id = Some(session.id.clone());
                         if let Err(e) = self.config.save() {
-                            eprintln!("Failed to save config after selecting session: {}", e);
+                            tracing::warn!(error = %e, "Failed to save config after selecting session");
                         }
                     }
                     if response.double_clicked() {

@@ -43,8 +43,11 @@ pub fn looks_like_complete_json(s: &str) -> bool {
         match ch {
             '\\' if in_string => escape = true,
             '"' => in_string = !in_string,
-            '{' | '[' => depth += 1,
-            '}' | ']' => {
+            // Braces/brackets only count OUTSIDE strings: arguments like
+            // `{"s": "x}"}` are complete even though the in-string brace
+            // would otherwise unbalance the counter.
+            '{' | '[' if !in_string => depth += 1,
+            '}' | ']' if !in_string => {
                 depth -= 1;
                 if depth < 0 {
                     return false;

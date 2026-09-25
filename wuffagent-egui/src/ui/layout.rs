@@ -186,7 +186,7 @@ impl ChatApp {
             // (set_config) and reverted on restart.
             self.core.config.memory_config = mconfig;
             if let Err(e) = self.save_config() {
-                eprintln!("Failed to save memory settings: {}", e);
+                tracing::warn!(error = %e, "Failed to save memory settings");
             }
         }
     }
@@ -201,7 +201,7 @@ impl ChatApp {
         let new_theme: &str = if self.core.config.theme == "dark" { "light" } else { "dark" };
         self.core.config.theme = new_theme.to_string();
         if let Err(e) = self.save_config() {
-            eprintln!("Failed to save theme: {}", e);
+            tracing::warn!(error = %e, "Failed to save theme");
         }
 
         // Apply custom theme colors

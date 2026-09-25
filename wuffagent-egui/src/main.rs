@@ -149,7 +149,7 @@ fn bootstrap() -> (
             cfg
         }
         Err(e) => {
-            eprintln!("Failed to load config: {}, using defaults", e);
+            tracing::warn!(error = %e, "Failed to load config, using defaults");
             Config { file_path: config_path.clone(), ..Default::default() }
         }
     };
@@ -237,7 +237,7 @@ fn bootstrap() -> (
 
     builtin::register_builtins(&registry, &config.search_config).expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
-        eprintln!("Warning: failed to discover plugins: {}", e);
+        tracing::warn!(error = %e, "Failed to discover plugins");
     }
 
     let tool_manager: Arc<ToolManager> = Arc::new(ToolManager::new(registry.clone()));

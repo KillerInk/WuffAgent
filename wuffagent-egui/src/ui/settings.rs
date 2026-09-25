@@ -192,7 +192,7 @@ impl SettingsDialog {
         // Apply the selected preset (server/connection settings live in presets).
         if let Some(ref name) = self.selected_preset {
             if let Err(e) = self.presets.apply(name, &mut cfg) {
-                eprintln!("Failed to apply preset '{}': {}", name, e);
+                tracing::warn!(preset = %name, error = %e, "Failed to apply preset");
             }
         }
         cfg.system_prompt.clone_from(&self.system_prompt);
@@ -221,7 +221,7 @@ impl SettingsDialog {
         };
         // Save via the shared config reference
         if let Err(e) = cfg.save() {
-            eprintln!("Failed to save config: {}", e);
+            tracing::warn!(error = %e, "Failed to save config");
             return;
         }
         self.config_dirty = true;

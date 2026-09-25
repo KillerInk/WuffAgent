@@ -275,10 +275,10 @@ impl ChatApp {
                     let _ = std::fs::create_dir_all(parent);
                 }
                 if let Err(e) = std::fs::write(&marker_path, json) {
-                    eprintln!("Failed to write restart marker: {}", e);
+                    tracing::warn!(path = %marker_path.display(), error = %e, "Failed to write restart marker");
                 }
             }
-            Err(e) => eprintln!("Failed to serialize restart marker: {}", e),
+            Err(e) => tracing::warn!(error = %e, "Failed to serialize restart marker"),
         }
         // Spawn the new process with the current CLI args (minus the program name).
         // On Windows the running exe is locked, so a self-build should point
@@ -314,7 +314,7 @@ impl ChatApp {
         let args: Vec<String> = std::env::args().skip(1).collect();
         match std::process::Command::new(&exe).args(&args).spawn() {
             Ok(_) => self.restart.pending_restart = true,
-            Err(e) => eprintln!("Failed to relaunch WuffAgent ({:?}): {}", exe, e),
+            Err(e) => tracing::error!(exe = %exe, error = %e, "Failed to relaunch WuffAgent"),
         }
     }
 }

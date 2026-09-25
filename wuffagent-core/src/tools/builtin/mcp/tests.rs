@@ -22,8 +22,11 @@ fn temp_config(tag: &str) -> PathBuf {
 }
 
 /// Point `get_config_path()` at a temp file for the duration of the test.
-/// Tests touching the config file run sequentially (a single test binary's
-/// thread pool is the only concurrency we rely on here).
+/// Tests touching the config file hold [`CONFIG_PATH_LOCK`] — the path
+/// override is PROCESS-GLOBAL, so without the lock two file-based tests can
+/// interleave and each read the other's temp file (flaky failure).
+static CONFIG_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct ConfigPathGuard {
     previous: Option<PathBuf>,
 }
@@ -159,6 +162,7 @@ fn test_mcp_add_server_validation_errors() {
 
 #[test]
 fn test_update_mcp_servers_add_and_remove_roundtrip() {
+    let _lock = CONFIG_PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = temp_config("rmw");
     let _guard = ConfigPathGuard::new(path.clone());
 
@@ -192,6 +196,7 @@ fn test_update_mcp_servers_add_and_remove_roundtrip() {
 
 #[test]
 fn test_atomic_write_config_preserves_unrelated_fields() {
+    let _lock = CONFIG_PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = temp_config("atomic");
     let _guard = ConfigPathGuard::new(path.clone());
     let mut cfg = Config::default();
