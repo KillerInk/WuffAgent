@@ -383,6 +383,7 @@ impl ChatApp {
             "copy" | "move" | "delete" | "file_info" => "📦",
             "web_search" => "🌐",
             "fetch_url" => "🔗",
+            "show_image" => "🖼️",
             "calculation" => "🧮",
             "time" => "🕐",
             "save_memory" | "update_memory" | "search_memory"

@@ -4,6 +4,8 @@
 use eframe::egui;
 
 use crate::ui::state::ChatApp;
+use base64::Engine;
+
 use crate::ui::theme::Theme;
 use wuffagent_core::types::ChatMessage;
 
@@ -18,6 +20,8 @@ struct ToolCardInfo {
     is_error: bool,
     duration_ms: Option<u64>,
     raw_result: String,
+    /// `data:` URI of an image to render inside the card (show_image results).
+    image_uri: Option<String>,
 }
 
 impl ChatApp {
@@ -52,6 +56,7 @@ impl ChatApp {
                 let raw_result = card.raw_result.clone();
                 let args = card.args.clone();
                 let duration_ms = card.duration_ms;
+                let image_uri = card.image_uri.clone();
                 let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
 
                 egui::Frame::NONE
@@ -155,6 +160,14 @@ impl ChatApp {
                                 egui::Stroke::new(1.0, theme.divider),
                             );
                             ui.add_space(6.0);
+                        } else if let Some(uri) = &image_uri {
+                            // show_image: the whole point is the picture — render
+                            // it right in the collapsed card (the expanded view
+                            // shows the image plus the metadata JSON fields).
+                            ui.add_space(6.0);
+                            Self::draw_data_uri_image(ui, uri, 260.0, theme);
+                        }
+                        if is_expanded {
                             if raw_result.trim().is_empty() {
                                 ui.label(egui::RichText::new("(no output)")
                                     .color(theme.text_dim).italics().size(11.0));
@@ -197,6 +210,7 @@ impl ChatApp {
                     is_error: true,
                     duration_ms,
                     raw_result: raw_result.trim().to_string(),
+                    image_uri: None,
                 };
             }
         }
@@ -215,6 +229,7 @@ impl ChatApp {
                     is_error: true,
                     duration_ms,
                     raw_result: raw_result.trim().to_string(),
+                    image_uri: None,
                 };
             }
         }
@@ -255,7 +270,19 @@ impl ChatApp {
             is_error: false,
             duration_ms,
             raw_result: raw_result.trim().to_string(),
+            image_uri: Self::tool_result_image_uri(raw_result),
         }
+    }
+
+    /// Extract a renderable image `data:` URI from a tool result (show_image
+    /// returns one in its JSON `data_uri` field), if present.
+    fn tool_result_image_uri(raw: &str) -> Option<String> {
+        let value = serde_json::from_str::<serde_json::Value>(raw.trim()).ok()?;
+        value
+            .get("data_uri")
+            .and_then(|d| d.as_str())
+            .filter(|d| d.starts_with("data:image/"))
+            .map(str::to_string)
     }
 
     /// One-line summary of a tool result shown in the collapsed tool card.
@@ -265,6 +292,18 @@ impl ChatApp {
             return "(no output)".to_string();
         }
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            // Image result (show_image): name/caption + dimensions, not "N chars".
+            if json.get("data_uri").and_then(|v| v.as_str()).is_some_and(|d| d.starts_with("data:image/")) {
+                let label = json
+                    .get("caption")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| json.get("path").and_then(|v| v.as_str()))
+                    .unwrap_or("image");
+                let label: String = label.chars().take(64).collect();
+                let w = json.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+                let h = json.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                return format!("🖼 {label} · {w}×{h} px");
+            }
             // Shell output: exit status + output volume.
             if let Some(code) = json.get("exit_code").and_then(|v| v.as_u64()) {
                 let lines_part = |key: &str| -> Option<String> {
@@ -392,6 +431,38 @@ impl ChatApp {
                 false,
             ));
         });
+    }
+
+    /// Render an image from a `data:image/...;base64,` URI (as returned by
+    /// the show_image tool), scaled to fit the available width / max height.
+    ///
+    /// The decoded bytes are hashed into the texture URI because egui's bytes
+    /// loader keeps the FIRST payload stored per URI (a fixed URI would show
+    /// a stale image — same reasoning as the chat-input attach flow).
+    pub(super) fn draw_data_uri_image(ui: &mut egui::Ui, uri: &str, max_height: f32, theme: &Theme) {
+        let Some(bytes) = Self::data_uri_to_bytes(uri) else {
+            ui.label(egui::RichText::new("(could not decode image)")
+                .color(theme.text_dim)
+                .size(10.5)
+                .italics());
+            return;
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hasher::write(&mut hasher, &bytes);
+        let hash = std::hash::Hasher::finish(&mut hasher);
+        let img = egui::Image::from_bytes(format!("show_image_{hash:016x}.jpg"), bytes);
+        let max_width = (ui.available_width() - 8.0).max(60.0);
+        ui.add(img.max_size(egui::Vec2::new(max_width, max_height)));
+    }
+
+    /// Decode a `data:[<mime>];base64,<payload>` URI into raw image bytes.
+    fn data_uri_to_bytes(uri: &str) -> Option<Vec<u8>> {
+        let rest = uri.strip_prefix("data:")?;
+        let (meta, payload) = rest.split_once(',')?;
+        if !meta.to_ascii_lowercase().ends_with(";base64") {
+            return None;
+        }
+        base64::engine::general_purpose::STANDARD.decode(payload).ok()
     }
 
     /// Themed code block: theme background, 1px border, uniform padding.

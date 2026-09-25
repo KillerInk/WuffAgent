@@ -29,6 +29,9 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 tokio-util = { version = "0.7", features = ["io"] }
 glob = "0.3.1"
 regex = "1.10"
+# Image decoding/encoding for the `show_image` tool (same format set as the
+# egui side's file picker: png/jpg/gif/bmp/webp).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 
 [dev-dependencies]
 tempfile = "3.0"

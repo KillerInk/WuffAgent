@@ -180,21 +180,25 @@ pub(crate) async fn run_native_tool_calls(
             }
         };
         // Early-started calls sent their ToolCallStart mid-stream; emit the
-        // completion in call order now.
+        // completion in call order now. The UI card gets the FULL result
+        // (it renders the image from the `data_uri` field).
         agent.send_event(crate::types::AppEvent::ToolCallComplete {
             tool_name: call.function.name.clone(),
             call_id: call.id.clone(),
             result: result_str.clone(),
             session_id: agent.session_id(),
         });
+        // The MODEL gets show_image's picture as a real image part instead
+        // of a base64 text blob (see tool_msg_image_fields).
+        let (msg_content, msg_image) = tool_msg_image_fields(&call.function.name, &result_str);
         let tool_msg = Message {
             role: "tool".to_string(),
-            content: result_str,
+            content: msg_content,
             timestamp: crate::types::format_timestamp(),
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
             reasoning_content: None,
-            image: None,
+            image: msg_image,
         };
         messages.push(tool_msg.clone());
         agent.record_in_store(&tool_msg);
@@ -278,6 +282,7 @@ pub(crate) async fn run_text_embedded_calls(
             result: result_str.clone(),
             session_id: agent.session_id(),
         });
+        let (msg_content, msg_image) = tool_msg_image_fields(&call.function.name, &result_str);
         // History entry in API-native shape (id links the result).
         let fb_assistant = Message {
             role: "assistant".to_string(),
@@ -299,15 +304,94 @@ pub(crate) async fn run_text_embedded_calls(
         agent.record_in_store(&fb_assistant);
         let fb_tool = Message {
             role: "tool".to_string(),
-            content: result_str,
+            content: msg_content,
             timestamp: crate::types::format_timestamp(),
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
             reasoning_content: None,
-            image: None,
+            image: msg_image,
         };
         messages.push(fb_tool.clone());
         agent.record_in_store(&fb_tool);
     }
     Ok(true)
+}
+
+/// Model-facing fields for a tool-result message.
+///
+/// `show_image` returns the rendered picture as a base64 `data_uri` inside
+/// its result JSON. As plain text that payload is unreadable to the model
+/// (tens of thousands of base64 "tokens" of noise). So for show_image the
+/// base64 is MOVED into the message's `image` field — serialized on the wire
+/// as an OpenAI/llama.cpp `image_url` content part, i.e. the same multimodal
+/// shape attached user images use — and the JSON text keeps a short
+/// placeholder plus the metadata (path, dimensions, size). Other tools and
+/// non-JSON results pass through unchanged.
+fn tool_msg_image_fields(tool_name: &str, result_str: &str) -> (String, Option<String>) {
+    if tool_name != "show_image" {
+        return (result_str.to_string(), None);
+    }
+    let mut value = match serde_json::from_str::<serde_json::Value>(result_str) {
+        Ok(v) => v,
+        Err(_) => return (result_str.to_string(), None),
+    };
+    let uri = match value
+        .get("data_uri")
+        .and_then(|v| v.as_str())
+        .filter(|u| u.starts_with("data:image/"))
+    {
+        Some(u) => u.to_string(),
+        None => return (result_str.to_string(), None),
+    };
+    let kb = value
+        .get("bytes")
+        .and_then(|v| v.as_u64())
+        .map(|b| b / 1024)
+        .unwrap_or(0);
+    value["data_uri"] =
+        serde_json::json!(format!("(sent to the model as an image part; {kb} KB JPEG)"));
+    (value.to_string(), Some(uri))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_msg_image_fields;
+
+    #[test]
+    fn show_image_result_moves_payload_into_image_part() {
+        let result = r#"{"path":"C:/x/y.png","source":"file","format":"png","width":900,"height":506,"bytes":123456,"data_uri":"data:image/jpeg;base64,AAAA"}"#;
+        let (content, image) = tool_msg_image_fields("show_image", result);
+        assert_eq!(
+            image.as_deref(),
+            Some("data:image/jpeg;base64,AAAA"),
+            "the data URI must move into the image part"
+        );
+        assert!(!content.contains("AAAA"), "base64 payload must leave the text");
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["path"], "C:/x/y.png");
+        assert_eq!(v["width"], 900);
+        assert!(v["data_uri"].as_str().unwrap().starts_with("(sent to the model"));
+    }
+
+    #[test]
+    fn other_tools_pass_through() {
+        let (content, image) = tool_msg_image_fields("read_file", r#"{"path":"a.rs"}"#);
+        assert_eq!(content, r#"{"path":"a.rs"}"#);
+        assert!(image.is_none());
+    }
+
+    #[test]
+    fn show_image_without_data_uri_passes_through() {
+        let (content, image) = tool_msg_image_fields("show_image", "Error: could not read image file");
+        assert_eq!(content, "Error: could not read image file");
+        assert!(image.is_none());
+    }
+
+    #[test]
+    fn show_image_non_image_data_uri_passes_through() {
+        let result = r#"{"data_uri":"data:text/plain;base64,AAAA"}"#;
+        let (content, image) = tool_msg_image_fields("show_image", result);
+        assert_eq!(content, result);
+        assert!(image.is_none());
+    }
 }

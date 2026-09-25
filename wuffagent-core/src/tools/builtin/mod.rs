@@ -2,6 +2,7 @@ pub mod agent_profile;
 pub mod calculation;
 pub mod fetch_url;
 pub mod fileio;
+pub mod image;
 pub mod hand_back;
 pub mod handoff;
 pub(crate) mod html;
@@ -17,6 +18,7 @@ pub mod web_search;
 pub use agent_profile::{EditAgentProfileTool, ListAgentsTool};
 pub use calculation::CalculationTool;
 pub use fetch_url::FetchUrlTool;
+pub use image::ShowImageTool;
 pub use fileio::{
     AppendFileTool, ApplyDiffTool, CopyTool, DeleteTool, FileInfoTool, ListDirTool, MkdirTool,
     MoveTool, ReadFileTool, SearchFilesTool, WriteFileTool,
@@ -82,6 +84,19 @@ pub fn register_builtins(
             name: "fetch_url".to_string(),
             version: "1.0.0".to_string(),
             description: "Fetch a URL and return its content as plain text (HTML is converted to text). Params: url (required), max_bytes (optional, default 128KB)".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+        plugin: None,
+    })?;
+
+    // Load + display an image (file path, data: URI, or URL) in the chat.
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(ShowImageTool::new()),
+        metadata: ToolMetadata {
+            name: "show_image".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Load an image (file path, data: URI, or http(s) URL), downscale it, and display it in the chat (the UI renders the returned data URI in the tool card)".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),

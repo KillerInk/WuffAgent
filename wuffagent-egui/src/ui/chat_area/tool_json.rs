@@ -12,6 +12,45 @@ impl ChatApp {
     /// Called only with the tool card already expanded, so long content
     /// (e.g. file reads) is shown directly in a height-capped scroll area.
     pub(super) fn draw_tool_json_result(&self, ui: &mut egui::Ui, json: &serde_json::Value, raw: &str, theme: &Theme) {
+        // Image result (show_image): render the picture itself, then a small
+        // metadata line (format/dimensions/size + source path or URL).
+        if json.get("data_uri").and_then(|v| v.as_str()).is_some_and(|d| d.starts_with("data:image/")) {
+            if let Some(caption) = json.get("caption").and_then(|v| v.as_str()) {
+                if !caption.trim().is_empty() {
+                    ui.label(egui::RichText::new(caption)
+                        .color(theme.text_secondary)
+                        .size(11.5)
+                        .italics());
+                    ui.add_space(2.0);
+                }
+            }
+            let uri = json["data_uri"].as_str().unwrap_or_default().to_string();
+            Self::draw_data_uri_image(ui, &uri, 420.0, theme);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let format = json.get("format").and_then(|v| v.as_str()).unwrap_or("?");
+                let w = json.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+                let h = json.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                let kb = json.get("bytes").and_then(|v| v.as_u64()).map(|b| b / 1024).unwrap_or(0);
+                ui.label(egui::RichText::new(format!("{format} · {w}×{h} · {kb} KB"))
+                    .color(theme.text_dim)
+                    .size(10.0)
+                    .monospace());
+                if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+                    if json.get("source").and_then(|v| v.as_str()) == Some("file") {
+                        self.draw_tool_path_badge(ui, path, theme);
+                    } else if !path.is_empty() {
+                        let p: String = path.chars().take(80).collect();
+                        ui.label(egui::RichText::new(p)
+                            .color(theme.text_dim)
+                            .size(10.0)
+                            .monospace());
+                    }
+                }
+            });
+            return;
+        }
         // Shell output: {exit_code, stdout, stderr, duration_ms, truncated} —
         // render a status line plus stdout/stderr as line-by-line code blocks
         // (one giant wrapped label is unreadable for command output).

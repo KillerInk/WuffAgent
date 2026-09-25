@@ -43,6 +43,7 @@ pub fn tool_args_summary(name: &str, arguments: &str) -> String {
             "search_content" => &["pattern", "path"],
             "web_search" | "search_memory" => &["query"],
             "fetch_url" => &["url"],
+            "show_image" => &["path"],
             "calculation" => &["expression"],
             "save_memory" | "update_memory" | "consolidate_memories" => &["content"],
             "handoff" => &["task"],
