@@ -509,6 +509,17 @@ impl Agent {
         // I1: record this run's tool-use trajectory for the improver.
         self.run_stats =
             Self::run_stats_since(messages, run_start_len, verify_state.attempts);
+        // M1: per-agent metrics line (trajectory + terminal verification
+        // outcome + wall-clock duration). Each handoff hop records its own
+        // line under its own agent; best-effort, never fails the run.
+        crate::agents::metrics::record_run(
+            &self.config.name,
+            self.run_stats.tool_calls as u32,
+            self.run_stats.tool_errors as u32,
+            verify_state.attempts,
+            start.elapsed().as_millis() as u64,
+            verify_state.final_outcome.unwrap_or(crate::agents::metrics::RunOutcome::None),
+        );
         Ok(outcome)
     }
 }

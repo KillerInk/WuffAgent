@@ -41,6 +41,9 @@ pub fn remember_feedback(
     task_snippet: &str,
     comment: &str,
 ) -> Result<bool, String> {
+    // M1: the metrics line is recorded regardless of the memory store
+    // (metrics are always on; best-effort, never fails the rating).
+    wuffagent_core::agents::metrics::record_feedback(profile_name, good);
     if !memory.config().enabled {
         return Ok(false);
     }

@@ -15,6 +15,7 @@ pub mod config;
 pub mod engine;
 pub mod improvement;
 pub mod manager;
+pub mod metrics;
 pub mod traits;
 pub mod types;
 

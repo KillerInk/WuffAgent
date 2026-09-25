@@ -274,6 +274,35 @@ impl AgentConfigDialog {
                                                 ui.checkbox(&mut self.tool_checkboxes[i], tool);
                                             }
 
+                                            // M1: read-only recent metrics for the selected
+                                            // EXISTING agent (run/outcome/feedback counts + the
+                                            // last few metric lines) from the per-agent log.
+                                            if let Some(name) = &history_agent {
+                                                let metrics = wuffagent_core::agents::metrics::MetricsLog::default();
+                                                let summary = metrics.summary_since(name, None);
+                                                if summary.runs + summary.feedback_up + summary.feedback_down > 0 {
+                                                    ui.separator();
+                                                    ui.group(|ui| {
+                                                        ui.label(egui::RichText::new("Recent metrics (all time):").strong());
+                                                        ui.label(format!(
+                                                            "{} run(s): {} verified, {} after retry, {} gave up, {} before verification; {} tool call(s) ({} errors); feedback {} up / {} down",
+                                                            summary.runs,
+                                                            summary.verified,
+                                                            summary.verified_after_retry,
+                                                            summary.gave_up,
+                                                            summary.not_verified,
+                                                            summary.tool_calls,
+                                                            summary.tool_errors,
+                                                            summary.feedback_up,
+                                                            summary.feedback_down
+                                                        ));
+                                                        for line in metrics.recent(name, 5).iter().rev() {
+                                                            ui.label(egui::RichText::new(format!("  {}", line.describe())).weak().small());
+                                                        }
+                                                    });
+                                                }
+                                            }
+
                                             // F4: prompt history + per-version Revert.
                                             if history_agent.is_some() {
                                                 ui.separator();

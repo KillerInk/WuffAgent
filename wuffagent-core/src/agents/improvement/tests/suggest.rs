@@ -217,3 +217,78 @@ fn test_cap_lessons_respects_budget() {
     assert!(capped.chars().count() <= 401, "{}", capped.chars().count());
     assert!(capped.ends_with('…'));
 }
+
+/// M1: recent run metrics for the agent (last 7 days) are added to the
+/// extraction prompt as a "Recent metrics (…)" line — and stay out of it
+/// when the agent has no recorded runs.
+#[tokio::test]
+async fn test_improvement_prompt_includes_recent_metrics() {
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+    let _metrics_guard = MetricsDirGuard::new();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "Watch out for off-by-one errors in the indexer",
+            "agent",
+            &["agent:metricsagent"],
+        ))
+        .unwrap();
+
+    let llm = Arc::new(CaptureLlm {
+        response: "[]".to_string(),
+        prompts: prompts.clone(),
+    });
+    let config = {
+        let mut cfg = test_agent_config();
+        cfg.name = "metricsagent".to_string();
+        cfg
+    };
+
+    // No metrics recorded yet -> no metrics line in the prompt.
+    let _ = suggest_improvements(
+        &manager,
+        &config,
+        "t",
+        "r",
+        &crate::agents::RunStats::default(),
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !prompts.lock().unwrap()[0].contains("Recent metrics ("),
+        "prompt: {}",
+        &prompts.lock().unwrap()[0]
+    );
+
+    // Record a run + feedback -> the next prompt carries the summary line.
+    crate::agents::metrics::record_run(
+        "metricsagent",
+        9,
+        3,
+        1,
+        12_345,
+        crate::agents::metrics::RunOutcome::VerifiedAfterRetry,
+    );
+    crate::agents::metrics::record_feedback("metricsagent", false);
+
+    let _ = suggest_improvements(
+        &manager,
+        &config,
+        "t",
+        "r",
+        &crate::agents::RunStats::default(),
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+    let prompt = &prompts.lock().unwrap()[1];
+    assert!(
+        prompt.contains("Recent metrics (1 run(s), 9 tool call(s) with 3 errors (33.3%),"),
+        "prompt: {}",
+        prompt
+    );
+    assert!(prompt.contains("1 verified_after_retry"), "prompt: {}", prompt);
+    assert!(prompt.contains("0 up / 1 down"), "prompt: {}", prompt);
+}

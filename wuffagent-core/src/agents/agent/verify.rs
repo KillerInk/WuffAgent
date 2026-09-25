@@ -256,13 +256,20 @@ impl Agent {
     }
 }
 
-/// Mutable verification bookkeeping for one run: the attempt counter and
-/// the last NEEDS_FIX reason seen (S1 outcome evidence).
+/// Mutable verification bookkeeping for one run: the attempt counter, the
+/// last NEEDS_FIX reason seen (S1 outcome evidence), and the terminal
+/// verification outcome (M1 metrics).
 pub(crate) struct VerificationState {
     /// Number of verification attempts made this run.
     pub(crate) attempts: u32,
     /// The last NEEDS_FIX judge reason seen this run (S1 outcome evidence).
     pub(crate) last_failed_reason: String,
+    /// M1: the terminal verification outcome, set when the run COMPLETES via
+    /// the verification path (the attempt count alone is ambiguous: with
+    /// MAX_VERIFICATION_ATTEMPTS=2 a second-attempt pass and a give-up both
+    /// end at attempts==2). `None` = the run ended before completing
+    /// verification (handoff/restart/hand-back).
+    pub(crate) final_outcome: Option<crate::agents::metrics::RunOutcome>,
 }
 
 impl VerificationState {
@@ -270,6 +277,7 @@ impl VerificationState {
         Self {
             attempts: 0,
             last_failed_reason: String::new(),
+            final_outcome: None,
         }
     }
 }
@@ -299,6 +307,8 @@ impl Agent {
                 &state.last_failed_reason,
                 original_request,
             );
+            // M1: terminal outcome for the metrics line.
+            state.final_outcome = Some(crate::agents::metrics::RunOutcome::GaveUp);
             tracing::info!(
                 "[AGENT] Agent '{}' completed ({} verification attempts)",
                 self.config.name,
@@ -329,6 +339,12 @@ impl Agent {
                         original_request,
                     );
                 }
+                // M1: terminal outcome for the metrics line.
+                state.final_outcome = Some(if state.attempts > 1 {
+                    crate::agents::metrics::RunOutcome::VerifiedAfterRetry
+                } else {
+                    crate::agents::metrics::RunOutcome::Verified
+                });
                 tracing::info!(
                     "[AGENT] Agent '{}' completed (verified)",
                     self.config.name
@@ -368,6 +384,9 @@ impl Agent {
                     self.config.name,
                     e
                 );
+                // M1: verification failed to run, but the response is accepted
+                // (default-pass) — record it as verified.
+                state.final_outcome = Some(crate::agents::metrics::RunOutcome::Verified);
                 self.send_event(crate::types::AppEvent::StreamComplete {
                     content: display_content.clone(),
                     usage,

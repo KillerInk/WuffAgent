@@ -217,6 +217,14 @@ pub async fn suggest_improvements(
     };
     // I1: trajectory line (also reused verbatim as evidence).
     let traj = trajectory_line(stats, prompt.chars().count());
+    // M1: this agent's recent run metrics (last 7 days) as outcome evidence —
+    // the trajectory line above covers only THIS run; the metrics cover the
+    // trend (error rate, verification outcomes, user feedback).
+    let metrics_line = {
+        let log = crate::agents::metrics::MetricsLog::default();
+        let since = chrono::Utc::now() - chrono::Duration::days(7);
+        log.summary_since(&agent_config.name, Some(since)).format_line()
+    };
     // I5: effect check — the last approved prompt change for this agent and
     // the outcomes recorded since it (None -> no section, prompt unchanged).
     let effect = effect_check_section(manager, &agent_config.name);
@@ -239,6 +247,7 @@ pub async fn suggest_improvements(
          Recent task: {}\n\
          Result: {}\n\
          \n\
+         {}\n\
          {}\n\
          \n\
          Previously rejected suggestions (do NOT re-suggest these):\n{}\n\
@@ -290,6 +299,7 @@ pub async fn suggest_improvements(
         task,
         result,
         traj,
+        metrics_line,
         rejected_text,
         memories_text,
         agent_config.name,
@@ -364,6 +374,10 @@ pub async fn suggest_improvements(
     // shows WHY a revert-style suggestion was made.
     if let Some((_, line)) = &effect {
         evidence.push(line.clone());
+    }
+    // M1: the metrics summary is deterministic evidence as well.
+    if !metrics_line.is_empty() {
+        evidence.push(metrics_line);
     }
     for s in &mut suggestions {
         s.evidence = evidence.clone();
