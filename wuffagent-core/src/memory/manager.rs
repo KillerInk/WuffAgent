@@ -251,40 +251,28 @@ impl MemoryManager {
     }
 
     /// Add multiple memory entries.
-    /// Uses fuzzy deduplication to avoid near-duplicate entries.
-    pub fn add_batch(&self, entries: Vec<MemoryEntry>) -> Result<(), String> {
-        let mut mem_entries = self.entries.lock().unwrap();
+    ///
+    /// Each entry runs through the same near-duplicate gate as
+    /// [`Self::add`] ([`is_near_duplicate`]) — checked against the existing
+    /// store AND earlier entries of this batch — and duplicates are skipped.
+    /// Returns the number of entries actually added.
+    pub fn add_batch(&self, entries: Vec<MemoryEntry>) -> Result<usize, String> {
+        let mut guard = self.entries.lock().unwrap();
+        let mut added = 0;
         for entry in entries {
-            // Check for duplicates with fuzzy matching.
-            let is_duplicate = mem_entries.iter().any(|existing| {
-                // Exact match first
-                if existing.content == entry.content
-                    && existing.r#type == entry.r#type
-                    && existing.tags == entry.tags
-                {
-                    return true;
-                }
-                // Fuzzy match: same type and high token overlap on content.
-                if existing.r#type != entry.r#type {
-                    return false;
-                }
-                let existing_tokens: std::collections::HashSet<&str> =
-                    existing.content.split_whitespace().collect();
-                let entry_tokens: std::collections::HashSet<&str> =
-                    entry.content.split_whitespace().collect();
-                let intersection = existing_tokens.intersection(&entry_tokens).count();
-                let union = existing_tokens.union(&entry_tokens).count();
-                union > 0 && (intersection as f64 / union as f64) > 0.75
-            });
-            if !is_duplicate {
-                mem_entries.push(entry);
+            if guard.iter().any(|existing| is_near_duplicate(existing, &entry)) {
+                continue;
             }
+            guard.push(entry);
+            added += 1;
         }
-        drop(mem_entries);
+        drop(guard);
 
-        self.evict_if_needed()?;
-        self.save()?;
-        Ok(())
+        if added > 0 {
+            self.evict_if_needed()?;
+            self.save()?;
+        }
+        Ok(added)
     }
 
     /// Update an existing memory entry by ID.

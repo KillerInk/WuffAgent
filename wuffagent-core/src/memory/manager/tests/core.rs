@@ -148,6 +148,88 @@ fn test_add_distinct_contents() {
 }
 
 #[test]
+fn test_add_batch_rejects_near_duplicates_like_add() {
+    let dir = tempdir().unwrap();
+    let config = MemoryConfig {
+        memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let manager = MemoryManager::new(config).unwrap();
+
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "Always run cargo test after modifying the memory module in this repository",
+            "test",
+            &["testing"],
+        ))
+        .unwrap();
+
+    let batch = vec![
+        // Near-duplicate of the existing entry -> same gate as add() -> skipped.
+        MemoryEntry::new(
+            MemoryType::Lesson,
+            "Always run cargo test after modifying the memory module in this repository, it catches regressions",
+            "test",
+            &["testing"],
+        ),
+        // Genuinely new -> added.
+        MemoryEntry::new(
+            MemoryType::Fact,
+            "The egui crate renders the chat interface with a custom theme system",
+            "test",
+            &["ui"],
+        ),
+    ];
+    assert_eq!(
+        manager.add_batch(batch).unwrap(),
+        1,
+        "only the non-duplicate batch entry may be added"
+    );
+    assert_eq!(manager.count(), 2);
+}
+
+#[test]
+fn test_add_batch_dedups_within_batch() {
+    let dir = tempdir().unwrap();
+    let config = MemoryConfig {
+        memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let manager = MemoryManager::new(config).unwrap();
+
+    let batch = vec![
+        MemoryEntry::new(
+            MemoryType::Fact,
+            "Session files are encrypted with the AES GCM cipher mode",
+            "test",
+            &["sessions"],
+        ),
+        // Near-duplicate of the FIRST batch entry (already pushed) -> skipped.
+        MemoryEntry::new(
+            MemoryType::Fact,
+            "Session files are encrypted with the AES GCM cipher mode and stored",
+            "test",
+            &["sessions"],
+        ),
+    ];
+    assert_eq!(manager.add_batch(batch).unwrap(), 1);
+    assert_eq!(manager.count(), 1);
+}
+
+#[test]
+fn test_add_batch_empty_is_noop() {
+    let dir = tempdir().unwrap();
+    let config = MemoryConfig {
+        memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let manager = MemoryManager::new(config).unwrap();
+    assert_eq!(manager.add_batch(vec![]).unwrap(), 0);
+    assert_eq!(manager.count(), 0);
+}
+
+#[test]
 fn test_get_recent_skips_superseded() {
     let dir = tempdir().unwrap();
     let config = MemoryConfig {
