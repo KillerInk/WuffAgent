@@ -57,7 +57,7 @@ exposed a real bug).
    (sessions/model.rs:148-168), `client/http.rs:127` request-building skip,
    regression test in sessions/model/tests.rs.
 10. [x] **Final gate**: `cargo test --workspace` green
-    (wuffagent-core 560 + wuffagent-egui 24 + 1 doctest, EXIT=0).
+    (wuffagent-core 565 + wuffagent-egui 24 + 1 doctest, EXIT=0).
 
 ## Test notes
 
@@ -69,4 +69,3 @@ exposed a real bug).
   `type:"function"` + `id` only on the FIRST fragment; continuations are
   index-only. Canned SSE lines must be balanced JSON — one missing `}`
   makes the whole line "unparseable" and the tool call silently vanishes.
-=======
