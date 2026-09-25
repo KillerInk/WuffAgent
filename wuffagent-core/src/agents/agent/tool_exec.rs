@@ -236,3 +236,116 @@ impl PendingToolRuns {
         move |call: ToolCall| runs.start(&call)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sleeps for `ms` (tool param, default 10) so tests can observe
+    /// cancellation of a slow tool.
+    struct SleepTool;
+
+    impl crate::tools::types::Tool for SleepTool {
+        fn name(&self) -> &str {
+            "sleep"
+        }
+        fn description(&self) -> &str {
+            "Sleeps for a given number of milliseconds"
+        }
+        fn parameters_schema(&self) -> crate::tools::types::ToolSchema {
+            crate::tools::types::ToolSchema {
+                name: "sleep".to_string(),
+                description: String::new(),
+                input_type: None,
+            }
+        }
+        fn execute(
+            &self,
+            params: crate::tools::types::ToolParams,
+        ) -> crate::tools::types::ToolResult<crate::tools::types::ToolOutput> {
+            let ms = params.get::<u64>("ms").unwrap_or(10);
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            Ok(crate::tools::types::ToolOutput::success(format!("slept {ms}ms")))
+        }
+    }
+
+    fn manager_with_sleep_tool() -> ToolManager {
+        use crate::tools::registry::{ToolEntry, ToolRegistry};
+        use crate::tools::types::TracingToolLogger;
+        let logger = Arc::new(TracingToolLogger);
+        let registry = ToolRegistry::new(vec![], logger.clone());
+        registry
+            .register(ToolEntry {
+                tool: Arc::new(SleepTool),
+                metadata: crate::tools::types::ToolMetadata {
+                    name: "sleep".to_string(),
+                    version: "0".to_string(),
+                    description: "test".to_string(),
+                    dependencies: vec![],
+                },
+                loaded_at: std::time::Instant::now(),
+                plugin: None,
+            })
+            .expect("register sleep tool");
+        ToolManager::new(Arc::new(registry))
+    }
+
+    #[tokio::test]
+    async fn cancelled_token_aborts_slow_tool_quickly() {
+        let manager = manager_with_sleep_tool();
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // pre-cancelled: the cancel branch is ready immediately
+        let started = std::time::Instant::now();
+        let result = execute_tool_call(
+            &manager,
+            &cancel,
+            "sleep",
+            r#"{"ms": 5000}"#,
+            &crate::tools::types::ToolProgress::none(),
+        )
+        .await;
+        // The tool itself sleeps 5 s; the select! must have bailed long before.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "cancellation should not wait for the tool to finish"
+        );
+        assert_eq!(result.as_deref(), Ok("Error: Cancelled (tool 'sleep' aborted)"));
+    }
+
+    #[tokio::test]
+    async fn bad_args_fail_fast_without_running_tool() {
+        let manager = manager_with_sleep_tool();
+        let cancel = CancellationToken::new();
+        let started = std::time::Instant::now();
+        let result = execute_tool_call(
+            &manager,
+            &cancel,
+            "sleep",
+            "{not json",
+            &crate::tools::types::ToolProgress::none(),
+        )
+        .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "parse errors must not wait for a tool run"
+        );
+        assert!(result.is_err(), "unparseable args are Err, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn success_result_passes_through_unmodified() {
+        let manager = manager_with_sleep_tool();
+        let cancel = CancellationToken::new();
+        let result = execute_tool_call(
+            &manager,
+            &cancel,
+            "sleep",
+            r#"{"ms": 1}"#,
+            &crate::tools::types::ToolProgress::none(),
+        )
+        .await;
+        // Note: JSON string values display with their quotes (ToolOutput's
+        // Display formats the serde value directly) — pre-existing behavior.
+        assert_eq!(result.as_deref(), Ok("\"slept 1ms\""));
+    }
+}
