@@ -289,6 +289,11 @@ fn bootstrap() -> (
     // Register memory tools with the memory manager
     builtin::register_memory_tools(&registry, memory_manager.clone()).expect("Failed to register memory tools");
 
+    // K1: skill (procedural memory) tools — backed by `<wuffagent_home>/skills/`.
+    // Shared-registry tools; per-profile visibility is gated by `allowed_tools`.
+    let skill_store = Arc::new(wuffagent_core::memory::skills::SkillStore::default());
+    builtin::register_skill_tools(&registry, skill_store).expect("Failed to register skill tools");
+
     // Agents directory (the `agents/` subdirectory next to the config file) —
     // the chat path resolves `handoff` targets from here (same directory the
     // UI's agent selector scans).

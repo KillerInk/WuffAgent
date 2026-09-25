@@ -83,6 +83,35 @@ impl Agent {
             }
         }
 
+        // Inject the available skills (name + when_to_use, capped) so the
+        // agent can read_skill the full body when one is relevant.
+        {
+            let skills_block = crate::memory::build_skills_prompt_block();
+            if !skills_block.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&skills_block);
+            }
+        }
+        // Skill tool guidance — only when the agent actually has the skill
+        // tools (`allowed_tools` empty = all tools; otherwise the gate is the
+        // presence of `save_skill`, like every other allowed_tools check).
+        if self
+            .config
+            .allowed_tools
+            .iter()
+            .any(|t| t == "save_skill")
+            || self.config.allowed_tools.is_empty()
+        {
+            prompt.push_str(
+                "\n\nYou have skill tools (save_skill, list_skills, read_skill, delete_skill) for \
+                 reusable procedures: when you complete a multi-step process, workflow, or \
+                 workaround that will be needed again, save it with save_skill (slug name, \
+                 one-line description, when_to_use, step-by-step body). When a skill from the \
+                 SKILLS block above (or from list_skills) looks relevant, call read_skill with \
+                 its name to get the full steps before following it.",
+            );
+        }
+
         // Note: system prompt caching would require &'mut self, which conflicts
         // with the LLM loop. The prompt is cheap to rebuild (~100ns).
         prompt

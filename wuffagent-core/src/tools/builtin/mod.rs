@@ -12,6 +12,7 @@ pub mod plugins;
 pub mod restart;
 pub mod search;
 pub mod shell;
+pub mod skills;
 pub mod time;
 pub mod web_search;
 
@@ -33,6 +34,7 @@ pub use mcp::{
 pub use plugins::{AddPluginPathTool, ReloadPluginsTool};
 pub use search::SearchContentTool;
 pub use shell::{ShellConfig, ShellTool};
+pub use skills::{DeleteSkillTool, ListSkillsTool, ReadSkillTool, SaveSkillTool};
 pub use time::TimeTool;
 pub use web_search::WebSearchTool;
 // NOTE: HandoffTool is NOT registered in `register_builtins` — it is
@@ -416,6 +418,68 @@ pub fn register_memory_tools(
             name: "delete_memory".to_string(),
             version: "1.0.0".to_string(),
             description: "Delete a memory entry by ID".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+        plugin: None,
+    })?;
+
+    Ok(())
+}
+
+/// Register the K1 skill tools: `save_skill`, `list_skills`, `read_skill`,
+/// `delete_skill` — backed by a [`SkillStore`](crate::memory::skills::SkillStore)
+/// (default root: `<wuffagent_home>/skills`).
+///
+/// Shared-registry tools; per-profile visibility is gated by `allowed_tools`
+/// like any other tool.
+pub fn register_skill_tools(
+    registry: &crate::tools::registry::ToolRegistry,
+    skills: std::sync::Arc<crate::memory::skills::SkillStore>,
+) -> crate::tools::types::ToolResult<()> {
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(SaveSkillTool::new(skills.clone())),
+        metadata: ToolMetadata {
+            name: "save_skill".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Save a reusable procedure (skill) as a named markdown document"
+                .to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+        plugin: None,
+    })?;
+
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(ListSkillsTool::new(skills.clone())),
+        metadata: ToolMetadata {
+            name: "list_skills".to_string(),
+            version: "1.0.0".to_string(),
+            description: "List saved skills (name, description, when_to_use)".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+        plugin: None,
+    })?;
+
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(ReadSkillTool::new(skills.clone())),
+        metadata: ToolMetadata {
+            name: "read_skill".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Read a saved skill's full content by name".to_string(),
+            dependencies: vec![],
+        },
+        loaded_at: std::time::Instant::now(),
+        plugin: None,
+    })?;
+
+    registry.register(ToolEntry {
+        tool: std::sync::Arc::new(DeleteSkillTool::new(skills)),
+        metadata: ToolMetadata {
+            name: "delete_skill".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Delete a saved skill by name".to_string(),
             dependencies: vec![],
         },
         loaded_at: std::time::Instant::now(),
