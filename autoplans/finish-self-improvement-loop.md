@@ -101,7 +101,25 @@ submodules):
 Pure move — no behavior change. Gate passed: `cargo test -p wuffagent-core
 mcp` → 24 passed, 0 failed; no warnings; workspace build EXIT=0.
 
-## Phase C — K1: skills (procedural memory, ~1-2 days)
+## Phase C — K1: skills (procedural memory, ~1-2 days) — ✅ DONE 2026-09-25
+Implemented as planned (modular: core store + tools + injection, no god class):
+- `memory/skills.rs`: `SkillStore` (root `<wuffagent_home>/skills/`, test override
+  `set_skills_dir_for_testing`), `Skill`/`SkillMeta`, slug-validated names
+  (lowercased, a-z/0-9/'-', 1-64), atomic writes, tolerant parsing (missing
+  frontmatter = body-only; unterminated frontmatter = skipped),
+  `prompt_block()` (name + when_to_use + description, capped at 20) and
+  `build_skills_prompt_block()` for the default store. 13 unit tests.
+- `tools/builtin/skills.rs`: `save_skill` / `list_skills` / `read_skill` /
+  `delete_skill` (each its own small Tool struct, `Arc<SkillStore>`-bound,
+  registered via `register_skill_tools` in builtin/mod.rs + main.rs after the
+  memory tools). 6 tool tests (round-trip + error paths).
+- Injection in `agents/agent/prompt.rs`: `═══ SKILLS ═══` block after the
+  memory block (empty string when no skills) + skill-tool guidance gated on
+  `allowed_tools` (empty = all, else must contain `save_skill`).
+- wuffagent profile (`~/.wuffagent/agents/wuffagent.json`): 4 skill tools
+  added to `allowed_tools` so the profile can dogfood them.
+Gate: `cargo test --workspace` → core 603 (+19), egui 24, 1 doctest, EXIT=0,
+no warnings.
 Per self-improvement-gaps Phase 4:
 - Core `wuffagent-core/src/memory/skills.rs`: `SkillStore` rooted at
   `<config_dir>/skills/`. File = `---` frontmatter (name, description,
