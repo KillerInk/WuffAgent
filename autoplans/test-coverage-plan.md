@@ -1,6 +1,6 @@
 # Test Coverage Plan (wuffagent-core + egui)
 
-Created: 2026-07-09. Status: **DONE** (2026-07-09), one item deferred (7).
+Created: 2026-07-09. Status: **DONE** (2026-07-09, all 10 items).
 
 Goal: close the biggest untested gaps in the workspace with small, modular,
 self-contained test additions (no production refactors except where a test
@@ -40,11 +40,16 @@ exposed a real bug).
    `pub` item, kept).
 6. [x] **Trimming module tests** — already done: `trimming/filestate/tests.rs`,
    `trimming/summarizer/freshness/tests.rs`.
-7. [ ] **HTTP client streaming tests** (`client/http.rs`) — **DEFERRED**:
-   needs a mock SSE server (mockito or a local tokio hyper server emitting
-   canned SSE lines; verify conversation accumulation, usage extraction,
-   `[DONE]`, mid-stream cancellation; non-streaming 4xx/5xx error mapping).
-   Self-contained follow-up; `process_sse_line` itself is now well covered.
+7. [x] **HTTP client streaming tests** (`client/http.rs`) — DONE (second pass):
+   `client/tests/http_stream.rs` (5 tests) with a hand-rolled one-shot
+   HTTP/1.1 server on `tokio::net::TcpListener` (no new dependency):
+   `send_message` success (content/usage/timings/model/tool_calls/
+   thinking_chars), 429 → `Error::Http` with body, invalid JSON →
+   `Error::Json`; `stream_message` full SSE (body flushed in 3 pieces to
+   exercise line-buffer reassembly; content+thinking+2 tool calls incl.
+   index-only continuation; early ready-firing of tc1; usage+model from
+   final chunk; `[DONE]`); cancellation mid-silent-stream →
+   `Error::Cancelled` with partial content kept.
 8. [x] **UI settings tests** — already done: `ui/settings/tests.rs`
    (24 tests).
 9. [x] **Empty assistant placeholder handling** — already done:
@@ -54,10 +59,14 @@ exposed a real bug).
 10. [x] **Final gate**: `cargo test --workspace` green
     (wuffagent-core 560 + wuffagent-egui 24 + 1 doctest, EXIT=0).
 
-## Notes for the deferred item (7)
+## Test notes
 
-- `process_sse_line` is a pure function — the remaining gap is the
-  `stream_message` line-buffering/cancellation loop in `http.rs`.
-- Cheapest approach: a small `tokio` TCP listener test server (no new
-  dependency) that writes canned `data: ...` lines, or add `mockito` as a
-  dev-dependency if its streaming support is sufficient.
+- The hand-rolled SSE test server (http_stream.rs) writes canned HTTP/1.1
+  responses on a local `TcpListener`; the streaming body is flushed in
+  separate writes/pieces so the client line buffer must reassemble lines
+  split across TCP writes.
+- Wire detail the tests encode: streamed tool-call fragments carry
+  `type:"function"` + `id` only on the FIRST fragment; continuations are
+  index-only. Canned SSE lines must be balanced JSON — one missing `}`
+  makes the whole line "unparseable" and the tool call silently vanishes.
+=======
