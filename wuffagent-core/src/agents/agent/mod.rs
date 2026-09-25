@@ -27,10 +27,6 @@ pub(crate) mod verify;
 /// re-extracted after the nudge exists (see `run_llm_loop`).
 pub(crate) const VERIFICATION_NUDGE: &str = "Your previous response did not fully satisfy the request. Improve it based on the tool outputs, or correct your tool calls and try again.";
 
-/// Minimum number of messages required before trimming is attempted.
-#[allow(dead_code)]
-const MIN_MESSAGES_FOR_TRIM: usize = 4;
-
 /// Character-aware truncation for S1 outcome content.
 pub fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
