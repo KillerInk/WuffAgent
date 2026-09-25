@@ -76,7 +76,7 @@ impl ChatApp {
             }
             AppEvent::AgentHandoff { from, to, task, .. } => {
                 tracing::info!(from, to, "Agent handoff");
-                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                     // The session is now owned by the target agent: follow the
                     // switch so follow-up messages (and the next queued one)
                     // run under the new profile.
@@ -123,19 +123,19 @@ impl ChatApp {
             }
             AppEvent::ImprovementSuggested { agent_name, suggestions, session_id: _ } => {
                 tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");
-                self.improvements_panel.handle_improvement_suggested(&agent_name, suggestions);
+                self.dialogs.improvements_panel.handle_improvement_suggested(&agent_name, suggestions);
             }
             AppEvent::McpConfigChanged { .. } => {
                 // An MCP management tool rewrote config.json's mcp_servers
                 // array; the in-memory list is stale. Reload it so the MCP
                 // panel (and any later reload) matches disk.
-                match wuffagent_core::config::Config::load(&self.config.file_path.clone()) {
+                match wuffagent_core::config::Config::load(&self.core.config.file_path.clone()) {
                     Ok(loaded) => {
                         tracing::info!(
                             count = loaded.mcp_servers.len(),
                             "MCP config reloaded after McpConfigChanged"
                         );
-                        self.config.mcp_servers = loaded.mcp_servers;
+                        self.core.config.mcp_servers = loaded.mcp_servers;
                     }
                     Err(e) => {
                         tracing::warn!("Failed to reload MCP config after McpConfigChanged: {}", e);
@@ -150,7 +150,7 @@ impl ChatApp {
                 if let Err(e) = self.save_session_for(&sid) {
                     tracing::warn!("Failed to save session before restart: {}", e);
                 }
-                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                     runtime.chat_state.push_message(
                         MessageKind::Normal,
                         "system",
@@ -167,15 +167,14 @@ impl ChatApp {
                 // already displayed in the chat at send time, so
                 // `already_displayed = true`.
                 tracing::info!(text = %message.text, "User message drained after run ended - starting next turn");
-                let generating = self
-                    .session_store
+                let generating = self.sessions.session_store
                     .get(&sid)
                     .map(|r| r.chat_state.is_generating)
                     .unwrap_or(false);
                 if generating {
                     // A new run is already in flight (rare race): fall back
                     // to the queue; it is drained when that run ends.
-                    if let Some(rt) = self.session_store.get_mut(&sid) {
+                    if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
                         rt.chat_state.queued_messages.push(*message);
                     }
                 } else {

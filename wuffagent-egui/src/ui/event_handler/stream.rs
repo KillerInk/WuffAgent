@@ -4,7 +4,7 @@ use wuffagent_core::types::{AppStatus, MessageKind, Usage};
 impl ChatApp {
     /// StreamChunk arm of `handle_event`.
     pub(crate) fn handle_stream_chunk(&mut self, content: &str, sid: &str, n_ctx: u32) {
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.chat_state.stream_chunk(content);
             // Live status-bar estimates while generating (content and
             // thinking chunks alike): see `update_live_estimates`.
@@ -14,7 +14,7 @@ impl ChatApp {
 
     /// StreamPromptProgress arm of `handle_event`.
     pub(crate) fn handle_stream_prompt_progress(&mut self, progress: wuffagent_core::types::PromptProgress, sid: &str) {
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             // Live PP progress + speed while the server processes the
             // prompt (llama.cpp `prompt_progress`; counts only
             // non-cached tokens). Replaced by the server-reported
@@ -30,7 +30,7 @@ impl ChatApp {
     pub(crate) fn handle_stream_round_complete(&mut self, usage: Option<&Usage>, sid: &str, n_ctx: u32) {
         // Intermediate tool round: commit the round's text, keep generating
         // so the next round's chunks keep rendering live.
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.chat_state.commit_stream();
             // This round's prompt processing is done — drop the live
             // progress pill (the next round may start a new one).
@@ -54,13 +54,13 @@ impl ChatApp {
             }
         }
         // Token tracker: a round just finished and was logged.
-        self.usage_panel.mark_dirty();
+        self.dialogs.usage_panel.mark_dirty();
     }
 
     /// StreamComplete arm of `handle_event`.
     pub(crate) fn handle_stream_complete(&mut self, content: &str, usage: Option<Usage>, sid: &str, n_ctx: u32) {
-        let is_selected = self.selected_session_id.as_deref() == Some(sid);
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        let is_selected = self.sessions.selected_session_id.as_deref() == Some(sid);
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             // Fallback for backends that never sent StreamChunks
             if runtime.chat_state.stream_buffer.is_empty() && !content.trim().is_empty() {
                 runtime.chat_state.append_message("assistant", content);
@@ -74,7 +74,7 @@ impl ChatApp {
             // aborted before it emitted its completion) is stale now.
             runtime.chat_state.active_tools.clear();
             if is_selected {
-                self.status = AppStatus::Ready;
+                self.display.status = AppStatus::Ready;
             }
             runtime.chat_state.status = AppStatus::Ready;
             if let Some(usage) = usage {
@@ -98,14 +98,14 @@ impl ChatApp {
         // Start the next queued message (sent while this run was active).
         self.drain_next_queued_message(sid);
         // Token tracker: the run finished and its final round was logged.
-        self.usage_panel.mark_dirty();
+        self.dialogs.usage_panel.mark_dirty();
     }
 
     /// StreamError arm of `handle_event`.
     pub(crate) fn handle_stream_error(&mut self, error: &str, sid: &str) {
         let cancelled = error == "Cancelled";
-        let is_selected = self.selected_session_id.as_deref() == Some(sid);
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        let is_selected = self.sessions.selected_session_id.as_deref() == Some(sid);
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.chat_state.stream_chunk(&format!("\n\nStream error: {}", error));
             runtime.chat_state.commit_stream();
             runtime.chat_state.prompt_progress = None;
@@ -114,7 +114,7 @@ impl ChatApp {
             // live cards so the transcript doesn't spin forever.
             runtime.chat_state.active_tools.clear();
             if is_selected {
-                self.status = AppStatus::Error(error.to_string());
+                self.display.status = AppStatus::Error(error.to_string());
             }
             runtime.chat_state.status = AppStatus::Error(error.to_string());
         }
@@ -142,7 +142,7 @@ impl ChatApp {
         // generated tokens, so TG speed and the token gauge must
         // track them too (before this, TG froze for the whole
         // duration of thinking segments).
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.chat_state.stream_thinking_chunk(content);
             runtime.chat_state.update_live_estimates(n_ctx);
         }
@@ -151,13 +151,13 @@ impl ChatApp {
     /// StreamThinkingComplete arm of `handle_event`.
     pub(crate) fn handle_thinking_complete(&mut self, sid: &str) {
         tracing::trace!("UI: StreamThinkingComplete received, current_thinking_len={}",
-            self.session_store.get(sid).map(|r| r.chat_state.current_thinking.len()).unwrap_or(0));
+            self.sessions.session_store.get(sid).map(|r| r.chat_state.current_thinking.len()).unwrap_or(0));
         // Commit the thinking as a typed message, then clear live state.
         // Note: do NOT commit_stream() here — the round's text stays in
         // stream_buffer and is committed by RoundComplete/StreamComplete,
         // which keeps ordering correct (thinking first, text after) and
         // prevents the StreamComplete fallback from re-appending it.
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             let thinking_text = std::mem::take(&mut runtime.chat_state.current_thinking);
             if !thinking_text.is_empty() {
                 runtime.chat_state.push_message(MessageKind::Thinking, "assistant", &thinking_text);

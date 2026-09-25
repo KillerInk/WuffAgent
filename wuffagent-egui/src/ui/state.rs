@@ -1,10 +1,6 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
-use tokio::task::JoinHandle;
-
-use eframe::egui;
-
 use wuffagent_core::config::Config;
 use wuffagent_core::server::ServerManager;
 use wuffagent_core::tools::ToolManager;
@@ -63,118 +59,35 @@ impl Drop for RuntimeOnThread {
 
 /// Main application state for the egui UI.
 ///
-/// Fields are flat `pub` (UI modules access them directly via `self.<field>`)
-/// but grouped by concern:
+/// Fields are grouped into small sub-structs by responsibility (see
+/// [`groups`]) and embedded as `pub` fields, so UI modules access them via
+/// `self.<group>.<field>`:
 ///
-/// - **Core services** — app-wide handles created at startup.
-/// - **Sessions** — per-session runtime state + selection.
-/// - **Dialogs & panels** — transient UI windows.
-/// - **Event relay** — core → UI event channel.
-/// - **Remote n_ctx** — server-synced context window state.
-/// - **Display snapshot** — cached rendered messages (perf).
+/// - **`core`** — app-wide service handles created at startup.
+/// - **`sessions`** — per-session runtime state + selection.
+/// - **`dialogs`** — transient dialog/panel widgets + visibility flags.
+/// - **`relay`** — core → UI event channel.
+/// - **`remote`** — server-synced context window state (n_ctx).
+/// - **`display`** — cached rendered messages (perf) + status bar.
+/// - **`restart`** — restart / auto-resume lifecycle.
+pub mod groups;
 pub struct ChatApp {
-    // ── Core services (app-wide, created at startup) ─────────────────
-    pub config: Config,
-    pub server: ServerManager,
-    /// Shared connection settings (URL + API key) used by every client in the
-    /// app (session runtimes, bootstrap engine, non-streaming LLM adapter).
-    /// One `update()` here propagates to all of them.
-    pub connection: Arc<wuffagent_core::client::ConnectionSettings>,
-    /// Last base_url synced to the shared connection settings (no-op guard).
-    pub last_synced_base_url: String,
-    pub tool_manager: Arc<ToolManager>,
-    pub agent_engine: Arc<wuffagent_core::agents::AgentEngine>,
-    /// Shared memory manager (single-writer discipline; all UI memory writes go
-    /// through it). Shared with the agent engine and the memory tools.
-    pub memory_manager: Arc<wuffagent_core::memory::MemoryManager>,
-    /// Dedicated runtime for UI-triggered async memory work (maintenance pass).
-    /// Wrapped in [`RuntimeOnThread`] so its `Drop` (a blocking wait) never
-    /// runs on a thread inside another runtime's async context.
-    pub memory_runtime: RuntimeOnThread,
-    /// MCP (Model Context Protocol) manager: owns the dedicated runtime for
-    /// MCP I/O and mirrors connected servers' tools into the shared registry.
-    /// Its own `shutdown()` (called in `Drop`) disconnects all servers and
-    /// drops that runtime on a plain thread.
-    pub mcp_manager: Arc<wuffagent_core::tools::mcp::McpManager>,
-
-    // ── Sessions ─────────────────────────────────────────────────────
-    /// Per-session runtime state keyed by session ID.
-    pub session_store: HashMap<String, wuffagent_core::sessions::SessionRuntime>,
-    /// ID of the currently selected session (None = no session selected).
-    pub selected_session_id: Option<String>,
-    /// Open sub-session tab ids (order = display order). A sub-session is a
-    /// clean context forked from a sub-session handoff; its session file
-    /// carries a `parent_session_id` back to the forking session. The tabs
-    /// are global live views — they stay open while the user switches
-    /// sessions (a closed tab's session remains in the session list).
-    pub sub_session_tabs: Vec<String>,
-    /// The tab shown in the chat area: a sub-session id, or None = the main
-    /// (selected) session tab. Reset to None when the selected session
-    /// changes (the user switched to another session in the sidebar).
-    pub active_tab: Option<String>,
-    /// Attached-but-unsent image per session (pasted or attached, not yet
-    /// sent). The egui-side half of the image flow: the UI keeps the
-    /// `ImageSource` for preview rendering and converts it to a `data:` URI
-    /// when the message crosses into core (`QueuedMessage.image`).
-    pub pending_images: HashMap<String, egui::ImageSource<'static>>,
+    /// App-wide service handles (server, connection, engine, memory, MCP, tools).
+    pub core: groups::CoreServices,
+    /// Per-session runtime state + session selection + chat-input staging.
+    pub sessions: groups::SessionState,
     /// The sessions sidebar widget (manages its own list + selection).
     pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
-
-    // ── Dialogs & panels (transient UI windows) ──────────────────────
-    pub status: AppStatus,
-    pub show_settings: bool,
-    pub settings_dialog: Option<super::settings::SettingsDialog>,
-    pub presets_dialog: Option<super::presets_dialog::PresetsDialog>,
-    pub show_agent_config: bool,
-    pub agent_config_dialog: Option<super::agent_config::AgentConfigDialog>,
-    /// The memory panel widget (owns its own list/search/edit state).
-    /// `show_panel` gates whether the window is drawn.
-    pub memory_panel: super::memory_panel::MemoryPanel,
-    /// The token-usage panel (floating window with an LLM token chart).
-    /// `show_panel` gates whether the window is drawn; stream completions
-    /// mark it dirty so the next frame picks up newly logged calls.
-    pub usage_panel: super::usage_panel::UsagePanel,
-    /// The MCP panel widget (server list, add/edit, per-tool toggles).
-    pub mcp_panel: super::mcp_panel::McpPanel,
-    /// Pending agent improvement suggestions.
-    pub improvements_panel: super::improvements::ImprovementsPanel,
-
-    // ── Event relay (core → UI) ──────────────────────────────────────
-    /// Channel sender for relaying core events (EngineEvent, AppEvent) to the UI thread.
-    /// The corresponding receiver is stored separately so `process_pending_events` can poll it.
-    pub pending_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
-    pub pending_rx: Option<mpsc::Receiver<AppEvent>>,
-
-    // ── Remote n_ctx (server-synced context window) ──────────────────
-    /// Remote n_ctx value (for remote mode).
-    pub remote_n_ctx: u32,
-    /// Handle for the remote n_ctx update task.
-    pub remote_n_ctx_handle: Option<JoinHandle<()>>,
-    /// Arc for the remote n_ctx atomic value.
-    pub remote_n_ctx_arc: Option<Arc<std::sync::atomic::AtomicU32>>,
-
-    // ── Display snapshot (perf: avoid deep-cloning messages per frame) ─
-    /// Shared display snapshot of the selected session's messages. Rebuilt only
-    /// when the session or its message set changes, so a per-frame redraw is an
-    /// O(1) `Arc::clone` instead of a full deep clone of every message (which
-    /// copies large tool outputs + base64 images and is the main lag).
-    pub display_snapshot: std::sync::Arc<Vec<wuffagent_core::types::ChatMessage>>,
-    /// Session id the snapshot belongs to (None = empty).
-    pub snapshot_session: Option<String>,
-    /// Message count the snapshot was built from.
-    pub snapshot_len: usize,
-    /// Set on in-place message edits (which keep the count unchanged) to force a rebuild.
-    pub display_dirty: bool,
-
-    // ── Restart / auto-resume ─────────────────────────────────────────
-    /// Set when a `restart` tool run requested a relaunch (marker written + new
-    /// process spawned); the window closes on the next frame.
-    pub pending_restart: bool,
-    /// Set once by `main` when a restart marker was found at startup; the first
-    /// frame where the resumed session's runtime exists auto-sends the resume turn.
-    pub pending_auto_resume: bool,
-    /// Reason captured from the restart marker, used to build the resume turn.
-    pub auto_resume_reason: Option<String>,
+    /// Transient dialog/panel widgets and their visibility flags.
+    pub dialogs: groups::Dialogs,
+    /// Core → UI event channel.
+    pub relay: groups::EventRelay,
+    /// Server-synced context window state (remote n_ctx).
+    pub remote: groups::RemoteNctx,
+    /// Cached rendered messages (perf) + status bar.
+    pub display: groups::DisplayState,
+    /// Restart / auto-resume lifecycle state.
+    pub restart: groups::RestartState,
 }
 
 impl ChatApp {
@@ -200,43 +113,57 @@ impl ChatApp {
         }
         let sessions_panel = Some(panel);
         Self {
-            config,
-            server,
-            tool_manager,
-            agent_engine,
-            memory_manager,
-            memory_runtime: RuntimeOnThread::new(memory_runtime),
-            mcp_manager,
-            connection,
-            last_synced_base_url: String::new(),
-            session_store,
-            selected_session_id,
-            sub_session_tabs: Vec::new(),
-            active_tab: None,
-            pending_images: HashMap::new(),
+            core: groups::CoreServices {
+                config,
+                server,
+                connection,
+                last_synced_base_url: String::new(),
+                tool_manager,
+                agent_engine,
+                memory_manager,
+                memory_runtime: RuntimeOnThread::new(memory_runtime),
+                mcp_manager,
+            },
+            sessions: groups::SessionState {
+                session_store,
+                selected_session_id,
+                sub_session_tabs: Vec::new(),
+                active_tab: None,
+                pending_images: HashMap::new(),
+            },
             sessions_panel,
-            status: AppStatus::Stopped,
-            show_settings: false,
-            settings_dialog: None,
-            presets_dialog: None,
-            show_agent_config: false,
-            agent_config_dialog: None,
-            memory_panel: super::memory_panel::MemoryPanel::new(),
-            usage_panel: super::usage_panel::UsagePanel::new(),
-            mcp_panel: super::mcp_panel::McpPanel::new(),
-            pending_tx: Some(Arc::new(Mutex::new(event_tx))),
-            pending_rx: Some(event_rx),
-            improvements_panel: super::improvements::ImprovementsPanel::new(),
-            display_snapshot: std::sync::Arc::new(Vec::new()),
-            snapshot_session: None,
-            snapshot_len: 0,
-            display_dirty: true,
-            remote_n_ctx: 0,
-            remote_n_ctx_handle: None,
-            remote_n_ctx_arc: None,
-            pending_restart: false,
-            pending_auto_resume: auto_resume_reason.is_some(),
-            auto_resume_reason,
+            dialogs: groups::Dialogs {
+                show_settings: false,
+                settings_dialog: None,
+                presets_dialog: None,
+                show_agent_config: false,
+                agent_config_dialog: None,
+                memory_panel: super::memory_panel::MemoryPanel::new(),
+                usage_panel: super::usage_panel::UsagePanel::new(),
+                mcp_panel: super::mcp_panel::McpPanel::new(),
+                improvements_panel: super::improvements::ImprovementsPanel::new(),
+            },
+            relay: groups::EventRelay {
+                pending_tx: Some(Arc::new(Mutex::new(event_tx))),
+                pending_rx: Some(event_rx),
+            },
+            remote: groups::RemoteNctx {
+                remote_n_ctx: 0,
+                remote_n_ctx_handle: None,
+                remote_n_ctx_arc: None,
+            },
+            display: groups::DisplayState {
+                display_snapshot: std::sync::Arc::new(Vec::new()),
+                snapshot_session: None,
+                snapshot_len: 0,
+                display_dirty: true,
+                status: AppStatus::Stopped,
+            },
+            restart: groups::RestartState {
+                pending_restart: false,
+                pending_auto_resume: auto_resume_reason.is_some(),
+                auto_resume_reason,
+            },
         }
     }
 
@@ -247,7 +174,7 @@ impl ChatApp {
     /// global config — `config.reasoning_effort` only seeds non-session
     /// clients (bootstrap engine, non-streaming adapter, memory LLM).
     pub fn save_config(&mut self) -> Result<(), wuffagent_core::config::Error> {
-        self.config.save()
+        self.core.config.save()
     }
 
     /// Sync the selected session's per-session UI selections (chosen agent
@@ -256,7 +183,7 @@ impl ChatApp {
     /// client's forced wire level in sync for non-pipeline requests (the
     /// chat pipeline re-applies the mode on every run anyway).
     pub fn sync_session_meta(&mut self, id: &str) {
-        if let Some(runtime) = self.session_store.get_mut(id) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(id) {
             // Update only the UI selections; clone the existing meta first so
             // non-UI fields (the sub-session parent link) survive the sync.
             let mut meta = runtime.client.session_meta().clone();
@@ -274,9 +201,9 @@ impl ChatApp {
 
     /// Save the selected session's conversation.
     pub fn save_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Clone the id so the immutable borrow of `self.selected_session_id`
+        // Clone the id so the immutable borrow of `self.sessions.selected_session_id`
         // ends before we call `save_session_for` (which mutably borrows `self`).
-        let id = self.selected_session_id.clone();
+        let id = self.sessions.selected_session_id.clone();
         match id {
             Some(id) => self.save_session_for(&id),
             None => Ok(()),
@@ -285,7 +212,7 @@ impl ChatApp {
 
     /// Save a specific session's conversation by id.
     pub fn save_session_for(&mut self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(runtime) = self.session_store.get(id) {
+        if let Some(runtime) = self.sessions.session_store.get(id) {
             runtime.client.save_session().map_err(|e| e.into())
         } else {
             Ok(())
@@ -307,9 +234,9 @@ impl ChatApp {
     /// The session currently displayed in the chat area: the active sub-
     /// session tab if one is open, otherwise the selected (main) session.
     pub fn displayed_session_id(&self) -> Option<&str> {
-        self.active_tab
+        self.sessions.active_tab
             .as_deref()
-            .or(self.selected_session_id.as_deref())
+            .or(self.sessions.selected_session_id.as_deref())
     }
 
     /// Owned form of [`Self::displayed_session_id`] — the id to target with
@@ -321,17 +248,17 @@ impl ChatApp {
 
     /// Get the selected session's chat area state (immutable view).
     pub fn selected_chat_state(&self) -> Option<&wuffagent_core::sessions::ChatAreaState> {
-        self.selected_session_id
+        self.sessions.selected_session_id
             .as_ref()
-            .and_then(|id| self.session_store.get(id))
+            .and_then(|id| self.sessions.session_store.get(id))
             .map(|r| &r.chat_state)
     }
 
     /// Get the client for the selected session (if any).
     pub fn active_client(&self) -> Option<&wuffagent_core::client::ChatClient> {
-        self.selected_session_id
+        self.sessions.selected_session_id
             .as_ref()
-            .and_then(|id| self.session_store.get(id))
+            .and_then(|id| self.sessions.session_store.get(id))
             .map(|r| &r.client)
     }
 
@@ -339,7 +266,7 @@ impl ChatApp {
     /// the current session) and spawn the (optionally newly built) executable with
     /// the current CLI args. Sets `pending_restart` so the window closes next frame.
     pub fn perform_restart(&mut self, reason: String, exe_path: Option<String>) {
-        let session_id = self.selected_session_id.clone().unwrap_or_default();
+        let session_id = self.sessions.selected_session_id.clone().unwrap_or_default();
         let marker_path = wuffagent_core::config::get_restart_marker_path();
         let marker = wuffagent_core::config::RestartMarker { session_id, reason };
         match serde_json::to_string_pretty(&marker) {
@@ -386,7 +313,7 @@ impl ChatApp {
         }
         let args: Vec<String> = std::env::args().skip(1).collect();
         match std::process::Command::new(&exe).args(&args).spawn() {
-            Ok(_) => self.pending_restart = true,
+            Ok(_) => self.restart.pending_restart = true,
             Err(e) => eprintln!("Failed to relaunch WuffAgent ({:?}): {}", exe, e),
         }
     }
@@ -397,6 +324,6 @@ impl Drop for ChatApp {
         // Disconnect all MCP servers (kills child processes) and drop the
         // MCP runtime on a plain thread — the UI thread is inside the main
         // runtime's context, where dropping a runtime panics. Non-blocking.
-        self.mcp_manager.shutdown();
+        self.core.mcp_manager.shutdown();
     }
 }

@@ -11,7 +11,7 @@ mod images;
 
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.theme);
+        let theme = Theme::from_name(&self.core.config.theme);
         ui.style_mut().spacing.item_spacing.y = 0.0;
 
         // Snapshot the selected session's display values up front so we don't
@@ -24,12 +24,12 @@ impl ChatApp {
         let target = self.input_target_session_id();
         let pending_image = target
             .as_deref()
-            .and_then(|sid| self.pending_images.get(sid))
+            .and_then(|sid| self.sessions.pending_images.get(sid))
             .cloned();
         let (has_session, is_generating, has_history, selected_agent) =
             target
                 .as_deref()
-                .and_then(|sid| self.session_store.get(sid))
+                .and_then(|sid| self.sessions.session_store.get(sid))
                 .map(|r| {
                     (
                         true,
@@ -52,7 +52,7 @@ impl ChatApp {
                         .clicked()
                     {
                         if let Some(sid) = target.clone() {
-                            self.pending_images.remove(&sid);
+                            self.sessions.pending_images.remove(&sid);
                         }
                     }
                 });
@@ -117,7 +117,7 @@ impl ChatApp {
                     }
                     // Sync back to chat_state (of the displayed session)
                     if let Some(sid) = &target {
-                        if let Some(runtime) = self.session_store.get_mut(sid) {
+                        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                             runtime.chat_state.input_text = local_text;
                         }
                     }
@@ -148,7 +148,7 @@ impl ChatApp {
                         });
                     if let Some(next) = next_agent {
                         if let Some(sid) = target.clone() {
-                            if let Some(runtime) = self.session_store.get_mut(&sid) {
+                            if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                                 runtime.selected_agent = Some(next);
                             }
                         }
@@ -158,7 +158,7 @@ impl ChatApp {
                             self.sync_session_meta(&sid);
                         }
                     } else if let Some(sid) = target.clone() {
-                        if let Some(runtime) = self.session_store.get_mut(&sid) {
+                        if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                             runtime.selected_agent = None;
                         }
                         self.sync_session_meta(&sid);
@@ -172,7 +172,7 @@ impl ChatApp {
                     // persisted with the session file.
                     let mut next_mode = target
                         .as_deref()
-                        .and_then(|sid| self.session_store.get(sid))
+                        .and_then(|sid| self.sessions.session_store.get(sid))
                         .map(|rt| rt.reasoning_mode)
                         .unwrap_or_default();
                     egui::ComboBox::from_id_salt("reasoning_effort")
@@ -195,7 +195,7 @@ impl ChatApp {
                     // `next_mode` only changes when the user picked a new entry:
                     // apply it to the session runtime + client immediately.
                     if let Some(sid) = target.clone() {
-                        let changed = if let Some(runtime) = self.session_store.get_mut(&sid) {
+                        let changed = if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                             let changed = runtime.reasoning_mode != next_mode;
                             runtime.reasoning_mode = next_mode;
                             changed
@@ -242,7 +242,7 @@ impl ChatApp {
                         if !input.is_empty() && self.handle_send_input(&input) {
                             // Accepted (queued or started): clear the input box.
                             if let Some(sid) = target.clone() {
-                                if let Some(runtime) = self.session_store.get_mut(&sid) {
+                                if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                                     runtime.chat_state.input_text.clear();
                                 }
                             }
@@ -299,13 +299,13 @@ impl ChatApp {
         };
 
         if let Err(e) = self.validate_input(input) {
-            if let Some(runtime) = self.session_store.get_mut(&sid) {
+            if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                 runtime.chat_state.pending_error = Some(e);
             }
             return false;
         }
 
-        if let Some(runtime) = self.session_store.get(&sid) {
+        if let Some(runtime) = self.sessions.session_store.get(&sid) {
             if runtime.chat_state.is_generating {
                 // AI is still working: display the message immediately and hand
                 // it to the RUNNING agent loop - the agent picks it up at its
@@ -320,7 +320,7 @@ impl ChatApp {
                 let tool_policy = self.resolve_tool_policy(&agent);
                 // Attached image (if any): the UI keeps the egui source in
                 // `pending_images`; core receives the `data:` URI form.
-                let image_source = self.pending_images.remove(&sid);
+                let image_source = self.sessions.pending_images.remove(&sid);
                 let image = image_source.as_ref().and_then(images::image_source_data_uri);
                 let queued = wuffagent_core::sessions::QueuedMessage {
                     text: input.to_string(),
@@ -333,12 +333,11 @@ impl ChatApp {
                 // already ended (race), the send fails and the message falls
                 // back to the per-session queue, which is drained when a run
                 // ends.
-                let injected = self
-                    .session_store
+                let injected = self.sessions.session_store
                     .get(&sid)
                     .map(|rt| rt.pipeline.inject(queued.clone()))
                     .unwrap_or(false);
-                if let Some(cs) = self.session_store.get_mut(&sid) {
+                if let Some(cs) = self.sessions.session_store.get_mut(&sid) {
                     cs.chat_state.messages.push(wuffagent_core::types::ChatMessage {
                         kind: MessageKind::Normal,
                         role: "user".to_string(),
@@ -369,7 +368,7 @@ impl ChatApp {
 
     pub(super) fn notify_chat(&mut self, msg: &str, success: bool) {
         if let Some(sid) = self.input_target_session_id() {
-            if let Some(runtime) = self.session_store.get_mut(&sid) {
+            if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                 runtime.chat_state.show_notification(msg, success);
             }
         }
@@ -390,13 +389,12 @@ impl ChatApp {
             Some(sid) => sid,
             None => return,
         };
-        if let Some(runtime) = self.session_store.get(&sid) {
+        if let Some(runtime) = self.sessions.session_store.get(&sid) {
             if runtime.chat_state.is_generating {
                 return;
             }
         }
-        let agent = self
-            .session_store
+        let agent = self.sessions.session_store
             .get(&sid)
             .and_then(|r| r.selected_agent.clone())
             .unwrap_or_default();
@@ -408,7 +406,7 @@ impl ChatApp {
     pub(super) fn input_text_snapshot(&self) -> String {
         self.input_target_session_id()
             .as_deref()
-            .and_then(|sid| self.session_store.get(sid))
+            .and_then(|sid| self.sessions.session_store.get(sid))
             .map(|r| r.chat_state.input_text.clone())
             .unwrap_or_default()
     }
@@ -421,12 +419,12 @@ impl ChatApp {
     }
 
     pub(super) fn send_message_to_session(&mut self, sid: &str) {
-        let (input, agent) = match self.session_store.get(sid) {
+        let (input, agent) = match self.sessions.session_store.get(sid) {
             Some(r) => (r.chat_state.input_text.trim().to_string(), r.selected_agent.clone().unwrap_or_default()),
             None => return,
         };
         if let Err(e) = self.validate_input(&input) {
-            if let Some(runtime) = self.session_store.get_mut(sid) {
+            if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.pending_error = Some(e);
             }
             return;
@@ -434,8 +432,7 @@ impl ChatApp {
 
         // Attached image (if any): convert the egui source to the `data:`
         // URI form core expects.
-        let image = self
-            .pending_images
+        let image = self.sessions.pending_images
             .remove(sid)
             .as_ref()
             .and_then(images::image_source_data_uri);
@@ -455,15 +452,15 @@ impl ChatApp {
         let image_b64 = images::data_uri_b64(image.as_deref());
         let image_data_uri = image;
 
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.chat_state.is_generating = true;
             runtime.chat_state.pending_error = None;
         }
-        self.status = AppStatus::Generating;
+        self.display.status = AppStatus::Generating;
 
         // Add the user message to the chat display
         if !already_displayed {
-            if let Some(runtime) = self.session_store.get_mut(sid) {
+            if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.messages.push(wuffagent_core::types::ChatMessage {
                     kind: MessageKind::Normal,
                     role: "user".to_string(),
@@ -475,13 +472,13 @@ impl ChatApp {
         }
 
         // Cancel any in-flight pipeline in this session
-        if let Some(runtime) = self.session_store.get(sid) {
+        if let Some(runtime) = self.sessions.session_store.get(sid) {
             runtime.pipeline.cancel();
         }
 
         // Engine and client tool events both flow straight into the single
         // pending_tx the UI polls each frame - no relay task needed.
-        let pending_tx = match self.pending_tx.clone() {
+        let pending_tx = match self.relay.pending_tx.clone() {
             Some(tx) => tx.lock().unwrap().clone(),
             None => return,
         };
@@ -493,7 +490,7 @@ impl ChatApp {
         // agent loop sees the correct context budget. 0 = remote props not
         // fetched yet -> trim is skipped (safe).
         let effective_n_ctx = self.get_effective_n_ctx();
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.client.set_n_ctx(effective_n_ctx);
             // Rebind the per-session engine to this session's client so the
             // agent chat loop runs against THIS session's isolated conversation
@@ -517,7 +514,7 @@ impl ChatApp {
     /// Called from the StreamComplete / StreamError handlers with the session id.
     pub(super) fn drain_next_queued_message(&mut self, sid: &str) {
         // Pop the next queued message (if any) for this session.
-        let next = if let Some(runtime) = self.session_store.get_mut(sid) {
+        let next = if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.chat_state.queued_messages.first().cloned()
         } else {
             None
@@ -536,7 +533,7 @@ impl ChatApp {
         // start_pipeline_for_session won't push it again. Remove it from the queue
         // and hand off — `start_pipeline_for_session` re-borrows the store, so the
         // mutable borrow above must have ended (it has, via `cloned()`).
-        if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.chat_state.queued_messages.remove(0);
         }
         self.start_pipeline_for_session(sid, &next.text, next.image, next.agent_prompt, next.tool_policy, true);
@@ -554,8 +551,7 @@ impl ChatApp {
     pub(super) fn sweep_finished_pipelines(&mut self) {
         // Collect the ids that need finalizing (we can't mutate the store while
         // iterating it).
-        let stuck: Vec<String> = self
-            .session_store
+        let stuck: Vec<String> = self.sessions.session_store
             .iter()
             .filter(|(_, rt)| rt.chat_state.is_generating && rt.pipeline.task_done())
             .map(|(id, _)| id.clone())
@@ -569,8 +565,8 @@ impl ChatApp {
                 sid
             );
             let n_ctx = self.get_effective_n_ctx();
-            let is_selected = self.selected_session_id.as_deref() == Some(sid.as_str());
-            if let Some(runtime) = self.session_store.get_mut(&sid) {
+            let is_selected = self.sessions.selected_session_id.as_deref() == Some(sid.as_str());
+            if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                 runtime.chat_state.commit_stream();
                 runtime.chat_state.is_generating = false;
                 runtime.chat_state.current_thinking.clear();
@@ -578,7 +574,7 @@ impl ChatApp {
                 runtime.refresh_token_gauge(n_ctx);
             }
             if is_selected {
-                self.status = AppStatus::Ready;
+                self.display.status = AppStatus::Ready;
             }
             // Persist whatever completed so the turn is not lost on reload.
             if let Err(e) = self.save_session_for(&sid) {
@@ -595,10 +591,10 @@ impl ChatApp {
         // Cancel the pipeline in the displayed session
         let sid = self.input_target_session_id();
         if let Some(sid) = &sid {
-            if let Some(runtime) = self.session_store.get(sid) {
+            if let Some(runtime) = self.sessions.session_store.get(sid) {
                 runtime.cancel();
             }
-            if let Some(runtime) = self.session_store.get_mut(sid) {
+            if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.is_generating = false;
                 runtime.chat_state.pending_error = None;
             }
@@ -607,7 +603,7 @@ impl ChatApp {
         // Flush any in-progress streamed text into the display, then persist the
         // session.
         if let Some(sid) = &sid {
-            if let Some(runtime) = self.session_store.get_mut(sid) {
+            if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.commit_stream();
             }
             if let Err(e) = self.save_session_for(sid) {

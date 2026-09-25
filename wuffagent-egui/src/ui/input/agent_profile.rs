@@ -11,10 +11,10 @@ impl ChatApp {
     /// `agents/` first, then the project-level `agents/` dirs (cwd, exe dir) —
     /// the same discovery set the UI agent dialog, the improvements panel (F3/F4), and the bootstrap engine use.
     pub(in crate::ui) fn agents_dirs(&self) -> Vec<PathBuf> {
-        let agents_dir = self.config.file_path
+        let agents_dir = self.core.config.file_path
             .parent()
             .map(|p| p.join("agents"))
-            .unwrap_or_else(|| self.config.file_path.clone());
+            .unwrap_or_else(|| self.core.config.file_path.clone());
         let mut dirs = vec![agents_dir];
         if let Ok(cwd) = std::env::current_dir() {
             let d = cwd.join("agents");

@@ -1,4 +1,4 @@
-﻿//! Tool-card rendering: collapsed tool cards, JSON result views,
+//! Tool-card rendering: collapsed tool cards, JSON result views,
 //! path badges, code blocks. Split out of ui/chat_area.rs (U3).
 
 use eframe::egui;
@@ -43,8 +43,8 @@ impl ChatApp {
             // and the expanded content is squeezed into a ~0px sliver, wrapping
             // one character per line. Force a vertical layout for the card body.
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                let is_expanded = self.selected_session_id.as_ref().map(|sid| {
-                    self.session_store.get(sid).map(|r| r.chat_state.expanded_messages.contains(&index)).unwrap_or(false)
+                let is_expanded = self.sessions.selected_session_id.as_ref().map(|sid| {
+                    self.sessions.session_store.get(sid).map(|r| r.chat_state.expanded_messages.contains(&index)).unwrap_or(false)
                 }).unwrap_or(false);
 
                 // Content is "header||call_id||result[||duration_ms]" — or a
@@ -133,8 +133,8 @@ impl ChatApp {
                             );
                         }
                         if row_click.clicked() {
-                            if let Some(sid) = &self.selected_session_id {
-                                if let Some(runtime) = self.session_store.get_mut(sid) {
+                            if let Some(sid) = &self.sessions.selected_session_id {
+                                if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                                     if is_expanded {
                                         runtime.chat_state.expanded_messages.retain(|&i| i != index);
                                     } else {

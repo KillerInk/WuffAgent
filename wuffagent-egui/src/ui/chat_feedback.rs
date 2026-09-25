@@ -77,10 +77,10 @@ impl crate::ui::state::ChatApp {
     /// the chat state; on store failure nothing is marked so the user can
     /// retry.
     pub(super) fn save_message_feedback(&mut self, index: usize, good: bool, comment: &str) {
-        let Some(sid) = self.selected_session_id.clone() else {
+        let Some(sid) = self.sessions.selected_session_id.clone() else {
             return;
         };
-        let Some((profile, snippet)) = self.session_store.get(&sid).map(|r| {
+        let Some((profile, snippet)) = self.sessions.session_store.get(&sid).map(|r| {
             (
                 r.selected_agent.clone().unwrap_or_else(|| "unknown".to_string()),
                 task_snippet_for(&r.chat_state.messages, index),
@@ -89,9 +89,9 @@ impl crate::ui::state::ChatApp {
             return;
         };
 
-        match remember_feedback(&self.memory_manager, &profile, good, &snippet, comment) {
+        match remember_feedback(&self.core.memory_manager, &profile, good, &snippet, comment) {
             Ok(_) => {
-                if let Some(rt) = self.session_store.get_mut(&sid) {
+                if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
                     rt.chat_state
                         .message_ratings
                         .insert(index, if good { "good" } else { "bad" }.to_string());

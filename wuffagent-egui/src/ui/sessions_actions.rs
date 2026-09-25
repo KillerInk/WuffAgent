@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 
 use super::state::ChatApp;
 
@@ -30,7 +30,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
                 s.sanitize();
                 let _ = wuffagent_core::sessions::save_session(&sessions_dir, &s);
             }
-            if let Some(runtime) = app.session_store.get_mut(&id) {
+            if let Some(runtime) = app.sessions.session_store.get_mut(&id) {
                 runtime.name = new_name;
             }
             panel.refresh();
@@ -39,12 +39,12 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             let session = wuffagent_core::sessions::create_session(&sessions_dir, &name);
 
             let mut runtime = wuffagent_core::sessions::SessionRuntime::create_from_config(
-                &app.config,
-                &app.connection,
-                &app.agent_engine,
+                &app.core.config,
+                &app.core.connection,
+                &app.core.agent_engine,
                 session.id.clone(),
                 session.name.clone(),
-                app.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
+                app.relay.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
             );
 
             // Default the new session agent to "general" (per-session
@@ -58,7 +58,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
                 parent_session_id: None,
             });
 
-            app.session_store.insert(session.id.clone(), runtime);
+            app.sessions.session_store.insert(session.id.clone(), runtime);
             *panel.selected_id_mut() = Some(session.id.clone());
 
             {
@@ -73,15 +73,15 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
         PanelAction::Delete(id) => {
             match wuffagent_core::sessions::delete_session(&sessions_dir, &id) {
                 Ok(()) => {
-                    app.session_store.remove(&id);
-                    app.pending_images.remove(&id);
+                    app.sessions.session_store.remove(&id);
+                    app.sessions.pending_images.remove(&id);
                     // Close any open sub-session tab for the deleted session.
-                    app.sub_session_tabs.retain(|t| t != &id);
-                    if app.active_tab.as_deref() == Some(id.as_str()) {
-                        app.active_tab = None;
+                    app.sessions.sub_session_tabs.retain(|t| t != &id);
+                    if app.sessions.active_tab.as_deref() == Some(id.as_str()) {
+                        app.sessions.active_tab = None;
                     }
-                    if app.selected_session_id.as_deref() == Some(&*id) {
-                        app.selected_session_id = None;
+                    if app.sessions.selected_session_id.as_deref() == Some(&*id) {
+                        app.sessions.selected_session_id = None;
                     }
                     panel.show_notification(&format!("Session '{}' deleted", id), true);
                     panel.clear_session();

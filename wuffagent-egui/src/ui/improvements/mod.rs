@@ -189,8 +189,8 @@ impl crate::ui::state::ChatApp {
     pub(super) fn draw_improvements_panel(&mut self, ctx: &egui::Context) {
         let agents_dirs = self.agents_dirs();
         let agent_manager = self.build_agent_manager();
-        let theme = Theme::from_name(&self.config.theme);
-        self.improvements_panel.draw(ctx, &agent_manager, &agents_dirs, &theme, &self.memory_manager);
+        let theme = Theme::from_name(&self.core.config.theme);
+        self.dialogs.improvements_panel.draw(ctx, &agent_manager, &agents_dirs, &theme, &self.core.memory_manager);
     }
 }
 

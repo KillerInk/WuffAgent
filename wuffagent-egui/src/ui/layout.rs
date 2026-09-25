@@ -8,10 +8,10 @@ impl ChatApp {
         // Session sidebar — draw before other panels so it sits on the left.
         // Pass disjoint immutable borrows (theme string + session_store) so the
         // panel (a field of `self`) can be borrowed mutably while we read app state.
-        let theme = self.config.theme.clone();
+        let theme = self.core.config.theme.clone();
         let (switched_id, pending_action) = {
             if let Some(ref mut panel) = self.sessions_panel {
-                panel.draw(&theme, &self.session_store, ui)
+                panel.draw(&theme, &self.sessions.session_store, ui)
             } else {
                 (None, None)
             }
@@ -36,7 +36,7 @@ impl ChatApp {
             ui.set_min_height(32.0);
             ui.set_max_height(36.0);
 
-            let theme = Theme::from_name(&self.config.theme);
+            let theme = Theme::from_name(&self.core.config.theme);
             ui.visuals_mut().panel_fill = theme.background;
 
             ui.horizontal(|ui| {
@@ -68,7 +68,7 @@ impl ChatApp {
                         .on_hover_text("Memory panel")
                         .clicked()
                     {
-                        self.memory_panel.show_panel = true;
+                        self.dialogs.memory_panel.show_panel = true;
                     }
 
                     // Token usage panel button
@@ -80,7 +80,7 @@ impl ChatApp {
                         .on_hover_text("Token usage")
                         .clicked()
                     {
-                        self.usage_panel.show_panel = true;
+                        self.dialogs.usage_panel.show_panel = true;
                     }
 
                     // MCP servers button
@@ -92,7 +92,7 @@ impl ChatApp {
                         .on_hover_text("MCP servers (external tools)")
                         .clicked()
                     {
-                        self.mcp_panel.show_panel = true;
+                        self.dialogs.mcp_panel.show_panel = true;
                     }
 
                     // Improvements panel button
@@ -104,7 +104,7 @@ impl ChatApp {
                         .on_hover_text("Agent improvements (pending suggestions)")
                         .clicked()
                     {
-                        self.improvements_panel.show_panel = true;
+                        self.dialogs.improvements_panel.show_panel = true;
                     }
 
                     // Agent config button
@@ -116,7 +116,7 @@ impl ChatApp {
                         .on_hover_text("Agent configuration")
                         .clicked()
                     {
-                        self.show_agent_config = true;
+                        self.dialogs.show_agent_config = true;
                     }
 
                     // Settings button
@@ -128,7 +128,7 @@ impl ChatApp {
                         .on_hover_text("Settings")
                         .clicked()
                     {
-                        self.show_settings = true;
+                        self.dialogs.show_settings = true;
                     }
                 });
             });
@@ -136,7 +136,7 @@ impl ChatApp {
 
         // Bottom panels stack upward, so bottom_bar must be declared first to be at the bottom
         egui::Panel::bottom("bottom_bar").show(ui, |ui| {
-            let theme = Theme::from_name(&self.config.theme);
+            let theme = Theme::from_name(&self.core.config.theme);
             ui.visuals_mut().panel_fill = theme.surface;
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
             self.draw_status_bar(ui);
@@ -149,14 +149,14 @@ impl ChatApp {
             .default_size(110.0)
             .min_size(70.0)
             .show(ui, |ui| {
-                let theme = Theme::from_name(&self.config.theme);
+                let theme = Theme::from_name(&self.core.config.theme);
                 ui.visuals_mut().panel_fill = theme.surface;
                 self.draw_input_area(ui);
             });
 
         // Chat area fills all remaining space
         egui::CentralPanel::default().show(ui, |ui| {
-            let theme = Theme::from_name(&self.config.theme);
+            let theme = Theme::from_name(&self.core.config.theme);
             ui.visuals_mut().panel_fill = theme.background;
             self.draw_chat_area(ui);
         });
@@ -169,9 +169,9 @@ impl ChatApp {
         self.draw_memory_panel(ctx);
 
         // Draw token-usage panel on top.
-        self.usage_panel.draw(ctx, &Theme::from_name(&self.config.theme));
+        self.dialogs.usage_panel.draw(ctx, &Theme::from_name(&self.core.config.theme));
 
-        // Draw MCP panel on top (disjoint field borrows; `&mut self.config`
+        // Draw MCP panel on top (disjoint field borrows; `&mut self.core.config`
         // so the panel can persist server changes).
         self.draw_mcp_panel(ctx);
     }
@@ -179,13 +179,12 @@ impl ChatApp {
     fn draw_memory_panel(&mut self, ctx: &egui::Context) {
         // Disjoint field borrows: the panel (mutable) + manager, runtime, config
         // (immutable) are separate struct fields, so they can coexist.
-        let updated = self
-            .memory_panel
-            .draw(ctx, &self.memory_manager, self.memory_runtime.as_ref(), &self.config);
+        let updated = self.dialogs.memory_panel
+            .draw(ctx, &self.core.memory_manager, self.core.memory_runtime.as_ref(), &self.core.config);
         if let Some(mconfig) = updated {
             // I4: persist memory settings — before this they were runtime-only
             // (set_config) and reverted on restart.
-            self.config.memory_config = mconfig;
+            self.core.config.memory_config = mconfig;
             if let Err(e) = self.save_config() {
                 eprintln!("Failed to save memory settings: {}", e);
             }
@@ -195,12 +194,12 @@ impl ChatApp {
     fn draw_mcp_panel(&mut self, ctx: &egui::Context) {
         // Disjoint field borrows: the panel (mutable) + manager (immutable)
         // + config (mutable) are separate struct fields, so they can coexist.
-        self.mcp_panel.draw(ctx, &self.mcp_manager, &mut self.config);
+        self.dialogs.mcp_panel.draw(ctx, &self.core.mcp_manager, &mut self.core.config);
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {
-        let new_theme: &str = if self.config.theme == "dark" { "light" } else { "dark" };
-        self.config.theme = new_theme.to_string();
+        let new_theme: &str = if self.core.config.theme == "dark" { "light" } else { "dark" };
+        self.core.config.theme = new_theme.to_string();
         if let Err(e) = self.save_config() {
             eprintln!("Failed to save theme: {}", e);
         }

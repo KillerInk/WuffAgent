@@ -1,4 +1,4 @@
-﻿use eframe::egui;
+use eframe::egui;
 
 use super::state::ChatApp;
 use super::theme::Theme;
@@ -22,12 +22,12 @@ impl ChatApp {
 
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
         LAYOUT_DBG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let theme = Theme::from_name(&self.config.theme);
+        let theme = Theme::from_name(&self.core.config.theme);
 
         // Sub-session tab bar (main tab + one tab per open sub-session).
         // Only shown while at least one sub-session tab is open, so plain
         // sessions keep their current look.
-        if self.displayed_session_id().is_some() && !self.sub_session_tabs.is_empty() {
+        if self.displayed_session_id().is_some() && !self.sessions.sub_session_tabs.is_empty() {
             self.draw_sub_session_tabs(ui, &theme);
         }
 
@@ -42,30 +42,30 @@ impl ChatApp {
         let selected = self.displayed_session_id().map(|s| s.to_string());
         let current_len = selected
             .as_deref()
-            .and_then(|sid| self.session_store.get(sid))
+            .and_then(|sid| self.sessions.session_store.get(sid))
             .map(|r| r.chat_state.messages.len())
             .unwrap_or(0);
-        if selected != self.snapshot_session
-            || self.display_dirty
-            || current_len != self.snapshot_len
+        if selected != self.display.snapshot_session
+            || self.display.display_dirty
+            || current_len != self.display.snapshot_len
         {
             let msgs = selected
                 .as_deref()
-                .and_then(|sid| self.session_store.get(sid))
+                .and_then(|sid| self.sessions.session_store.get(sid))
                 .map(|r| r.chat_state.messages.clone())
                 .unwrap_or_default();
-            self.snapshot_len = msgs.len();
+            self.display.snapshot_len = msgs.len();
             // Clone so `selected` stays usable below (error card, streaming,
             // scroll state) — the snapshot only records which session it holds.
-            self.snapshot_session = selected.clone();
-            self.display_snapshot = std::sync::Arc::new(msgs);
-            self.display_dirty = false;
+            self.display.snapshot_session = selected.clone();
+            self.display.display_snapshot = std::sync::Arc::new(msgs);
+            self.display.display_dirty = false;
         }
-        let messages = self.display_snapshot.clone();
+        let messages = self.display.display_snapshot.clone();
 
         // Show pending error as a subtle red-tinted card (from the current session)
         if let Some(sid) = &selected {
-            if let Some(runtime) = self.session_store.get(sid) {
+            if let Some(runtime) = self.sessions.session_store.get(sid) {
                 if let Some(err) = &runtime.chat_state.pending_error {
                     egui::Frame::NONE
                         .fill(theme.error.linear_multiply(0.12))
@@ -89,7 +89,7 @@ impl ChatApp {
         // `&mut self` helpers without holding an immutable borrow of the store.
         let (streaming, is_streaming) = selected
             .as_deref()
-            .and_then(|sid| self.session_store.get(sid))
+            .and_then(|sid| self.sessions.session_store.get(sid))
             .filter(|r| r.chat_state.is_generating)
             .map(|r| {
                 (
@@ -103,7 +103,7 @@ impl ChatApp {
         // for the same reason as the streaming state above.
         let active_tools: Vec<wuffagent_core::sessions::ActiveTool> = selected
             .as_deref()
-            .and_then(|sid| self.session_store.get(sid))
+            .and_then(|sid| self.sessions.session_store.get(sid))
             .map(|r| r.chat_state.active_tools.clone())
             .unwrap_or_default();
 
@@ -113,10 +113,10 @@ impl ChatApp {
             .auto_shrink([false, true])
             .stick_to_bottom(
                 selected.as_deref().map(|sid| {
-                    self.session_store.get(sid).map(|r| r.chat_state.scroll_to_bottom_requested).unwrap_or(false)
+                    self.sessions.session_store.get(sid).map(|r| r.chat_state.scroll_to_bottom_requested).unwrap_or(false)
                 }).unwrap_or(false) ||
                 selected.as_deref().map(|sid| {
-                    self.session_store.get(sid).map(|r| r.chat_state.at_bottom).unwrap_or(false)
+                    self.sessions.session_store.get(sid).map(|r| r.chat_state.at_bottom).unwrap_or(false)
                 }).unwrap_or(false)
             )
             .show(ui, |ui| {
@@ -167,7 +167,7 @@ impl ChatApp {
         // Compute `at_bottom` (immutable self borrow) before mutating the store.
         let at_bottom = self.is_at_bottom_from_output(&scroll_output);
         if let Some(sid) = &selected {
-            if let Some(runtime) = self.session_store.get_mut(sid) {
+            if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.scroll_to_bottom_requested = false;
                 runtime.chat_state.at_bottom = at_bottom;
                 
@@ -188,7 +188,7 @@ impl ChatApp {
         // Snapshot the opacity first so we can call an `&mut self` helper.
         let (button_visible, button_opacity) = selected
             .as_deref()
-            .and_then(|sid| self.session_store.get(sid))
+            .and_then(|sid| self.sessions.session_store.get(sid))
             .map(|r| (r.chat_state.button_visible, r.chat_state.button_opacity))
             .unwrap_or((false, 0.0));
         if button_visible && button_opacity > 0.01 {
@@ -206,13 +206,12 @@ impl ChatApp {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.set_min_height(30.0);
             // Main tab (the currently selected session)
-            let main_name = self
-                .selected_session_id
+            let main_name = self.sessions.selected_session_id
                 .as_ref()
-                .and_then(|sid| self.session_store.get(sid))
+                .and_then(|sid| self.sessions.session_store.get(sid))
                 .map(|r| r.name.clone())
                 .unwrap_or_else(|| "Session".to_string());
-            let main_active = self.active_tab.is_none();
+            let main_active = self.sessions.active_tab.is_none();
             if ui
                 .selectable_label(
                     main_active,
@@ -220,16 +219,15 @@ impl ChatApp {
                 )
                 .clicked()
             {
-                self.active_tab = None;
+                self.sessions.active_tab = None;
             }
             // One tab per open sub-session
-            for sub_id in self.sub_session_tabs.clone() {
-                let (label, generating) = self
-                    .session_store
+            for sub_id in self.sessions.sub_session_tabs.clone() {
+                let (label, generating) = self.sessions.session_store
                     .get(&sub_id)
                     .map(|r| (r.name.clone(), r.chat_state.is_generating))
                     .unwrap_or_else(|| (sub_id.clone(), false));
-                let active = self.active_tab.as_deref() == Some(sub_id.as_str());
+                let active = self.sessions.active_tab.as_deref() == Some(sub_id.as_str());
                 let mut text = label;
                 if generating {
                     text = format!("● {}", text);
@@ -241,7 +239,7 @@ impl ChatApp {
                     )
                     .clicked()
                 {
-                    self.active_tab = Some(sub_id.clone());
+                    self.sessions.active_tab = Some(sub_id.clone());
                 }
                 let close = ui
                     .add(
@@ -251,10 +249,10 @@ impl ChatApp {
                     )
                     .on_hover_text("Close tab (the session stays in the session list)");
                 if close.clicked() {
-                    if self.active_tab.as_deref() == Some(sub_id.as_str()) {
-                        self.active_tab = None;
+                    if self.sessions.active_tab.as_deref() == Some(sub_id.as_str()) {
+                        self.sessions.active_tab = None;
                     }
-                    self.sub_session_tabs.retain(|t| t != &sub_id);
+                    self.sessions.sub_session_tabs.retain(|t| t != &sub_id);
                 }
                 ui.add_space(2.0);
             }
@@ -364,7 +362,7 @@ impl ChatApp {
             if ui.add(scroll_btn).clicked() {
                 // Trigger auto-scroll on next frame (for the displayed session)
                 if let Some(sid) = self.displayed_session_id().map(|s| s.to_string()) {
-                    if let Some(runtime) = self.session_store.get_mut(&sid) {
+                    if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                         runtime.chat_state.scroll_to_bottom_requested = true;
                     }
                 }
@@ -465,7 +463,7 @@ impl ChatApp {
         let Some(sid) = self.displayed_session_id().map(|s| s.to_string()) else {
             return;
         };
-        let (rated, comment_open, mut comment) = match self.session_store.get(&sid) {
+        let (rated, comment_open, mut comment) = match self.sessions.session_store.get(&sid) {
             Some(rt) => (
                 rt.chat_state.message_ratings.get(&index).cloned(),
                 rt.chat_state.feedback_comment_for == Some(index),
@@ -542,7 +540,7 @@ impl ChatApp {
         // Persist the typed comment back to the session state (the field edits
         // a per-frame copy).
         if cancel {
-            if let Some(rt) = self.session_store.get_mut(&sid) {
+            if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
                 rt.chat_state.feedback_comment_for = None;
                 rt.chat_state.feedback_comment.clear();
             }
@@ -552,14 +550,14 @@ impl ChatApp {
         } else if save_bad {
             self.save_message_feedback(index, false, &comment);
         } else if open_bad {
-            if let Some(rt) = self.session_store.get_mut(&sid) {
+            if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
                 rt.chat_state.feedback_comment_for = Some(index);
                 rt.chat_state.feedback_comment.clear();
             }
         } else if comment_open {
             // Field still open after this frame (no save/cancel): persist the
             // typed comment. On a failed save the field stays open for retry.
-            if let Some(rt) = self.session_store.get_mut(&sid) {
+            if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
                 if rt.chat_state.feedback_comment_for == Some(index) {
                     rt.chat_state.feedback_comment = comment;
                 }

@@ -13,7 +13,7 @@ impl ChatApp {
     /// pending-image slot. No-op when the clipboard holds no image (text is
     /// pasted by egui itself; an empty clipboard simply does nothing).
     pub(super) fn paste_image_from_clipboard(&mut self) {
-        if self.selected_session_id.is_none() {
+        if self.sessions.selected_session_id.is_none() {
             return;
         }
         if let Some(rgba) = clipboard_image_pixels() {
@@ -24,7 +24,7 @@ impl ChatApp {
     /// "Attach image" button: try the system clipboard first (the screenshot
     /// flow), then fall back to a file picker for common image formats.
     pub(super) fn attach_image_from_clipboard_or_file(&mut self) {
-        if self.selected_session_id.is_none() {
+        if self.sessions.selected_session_id.is_none() {
             return;
         }
         if let Some(rgba) = clipboard_image_pixels() {
@@ -89,7 +89,7 @@ impl ChatApp {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hasher::write(&mut hasher, png.as_slice());
         let hash = std::hash::Hasher::finish(&hasher);
-        self.pending_images.insert(
+        self.sessions.pending_images.insert(
             sid,
             egui::ImageSource::Bytes {
                 uri: format!("bytes://attached_image_{hash:016x}.png").into(),

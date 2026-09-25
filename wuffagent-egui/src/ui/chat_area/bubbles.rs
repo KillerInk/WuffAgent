@@ -193,8 +193,8 @@ impl ChatApp {
         theme: &Theme,
     ) {
         let is_user = message.role == "user";
-        let is_editing = self.selected_session_id.as_ref().map(|sid| {
-            self.session_store.get(sid).map(|r| r.chat_state.editing_message_index == Some(index)).unwrap_or(false)
+        let is_editing = self.sessions.selected_session_id.as_ref().map(|sid| {
+            self.sessions.session_store.get(sid).map(|r| r.chat_state.editing_message_index == Some(index)).unwrap_or(false)
         }).unwrap_or(false);
 
         // Tool messages render as a compact collapsible card (result hidden
@@ -243,8 +243,8 @@ impl ChatApp {
                     response.context_menu(|menu_ui| {
                         menu_ui.set_min_width(120.0);
                         if menu_ui.button("Edit").clicked() {
-                            if let Some(sid) = &self.selected_session_id {
-                                if let Some(runtime) = self.session_store.get_mut(sid) {
+                            if let Some(sid) = &self.sessions.selected_session_id {
+                                if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                                     runtime.chat_state.editing_message_index = Some(index);
                                     runtime.chat_state.editing_message_content = message.content.clone();
                                 }
@@ -267,8 +267,8 @@ impl ChatApp {
                                 eprintln!("[ldbg] msg {:>3} frame avail_w={:.1}", index, ui.available_width());
                             }
                             if is_editing {
-                                if let Some(sid) = &self.selected_session_id {
-                                    if let Some(runtime) = self.session_store.get_mut(sid) {
+                                if let Some(sid) = &self.sessions.selected_session_id {
+                                    if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                                         ui.add_sized(
                                             egui::vec2(ui.available_width().max(160.0), 80.0),
                                             egui::TextEdit::multiline(&mut runtime.chat_state.editing_message_content),
@@ -384,8 +384,8 @@ impl ChatApp {
                     self.commit_message_edit(index);
                 }
                 if i.key_pressed(egui::Key::Escape) {
-                    if let Some(sid) = &self.selected_session_id {
-                        if let Some(runtime) = self.session_store.get_mut(sid) {
+                    if let Some(sid) = &self.sessions.selected_session_id {
+                        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                             runtime.chat_state.editing_message_index = None;
                             runtime.chat_state.editing_message_content.clear();
                         }
@@ -396,9 +396,9 @@ impl ChatApp {
     }
 
     pub(super) fn commit_message_edit(&mut self, index: usize) {
-        let new_content = match &self.selected_session_id {
+        let new_content = match &self.sessions.selected_session_id {
             Some(sid) => {
-                self.session_store.get(sid).map(|r| r.chat_state.editing_message_content.clone())
+                self.sessions.session_store.get(sid).map(|r| r.chat_state.editing_message_content.clone())
             }
             None => return,
         };
@@ -408,8 +408,8 @@ impl ChatApp {
         };
         
         // Update chat_display
-        if let Some(sid) = &self.selected_session_id {
-            if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(sid) = &self.sessions.selected_session_id {
+            if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 if index < runtime.chat_state.messages.len() {
                     runtime.chat_state.messages[index].content = new_content.clone();
                 }
@@ -418,8 +418,8 @@ impl ChatApp {
         
         // Update the underlying client conversation, then persist via the
         // single save path.
-        if let Some(sid) = self.selected_session_id.clone() {
-            if let Some(runtime) = self.session_store.get(&sid) {
+        if let Some(sid) = self.sessions.selected_session_id.clone() {
+            if let Some(runtime) = self.sessions.session_store.get(&sid) {
                 // The display and the store are SEPARATE arrays that drift apart as
                 // soon as the display gains entries the store does not hold (e.g.
                 // Thinking blocks: one display entry per round, while the store folds
@@ -443,20 +443,20 @@ impl ChatApp {
         }
         
         // Clear edit state
-        if let Some(sid) = &self.selected_session_id {
-            if let Some(runtime) = self.session_store.get_mut(sid) {
+        if let Some(sid) = &self.sessions.selected_session_id {
+            if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.editing_message_index = None;
                 runtime.chat_state.editing_message_content.clear();
             }
         }
         // In-place edit keeps the message count unchanged, so force the display
         // snapshot to rebuild next frame (the len-based check would miss it).
-        self.display_dirty = true;
+        self.display.display_dirty = true;
     }
 
     pub(super) fn delete_message(&mut self, index: usize) {
-        if let Some(sid) = self.selected_session_id.clone() {
-            if let Some(runtime) = self.session_store.get_mut(&sid) {
+        if let Some(sid) = self.sessions.selected_session_id.clone() {
+            if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                 if index < runtime.chat_state.messages.len() {
                     runtime.chat_state.messages.remove(index);
                     // S2: keep the feedback state index-aligned after deletion

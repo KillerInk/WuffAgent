@@ -1,4 +1,4 @@
-﻿use eframe::egui;
+use eframe::egui;
 
 use super::state::ChatApp;
 use wuffagent_core::types::AppStatus;
@@ -6,7 +6,7 @@ use super::theme::Theme;
 
 impl ChatApp {
     pub(super) fn draw_status_bar(&self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.theme);
+        let theme = Theme::from_name(&self.core.config.theme);
         let chat = match self.selected_chat_state() {
             Some(c) => c,
             None => return,
@@ -60,8 +60,8 @@ impl ChatApp {
             ui.label(egui::RichText::new(format!("Messages: {}", chat.messages.len())).color(theme.text_secondary).size(11.0));
 
             // Memory count indicator with a tooltip listing project + threshold.
-            let mem_count = self.memory_manager.count();
-            let mconfig = self.memory_manager.config();
+            let mem_count = self.core.memory_manager.count();
+            let mconfig = self.core.memory_manager.config();
             ui.label(egui::RichText::new(format!("🧠 {}", mem_count)).color(theme.text_secondary).size(11.0))
                 .on_hover_text(format!(
                     "{} active memories (project '{}', max {})\nMaintenance: {}",
@@ -76,9 +76,9 @@ impl ChatApp {
                 ));
 
             // MCP indicator: connected / total servers.
-            let mcp_servers = self.mcp_manager.snapshot();
+            let mcp_servers = self.core.mcp_manager.snapshot();
             if !mcp_servers.is_empty() {
-                let (connected, total) = self.mcp_manager.connected_counts();
+                let (connected, total) = self.core.mcp_manager.connected_counts();
                 let detail: Vec<String> = mcp_servers
                     .iter()
                     .map(|s| {
@@ -113,21 +113,21 @@ impl ChatApp {
     /// disables trimming (`n_ctx() > 0` guards in the agent/client loop) until
     /// the real value arrives.
     pub(super) fn get_effective_n_ctx(&self) -> u32 {
-        self.remote_n_ctx
+        self.remote.remote_n_ctx
     }
 
     /// Returns true when the connected server's /props n_ctx has not been
     /// fetched yet. Used to show "…" in the bottom bar instead of a misleading
     /// value.
     pub(super) fn remote_props_unknown(&self) -> bool {
-        self.remote_n_ctx == 0
+        self.remote.remote_n_ctx == 0
     }
 
     pub(super) fn draw_bottom_bar(&self, ui: &mut egui::Ui) {
-        let theme = Theme::from_name(&self.config.theme);
+        let theme = Theme::from_name(&self.core.config.theme);
         let n_ctx = self.get_effective_n_ctx();
-        let n_gpu_layers = self.server.get_n_gpu_layers();
-        let threads = self.server.get_threads();
+        let n_gpu_layers = self.core.server.get_n_gpu_layers();
+        let threads = self.core.server.get_threads();
         let chat = match self.selected_chat_state() {
             Some(c) => c,
             None => return,
