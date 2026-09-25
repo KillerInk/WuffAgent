@@ -139,4 +139,9 @@ pub struct RestartState {
     pub pending_auto_resume: bool,
     /// Reason captured from the restart marker, used to build the resume turn.
     pub auto_resume_reason: Option<String>,
+    /// Set by `main` when a restart marker was found at startup BUT its session
+    /// could not be loaded — the auto-resume cannot run, so the UI shows a
+    /// one-shot dismissible banner explaining why the window started empty.
+    /// `(session_id, restart_reason)`. Cleared when the user dismisses it.
+    pub resume_failed: Option<(String, String)>,
 }

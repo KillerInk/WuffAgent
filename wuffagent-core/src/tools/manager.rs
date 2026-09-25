@@ -403,6 +403,13 @@ impl ToolManager {
             .get(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
 
+        // (T5/M2) Validate the parameters against the tool's declared schema
+        // BEFORE executing: `InvalidParams` is fixable, so the agent loop can
+        // feed the named problems back to the model for a corrected call.
+        if let Err(e) = self.validate(tool_name, &params) {
+            return Err(e);
+        }
+
         self.logger.log_tool_call(tool_name, &params);
 
         // Clone the sink so it can be moved into the blocking task.
@@ -421,15 +428,23 @@ impl ToolManager {
         result
     }
 
-    /// Validate parameters against the tool's schema.
+    /// Validate parameters against the tool's declared input schema (T5/M2):
+    /// required fields must be present (and non-null unless the field is
+    /// nullable), and declared top-level property types must match.
     ///
-    /// For now this is a no-op placeholder; a real implementation would
-    /// validate the JSON schema using a library such as `jsonschema`.
-    pub fn validate(&self, tool_name: &str, _params: &ToolParams) -> ToolResult<()> {
-        let _ = tool_name;
-        let _ = _params;
-        // TODO: implement proper JSON schema validation
-        Ok(())
+    /// Returns [`ToolError::InvalidParams`] naming every problem (joined), so
+    /// the LLM can self-correct. Tools that declare no input schema are always
+    /// valid — their own argument parsing is the final authority.
+    pub fn validate(&self, tool_name: &str, params: &ToolParams) -> ToolResult<()> {
+        let Some(schema) = self.registry.schema_for(tool_name) else {
+            return Ok(());
+        };
+        let problems = crate::tools::validation::validate_params(&schema, params);
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(ToolError::InvalidParams(problems.join("; ")))
+        }
     }
 
     /// Get all tool definitions in OpenAI-compatible format for function calling.

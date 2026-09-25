@@ -363,21 +363,20 @@ async fn main() -> eframe::Result {
     // active session at the marker's session (before the store is built below),
     // capture the reason for the continue turn, and delete the marker so it only
     // fires once.
-    let auto_resume_reason: Option<String> = {
-        let marker_path = wuffagent_core::config::get_restart_marker_path();
-        let marker = std::fs::read_to_string(&marker_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<wuffagent_core::config::RestartMarker>(&s).ok());
-        match marker {
+    // (T4) consume_restart_marker reads + parses + deletes the marker (once),
+    // keeping an unparseable file in place for inspection. `marker_session_id`
+    // is tracked separately: auto-resume is only possible if that session can
+    // actually be loaded below, otherwise the UI would start empty with no
+    // explanation (see the resume-failed banner).
+    let (auto_resume_reason, marker_session_id): (Option<String>, Option<String>) =
+        match wuffagent_core::config::consume_restart_marker() {
             Some(m) => {
                 config.session_id = Some(m.session_id.clone());
-                let _ = std::fs::remove_file(&marker_path);
                 tracing::info!("Restart marker found; auto-resuming session {}", m.session_id);
-                Some(m.reason)
+                (Some(m.reason), Some(m.session_id))
             }
-            None => None,
-        }
-    };
+            None => (None, None),
+        };
 
     // Dedicated runtime for UI-triggered async work (memory maintenance).
     // NOTE: the UI thread (main thread) IS inside the `#[tokio::main]` runtime
@@ -427,6 +426,20 @@ async fn main() -> eframe::Result {
         }
     }
 
+    // (T4) A restart marker pointing at a session that did not load means the
+    // auto-resume cannot happen — surface it to the UI as a one-shot banner
+    // instead of failing silently into an empty window.
+    let auto_resume_failed: Option<(String, String)> = marker_session_id
+        .as_ref()
+        .filter(|id| !session_store.contains_key(id.as_str()))
+        .map(|id| (id.clone(), auto_resume_reason.clone().unwrap_or_default()));
+    if auto_resume_failed.is_some() {
+        tracing::warn!(
+            "Restart marker's session '{}' could not be loaded; auto-resume will not run",
+            marker_session_id.as_deref().unwrap_or("")
+        );
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),
         ..Default::default()
@@ -445,7 +458,7 @@ async fn main() -> eframe::Result {
                 config, server, tool_manager, agent_engine, connection,
                 session_store, selected_session_id, event_tx, event_rx,
                 memory_manager, memory_runtime, mcp_manager,
-                auto_resume_reason,
+                auto_resume_reason, auto_resume_failed,
             )))
         }),
     )

@@ -24,7 +24,21 @@ stale memories). `plans/lego.md` is stale — its god files
   wrong, it is implemented in `tools/builtin/restart.rs` (L15, L245, L279).
   Only the **resume-failure toast** of T4 remains.
 
-## Phase A — quick wins (~½ day)
+## Phase A — quick wins (~½ day) — ✅ DONE 2026-08-31
+
+A1: `config::consume_restart_marker` (+ test override) in config/paths.rs;
+main.rs consumes it, tracks `marker_session_id`, and on load failure passes
+`auto_resume_failed: Option<(String, String)>` to `ChatApp::new`;
+`RestartState.resume_failed` + dismissible amber top banner in
+`ui/window.rs` (egui 0.36 `egui::Panel::top` + `panel_fill`; `TopBottomPanel`
+and `Frame::none()` no longer exist). 3 core tests.
+
+A2: `tools/validation.rs` (`validate_params` → Vec<String>), registry
+`schema_for`, `ToolManager::validate` implemented, validation gate in
+`execute_with_progress` before execution. 14 validation tests + 2 manager
+integration tests. Note: "integer" accepts whole-number floats (42.0) —
+rejecting `300.0` for `timeout_ms: integer` is noisier than useful;
+required+null is reported once (by the required loop, not the type loop).
 
 ### A1. Restart resume-failure toast (T4 remainder)
 `main.rs:366-428`: the marker is consumed (`config.session_id` set, marker

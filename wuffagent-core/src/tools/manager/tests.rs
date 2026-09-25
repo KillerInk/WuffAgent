@@ -155,3 +155,111 @@ fn test_repair_truncated_tool_calls_noop_without_calls() {
     msg.tool_calls = None;
     assert!(repair_truncated_tool_calls(&mut msg).is_empty());
 }
+
+// ─── Schema validation gate (T5/M2) ─────────────────────────────────────────
+
+/// A trivial tool that counts how often it actually ran, and declares a
+/// schema requiring an integer `count` field.
+struct CountingTool {
+    runs: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::tools::types::Tool for CountingTool {
+    fn name(&self) -> &str {
+        "counting"
+    }
+    fn description(&self) -> &str {
+        "counts how often it runs"
+    }
+    fn parameters_schema(&self) -> crate::tools::types::ToolSchema {
+        use crate::tools::types::{FieldSchema, JsonSchema, ToolSchema};
+        let mut props = std::collections::HashMap::new();
+        props.insert(
+            "count".to_string(),
+            FieldSchema {
+                description: "how many".to_string(),
+                type_name: "integer".to_string(),
+                nullable: false,
+            },
+        );
+        ToolSchema {
+            name: "counting".to_string(),
+            description: "counts how often it runs".to_string(),
+            input_type: Some(JsonSchema {
+                type_name: "object".to_string(),
+                required: vec!["count".to_string()],
+                properties: Some(props),
+            }),
+        }
+    }
+    fn execute(&self, _params: ToolParams) -> ToolResult<ToolOutput> {
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ToolOutput::success("ok"))
+    }
+}
+
+fn manager_with_counting(runs: Arc<std::sync::atomic::AtomicUsize>) -> ToolManager {
+    let registry = ToolRegistry::new(vec![], Arc::new(TracingToolLogger));
+    registry
+        .register(ToolEntry {
+            tool: Arc::new(CountingTool { runs }),
+            metadata: ToolMetadata {
+                name: "counting".to_string(),
+                version: "1.0.0".to_string(),
+                description: "counts how often it runs".to_string(),
+                dependencies: vec![],
+            },
+            loaded_at: std::time::Instant::now(),
+            plugin: None,
+        })
+        .unwrap();
+    ToolManager::new(Arc::new(registry))
+}
+
+#[tokio::test]
+async fn test_execute_rejects_params_failing_schema_validation() {
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tm = manager_with_counting(runs.clone());
+
+    // Missing required field → InvalidParams, tool never ran.
+    let err = tm.execute("counting", ToolParams::new()).await.unwrap_err();
+    match &err {
+        ToolError::InvalidParams(msg) => {
+            assert!(msg.contains("missing required parameter 'count'"), "{msg}")
+        }
+        other => panic!("expected InvalidParams, got {other:?}"),
+    }
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // Wrong type → InvalidParams, tool never ran.
+    let mut p = ToolParams::new();
+    p.values
+        .insert("count".to_string(), serde_json::json!("three"));
+    let err = tm.execute("counting", p).await.unwrap_err();
+    assert!(matches!(err, ToolError::InvalidParams(_)), "{err:?}");
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // Valid params pass validation and the tool runs.
+    let mut p = ToolParams::new();
+    p.values.insert("count".to_string(), serde_json::json!(2));
+    tm.execute("counting", p)
+        .await
+        .expect("valid params must pass validation");
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_validate_reports_all_problems_and_is_ok_for_schemaless_tools() {
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tm = manager_with_counting(runs);
+
+    // Wrong type → InvalidParams naming the problem (and nothing else).
+    let mut p = ToolParams::new();
+    p.values.insert("count".to_string(), serde_json::json!(1.5));
+    let err = tm.validate("counting", &p).unwrap_err();
+    assert!(err.to_string().contains("expected integer"), "{err:?}");
+    assert!(!err.to_string().contains("missing required"), "{err:?}");
+
+    // Unknown tool → validation passes (no schema to check against).
+    assert!(tm.validate("does-not-exist", &ToolParams::new()).is_ok());
+}

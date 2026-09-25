@@ -18,8 +18,8 @@ pub use self::search::{SearchBackend, SearchConfig, SearchRegion, TimeRange};
 pub use crate::agents::config::{AgentConfig, ShellConfig, WorkerConfig};
 pub use crate::memory::types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};
 pub use paths::{
-    get_config_path, get_restart_marker_path, get_wuffagent_home, set_config_path_for_testing,
-    RestartMarker,
+    consume_restart_marker, get_config_path, get_restart_marker_path, get_wuffagent_home,
+    set_config_path_for_testing, set_restart_marker_path_for_testing, RestartMarker,
 };
 
 mod chat;

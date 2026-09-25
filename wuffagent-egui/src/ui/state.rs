@@ -105,6 +105,7 @@ impl ChatApp {
         memory_runtime: Arc<tokio::runtime::Runtime>,
         mcp_manager: Arc<wuffagent_core::tools::mcp::McpManager>,
         auto_resume_reason: Option<String>,
+        auto_resume_failed: Option<(String, String)>,
     ) -> Self {
         // Build the sessions sidebar widget, pre-selecting the active session.
         let mut panel = super::sessions_panel::SessionsPanel::new(&Arc::new(Mutex::new(config.clone())));
@@ -161,8 +162,10 @@ impl ChatApp {
             },
             restart: groups::RestartState {
                 pending_restart: false,
-                pending_auto_resume: auto_resume_reason.is_some(),
+                // A marker whose session failed to load can never resume.
+                pending_auto_resume: auto_resume_reason.is_some() && auto_resume_failed.is_none(),
                 auto_resume_reason,
+                resume_failed: auto_resume_failed,
             },
         }
     }

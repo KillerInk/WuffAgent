@@ -542,3 +542,54 @@ fn test_config_old_file_without_mcp_servers_loads() {
     assert_eq!(loaded.mcp_servers[0].name, "fs");
     assert_eq!(loaded.mcp_servers[0].timeout_secs, 60);
 }
+
+// ─── Restart marker consumption (T4) ────────────────────────────────────────
+
+/// The marker-path override is process-wide; serialize the tests that use it.
+static MARKER_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn test_consume_restart_marker_present_reads_and_deletes() {
+    let _g = MARKER_PATH_LOCK.lock().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("restart.json");
+    std::fs::write(
+        &path,
+        r#"{"session_id":"sess-1","reason":"rebuild after code change"}"#,
+    )
+    .unwrap();
+    crate::config::set_restart_marker_path_for_testing(Some(path.clone()));
+    let marker = crate::config::consume_restart_marker().expect("marker must be read");
+    assert_eq!(marker.session_id, "sess-1");
+    assert_eq!(marker.reason, "rebuild after code change");
+    assert!(!path.exists(), "marker must be deleted after consumption");
+    crate::config::set_restart_marker_path_for_testing(None);
+}
+
+#[test]
+fn test_consume_restart_marker_corrupt_returns_none_keeps_file() {
+    let _g = MARKER_PATH_LOCK.lock().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("restart.json");
+    std::fs::write(&path, "this is not json").unwrap();
+    crate::config::set_restart_marker_path_for_testing(Some(path.clone()));
+    assert!(
+        crate::config::consume_restart_marker().is_none(),
+        "corrupt marker must yield None"
+    );
+    assert!(
+        path.exists(),
+        "corrupt marker file must be kept for inspection"
+    );
+    crate::config::set_restart_marker_path_for_testing(None);
+}
+
+#[test]
+fn test_consume_restart_marker_absent_returns_none() {
+    let _g = MARKER_PATH_LOCK.lock().unwrap();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("restart.json"); // never created
+    crate::config::set_restart_marker_path_for_testing(Some(path));
+    assert!(crate::config::consume_restart_marker().is_none());
+    crate::config::set_restart_marker_path_for_testing(None);
+}

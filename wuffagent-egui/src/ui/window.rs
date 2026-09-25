@@ -367,6 +367,34 @@ impl eframe::App for ChatApp {
         self.show_presets_dialog(ctx);
         // Show agent config dialog
         self.show_agent_config_dialog(ctx);
+        // (T4) A restart marker was found at startup but its session could not
+        // be loaded — the auto-resume was skipped. Show a one-shot banner
+        // explaining why the window started empty; the user dismisses it.
+        if self.restart.resume_failed.is_some() {
+            egui::Panel::top("restart_resume_failed")
+                .resizable(false)
+                .show(ui, |ui| {
+                    ui.visuals_mut().panel_fill = egui::Color32::from_rgb(58, 50, 28);
+                    ui.horizontal_wrapped(|ui| {
+                        let (sid, reason) = self
+                            .restart
+                            .resume_failed
+                            .as_ref()
+                            .map(|(s, r)| (s.clone(), r.clone()))
+                            .unwrap_or_default();
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 205, 90),
+                            format!("⚠ Restart resume failed — session '{sid}' was not found."),
+                        );
+                        if !reason.is_empty() {
+                            ui.weak(format!("Reason was: {reason}"));
+                        }
+                        if ui.small_button("Dismiss").clicked() {
+                            self.restart.resume_failed = None;
+                        }
+                    });
+                });
+        }
         // Draw main UI into the root viewport ui (margins/background are
         // applied by the panels themselves, mirroring the old CentralPanel
         // fill behaviour).

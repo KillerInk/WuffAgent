@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod preview;
 pub mod registry;
 pub mod types;
+pub mod validation;
 
 pub use manager::ToolManager;
 pub use mcp::McpManager;

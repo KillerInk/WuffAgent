@@ -123,6 +123,16 @@ impl ToolRegistry {
         self.tools.read().unwrap().get(name).map(|e| e.tool.clone())
     }
 
+    /// The input schema the tool declares (T5/M2), if any — used to validate
+    /// parameters against what the tool actually expects.
+    pub fn schema_for(&self, name: &str) -> Option<crate::tools::types::JsonSchema> {
+        self.tools
+            .read()
+            .unwrap()
+            .get(name)
+            .and_then(|e| e.tool.parameters_schema().input_type)
+    }
+
     pub fn list(&self) -> Vec<ToolEntry> {
         self.tools.read().unwrap().values().cloned().collect()
     }
