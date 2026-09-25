@@ -1,12 +1,9 @@
 # Finish the self-improvement loop + audit leftovers
 
-**Status:** plan (2026-08-31, wuffagent). Covers everything still open in
-`plans/self-improvement-gaps.md` (T4-remainder, T5/M2, K1, M1) plus new
-findings from the 2026-08-31 source audit (mcp god file, dead `validate`,
-stale memories). `plans/lego.md` is stale — its god files
-(`agent.rs` 1933 L, `file_io.rs` 1219 L, `client/mod.rs` 990 L,
-`memory/manager.rs` 1076 L) were already split by later refactors
-(`agents/agent/`, `fileio/`, `client/` split, `memory/manager/`).
+**Status:** ✅ DONE (2026-08-31 → 2026-09-25, wuffagent). All phases A-D
+complete: A (quick wins + T4 resume-failure banner) 2026-08-31, B (mcp god
+file split) + C (K1 skills) + D (M1 metrics) 2026-09-25. `plans/lego.md`
+is stale — its god files were already split by later refactors.
 
 ## Audit findings (2026-08-31)
 
@@ -136,21 +133,32 @@ Per self-improvement-gaps Phase 4:
 - Tests: frontmatter round-trip, CRUD, invalid name, overwrite, empty store;
   tool round-trip (save → list → read → delete) + missing-param errors.
 
-## Phase D — M1: per-agent metrics (~1 day)
-- `wuffagent-core/src/agents/metrics.rs` (mirror `usage/recorder.rs`
-  style): append-only `<config_dir>/wuffagent/metrics/<agent>.jsonl`
-  lines: `{ts, tool_calls, tool_errors, verification_attempts,
-  duration_ms, outcome}` where outcome ∈ verified / verified_after_retry /
-  needs_fix / gave_up / none.
-- Writers: `Agent::run` end (run_stats + verification outcome — both
-  already computed in agents/agent/loop.rs) and user feedback
-  (`ui/chat_feedback.rs` path appends `{ts, feedback: "up"|"down"}`).
-- Reads: `summarize_since(agent, since_ts) -> String` for the improver
-  (append a "Recent metrics: …" line to the extraction prompt) and
-  `recent(agent, n) -> Vec<...>` for the agent-editor UI section
-  (ui/agent_config.rs: counts + error/feedback rates, last N lines).
-- Tests: append/parse round-trip, summarize aggregation, feedback line,
-  corrupt-line tolerance (recorder is best-effort: read never fails hard).
+## Phase D — M1: per-agent metrics (~1 day) — ✅ DONE 2026-09-25
+Implemented as planned (modular: one small module + hooks, no god class):
+- `agents/metrics.rs`: `MetricsLog` rooted at `<wuffagent_home>/metrics/`
+  (one JSONL file per agent, file name = sanitized agent name), line kinds
+  `run {ts, tool_calls, tool_errors, verification_attempts, duration_ms,
+  outcome}` + `feedback {ts, feedback: up|down}`; best-effort writes
+  (warn-once, swallow), tolerant reads (corrupt lines skipped); test override
+  `set_metrics_dir_for_testing`. Terminal outcome set: verified /
+  verified_after_retry / gave_up / none (there is no terminal `needs_fix` —
+  the nudge loop retries until pass or give-up; the verification-LLM-error
+  default-pass records as `verified`). 7 unit tests.
+- Writer: `run_llm_loop` end (loop.rs) — each handoff hop records its own
+  line under its own agent; terminal outcome via new
+  `VerificationState::final_outcome` (set in verify.rs: verified /
+  verified_after_retry / gave_up / error-default-pass) because the attempt
+  count alone is ambiguous (attempts==2 can be second-attempt pass OR
+  give-up).
+- Writer: `ui/chat_feedback.rs::remember_feedback` records up/down
+  regardless of the memory store (metrics are always on).
+- Reader: improver extraction prompt gets a "Recent metrics (…)" line
+  (last 7 days, `MetricsSummary::format_line`) as deterministic evidence;
+  agent editor UI (ui/agent_config.rs) shows all-time counts + last 5 lines
+  for the selected existing agent.
+- Tests: 7 metrics + 1 improver-prompt test (`MetricsDirGuard` — serialized
+  on a process-wide lock, same pattern as the MCP config-path tests).
+Gate: `cargo test --workspace` → core 611, egui 24, 1 doctest, EXIT=0.
 
 ## Priority & gates
 A → B → C → D (A+B are small and independent; C before D so D's
