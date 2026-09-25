@@ -83,18 +83,23 @@ the user gets an empty window with no explanation.
   schema passes, all-good passes. Manager-level test: a registered tool with
   a schema rejects a bad param map with `InvalidParams` naming the field.
 
-## Phase B — split the mcp god file (~½ day)
-`tools/builtin/mcp.rs` (32.8 KB) → module dir (Rust already allows
-`mcp.rs` + `mcp/tests.rs`; convert to `mcp/mod.rs` + submodules):
-- `mcp/mod.rs`: `register_mcp_tools` + shared helpers (thread/timeout
-  runner, McpManager accessors used by several tools)
+## Phase B — split the mcp god file (~½ day) — ✅ DONE 2026-09-25
+`tools/builtin/mcp.rs` (32.8 KB) → module dir (converted to `mcp/mod.rs` +
+submodules):
+- `mcp/mod.rs`: module docs + shared helpers (`config_path`,
+  `atomic_write_config`, `update_mcp_servers_in_config`, `run_mcp_op`,
+  `status_str`, `mcp_err`, `notify_config_changed`, `parse_server_config`)
+  + `pub use` re-exports so `register_mcp_tools` in `builtin/mod.rs` is
+  unchanged. (`register_mcp_tools` itself lives in `builtin/mod.rs`.)
 - `mcp/servers.rs`: mcp_add_server, mcp_remove_server, mcp_connect,
   mcp_disconnect
 - `mcp/tool_mgmt.rs`: mcp_list, mcp_refresh_tools, mcp_set_tool_enabled
-Pure move — no behavior change, same registration signature (called from
-`wuffagent-egui/src/main.rs`), existing `mcp/tests.rs` stays (split its
-tests to match if convenient, not required).
-Gate: `cargo test -p wuffagent-core` (all mcp tests green) + workspace build.
+- Submodules pull the shared helpers via `use super::*;` (private parent
+  items are visible to child modules; glob imports don't warn on unused
+  names). Existing `mcp/tests.rs` stays untouched (its `use super::*;`
+  still resolves the helpers from `mod.rs`).
+Pure move — no behavior change. Gate passed: `cargo test -p wuffagent-core
+mcp` → 24 passed, 0 failed; no warnings; workspace build EXIT=0.
 
 ## Phase C — K1: skills (procedural memory, ~1-2 days)
 Per self-improvement-gaps Phase 4:
