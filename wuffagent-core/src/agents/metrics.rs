@@ -215,6 +215,19 @@ pub fn set_metrics_dir_for_testing(dir: Option<PathBuf>) {
     *test_metrics_dir_slot().lock().unwrap() = dir;
 }
 
+/// Per-process temp dir that [`MetricsLog::default`] falls back to when this
+/// crate runs under `#[cfg(test)]` (its own test binary only — a dependent
+/// crate's test binary still sees the real location and must set
+/// `set_metrics_dir_for_testing` explicitly in its tests).
+#[cfg(test)]
+fn test_process_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::temp_dir().join(format!("wuffagent-metrics-test-{}", std::process::id()))
+    })
+    .clone()
+}
+
 /// Per-agent metrics log (append-only JSONL, one file per agent).
 ///
 /// Construction is side-effect free (no I/O); each write opens its file in
@@ -237,13 +250,24 @@ impl MetricsLog {
     }
 
     /// Default location: `~/.wuffagent/metrics/`, sibling of `sessions/` and
-    /// `usage.jsonl` (see `config::get_wuffagent_home`); the test override
-    /// wins when set.
+    /// `usage.jsonl` (see `config::get_wuffagent_home`). An explicit test
+    /// override wins when set; inside THIS crate's test binary the fallback
+    /// is a per-process temp dir (see `test_process_dir`), so tests that
+    /// exercise production paths (the run writer, the improver reader) never
+    /// pollute the real metrics dir.
     pub fn default() -> Self {
-        Self::new(
-            test_metrics_dir()
-                .unwrap_or_else(|| crate::config::get_wuffagent_home().join("metrics")),
-        )
+        if let Some(p) = test_metrics_dir() {
+            Self::new(p)
+        } else {
+            #[cfg(test)]
+            {
+                Self::new(test_process_dir())
+            }
+            #[cfg(not(test))]
+            {
+                Self::new(crate::config::get_wuffagent_home().join("metrics"))
+            }
+        }
     }
 
     /// The metrics directory this log writes into.

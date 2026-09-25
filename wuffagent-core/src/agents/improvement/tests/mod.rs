@@ -90,7 +90,9 @@ static METRICS_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct MetricsDirGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
-    dir: tempfile::TempDir,
+    /// Kept alive so the temp dir outlives the test (the value itself is
+    /// never read — only its cleanup on drop matters).
+    _dir: tempfile::TempDir,
 }
 
 impl MetricsDirGuard {
@@ -98,7 +100,10 @@ impl MetricsDirGuard {
         let lock = METRICS_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         crate::agents::metrics::set_metrics_dir_for_testing(Some(dir.path().to_path_buf()));
-        MetricsDirGuard { _lock: lock, dir }
+        MetricsDirGuard {
+            _lock: lock,
+            _dir: dir,
+        }
     }
 }
 

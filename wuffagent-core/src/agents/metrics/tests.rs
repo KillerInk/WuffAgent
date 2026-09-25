@@ -184,3 +184,24 @@ fn test_recent_caps_to_last_n() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Test hygiene: inside this crate's test binary, `default()` must point at
+/// the per-process temp dir (never the real `~/.wuffagent/metrics`), and an
+/// explicit override must still win.
+#[test]
+fn test_default_uses_test_process_dir() {
+    let d = MetricsLog::default().dir().to_path_buf();
+    assert!(
+        d.starts_with(std::env::temp_dir())
+            && d.to_string_lossy().contains("wuffagent-metrics-test-"),
+        "default() under test must use the per-process temp dir, got: {:?}",
+        d
+    );
+    assert!(!d.starts_with(crate::config::get_wuffagent_home()));
+
+    let override_dir = tmp_dir("override-wins");
+    set_metrics_dir_for_testing(Some(override_dir.clone()));
+    assert_eq!(MetricsLog::default().dir(), override_dir.as_path());
+    set_metrics_dir_for_testing(None);
+    let _ = std::fs::remove_dir_all(&override_dir);
+}

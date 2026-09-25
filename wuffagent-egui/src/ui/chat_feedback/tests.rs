@@ -16,6 +16,21 @@ fn msg(role: &str, content: &str) -> ChatMessage {
     }
 }
 
+/// M1 test hygiene: the feedback writer appends to `MetricsLog::default()`,
+/// which — from this (dependent) crate's test binary — is the REAL
+/// `~/.wuffagent/metrics` unless overridden. Point it at a per-process temp
+/// dir so test ratings never leak into the app's metrics.
+fn test_metrics_dir() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::temp_dir().join(format!(
+            "wuffagent-metrics-egui-test-{}",
+            std::process::id()
+        ))
+    })
+    .clone()
+}
+
 /// S2: the lesson entry names the rating, the agent (in content AND tag),
 /// the task snippet, and the comment (or "none").
 #[test]
@@ -40,6 +55,7 @@ fn test_feedback_lesson_shape() {
 /// collapsed by the dedup gate; a different comment is a distinct entry.
 #[test]
 fn test_remember_feedback_saves_and_dedups() {
+    wuffagent_core::agents::metrics::set_metrics_dir_for_testing(Some(test_metrics_dir()));
     let dir = std::env::temp_dir().join(format!(
         "wuffagent-user-feedback-{}",
         std::process::id()
@@ -76,6 +92,7 @@ fn test_remember_feedback_saves_and_dedups() {
 /// is stored.
 #[test]
 fn test_remember_feedback_skipped_when_disabled() {
+    wuffagent_core::agents::metrics::set_metrics_dir_for_testing(Some(test_metrics_dir()));
     let dir = std::env::temp_dir().join(format!(
         "wuffagent-user-feedback-disabled-{}",
         std::process::id()
