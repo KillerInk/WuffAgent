@@ -285,6 +285,23 @@ pub(crate) struct ToolCall {
     pub(crate) function: ToolFunction,
 }
 
+impl ToolCall {
+    /// Convert to the wire-format tool call used by `Message` (this parse
+    /// type exists only because models' text is deserialized directly into
+    /// it; everything downstream of the parse step uses
+    /// `crate::types::ToolCall`).
+    pub(crate) fn to_message_call(&self) -> crate::types::ToolCall {
+        crate::types::ToolCall {
+            id: self.id.clone(),
+            call_type: self._call_type.clone(),
+            function: crate::types::ToolFunction {
+                name: self.function.name.clone(),
+                arguments: self.function.arguments.clone(),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 pub(crate) struct ToolFunction {
     pub(crate) name: String,

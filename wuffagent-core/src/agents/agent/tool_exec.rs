@@ -1,11 +1,17 @@
 //! Parallel tool execution for `run_llm_loop` (extracted A1).
 //!
-//! While the model is still streaming (often: still reasoning), a tool call
-//! becomes executable the moment the stream moves past it. The ready callback
-//! returned by `PendingToolRuns::ready` spawns its execution in the
-//! background at that point, so tools run while the model keeps thinking.
-//! Results are collected in call order after the stream ends (see the
-//! native tool-call section in `tool_calls.rs`).
+//! Every tool call runs in the background:
+//! - while the model is still streaming (often: still reasoning), a call
+//!   becomes executable the moment the stream moves past it — the ready
+//!   callback returned by `PendingToolRuns::ready` starts it then, so tools
+//!   run while the model keeps thinking;
+//! - at stream end, the collection in `tool_calls.rs` starts whatever the
+//!   stream never moved past (typically the LAST call) plus all
+//!   text-embedded fallback calls, in parallel.
+//!
+//! Results are always collected in CALL order (request list + shared store
+//! must stay in lockstep); completions may arrive out of order (the UI keys
+//! cards on call_id).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -83,16 +89,60 @@ type PendingRunMap = Arc<
     Mutex<HashMap<String, tokio::task::JoinHandle<Result<String, String>>>>,
 >;
 
-/// Tool runs that were early-started while the model was still streaming.
-///
-/// Owns the `id → JoinHandle` map plus everything the ready callback needs
-/// (event channel, tool manager, cancel token) so the `'static` closure
-/// construction lives here instead of in `run_llm_loop`.
+/// Tool runs started in the background: early-starts while the model is
+/// still streaming, plus end-of-stream starts for the calls the stream never
+/// "moved past" (typically the last one) and all text-embedded fallback
+/// calls. Every execution path funnels through `start`/`execute_tool_call`,
+/// so parsing, cancellation, and result normalization are identical.
 pub(crate) struct PendingToolRuns {
     map: PendingRunMap,
     sink: EventSink,
-    manager: Arc<Mutex<ToolManager>>,
+    /// Cheap-clone manager (Arc fields inside), so each spawned task takes
+    /// its own copy and no lock is held across awaits.
+    manager: Arc<ToolManager>,
     cancel: CancellationToken,
+}
+
+/// Execute ONE tool call and normalize its result text.
+///
+/// Shared by the early-start path, the end-of-stream catch-up, and the
+/// text-embedded fallback, so all of them agree on argument parsing,
+/// cancellation semantics, and output normalization (empty → "(no output)",
+/// tool error → "Error: …").
+///
+/// `Ok` = the normalized result text; `Err` = argument-parse error (the tool
+/// never ran).
+pub(crate) async fn execute_tool_call(
+    manager: &ToolManager,
+    cancel: &CancellationToken,
+    name: &str,
+    args: &str,
+    progress: &crate::tools::types::ToolProgress,
+) -> Result<String, String> {
+    let params = match crate::tools::manager::parse_tool_args(args) {
+        Ok(p) => p,
+        Err(e) => return Err(e),
+    };
+    let result = tokio::select! {
+        r = manager.execute_with_progress(name, params, progress) => r,
+        _ = cancel.cancelled() => {
+            return Ok(format!("Error: Cancelled (tool '{name}' aborted)"))
+        }
+    };
+    Ok(match result {
+        Ok(output) => {
+            let s = format!("{output}");
+            if s.trim().is_empty() {
+                "(no output)".to_string()
+            } else {
+                s
+            }
+        }
+        Err(e) => {
+            tracing::warn!("[AGENT] Tool '{name}' failed: {e}");
+            format!("Error: {e}")
+        }
+    })
 }
 
 impl PendingToolRuns {
@@ -104,7 +154,7 @@ impl PendingToolRuns {
         Self {
             map: Arc::new(Mutex::new(HashMap::new())),
             sink,
-            manager: Arc::new(Mutex::new(manager)),
+            manager: Arc::new(manager),
             cancel,
         }
     }
@@ -131,6 +181,51 @@ impl PendingToolRuns {
         self.map.lock().unwrap().remove(call_id)
     }
 
+    /// Start a tool call in the background: emit its `ToolCallStart` event
+    /// (the live UI card) and spawn its execution. No-op when the call was
+    /// already started (defensive) or carries an empty id (the caller then
+    /// executes it inline).
+    ///
+    /// Used by the stream ready callback (early-start) AND by the
+    /// end-of-stream collection in `tool_calls.rs` (catch-up start for the
+    /// calls the stream never moved past, and all text-embedded calls), so
+    /// every path runs tools in parallel.
+    pub(crate) fn start(&self, call: &ToolCall) {
+        let id = call.id.clone();
+        if id.is_empty() {
+            return;
+        }
+        if self.map.lock().unwrap().contains_key(&id) {
+            return; // defensive: already started
+        }
+        let name = call.function.name.clone();
+        let args = call.function.arguments.clone();
+        tracing::debug!(
+            "[AGENT] Starting tool '{}' (id={}) in the background",
+            name, id
+        );
+        // Live tool card: args preview + progress sink.
+        let args_preview = crate::tools::tool_args_summary(&name, &args);
+        self.sink.send(AppEvent::ToolCallStart {
+            tool_name: name.clone(),
+            call_id: id.clone(),
+            args_preview,
+            session_id: self.sink.session_id().to_string(),
+        });
+        let progress = tool_progress_for(
+            self.sink.tx.clone(),
+            self.sink.session_id(),
+            &name,
+            &id,
+        );
+        let tool_mgr = Arc::clone(&self.manager);
+        let token = self.cancel.clone();
+        let handle = tokio::spawn(async move {
+            execute_tool_call(&tool_mgr, &token, &name, &args, &progress).await
+        });
+        self.map.lock().unwrap().insert(id, handle);
+    }
+
     /// The `'static` ready callback for `ChatClient::stream_with_messages_arc`.
     ///
     /// Early-starts a tool call while the model is still streaming: the SSE
@@ -138,66 +233,6 @@ impl PendingToolRuns {
     /// safe to execute now.
     pub(crate) fn ready(self: &Arc<Self>) -> impl FnMut(ToolCall) + Send + Sync + 'static {
         let runs = Arc::clone(self);
-        move |call: ToolCall| {
-            let id = call.id.clone();
-            if id.is_empty() {
-                return;
-            }
-            if runs.map.lock().unwrap().contains_key(&id) {
-                return; // defensive: already started
-            }
-            let name = call.function.name.clone();
-            let args = call.function.arguments.clone();
-            tracing::debug!(
-                "[AGENT] Early-starting tool '{}' (id={}) while model is still streaming",
-                name, id
-            );
-            // Live tool card: args preview + progress sink.
-            let args_preview = crate::tools::tool_args_summary(&name, &args);
-            runs.sink.send(AppEvent::ToolCallStart {
-                tool_name: name.clone(),
-                call_id: id.clone(),
-                args_preview,
-                session_id: runs.sink.session_id().to_string(),
-            });
-            let progress = tool_progress_for(
-                runs.sink.tx.clone(),
-                runs.sink.session_id(),
-                &name,
-                &id,
-            );
-            let tool_mgr = runs.manager.clone();
-            let token = runs.cancel.clone();
-            let handle = tokio::spawn(async move {
-                let params = match crate::tools::manager::parse_tool_args(&args) {
-                    Ok(p) => p,
-                    Err(e) => return Err(e),
-                };
-                // Clone the manager (cheap Arc clones inside) so no mutex
-                // guard lives across the awaits in the select! below.
-                let mgr = tool_mgr.lock().unwrap().clone();
-                let result = tokio::select! {
-                    r = mgr.execute_with_progress(&name, params, &progress) => r,
-                    _ = token.cancelled() => {
-                        return Ok(format!(
-                            "Error: Cancelled (tool '{}' aborted)",
-                            name
-                        ))
-                    }
-                };
-                Ok(match result {
-                    Ok(output) => {
-                        let s = format!("{}", output);
-                        if s.trim().is_empty() {
-                            "(no output)".to_string()
-                        } else {
-                            s
-                        }
-                    }
-                    Err(e) => format!("Error: {}", e),
-                })
-            });
-            runs.map.lock().unwrap().insert(id, handle);
-        }
+        move |call: ToolCall| runs.start(&call)
     }
 }

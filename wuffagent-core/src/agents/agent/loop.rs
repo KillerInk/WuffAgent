@@ -453,10 +453,11 @@ impl Agent {
 
             // ── Native tool calls ───────────────────────────────────────
             // Calls the model has already moved past were early-started
-            // mid-stream (ready callback above) — collect their results
-            // here, in call order. Calls that never got a "moved past"
-            // signal (typically the LAST one in the stream) are executed
-            // inline, exactly as before.
+            // mid-stream (ready callback above). The section below starts
+            // whatever is still unstarted (typically the LAST call in the
+            // stream, which never got a "moved past" signal) in the
+            // background too, then collects ALL results in call order —
+            // i.e. every tool in the round runs in parallel.
             if let Some(calls) = &tool_calls {
                 if !calls.is_empty() {
                     super::tool_calls::run_native_tool_calls(
@@ -479,6 +480,7 @@ impl Agent {
                 &tool_defs,
                 &display_content,
                 cancel_token,
+                &pending_tool_runs,
                 messages,
                 &tool_manager,
             )
