@@ -158,7 +158,16 @@ Implemented as planned (modular: one small module + hooks, no god class):
   for the selected existing agent.
 - Tests: 7 metrics + 1 improver-prompt test (`MetricsDirGuard` — serialized
   on a process-wide lock, same pattern as the MCP config-path tests).
-Gate: `cargo test --workspace` → core 611, egui 24, 1 doctest, EXIT=0.
+- Test hygiene follow-up (commit b8a5264): the production run-writer fired
+  during `cargo test` (agent-loop tests) and the egui chat-feedback tests,
+  polluting the real `~/.wuffagent/metrics/`. Fix: `MetricsLog::default()`
+  falls back to a per-process temp dir under `#[cfg(test)]` of wuffagent-core
+  (explicit override still wins); the egui tests set the override themselves
+  (core is a dependency there, so cfg(test) is off — note
+  `remember_feedback` records metrics even with the memory store disabled).
+  Regression test: `test_default_uses_test_process_dir`.
+Gate: `cargo test --workspace` → core 612, egui 24, 1 doctest, EXIT=0, no
+  warnings, real metrics dir left untouched.
 
 ## Priority & gates
 A → B → C → D (A+B are small and independent; C before D so D's
