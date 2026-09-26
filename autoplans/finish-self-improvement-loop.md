@@ -169,6 +169,21 @@ Implemented as planned (modular: one small module + hooks, no god class):
 Gate: `cargo test --workspace` → core 612, egui 24, 1 doctest, EXIT=0, no
   warnings, real metrics dir left untouched.
 
+### D-bis. Metrics undercount bugfix (2026-09-26, commit 1827079)
+The first real runs recorded `tool_calls: 0` for multi-tool turns: the
+run-writer re-scanned the request list with a start-of-run offset
+(`run_stats_since`), but `run_llm_loop` trims that list in place mid-run,
+so on longer turns the offset drifted past every recorded call. Fix: the
+two execution functions (`run_native_tool_calls` /
+`run_text_embedded_calls`) now take `&mut RunStats` and increment the
+counters per executed call; the handoff/restart/hand-back exits `break`
+instead of `return` so the single metrics tail records every Ok exit.
+`run_stats_since` removed; regression tests in
+`agents/agent/tests/tool_calls.rs` (core now 614). Verified live: after
+the self-restart loaded the fix, a 7-tool turn recorded
+`tool_calls: 7, tool_errors: 2` (pre-fix, an ~8-tool 46-min turn had
+logged `0/0`).
+
 ## Priority & gates
 A → B → C → D (A+B are small and independent; C before D so D's
 summarizer can later include skill usage if ever wanted).
