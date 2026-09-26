@@ -1,244 +1,262 @@
-# Self-improvement gaps — round 2 (2026-10-06)
+# WuffAgent Self-Improvement — Gap Analysis Round 2 (plan, 2026-09-26)
 
-**Status:** planned (wuffagent)
-**Supersedes:** `self-improvement-gaps.md` (round 1, implemented 2026-08-31 → 09-25) and the
-self-extend additions T1–T4 (`t1-…md`, `t2-…md`, `t3-…md`, `t3b-…md` — all done; T3b marked
-DONE in this round's housekeeping).
+**Status:** planned (wuffagent). Companion to `plans/self-improvement-gaps.md`
+(round 1, 2026-07 — now fully implemented) and
+`autoplans/finish-self-improvement-loop.md` (round 1's execution log, done
+2026-09-25).
 
-## Inventory — what the loop already has (verified in code, 2026-10-06)
+Round 1 built the *plumbing*: memory (fact/lesson/decision/context/goal +
+tags), LLM memory maintenance, the skills store, per-agent metrics (JSONL),
+a verification judge with nudge-retry, an auto-improvement check with
+review panel, agent self-tools (edit_agent_profile, list_agents, restart,
+handoff/hand_back), MCP management tools, runtime plugin reload, and the
+I1–I5 improver upgrades (trajectory, profile fields, per-field approval +
+evidence, cooldown, effect check).
 
-1. **Episodic memory**: entries + typed lessons, token-dedup, fuzzy injection (top 5 / 1000
-   chars), maintenance LLM pass (dedup/retag/supersede/revive, opt-in, threshold 40),
-   per-agent lesson tagging convention (`agent:<name>`).
-2. **Procedural memory (skills)**: `SkillStore` (`memory/skills.rs`), 4 tools, `═══ SKILLS ═══`
-   prompt block for every agent (capped 20), tool guidance gated on `save_skill` in
-   `allowed_tools`.
-3. **Per-agent metrics (M1)**: `agents/metrics/` — JSONL per agent (`run` lines: tool
-   calls/errors, verification attempts, duration, terminal outcome; `feedback` up/down lines),
-   undercount bugfix landed (D-bis), `MetricsLog::recent/summary_since/last_7_days_summary`,
-   `describe()`, `MetricsSummary::format_line`.
-4. **Post-task improvement check (I1–I5)**: `agents/improvement.rs` — LLM call with
-   trajectory (RunStats), lessons, recent metrics, rejection lessons, effect-check section for
-   the last applied prompt; I2 profile-field proposals (allowed_tools, reasoning_effort,
-   shell_config, handoff_targets, task_timeout_ms), I3 evidence attached to each suggestion,
-   I4 throttle (cooldown 5 tasks + new-evidence gate, `ImprovementState` persisted in the
-   memory dir).
-5. **Review panel** (`wuffagent-egui/src/ui/improvements/`): per-field approve toggles, prompt
-   editing (F1), append-dedup (F2), revert-to-snapshot (F4), rejection lesson on dismiss (F5),
-   applied-prompt marker on approve (I5).
-6. **Self-tools**: `list_agents` / `edit_agent_profile` (history snapshots), `restart`
-   (build_cmd + test_cmd + `.prev` backup + resume marker), `handoff` / `hand_back` (in-turn +
-   sub-session), MCP management (7 tools), plugin self-extend (`reload_plugins` /
-   `add_plugin_path`, T3b), shell (allowlist + dangerous-command filter), skills, memory.
-7. **Verification loop (S1)**: judge LLM + nudge retry; terminal outcomes feed metrics.
+This round audits what is **missing** in the self-improvement loop itself.
 
-## Gaps (findings, with evidence)
+## What exists (verified in code, 2026-09-26)
 
-### G1. Effect check is blind to the best data (HIGH)
-`improver.rs::effect_check_section` (L154-169) compares only **lesson entries** since the
-`improvement-applied` marker. The metrics M1 built — run outcomes, tool-error rate, feedback
-up/down — are the strongest before/after signals and are **not used** by the effect check
-(`suggest_improvements` feeds them to the LLM as "recent 7 days", but the effect check has no
-windowing around the marker). Additionally:
-- **Field-only approvals record no marker at all**: `draw.rs:356` calls
-  `remember_applied_prompt` only when `prompt_applied` is true (set only for prompt writes,
-  `improvements/memory.rs:134`), so tools/shell/reasoning/handoff/timeout changes are never
-  effect-checked.
-- The effect check lists lessons but never the **number of runs since the change** (the
-  denominator that makes the comparison meaningful) — `runs_since` (improver.rs:113-124)
-  already exists and is unused here.
+- `agents/engine.rs` (336): single merged pipeline
+  (`execute_with_tools` → `post_task_maintenance`, L268–332).
+  `improvement_due` (free fn, L54–56) uses ONE shared `tasks_completed`
+  counter (L74) — the cooldown is **global across agents**, and the
+  improver analyzes **only the agent that just finished**.
+  `has_new_improvement_evidence()` (memory/manager.rs:172) +
+  `record_improvement_check()` (:191) + `ImprovementState` (:524,
+  `last_check: Option<i64>`) gate the LLM call.
+- `agents/improvement.rs` (414): the improver.
+  `suggest_improvements` (L184): lessons via `collect_lessons` (gated on
+  `improvement_trigger_lessons`, default 1), `cap_lessons` budget,
+  `rejected_history` (F5), `trajectory_line` (I1), 7-day metrics line
+  (L223–227, `MetricsLog::summary_since(...).format_line()`),
+  `effect_check_section` (L109–144, I5), prompt template with the
+  changeable-field list (L265–272) + JSON template (L274–291),
+  `TOTAL_PROMPT_CHAR_BUDGET` tail truncation, evidence attached
+  deterministically (L362–384).
+- `agents/metrics.rs` (455): `MetricsLog` — one JSONL per agent
+  (`<wuffagent_home>/metrics/<name>.jsonl`), lines `run {ts, tool_calls,
+  tool_errors, verification_attempts, duration_ms, outcome}` +
+  `feedback {ts, up|down}`. Readers: `read_all`/`recent`/`summary_since`
+  (L381, → `MetricsSummary {runs, tool_calls, tool_errors, verified,
+  verified_after_retry, gave_up, not_verified, feedback_up,
+  feedback_down}` + `format_line()`). Writers: `record_run` (from
+  `run_llm_loop`) + `record_feedback` (chat thumbs). No token/cost line.
+- `memory/manager.rs` (544): store CRUD, `suggest_improvements` wrapper
+  (L82), evidence gate, maintenance. `MemoryEntry` carries
+  `timestamp: Option<DateTime<Utc>>` — the I5 applied-marker is already
+  machine-readable (improvement.rs:111).
+- `memory/skills.rs` (11 KB) + `tools/builtin/skills.rs`: SkillStore —
+  CRUD + `prompt_block` injection (name/description/when_to_use, capped
+  at 20) into every system prompt. **No usage tracking, no maintenance.**
+- `types/policy.rs`: `ImprovementSuggestion` — agent_name, prompt_change,
+  rationale, new_agents, allowed_tools, reasoning_effort, shell_config,
+  handoff_targets, task_timeout_ms, evidence. No `description` field.
+- `ui/improvements/` (egui): review panel — per-field toggles, editable
+  prompts, Revert (F4), evidence display; approve → profile write in the
+  profile's actual dir + I5 marker; dismiss → F5 rejection lesson.
+  `ImprovementsPanel.pending` is **in-memory only** (mod.rs:113–117) —
+  suggestions vanish on app exit if unreviewed.
+- Agent self-tools: list_agents, edit_agent_profile (history snapshots),
+  restart (build-gated, dual-target), handoff/hand_back (in-turn +
+  sub-session), memory/skill tools, MCP management, plugin reload,
+  web_search/fetch_url. No tool for **reading metrics** or **triggering
+  the improver on demand**.
 
-### G2. No on-demand or cross-agent self-review (MEDIUM)
-The check fires only inside `post_task_maintenance` (engine.rs) for **the agent that just
-finished a task**, gated by a **process-global** task counter (`improvement_due`,
-engine.rs:222-237: `tasks_completed` is one shared counter). Consequences:
-- the user cannot say "review now" — they must wait for cooldown + new evidence;
-- one busy agent consumes the cooldown for everyone; a single idle agent never gets checked
-  while another burns tasks;
-- cross-agent patterns (handoff chains, shared tool gaps) are never analyzed — each check sees
-  exactly one agent's data.
+## Gaps (ordered by impact)
 
-### G3. Self-improvement health is invisible (MEDIUM)
-`ImprovementsPanel` shows only pending suggestions. The user cannot see when the last check
-ran, what it concluded ("no change needed" vs "2 suggestions" vs LLM error), or why the gate
-blocked a check (cooldown remaining / no new evidence). `ImprovementState` (memory/manager.rs)
-persists only `last_check: Option<i64>`. A silent no-op loop looks like a broken one.
+### A. The effect check ignores the metrics it already collects (HIGH)
+`effect_check_section` (agents/improvement.rs:109–144) lists only **lesson
+memories** newer than the applied marker. The strongest outcome signals —
+verification outcomes, tool error rate, user thumbs — are in `metrics/<a>
+.jsonl` but never compared before/after. The "did this prompt change
+help?" question is answered from text, not data.
 
-### G4. Pending suggestions are lost on app exit (MEDIUM)
-`ImprovementsPanel.pending` is in-memory only (improvements/mod.rs:113-117). Approve/dismiss
-are the only exits; closing the app drops unreviewed suggestions. Re-suggestion is not
-guaranteed (the new-evidence gate re-arms, but the LLM may produce different wording, so the
-F2 agent+rationale dedup may not catch it).
+### B. No agent-initiated self-review (HIGH)
+Agents can edit their own profile, restart, save memories/skills — but
+cannot inspect their own metrics, and the improver runs **only** on the
+global cooldown after a task of the *current* agent. A "coder keeps
+handing back to wuffagent" pattern is only analyzed when coder finishes a
+task AND the global counter lands on a boundary AND new lesson evidence
+arrived.
 
-### G5. The agent cannot read its own metrics (MEDIUM)
-No tool exposes `MetricsLog` to the model. The `wuffagent` profile (the one whose job is to
-improve itself) must `shell` into `~/.wuffagent/metrics/*.jsonl` to judge its own runs. There
-is no "how is coder doing?" answer in chat.
+### C. No cross-agent / global review (HIGH)
+Round 1's round-2 roadmap said "per-agent + global self-review"; global
+never landed. Cross-agent problems (bad handoff targets, overlapping
+agents, a profile that should exist) can only be proposed as `new_agents`
+side-proposals while analyzing one agent.
 
-### G6. Skills have no lifecycle (LOW-MEDIUM)
-Skills are saved + injected but: no usage is recorded (a skill that is never `read_skill`ed is
-indistinguishable from a hot one), no maintenance pass (memory has one), and the improver has
-no skill signal in its evidence. Cheap first step: a `skill_use` metric line; maintenance is
-stretch.
+### D. Agents can't see their own metrics (MEDIUM)
+No `read_metrics` tool. The agent editor UI shows them to humans; the
+agent itself is blind to its own run history (the improver gets it, but
+that's a different LLM call with a different prompt).
 
-### G7. Metrics lack cost + task identity (LOW, stretch)
-`RunStats` (agents/types.rs:69) is tool_calls/tool_errors/verification_attempts only — no
-prompt/completion tokens (the `usage_recorder` telemetry exists but is not correlated per
-agent run) and no session/task id linking a run to its feedback line or an improvement marker.
-Prompt bloat (the most likely side effect of approved prompt changes) is therefore not visible
-in the effect check's data.
+### E. Skills are append-only (MEDIUM)
+Skills are created but never: (1) tracked for usage (did read_skill lead
+to a successful task?), (2) maintained (no stale-skill cleanup, no
+consolidation — the LLM maintenance pass covers memories only), (3)
+versioned (overwrite = silent replacement, no history, unlike
+edit_agent_profile's prompt history).
 
-### G8. Small improver/apply gaps (LOW)
-- **a.** `ImprovementSuggestion` has no `description` field — the profile description drives
-  agent selection and handoff targeting, and the improver (which sees the agent at work) is
-  the best position to rewrite it.
-- **b.** Cooldown is process-global (see G2) — per-agent counters are the fix.
-- **c.** Effect check lacks "N runs since change" (see G1).
-- **d.** The marker stores the applied date as a **string in the content** (improvements/
-  memory.rs:243-252); a machine-readable timestamp is needed for windowed before/after
-  comparisons (G1). (Check whether `MemoryEntry` already carries a created-at timestamp the
-  effect check can use; if yes, no content change needed — only a read path.)
+### F. No eval / regression harness (MEDIUM, stretch)
+Prompt changes are judged by vibes (lessons) + a weak effect check (A).
+No saved test tasks per agent, no before/after scoring. A minimal version
+needs almost no new machinery: a JSONL of saved tasks + run them through
+the existing verification judge + record to metrics.
 
-### G9. No eval / regression harness for prompts (STRETCH)
-"Did the prompt change help?" is currently judged from post-hoc metrics + user thumbs. A
-fixed per-agent task set with scored runs before/after a change would make prompt changes
-objective and gate auto-apply. Big; design separately.
+### G. Suggestion lifecycle leaks (MEDIUM)
+1. Pending suggestions are not persisted (app exit loses them; the
+   evidence gate may never re-arm them).
+2. `ImprovementSuggestion` has no `description` field — the improver can't
+   fix an agent's description (which is what agent *selection* reads).
+3. No visibility into WHY the auto-check is idle (cooldown? no new
+   evidence? auto_improve off?) — the panel only shows pending items.
 
-## Phases
+### H. Cost control is coarse (LOW)
+- The 7-day metrics window is hardcoded (improvement.rs:225) — no
+  `improvement_metrics_window_days` in MemoryConfig.
+- Cooldown is per *task completion*, not wall-clock (a day with 50 tasks
+  triggers 10 checks; a quiet week triggers none even if evidence
+  accumulated — mitigated by the evidence gate, but not eliminated).
+- Metrics have no token/cost lines, so the cost of the improvement
+  system itself (improver LLM call + verification calls) isn't visible in
+  the data it produces.
 
-### Phase 1 — close the effect-check loop (G1 + G8a + G8c + G8d) — core, ~1 day
+### I. Feedback loop is binary (LOW, stretch)
+Thumbs up/down per message only. No per-tool-error feedback, no
+"this suggestion was right" signal beyond approve/dismiss.
 
-1. **1a. Windowed metric summaries.** `agents/metrics/`: generalize the existing
-   `summary_since(Option<DateTime<Utc>>)` into
-   `summary_between(from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) ->
-   MetricsSummary` (keep `summary_since` as a thin wrapper so the UI/improver call sites are
-   untouched). Also `runs_since(since)` is already there (improver.rs) — move/keep as is.
-2. **1b. Marker for ALL approved profile changes.** Generalize `applied_marker`
-   (improvements/memory.rs:242): content names the applied fields ("prompt, allowed_tools")
-   and the date; keep the `improvement-applied` + `agent:<name>` tags (the tag is what
-   `latest_applied_marker` finds — content wording is free to change). `apply_improvement_
-   detailed` already computes the `applied: Vec<String>` list (memory.rs:100-129) — return it
-   (extend the tuple or a small struct) so `draw.rs:356` records a marker whenever a profile
-   write succeeded, not only for prompts. Prefer a machine-readable timestamp: if
-   `MemoryEntry` exposes a created-at field, the effect check uses it; otherwise keep the
-   date string and parse it (content already has `%Y-%m-%d`).
-3. **1c. Effect-check section v2.** `improver.rs::effect_check_section` becomes a
-   before/after comparison using 1a: window BEFORE = 7 days ending at the marker ts, window
-   AFTER = marker ts → now; render both via `MetricsSummary::format_line` (rename the
-   hard-coded "Recent metrics" prefix to a parameter so one rendering serves both windows) +
-   "N runs since the change" via `runs_since`. Keep the existing lesson list as third item.
-   Update the "Recent metrics" extraction prompt text (improver.rs:331) only if wording
-   collides — it stays 7-day-based.
-4. **1d. Propose `description`.** `ImprovementSuggestion.description: Option<String>`
-   (serde default — old JSON still parses), improver prompt field list + JSON template
-   (improver.rs:264-287), `PendingImprovement.description` + `apply_description` toggle
-   (default true), apply path in `improvements/memory.rs` (`config.description = …`, add
-   "description" to the applied list), serialization + suggest tests extended (the I2 tests in
-   `improvement/tests/` are the pattern).
-5. **1e. Per-agent cooldown (G8b).** `engine.rs::improvement_due`: replace the shared
-   `tasks_completed` gate with a per-agent map (`HashMap<String, usize>`: last task-counter
-   value at which THAT agent was checked); a check is due when the agent's own task count
-   advanced ≥ `improvement_cooldown_tasks` since its last check. Keep the new-evidence gate
-   as is. (Small, same file, ships with the loop work.)
+## Plan
 
-**Tests (1):** windowed summary (before/after/empty), marker content for field-only approval,
-effect-check section contains both windows + run count (fake marker + seeded temp metrics dir,
-`MetricsDirGuard` pattern), description round-trip through suggest + apply, per-agent due
-logic (two agents, one busy).
-**Gate:** `cargo test --workspace` green, no warnings, one commit per sub-item, self-restart
-(build-gated) after core changes, update memory.
+### Phase 1 — make the loop measure what it changes (1–2 days)
+- **1a. Metrics-backed effect check (fixes A).**
+  In `effect_check_section` (agents/improvement.rs): also compute
+  `summary_since(marker.timestamp)` and the matching BEFORE window
+  (window length = time since marker, capped at 30 days) via a new
+  `MetricsLog::summary_between(agent, start, end)` (trivial over
+  `read_all`; `summary_since` keeps working). Section text becomes:
+  metrics before vs after (runs, error rate, verified/gave-up, thumbs)
+  + the lesson list. No new MemoryEntry fields needed — the marker's
+  `timestamp` already exists (I5/G8d resolved).
+  Tests: synthetic JSONL before/after a marker → section contains both
+  windows; missing metrics file → section still works (lessons only).
+- **1b. Persist pending suggestions (fixes G.1).**
+  New tiny module `memory/pending_improvements.rs` (or egui-side, but core
+  is better: survives UI rework): `<wuffagent_home>/pending_improvements.
+  json`, one file per project or global; `ImprovementsPanel` loads on
+  startup, saves on any mutation (append/refresh/approve/dismiss).
+  Serde-compatible with the existing `ImprovementSuggestion` (add
+  `#[serde(default)]` where needed — already there).
+  Tests: round-trip, corrupt file → empty, approve removes the entry.
+- **1c. `description` as a changeable field (fixes G.2).**
+  Add `description: Option<String>` to `ImprovementSuggestion` (serde
+  default), the improver's field list + JSON template
+  (improvement.rs:265–291), `PendingImprovement` (+toggle, default on),
+  and the apply path (ui/improvements/memory.rs: `apply_improvement_
+  detailed` → `config.description`).
 
-### Phase 2 — visible + durable loop (G3 + G4 + G2a) — core + egui, ~1 day
+### Phase 2 — agent-initiated + cross-agent review (2–3 days)
+- **2a. Per-agent improvement state (foundation for B+C).**
+  `ImprovementState` (memory/manager.rs:524): `last_check: Option<i64>`
+  → `per_agent: BTreeMap<String, {last_check: i64, completed: usize}>`
+  (+ keep `last_check` as the max for back-compat / evidence gate).
+  `improvement_due` (engine.rs:54) becomes
+  `improvement_due_for(agent, state, cooldown)`; the shared
+  `tasks_completed` stays for the maintenance cooldown only.
+- **2b. `check_improvements` tool (fixes B, part of C).**
+  New builtin (`tools/builtin/improve.rs`, registered like the memory
+  tools; allowlisted per agent — enable for wuffagent first):
+  `check_improvements(agent: Option<String>, focus: Option<String>)` →
+  runs the EXISTING `MemoryManager::suggest_improvements`
+  (memory/manager.rs:82) for the named agent (default: the calling
+  agent), bypassing the cooldown (agent-initiated = explicit) but
+  respecting the evidence gate + `auto_improve`, and returns the
+  suggestions as tool output (so the agent can summarize/act) AND emits
+  `AppEvent::ImprovementSuggested` (so the panel gets them too).
+  Reuses `collect_lessons`/metrics/effect-check unchanged — only the
+  trigger changes. Guard: one check per agent per N minutes (in-memory,
+  best-effort) so a chatty agent can't spam the LLM.
+- **2c. `read_metrics` tool (fixes D).**
+  New builtin (`tools/builtin/read_metrics.rs`): `read_metrics(agent:
+  Option<String> (default caller), days: Option<u32> (default 7))` →
+  `summary_since(...).format_line()` + the last N raw lines
+  (`recent(agent, n)`). Read-only, no LLM. One small Tool struct, tests
+  with `set_metrics_dir_for_testing` (existing pattern).
+- **2d. Global review on demand (fixes C).**
+  Extend `check_improvements` with `agent: "all"` (or a `scope:
+  "global"` param): loop all enabled profiles, collect per-agent
+  evidence (lessons + 7-day metrics + rejection history), ONE combined
+  LLM call with a cross-agent prompt section ("handoff patterns,
+  overlapping/missing roles") → suggestions for any agent incl.
+  `new_agents`. Keep it ONE call (cost). Config:
+  `improvement_global_enabled: bool` (default true, tool-gated anyway).
+- **2e. MemoryConfig knobs (fixes H.1/H.2).**
+  `improvement_metrics_window_days: u32` (default 7; used in
+  improvement.rs:225 instead of hardcoded), optional
+  `improvement_min_interval_hours: u64` (default 0 = off; wall-clock
+  lower bound on top of the task cooldown — `ImprovementState` already
+  stores timestamps).
 
-1. **2a. Last-check outcome persisted.** Extend `ImprovementState` (memory/manager.rs:524)
-   with `last_agent: Option<String>` and `last_result: Option<String>` ("no change needed" /
-   "N suggestion(s)" / "error: …"); `record_improvement_check(result)` signature change (two
-   call sites in engine.rs); getter `last_improvement_check() -> Option<(i64, String,
-   String)>`.
-2. **2b. Panel status header.** `improvements/draw.rs` (or a new small
-   `improvements/status.rs` to keep draw modular): one line above the pending list —
-   "Last check: <relative time> on '<agent>' — <result>; next auto-check: <n> task(s) away,
-   evidence: <new runs since check / none>". Engine already exposes the pieces (2a + the
-   metrics count used by the evidence gate).
-3. **2c. "Check now" button.** `AgentEngine::check_improvements_now(&self, agent_name)`:
-   factor the body of the post-task check (engine.rs:166-212) into a private
-   `run_improvement_check(agent, force: bool)`; the public method calls it with `force=true`
-   (skips cooldown + evidence gate), the post-task path keeps `force=false`. The panel button
-   calls it via `ChatApp` (engine is already owned there); suggestions flow through the
-   existing `AppEvent::ImprovementSuggested` path unchanged.
-4. **2d. Pending suggestions survive restart.** New core module
-   `agents/improvement/pending.rs`: `PendingStore` at `<wuffagent_home>/pending_improvements.
-   json` — `Vec<ImprovementSuggestion>`, atomic write (existing atomic-write helper pattern
-   from the MCP config), tolerant load (corrupt file → empty + warn), `set_metrics_dir_
-   for_testing`-style override. egui: `ImprovementsPanel` loads on init (ChatApp bootstrap),
-   rewrites on add/refresh/approve/dismiss. The F2 dedup rule is reused so a restart-restore
-   never stacks duplicates.
+### Phase 3 — skills become first-class improvement memory (1–2 days)
+- **3a. Skill usage line in metrics (foundation for E).**
+  `read_skill` tool records `skill {ts, name, used: bool}` in the
+  existing per-agent JSONL (new `MetricsLine` variant; serde-tolerant so
+  old lines still parse). `used: true` is recorded when the agent calls
+  `save_skill`/`delete_skill` for the same name within the same session,
+  OR more simply: count reads only (usage = "agent thought it relevant");
+  start with reads-only, keep the `used` field for later.
+- **3b. Skill maintenance (fixes E).**
+  Extend the LLM maintenance pass (memory/maintenance.rs) with a
+  skills sub-pass (same batching pattern): input = skill metas + their
+  usage counts (3a) + ages; output actions: merge/retire stale skills,
+  propose updated `when_to_use`. Retires go to a trash dir (like the
+  memory maintenance's supersede handling) instead of delete.
+- **3c. Skill history (fixes E.3, small).**
+  On `save_skill` overwrite, copy the old file to
+  `<skills_dir>/<name>.history/<utc-timestamp>.md` (capped at 5, like
+  agent prompt history). No new UI needed; `read_skill` gains an
+  `at: Option<String>` (timestamp) param to view history.
 
-**Tests (2):** state last_result round-trip; pending store round-trip + corrupt file +
-restore-dedup; `check_improvements_now` runs the check with a fake LLM (engine test) while
-`force=false` is still gated.
-**Gate:** as Phase 1.
+### Phase 4 — visibility (½–1 day, mostly egui)
+- **4a. Improvement status in the panel (fixes G.3).**
+  Header line under "Self-Improvement Suggestions": last check time,
+  cooldown progress (`completed % N`), evidence-gate state,
+  auto_improve flag — all from `MemoryManager` accessors (add
+  `improvement_status() -> String` in core so egui stays dumb).
+- **4b. "Run check now" button** → calls the same path as 2b for the
+  selected agent (bypasses cooldown).
+- **4c. Metrics tokens line (fixes H.3, small).**
+  If the LLM client already reports token usage (usage/recorder exists):
+  add `tokens_in/tokens_out` to the `run` metrics line (Option fields,
+  serde-defaulted). Improver prompt can then quote cost.
 
-### Phase 3 — self-data the agent can read (G5 + G6-lite) — core, ~½ day
+### Stretch (not scheduled)
+- **F. Eval harness:** `evals/<agent>/<task>.json` (task text + expected
+  verification criteria); a `run_evals` tool/UI action executes them
+  headlessly through the existing verification judge and writes an
+  `eval` metrics line; effect check (1a) can then show eval deltas.
+- **I. Richer feedback:** per-tool-error thumbs + "suggestion helped"
+  follow-up question after an approval (feeds F5-style lessons).
 
-1. **3a. `read_metrics` builtin tool.** New `tools/builtin/metrics.rs` (one small Tool struct,
-   the `skills.rs`/`agent_profile.rs` pattern): params `{ agent: Option<String>,
-   limit: usize (default 20, max 100) }`. Output: for the requested agent (or, when omitted,
-   every agent file in the metrics dir with lines) — the 7-day `MetricsSummary::format_line`
-   + the newest `limit` lines via `describe()`. `MetricsLog` construction is side-effect free,
-   so the tool binds `Arc<MetricsLog::default()>`; register via
-   `register_metrics_tools(&registry)` in the main.rs chain (next to the skill tools) and add
-   `read_metrics` to the `wuffagent` profile's `allowed_tools`.
-2. **3b. Skill-use metric lines.** Extend `MetricsLine` with
-   `SkillUse { ts: DateTime<Utc>, skill: String }` (serde tag `skill_use` — additive, old
-   lines still parse), `describe()` renders it, `log_skill_use(agent, skill)` helper;
-   `read_skill` writes one line on success (agent name from the per-run config — if the skill
-   tools don't already receive the agent identity, thread it the same way the memory tools do;
-   otherwise default agent name is acceptable). MetricsSummary unchanged (skill lines are
-   visible in `recent`/the improver's recent lines, which already render via `describe()`).
+## Explicit backlog (out of scope here)
+- Typed `LlmError` (known since step 20; cross-cutting).
+- `agents/manager.rs` (605) / `memory/maintenance.rs` (566) / egui
+  `agent_config.rs` (673) splits — do when touched (see
+  autoplans/code-design-improvements.md "Remaining backlog").
+- Skill *injection* relevance ranking (currently all ≤20 skills are
+  listed; fine at current counts).
 
-**Tests (3):** read_metrics round-trip (temp metrics dir: seeded run+feedback lines → expected
-text), unknown agent → "no data", limit clamping; skill-use append + tolerant read of the new
-line kind by old code paths.
-**Gate:** as Phase 1.
+## Order & gates
+1 → 2 → 3 → 4 (Phase 1 is independent and small; Phase 2 is the core of
+this round). Each phase: `cargo test -p wuffagent-core` + `-p
+wuffagent-egui` + `cargo build --workspace` green, no warnings, one
+commit each; restart WuffAgent after core changes (dual-target
+self-restart).
 
-### Phase 4 — stretch / deferred (design before implementing)
-
-- **G7**: tokens + task identity in the run line (prompt/completion tokens from the client
-  usage path, session id) → prompt-bloat visibility in the effect check.
-- **G2b**: cross-agent periodic review (app-start or idle-triggered; collects every agent's
-  recent metrics + handoff hops; the improver gets a multi-agent evidence mode).
-- **G9**: prompt eval harness (per-agent fixed task set, scored runs before/after; could
-  auto-gate future auto-apply).
-- **G6-full**: skill maintenance pass (usage-driven prune/merge, modeled on memory
-  maintenance).
-- **Profile drift note** (observed 2026-10-06): the project `agents/` dir (a search dir)
-  carried a drifted `wuffagent.json` while the canonical config-dir copy
-  (`C:\Users\troop\.wuffagent\agents\`) is the active one. One-line AGENTS.md note: config
-  dir is canonical; project `agents/` only adds/overrides.
-
-## Order & rationale
-
-P1 → P2 → P3. P1 makes the loop's conclusions *trustworthy* (it is already running — feeding
-it its own data is the highest-value fix). P2 makes it *trustable by the user* (visible +
-durable + on demand). P3 closes the agent's own feedback gap (it can read what it is judged
-on). P4 only after P1–P3 prove out.
-
-## Housekeeping (this round, done or to do)
-
-- ✅ `t3b-runtime-plugin-reload.md` marked DONE (reload_plugins + add_plugin_path exist in
-  `tools/builtin/plugins.rs`, are in the active wuffagent profile's `allowed_tools`, and were
-  exercised in-session 2026-10-06).
-- ⚠ Suspected flake in the `search_content` builtin (2026-10-06, M: drive): wide-dir searches
-  (`wuffagent-core/src`, 194 files; `ui/improvements`) returned 0 matches for patterns that
-  demonstrably exist, while narrower paths work. Candidate bug: check the walk/size limits in
-  `tools/builtin/search.rs` when next touched. (Workaround: retry narrower or `Select-String`.)
-- ⚠ The project `agents/wuffagent.json` disappeared from disk mid-session (untracked in git,
-  git status clean) — consistent with the drift note above; no code path in WuffAgent deletes
-  agent files, so external (user/editor) deletion is the likely cause.
-
-## Out of scope (deliberately)
-
-- Auto-apply of improvements (human review stays the gate; G9 would be its prerequisite).
-- Sandboxing plugin loads (T3b decision stands).
-- Any change to the verification nudge budget / judge prompt (S1 territory).
+## Notes / hazards
+- The M: repo drive has dropped untracked files mid-session this round
+  (`agents/wuffagent.json`, `autoplans/self-improvement-gaps.md` both
+  vanished after being listed) — commit new files early.
+- The machine clock reads 2026-09-26 while some file mtimes show
+  2026-10-06 (future) — treat mtimes from this drive with suspicion;
+  `git log` dates are the reference.
