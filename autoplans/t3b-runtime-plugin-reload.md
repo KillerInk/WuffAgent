@@ -1,6 +1,11 @@
 # T3b: Runtime plugin (re)load — `reload_plugins` builtin
 
-**Status:** planned
+**Status:** ✅ DONE (verified in-session 2026-10-06, wuffagent). Both tools exist in
+`wuffagent-core/src/tools/builtin/plugins.rs` (registered via `register_plugin_tools`), are
+listed in the active `wuffagent` profile's `allowed_tools`, and were exercised live in a
+2026-10-06 session (the tool set available to the model includes `reload_plugins` and
+`add_plugin_path`). Marked from `self-improvement-gaps-2.md` housekeeping; exact commit not
+re-verified.
 **Part of:** `plans/self-improvement-gaps.md` Phase 3, item T3 (the remaining half;
 the `McpConfigChanged` event half landed as T3a, commit a0e9de8).
 
