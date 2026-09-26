@@ -155,8 +155,18 @@ pub fn bootstrap() -> AppContext {
         for dir in &agents_search_dirs {
             agent_manager.add_search_dir(dir.clone());
         }
-        builtin::register_agent_tools(&tooling.registry, Arc::new(agent_manager))
+        // 2a: the self-improvement tools share the same AgentManager Arc
+        // (they read profiles by name).
+        let agent_manager = Arc::new(agent_manager);
+        builtin::register_agent_tools(&tooling.registry, agent_manager.clone())
             .expect("Failed to register agent-profile tools");
+        builtin::register_improvement_tools(
+            &tooling.registry,
+            memory_manager.clone(),
+            agent_manager,
+            Some(Arc::new(Mutex::new(event_tx.clone()))),
+        )
+        .expect("Failed to register self-improvement tools");
     }
 
     // T3b: runtime plugin management tools (`reload_plugins` /

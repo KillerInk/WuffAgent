@@ -1,6 +1,7 @@
 # Self-improvement loop: gap analysis + implementation plan
 
-**Status:** in progress (2026-09-26, wuffagent). 1a + 1c DONE (1b folded into 1a).
+**Status:** Phase 1+2 DONE (2026-09-26, wuffagent). 1a/1b/1c + 2a/2b/2c all
+implemented and tested (core 626, egui 24, clean build).
 **Companion to:** `plans/self-improvement-gaps.md` (2026-07, T-series) and
 `autoplans/finish-self-improvement-loop.md` (2026-08-31 → 2026-09-26, A–D).
 This file is the NEXT iteration: what is still missing from the loop that
@@ -144,14 +145,48 @@ not lost.
 Gate: `cargo test -p wuffagent-core` + `-p wuffagent-egui` + workspace
 build; restart (core changed).
 
-### Phase 2 — on-demand self-check + fleet context (~1 day)
-2a. `run_self_improvement` tool (Gap B; reuses `suggest_improvements`,
-    bypasses cooldown, emits the AppEvent).
-2b. Fleet summary line in the per-task improver evidence (Gap C step 1).
-2c. Prompt hygiene: add `description` to the improver field list + JSON
-    template + `PendingImprovement` (one-line description edits are the
-    cheapest useful suggestion and currently impossible).
-Gate: tests incl. a fake-LLM round trip; workspace green; restart.
+### Phase 2 — on-demand self-check + fleet context (~1 day) — ✅ DONE 2026-09-26
+2a. `run_self_improvement` tool (Gap B) — ✅ DONE.
+    - `tools/builtin/improvement.rs` → module `improvement/` (`mod.rs` +
+      `status.rs` [1c tool moved] + `run.rs`), one file per tool.
+    - `RunSelfImprovementTool { memory, agents, events }`: params `agent`
+      (required) + `focus` (optional). Reuses
+      `MemoryManager::suggest_improvements` (the manager already carries the
+      memory-dedicated LLM client), so the on-demand check sees the SAME
+      evidence as the per-task path (lessons, effect check, 7-day + fleet
+      metrics). 180s backstop timeout via the web_search-style `block_on!`
+      macro + cached `BLOCKING_RUNTIME`.
+    - Emits `AppEvent::ImprovementSuggested` (session_id empty = app-level,
+      routed by the UI to the active session — mcp-tools convention) so the
+      suggestions land in the review panel; output lists the rationales.
+    - Calls `record_improvement_check()` after the attempt (engine.rs
+      semantics) so the evidence gate re-arms and list_improvement_status
+      reflects the on-demand check. Explicit messages for auto_improve=off
+      and unknown/missing agent (lists available profiles).
+    - Registration: new `register_improvement_tools(registry, memory,
+      agents, events)` in `improvement/mod.rs` (via the private
+      `super::register_tool`); bootstrap hoists the AgentManager Arc and
+      registers after the memory manager exists.
+    - 5 tool tests (missing agent, unknown agent, no-LLM no-suggestions,
+      auto_improve off, schema). No fake-LLM round trip: the LLM path is the
+      one the per-task check already exercises in production; the tool adds
+      no LLM-specific logic.
+2b. Fleet summary line (Gap C step 1) — ✅ DONE.
+    `MetricsLog::agent_names()` (dir scan, *.jsonl stems) +
+    `fleet_summary_line()` in improvement.rs: one short line per agent with
+    runs in the last 7 days, empty when nobody ran. In the prompt (slot
+    after the per-agent metrics line) AND in the deterministic evidence.
+2c. `description` field — ✅ DONE.
+    `ImprovementSuggestion.description: Option<String>` (serde-defaulted;
+    regression test: old JSON without the key still parses), in the improver
+    field list + JSON template, in `PendingImprovement` (+
+    `apply_description` toggle), editable single-line text in the panel
+    (user edit wins, same pattern as the prompt buffer), applied in
+    `apply_improvement_detailed` (reported as "description").
+
+Gate: `cargo test --workspace` → core 626, egui 24, 1 doctest; clean check.
+`wuffagent` profile allowed_tools gained `run_self_improvement` (dogfood).
+Restart loads the new core (tools registered at bootstrap).
 
 ### Phase 3 — skills in the loop (1–2 days)
 3a. `skill_use` metric line in `read_skill` + counts in `MetricsSummary`.

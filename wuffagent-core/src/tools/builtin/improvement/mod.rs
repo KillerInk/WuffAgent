@@ -1,0 +1,52 @@
+//! Self-improvement tools — the agent-visible side of the improvement loop
+//! (the loop itself: `crate::agents::improvement` + the per-task trigger in
+//! `AgentEngine::post_task_maintenance`).
+//!
+//! One file per tool (the builtin convention):
+//! - [`status`] — `list_improvement_status`: read-only snapshot of the loop
+//!   (last check, evidence gate, settings, lesson count; no LLM call).
+//! - [`run`] — `run_self_improvement`: on-demand check reusing the engine's
+//!   `suggest_improvements` (bypasses the cooldown/evidence gates; emits
+//!   `AppEvent::ImprovementSuggested` for the review panel).
+
+mod run;
+mod status;
+
+pub use run::RunSelfImprovementTool;
+pub use status::ListImprovementStatusTool;
+
+use std::sync::{Arc, Mutex};
+
+use crate::agents::AgentManager;
+use crate::memory::MemoryManager;
+use crate::tools::registry::ToolRegistry;
+use crate::tools::types::{Tool, ToolResult};
+use crate::types::AppEvent;
+
+/// 2a: register the self-improvement tools. Both are per-profile
+/// `allowed_tools`-gated like every builtin; the run tool additionally takes
+/// the app's event channel so its suggestions reach the review panel
+/// (`session_id` empty = app-level event, routed by the UI to the active
+/// session — same convention as the mcp config tools).
+pub fn register_improvement_tools(
+    registry: &ToolRegistry,
+    memory: Arc<MemoryManager>,
+    agents: Arc<AgentManager>,
+    events: Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
+) -> ToolResult<()> {
+    for (name, desc, tool) in [
+        (
+            "list_improvement_status",
+            "Show the auto-improvement loop's state (last check, evidence, cooldown)",
+            Arc::new(ListImprovementStatusTool::new(memory.clone())) as Arc<dyn Tool>,
+        ),
+        (
+            "run_self_improvement",
+            "Run an on-demand self-improvement check for an agent (bypasses the cooldown)",
+            Arc::new(RunSelfImprovementTool::new(memory, agents, events)) as Arc<dyn Tool>,
+        ),
+    ] {
+        super::register_tool(registry, name, desc, tool)?;
+    }
+    Ok(())
+}

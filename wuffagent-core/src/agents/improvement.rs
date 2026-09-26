@@ -157,12 +157,7 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
     );
 
     let section = format!(
-        "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).
-{before_line}
-{after_line}
-Outcomes recorded for this agent since that change:
-{list}
-If the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
+        "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).\n{before_line}\n{after_line}\nOutcomes recorded for this agent since that change:\n{list}\nIf the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
     );
     let evidence_line = format!(
         "Effect check: prompt last changed via approved improvement {days} day(s) ago ({date}); runs before vs after: {} vs {}; {} outcome(s) since",
@@ -266,6 +261,10 @@ pub async fn suggest_improvements(
         let since = chrono::Utc::now() - chrono::Duration::days(7);
         log.summary_since(&agent_config.name, Some(since)).format_line()
     };
+    // 2b: fleet view — every other agent's 7-day summary on one line each, so
+    // the improver can see this agent's results in context of its siblings
+    // (a bad handoff target, a sibling whose config is clearly working).
+    let fleet_line = fleet_summary_line();
     // I5: effect check — the last approved prompt change for this agent and
     // the outcomes recorded since it (None -> no section, prompt unchanged).
     let effect = effect_check_section(manager, &agent_config.name);
@@ -290,6 +289,7 @@ pub async fn suggest_improvements(
          \n\
          {}\n\
          {}\n\
+         {}\n\
          \n\
          Previously rejected suggestions (do NOT re-suggest these):\n{}\n\
          \n\
@@ -306,6 +306,7 @@ pub async fn suggest_improvements(
          You may change the system prompt AND/OR any of these profile fields \
          (omit a field entirely when it needs no change):\n\
          - prompt_change (string or null)\n\
+         - description (short one-line description of the agent, or null)\n\
          - allowed_tools (array of tool names, or null)\n\
          - reasoning_effort (\"off\" | \"low\" | \"medium\" | \"high\", or null)\n\
          - shell_config ({{\"shell_enabled\": bool, \"allowed_commands\": [..], \"shell_timeout_ms\": number}}, or null)\n\
@@ -318,6 +319,7 @@ pub async fn suggest_improvements(
              \"agent_name\": \"{}\",\n\
              \"prompt_change\": \"new prompt text or null if no change needed\",\n\
              \"rationale\": \"why this change is needed\",\n\
+             \"description\": null,\n\
              \"allowed_tools\": null,\n\
              \"reasoning_effort\": null,\n\
              \"shell_config\": null,\n\
@@ -341,6 +343,7 @@ pub async fn suggest_improvements(
         result,
         traj,
         metrics_line,
+        fleet_line,
         rejected_text,
         memories_text,
         agent_config.name,
@@ -420,6 +423,10 @@ pub async fn suggest_improvements(
     if !metrics_line.is_empty() {
         evidence.push(metrics_line);
     }
+    // 2b: the fleet line is deterministic evidence too.
+    if !fleet_line.is_empty() {
+        evidence.push(fleet_line);
+    }
     for s in &mut suggestions {
         s.evidence = evidence.clone();
     }
@@ -438,6 +445,31 @@ pub async fn suggest_improvements(
     }
 
     Ok(suggestions)
+}
+
+/// 2b: the cross-agent fleet summary — one short line per agent with at
+/// least one run in the last 7 days (self-inclusive; the per-agent metrics
+/// line above already covers the target in detail). Empty string when no
+/// agent has recent metrics.
+fn fleet_summary_line() -> String {
+    let log = crate::agents::metrics::MetricsLog::default();
+    let since = chrono::Utc::now() - chrono::Duration::days(7);
+    let mut parts = Vec::new();
+    for name in log.agent_names() {
+        let s = log.summary_since(&name, Some(since));
+        if s.runs == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "{name}: {} run(s), {} tool error(s), {} gave_up, feedback {}/{}",
+            s.runs, s.tool_errors, s.gave_up, s.feedback_up, s.feedback_down
+        ));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("Fleet metrics (last 7 days): {}", parts.join(" | "))
+    }
 }
 
 /// I3: keep evidence strings short (they are displayed in the review panel).

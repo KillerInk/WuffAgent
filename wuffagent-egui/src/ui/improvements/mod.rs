@@ -49,6 +49,8 @@ pub struct PendingImprovement {
     /// First click arms it (label changes to a confirmation), second click
     /// reverts the agent to its latest snapshot and drops this pending item.
     pub revert_armed: bool,
+    /// 2c: proposed one-line description replacement (None = no change).
+    pub description: Option<String>,
     /// I2: proposed profile-field changes (None = the LLM left them alone).
     pub allowed_tools: Option<Vec<String>>,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -58,6 +60,7 @@ pub struct PendingImprovement {
     /// I3: per-field approve toggles. Default true (apply the change); the
     /// user can untick any field to approve the rest without it.
     pub apply_prompt: bool,
+    pub apply_description: bool,
     pub apply_allowed_tools: bool,
     pub apply_reasoning_effort: bool,
     pub apply_shell_config: bool,
@@ -93,12 +96,14 @@ impl From<&wuffagent_core::memory::ImprovementSuggestion> for PendingImprovement
                 })
                 .collect(),
             revert_armed: false,
+            description: s.description.clone(),
             allowed_tools: s.allowed_tools.clone(),
             reasoning_effort: s.reasoning_effort,
             shell_config: s.shell_config.clone(),
             handoff_targets: s.handoff_targets.clone(),
             task_timeout_ms: s.task_timeout_ms,
             apply_prompt: true,
+            apply_description: true,
             apply_allowed_tools: true,
             apply_reasoning_effort: true,
             apply_shell_config: true,
@@ -156,6 +161,7 @@ impl ImprovementsPanel {
                 existing.revert_armed = false;
                 // I2/I3: refresh the proposed field changes + evidence; the
                 // user's per-field toggles are preserved across the refresh.
+                existing.description = s.description.clone();
                 existing.allowed_tools = s.allowed_tools.clone();
                 existing.reasoning_effort = s.reasoning_effort;
                 existing.shell_config = s.shell_config.clone();

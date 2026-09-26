@@ -60,6 +60,10 @@ pub struct ImprovementSuggestion {
     pub prompt_change: Option<String>,
     /// Explanation for why this improvement is suggested.
     pub rationale: String,
+    /// 2c: replace the agent's one-line description (None = no change). The
+    /// cheapest useful suggestion (one line of text) — previously impossible.
+    #[serde(default)]
+    pub description: Option<String>,
     /// Proposals for new specialized agents (LLMs commonly omit it when empty).
     #[serde(default)]
     pub new_agents: Vec<NewAgentProposal>,

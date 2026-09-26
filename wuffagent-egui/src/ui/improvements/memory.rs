@@ -83,8 +83,11 @@ pub fn apply_improvement_detailed(
         .then(|| imp.handoff_targets.clone())
         .flatten();
     let do_timeout = imp.apply_task_timeout.then(|| imp.task_timeout_ms).flatten();
+    // 2c: the one-line description (user's edited text is stored back into
+    // imp.description by the panel, so this picks up the edit automatically).
+    let do_description = imp.apply_description.then(|| imp.description.clone()).flatten();
     let has_field_change =
-        do_tools.is_some() || do_reasoning.is_some() || do_shell.is_some() || do_handoff.is_some() || do_timeout.is_some();
+        do_tools.is_some() || do_reasoning.is_some() || do_shell.is_some() || do_handoff.is_some() || do_timeout.is_some() || do_description.is_some();
 
     if apply_prompt || has_field_change {
         // F3: locate the profile's ACTUAL directory (primary first) and edit
@@ -126,6 +129,10 @@ pub fn apply_improvement_detailed(
                         if let Some(ms) = do_timeout {
                             config.task_timeout_ms = ms;
                             applied.push("timeout".to_string());
+                        }
+                        if let Some(desc) = do_description {
+                            config.description = desc;
+                            applied.push("description".to_string());
                         }
                         match mgr.edit_agent(&imp.agent_name, &config) {
                             Ok(()) => {

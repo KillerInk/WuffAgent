@@ -4,8 +4,8 @@
 //! The loop is otherwise passive: after each task, `AgentEngine` decides
 //! whether an LLM self-improvement check fires (cooldown + new-evidence
 //! gate) and the result lands in the egui review panel. This tool lets an
-//! agent answer "when did the last check run, and why is/ isn't one due?"
-//! — useful when the agent is editing WuffAgent itself and wants to feed or
+//! agent answer "when did the last check run, and why is/ isn't one due?" —
+//! useful when the agent is editing WuffAgent itself and wants to feed or
 //! debug the loop.
 
 use std::sync::Arc;

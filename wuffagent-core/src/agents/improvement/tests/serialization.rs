@@ -6,6 +6,7 @@ fn test_suggestion_serialization() {
         agent_name: "coder".to_string(),
         prompt_change: Some("You are a coding agent.".to_string()),
         rationale: "Better clarity".to_string(),
+        description: Some("A focused coding specialist.".to_string()),
         new_agents: vec![],
         allowed_tools: Some(vec!["file_io".to_string()]),
         reasoning_effort: Some(crate::types::ReasoningEffort::Medium),
@@ -29,6 +30,19 @@ fn test_suggestion_serialization() {
     );
     assert_eq!(parsed.task_timeout_ms, Some(90_000));
     assert_eq!(parsed.evidence.len(), 1);
+    // 2c: the description field round-trips too.
+    assert_eq!(
+        parsed.description,
+        Some("A focused coding specialist.".to_string())
+    );
+}
+
+#[test]
+fn test_suggestion_serialization_without_description() {
+    // Old suggestion JSON (no `description` key) still parses (serde default).
+    let json = r#"{"agent_name":"coder","rationale":"r","prompt_change":null,"new_agents":[],"allowed_tools":null,"reasoning_effort":null,"shell_config":null,"handoff_targets":null,"task_timeout_ms":null,"evidence":[]}"#;
+    let parsed: ImprovementSuggestion = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed.description, None);
 }
 
 #[test]

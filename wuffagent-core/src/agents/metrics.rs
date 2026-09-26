@@ -383,6 +383,27 @@ impl MetricsLog {
         all.into_iter().skip(skip).collect()
     }
 
+    /// All agents that have a metrics file (file names without the `.jsonl`
+    /// suffix, sorted). For the fleet summary — the cross-agent comparison
+    /// the improver uses to see one agent's results next to its siblings'.
+    pub fn agent_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return names;
+        };
+        for entry in entries.flatten() {
+            if let Some(stem) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.strip_suffix(".jsonl"))
+            {
+                names.push(stem.to_string());
+            }
+        }
+        names.sort();
+        names
+    }
+
     /// Aggregate counts for `agent` over lines with `ts >= since`
     /// (`None` = all time).
     pub fn summary_since(&self, agent: &str, since: Option<DateTime<Utc>>) -> MetricsSummary {

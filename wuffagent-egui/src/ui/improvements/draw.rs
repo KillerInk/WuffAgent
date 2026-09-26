@@ -170,6 +170,23 @@ impl ImprovementsPanel {
                             ui.checkbox(&mut imp.apply_prompt, "Apply prompt change");
                         }
 
+                        // 2c: proposed one-line description change (editable,
+                        // same "user edit wins" pattern as the prompt).
+                        if let Some(desc) = imp.description.clone() {
+                            let mut buf = desc;
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Proposed description (editable)").strong(),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut buf)
+                                        .desired_width(f32::INFINITY),
+                                );
+                                ui.checkbox(&mut imp.apply_description, "Apply description change");
+                            });
+                            imp.description = Some(buf);
+                        }
+
                         for na in imp.new_agents.iter_mut() {
                             ui.add_space(6.0);
                             ui.label(
@@ -236,6 +253,7 @@ impl ImprovementsPanel {
                         }
 
                         let has_config_change = imp.prompt_change.is_some()
+                            || imp.description.is_some()
                             || imp.allowed_tools.is_some()
                             || imp.reasoning_effort.is_some()
                             || imp.shell_config.is_some()

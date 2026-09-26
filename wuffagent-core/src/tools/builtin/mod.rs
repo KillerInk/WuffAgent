@@ -41,7 +41,7 @@ pub use web_search::WebSearchTool;
 // NOTE: HandoffTool is NOT registered in `register_builtins` — it is
 // per-execution (own mailbox / agents dir / allowlist) and is injected by
 // `Agent::builder` for agents with `handoff_enabled`, like the per-agent shell.
-pub use improvement::ListImprovementStatusTool;
+pub use improvement::{register_improvement_tools, ListImprovementStatusTool, RunSelfImprovementTool};
 pub use handoff::HandoffTool;
 // NOTE: RestartTool is also per-execution (own mailbox) — injected by
 // `Agent::builder` for agents with `restart_enabled`, not registered in
@@ -348,12 +348,7 @@ pub fn register_memory_tools(
         (
             "delete_memory",
             "Delete a memory entry by ID",
-            std::sync::Arc::new(DeleteMemoryTool::new(memory.clone())) as std::sync::Arc<dyn Tool>,
-        ),
-        (
-            "list_improvement_status",
-            "Show the auto-improvement loop's state (last check, evidence, cooldown)",
-            std::sync::Arc::new(ListImprovementStatusTool::new(memory)) as std::sync::Arc<dyn Tool>,
+            std::sync::Arc::new(DeleteMemoryTool::new(memory)) as std::sync::Arc<dyn Tool>,
         ),
     ] {
         register_tool(registry, name, desc, tool)?;
