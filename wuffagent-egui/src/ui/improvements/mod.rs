@@ -52,6 +52,10 @@ pub struct PendingImprovement {
     /// First click arms it (label changes to a confirmation), second click
     /// reverts the agent to its latest snapshot and drops this pending item.
     pub revert_armed: bool,
+    /// 3c: per-skill "click again to confirm" armed state of the skill
+    /// Revert buttons in the Skills section (canonical lowercase skill
+    /// names; a proposal refresh clears it).
+    pub skill_revert_armed: Vec<String>,
     /// 2c: proposed one-line description replacement (None = no change).
     pub description: Option<String>,
     /// I2: proposed profile-field changes (None = the LLM left them alone).
@@ -104,6 +108,7 @@ impl From<&wuffagent_core::memory::ImprovementSuggestion> for PendingImprovement
                 })
                 .collect(),
             revert_armed: false,
+            skill_revert_armed: Vec::new(),
             description: s.description.clone(),
             allowed_tools: s.allowed_tools.clone(),
             reasoning_effort: s.reasoning_effort,
@@ -221,6 +226,7 @@ impl ImprovementsPanel {
                     })
                     .collect();
                 existing.revert_armed = false;
+                existing.skill_revert_armed.clear();
                 // I2/I3: refresh the proposed field changes + evidence; the
                 // user's per-field toggles are preserved across the refresh.
                 existing.description = s.description.clone();

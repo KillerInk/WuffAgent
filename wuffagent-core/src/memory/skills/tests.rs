@@ -194,3 +194,149 @@ fn test_validate_skill_name() {
     assert!(validate_skill_name("has space").is_err());
     assert!(validate_skill_name("under_score").is_err());
 }
+
+// ── 3c: version history ─────────────────────────────────────────────────────
+
+#[test]
+fn test_save_snapshots_previous_version() {
+    let store = SkillStore::new(temp_root("hist-save"));
+    store.save("s", "v1", "when", "first version").unwrap();
+    assert!(store.list_skill_history("s").is_empty(), "first save: nothing to snapshot");
+    store.save("s", "v2", "when", "second version").unwrap();
+    let list = store.list_skill_history("s");
+    assert_eq!(list.len(), 1, "overwriting v2 snapshots v1");
+    assert_eq!(list[0].extension().map(|e| e == "md"), Some(true));
+    store.save("s", "v3", "when", "third version").unwrap();
+    let list = store.list_skill_history("s");
+    assert_eq!(list.len(), 2, "overwriting v3 snapshots v2");
+    // Newest first: [0] holds the v2 content (snapshotted last).
+    let newest = fs::read_to_string(&list[0]).unwrap();
+    assert!(newest.contains("second version"));
+    assert!(store.read("s").unwrap().body.contains("third version"));
+    let _ = fs::remove_dir_all(store.root());
+}
+
+#[test]
+fn test_first_save_no_snapshot() {
+    let store = SkillStore::new(temp_root("hist-first"));
+    store.save("s", "v1", "when", "body").unwrap();
+    assert!(
+        store.list_skill_history("s").is_empty(),
+        "a first save has nothing to snapshot"
+    );
+    let _ = fs::remove_dir_all(store.root());
+}
+
+#[test]
+fn test_revert_skill_restores_and_stays_reversible() {
+    let store = SkillStore::new(temp_root("hist-revert"));
+    store.save("s", "v1", "when", "first version").unwrap();
+    store.save("s", "v2", "when", "second version").unwrap();
+    store.save("s", "v3", "when", "third version").unwrap();
+    let hist = store.list_skill_history("s");
+    assert_eq!(hist.len(), 2); // [v2, v1] newest first
+    // Revert to the OLDEST snapshot (v1).
+    let restored = store.revert_skill("s", &hist[1]).expect("revert to v1");
+    assert!(restored.body.contains("first version"));
+    assert!(store.read("s").unwrap().body.contains("first version"));
+    // The revert itself snapshotted the pre-revert (v3) state, so history
+    // grew by one and the newest entry IS v3 (forward again is possible).
+    let hist2 = store.list_skill_history("s");
+    assert_eq!(hist2.len(), 3);
+    let newest = store.revert_skill("s", &hist2[0]).expect("revert to v3");
+    assert!(newest.body.contains("third version"));
+    assert!(store.read("s").unwrap().body.contains("third version"));
+    let _ = fs::remove_dir_all(store.root());
+}
+
+#[test]
+fn test_delete_snapshots_so_retired_skill_restores() {
+    let store = SkillStore::new(temp_root("hist-delete"));
+    store.save("s", "v1", "when", "body").unwrap();
+    assert!(store.delete("s").unwrap());
+    assert!(store.read("s").is_none());
+    let hist = store.list_skill_history("s");
+    assert_eq!(hist.len(), 1, "delete snapshots the file before removal");
+    let restored = store.revert_skill("s", &hist[0]).expect("restore retired skill");
+    assert!(restored.body.contains("body"));
+    assert!(store.read("s").is_some(), "skill is back");
+    // Delete it again (the restore made it exist), then a delete of the now
+    // missing skill is a plain false and snapshots nothing new.
+    assert!(store.delete("s").unwrap());
+    let before = store.list_skill_history("s").len();
+    assert!(!store.delete("s").unwrap());
+    assert_eq!(store.list_skill_history("s").len(), before, "missing delete snapshots nothing");
+    let _ = fs::remove_dir_all(store.root());
+}
+
+#[test]
+fn test_list_skill_history_newest_first_and_unknown_empty() {
+    let store = SkillStore::new(temp_root("hist-order"));
+    store.save("s", "v1", "when", "one").unwrap();
+    store.save("s", "v2", "when", "two").unwrap();
+    store.save("s", "v3", "when", "three").unwrap();
+    let hist = store.list_skill_history("s");
+    assert_eq!(hist.len(), 2);
+    // Newest first: the last-written snapshot (containing v2) is [0].
+    let newest_content = fs::read_to_string(&hist[0]).unwrap();
+    assert!(newest_content.contains("two"));
+    let oldest_content = fs::read_to_string(&hist[1]).unwrap();
+    assert!(oldest_content.contains("one"));
+    // Another skill's snapshots are not mixed in.
+    store.save("t", "v1", "when", "other").unwrap();
+    store.save("t", "v2", "when", "other2").unwrap();
+    assert_eq!(store.list_skill_history("s").len(), 2);
+    assert_eq!(store.list_skill_history("t").len(), 1);
+    assert!(store.list_skill_history("ghost").is_empty());
+    let _ = fs::remove_dir_all(store.root());
+}
+
+#[test]
+fn test_revert_skill_rejects_bad_snapshots() {
+    let store = SkillStore::new(temp_root("hist-validate"));
+    store.save("s", "v1", "when", "one").unwrap();
+    store.save("s", "v2", "when", "two").unwrap();
+    // A snapshot of another skill is rejected (name mismatch).
+    store.save("t", "v1", "when", "other").unwrap();
+    store.save("t", "v2", "when", "other2").unwrap();
+    let other = store.list_skill_history("t").pop().unwrap();
+    let err = store.revert_skill("s", &other).unwrap_err();
+    assert!(err.contains("does not belong"), "got: {err}");
+    // A file outside the history dir is rejected.
+    let err = store.revert_skill("s", &store.path("s")).unwrap_err();
+    assert!(err.contains("not under the history directory"), "got: {err}");
+    // A missing file is rejected.
+    let missing = store.history_dir().join("s-1.md");
+    let err = store.revert_skill("s", &missing).unwrap_err();
+    assert!(err.contains("does not exist"), "got: {err}");
+    assert_eq!(
+        store.list_skill_history("s").len(),
+        1,
+        "failed reverts must not snapshot"
+    );
+    let _ = fs::remove_dir_all(store.root());
+}
+
+#[test]
+fn test_history_prunes_to_keep_cap() {
+    let store = SkillStore::new(temp_root("hist-prune"));
+    // HISTORY_KEEP + 5 overwrites → the 5 oldest snapshots are pruned.
+    for i in 0..(HISTORY_KEEP + 5) {
+        store.save("s", &format!("v{i}"), "when", &format!("body {i}")).unwrap();
+    }
+    let hist = store.list_skill_history("s");
+    assert_eq!(hist.len(), HISTORY_KEEP, "oldest snapshots are pruned");
+    let _ = fs::remove_dir_all(store.root());
+}
+
+#[test]
+fn test_history_dir_not_listed_as_skill() {
+    let store = SkillStore::new(temp_root("hist-dir"));
+    store.save("s", "v1", "when", "one").unwrap();
+    store.save("s", "v2", "when", "two").unwrap();
+    // The history/ subdir (and its files) must not appear in list().
+    let list = store.list();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].name, "s");
+    let _ = fs::remove_dir_all(store.root());
+}

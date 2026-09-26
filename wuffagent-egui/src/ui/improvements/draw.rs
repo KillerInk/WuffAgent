@@ -207,6 +207,7 @@ impl ImprovementsPanel {
                 let mut to_remove: Vec<usize> = Vec::new();
                 let mut to_approve: Vec<usize> = Vec::new();
                 let mut to_revert: Vec<usize> = Vec::new();
+                let mut to_revert_skills: Vec<(usize, String)> = Vec::new();
                 let mut to_dismiss: Vec<usize> = Vec::new();
 
                 for (i, imp) in self.pending.iter_mut().enumerate() {
@@ -359,10 +360,43 @@ impl ImprovementsPanel {
                                         "new"
                                     };
                                     ui.add_space(4.0);
-                                    ui.label(
-                                        egui::RichText::new(format!("{} ({})", sk.name, verb))
-                                            .strong(),
-                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{} ({})", sk.name, verb))
+                                                .strong(),
+                                        );
+                                        // 3c: per-skill Revert (F4 two-click
+                                        // pattern) — restore this skill's
+                                        // latest version snapshot, e.g. undo a
+                                        // previously approved bad rewrite or a
+                                        // retire (available for every verb).
+                                        let canonical = sk.name.trim().to_ascii_lowercase();
+                                        let sk_hist = skill_store.list_skill_history(&canonical);
+                                        if !sk_hist.is_empty() {
+                                            let armed =
+                                                imp.skill_revert_armed.iter().any(|n| n == &canonical);
+                                            let label = if armed {
+                                                let ts = skill_snapshot_ts(&sk_hist[0], &canonical);
+                                                format!("↩ Confirm revert to {}?", agent_history::format_ts(ts))
+                                            } else {
+                                                "↩ Revert".to_string()
+                                            };
+                                            if ui
+                                                .add_enabled(
+                                                    true,
+                                                    egui::Button::new(egui::RichText::new(label).weak()).small(),
+                                                )
+                                                .on_hover_text("Restore this skill to its latest version snapshot (the state before the most recent overwrite/retire). Two clicks: this arms it, the next confirms.")
+                                                .clicked()
+                                            {
+                                                if armed {
+                                                    to_revert_skills.push((i, canonical.clone()));
+                                                } else {
+                                                    imp.skill_revert_armed.push(canonical.clone());
+                                                }
+                                            }
+                                        }
+                                    });
                                     if is_delete {
                                         // 3b: a retire carries no (or stale)
                                         // metadata — just state what it does.
@@ -570,6 +604,39 @@ impl ImprovementsPanel {
                     }
                 }
 
+                // 3c: execute skill reverts (file I/O) — restore each skill
+                // to its latest version snapshot. The pending item stays (a
+                // skill revert does not invalidate the prompt/tool
+                // proposals), but the user is told the skill suggestion may
+                // now be stale.
+                for (i, name) in to_revert_skills {
+                    if i >= self.pending.len() {
+                        continue; // defensive: indices came from this frame
+                    }
+                    let sk_hist = skill_store.list_skill_history(&name);
+                    let Some(latest) = sk_hist.first().cloned() else {
+                        self.pending[i].skill_revert_armed.retain(|n| n != &name);
+                        self.message =
+                            Some(format!("revert of skill '{name}': no history snapshot available"));
+                        continue;
+                    };
+                    let ts = skill_snapshot_ts(&latest, &name);
+                    match skill_store.revert_skill(&name, &latest) {
+                        Ok(skill) => {
+                            self.pending[i].skill_revert_armed.retain(|n| n != &name);
+                            self.message = Some(format!(
+                                "reverted skill '{}' to {} — the skill suggestion in this item may now be stale",
+                                skill.name,
+                                agent_history::format_ts(ts)
+                            ));
+                        }
+                        Err(e) => {
+                            self.pending[i].skill_revert_armed.retain(|n| n != &name);
+                            self.message = Some(format!("Error: revert of skill '{name}' failed: {e}"));
+                        }
+                    }
+                }
+
                 // Execute collected actions (file I/O + list mutation) after
                 // the loop so we never mutate while iterating.
                 for i in to_approve.into_iter().rev() {
@@ -623,6 +690,19 @@ impl ImprovementsPanel {
                 }
             });
     }
+}
+
+/// 3c: parse the unix timestamp out of a skill-history snapshot filename
+/// (`<name>-<unixts>[-seq].md`) for the Revert button label. Mirrors the
+/// agent-history label path (`agent_history::HistoryEntry.ts`).
+fn skill_snapshot_ts(path: &std::path::Path, name: &str) -> u64 {
+    let file_name = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or_default();
+    let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
+    let tail = stem.strip_prefix(&format!("{name}-")).unwrap_or("");
+    crate::ui::agent_history::parse_ts_seq(tail).0
 }
 
 /// 4a: the panel's one-line loop-status header, e.g.

@@ -66,6 +66,7 @@ fn pending(agent: &str, prompt: Option<&str>) -> PendingImprovement {
         rationale: "test".to_string(),
         new_agents: vec![],
         revert_armed: false,
+        skill_revert_armed: vec![],
         description: None,
         allowed_tools: None,
         reasoning_effort: None,
@@ -356,11 +357,13 @@ fn test_duplicate_suggestion_replaces_existing() {
     assert_eq!(panel.pending[0].prompt_change.as_deref(), Some("new prompt"));
     // The edit buffer is re-initialized from the replacement's LLM text.
     assert_eq!(panel.pending[0].edited_prompt.as_deref(), Some("new prompt"));
-    // Re-arming state resets with the replacement.
+    // Re-arming state resets with the replacement (agent + per-skill, 3c).
     panel.pending[0].revert_armed = true;
+    panel.pending[0].skill_revert_armed = vec!["some-skill".to_string()];
     panel
         .handle_improvement_suggested("coder", vec![suggestion("coder", "same", "newer prompt")]);
     assert!(!panel.pending[0].revert_armed);
+    assert!(panel.pending[0].skill_revert_armed.is_empty());
 
     // Same rationale for a DIFFERENT agent is not a duplicate.
     panel.handle_improvement_suggested("coder", vec![suggestion("researcher", "same", "p3")]);
@@ -627,6 +630,45 @@ fn test_apply_improvement_skill_delete() {
     assert_eq!(kept.body, "1. new steps");
 
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&skills_root);
+}
+
+/// 3c: the panel's per-skill Revert flow — approve a skill update (which
+/// snapshots the previous version), then revert to the latest snapshot,
+/// exactly the sequence the button executes (list → latest → revert). The
+/// original content comes back and the revert stays reversible.
+#[test]
+fn test_skill_revert_flow_after_approved_update() {
+    let skills_root = temp_skill_dir("skills-revert-store");
+    let store = SkillStore::new(skills_root.clone());
+    store.save("my-skill", "old desc", "old when", "1. original steps").unwrap();
+
+    // Approve an update (what the panel's Approve does for skills).
+    let mut imp = pending("coder", None);
+    imp.skill_updates = vec![SkillUpdate {
+        name: "my-skill".to_string(),
+        action: "update".to_string(),
+        description: "new desc".to_string(),
+        when_to_use: "new when".to_string(),
+        body: "1. rewritten steps".to_string(),
+    }];
+    let (msg, prompt_applied) = apply_improvement_detailed(&[], &AgentManager::new(temp_agents_dir("skill-revert-dir")), &store, &imp);
+    assert!(!prompt_applied);
+    assert!(msg.contains("saved skill 'my-skill'"), "msg: {msg}");
+    assert_eq!(store.read("my-skill").unwrap().body, "1. rewritten steps");
+
+    // Panel Revert: list → latest snapshot → revert.
+    let hist = store.list_skill_history("my-skill");
+    assert_eq!(hist.len(), 1, "the approved update snapshotted v1");
+    let restored = store.revert_skill("my-skill", &hist[0]).expect("revert");
+    assert_eq!(restored.body, "1. original steps", "original content is back");
+    assert_eq!(store.read("my-skill").unwrap().body, "1. original steps");
+    // Reversible: the pre-revert (rewritten) state was snapshotted too.
+    let hist2 = store.list_skill_history("my-skill");
+    assert_eq!(hist2.len(), 2);
+    let forward = store.revert_skill("my-skill", &hist2[0]).expect("forward again");
+    assert_eq!(forward.body, "1. rewritten steps");
+
     let _ = std::fs::remove_dir_all(&skills_root);
 }
 

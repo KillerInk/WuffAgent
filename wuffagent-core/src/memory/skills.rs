@@ -45,6 +45,12 @@ pub struct SkillMeta {
 /// Number of skills listed in the system-prompt block (keep it cheap).
 const PROMPT_BLOCK_MAX_SKILLS: usize = 20;
 
+/// 3c: maximum version-history snapshots kept per skill (oldest are pruned)
+/// — mirrors `AgentManager::HISTORY_SNAPSHOTS_KEEP` (the skill/agent history
+/// code paths are intentionally separate: different bricks, different file
+/// layouts).
+const HISTORY_KEEP: usize = 20;
+
 /// Skill store rooted at a directory (default: `<wuffagent_home>/skills`).
 #[derive(Debug, Clone)]
 pub struct SkillStore {
@@ -73,7 +79,10 @@ impl SkillStore {
 
     /// Save (or overwrite) a skill. The name is slug-validated (and
     /// lowercased); metadata values are flattened to single lines; the write
-    /// is atomic. Overwriting is the versioning mechanism (file mtime).
+    /// is atomic. Overwriting an existing skill first snapshots the current
+    /// file into the history dir (3c), so a bad overwrite (e.g. a wrong
+    /// auto-suggested rewrite) can be rolled back via
+    /// [`Self::revert_skill`].
     pub fn save(
         &self,
         name: &str,
@@ -86,6 +95,9 @@ impl SkillStore {
         if body.trim().is_empty() {
             return Err("skill body must not be empty".to_string());
         }
+        // 3c: snapshot the current version before it is overwritten
+        // (no-op on first save).
+        self.snapshot_skill(&name);
         let meta = SkillMeta {
             name: name.clone(),
             description: flatten(description),
@@ -154,12 +166,16 @@ impl SkillStore {
         parse_skill(&name, &content, modified_at)
     }
 
-    /// Delete a skill. Returns true when a file was removed, false when the
-    /// skill did not exist.
+    /// Delete a skill. The current file is snapshotted into the history dir
+    /// first (3c), so a retired skill (e.g. by the improver's "retire"
+    /// suggestion) can be restored via [`Self::revert_skill`]. Returns true
+    /// when a file was removed, false when the skill did not exist.
     pub fn delete(&self, name: &str) -> Result<bool, String> {
         let name = name.trim().to_ascii_lowercase();
         validate_skill_name(&name)?;
         let path = self.path(&name);
+        // 3c: snapshot BEFORE the file disappears (no-op when missing).
+        self.snapshot_skill(&name);
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -190,6 +206,257 @@ impl SkillStore {
         }
         block.push_str("══════════════════════\n");
         block
+    }
+
+    // ── 3c: version history (mirrors the AgentManager snapshot pattern) ────
+
+    /// 3c: directory holding skill version-history snapshots:
+    /// `<root>/history/`.
+    fn history_dir(&self) -> PathBuf {
+        self.root.join("history")
+    }
+
+    /// 3c: copy the CURRENT `<root>/<name>.md` into the history dir, keeping
+    /// at most [`HISTORY_KEEP`] snapshots per skill.
+    ///
+    /// No-op when the skill file does not exist (nothing to roll back to).
+    /// Failures are logged but never abort the caller: history is a safety
+    /// net, not a correctness dependency of the save/delete itself.
+    fn snapshot_skill(&self, name: &str) {
+        let src = self.path(name);
+        if !src.is_file() {
+            return;
+        }
+        let hist = self.history_dir();
+        if fs::create_dir_all(&hist).is_err() {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let dst = self.next_history_path(name, now);
+        if let Err(e) = fs::copy(&src, &dst) {
+            tracing::warn!("failed to snapshot skill '{name}' history: {e}");
+            return;
+        }
+        tracing::info!("snapshotted skill '{name}': {dst:?}");
+        self.prune_skill_history(name);
+    }
+
+    /// 3c: choose the destination path for the next snapshot of `name` at
+    /// `now`. Same scheme as the agent history: the first snapshot at a
+    /// timestamp uses the base name (`<name>-<now>.md`, seq 0); every later
+    /// one appends `-1`, `-2`, ... where the seq is (max existing seq for
+    /// this timestamp) + 1 — NOT the first free slot. A reused low seq would
+    /// sort as the OLDEST snapshot and get pruned immediately.
+    fn next_history_path(&self, name: &str, now: u64) -> PathBuf {
+        let hist = self.history_dir();
+        let base = hist.join(format!("{name}-{now}.md"));
+        let prefix = format!("{name}-{now}-");
+        let mut max_seq: u32 = 0;
+        let mut any = false;
+        if base.exists() {
+            any = true;
+        }
+        if let Ok(entries) = fs::read_dir(&hist) {
+            for entry in entries.flatten() {
+                let file_name_os = entry.file_name();
+                let Some(file_name) = file_name_os.to_str() else {
+                    continue;
+                };
+                let Some(stem) = file_name.strip_suffix(".md") else {
+                    continue;
+                };
+                let Some(tail) = stem.strip_prefix(&prefix) else {
+                    continue;
+                };
+                if let Ok(seq) = tail.parse::<u32>() {
+                    any = true;
+                    if seq > max_seq {
+                        max_seq = seq;
+                    }
+                }
+            }
+        }
+        if !any {
+            return base;
+        }
+        let next_seq = max_seq + 1;
+        hist.join(format!("{name}-{now}-{next_seq}.md"))
+    }
+
+    /// 3c: delete the oldest snapshots of `name` beyond [`HISTORY_KEEP`].
+    fn prune_skill_history(&self, name: &str) {
+        let hist = self.history_dir();
+        let prefix = format!("{name}-");
+        let entries = match fs::read_dir(&hist) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let mut snaps: Vec<(PathBuf, u64, u32)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().map(|e| e == "md").unwrap_or(false) != true {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|f| f.to_str()) else {
+                continue;
+            };
+            let Some(stem) = file_name.strip_suffix(".md") else {
+                continue;
+            };
+            let Some(tail) = stem.strip_prefix(&prefix) else {
+                continue;
+            };
+            if tail.is_empty() {
+                continue;
+            }
+            let (ts, seq) = Self::history_file_order(tail);
+            if ts > 0 {
+                snaps.push((path, ts, seq));
+            }
+        }
+        if snaps.len() <= HISTORY_KEEP {
+            return;
+        }
+        snaps.sort_by_key(|(path, ts, seq)| {
+            (
+                *ts,
+                *seq,
+                path.file_name()
+                    .map(|f| f.to_os_string())
+                    .unwrap_or_default(),
+            )
+        });
+        let excess = snaps.len() - HISTORY_KEEP;
+        for (path, _, _) in snaps.into_iter().take(excess) {
+            if let Err(e) = fs::remove_file(&path) {
+                tracing::warn!("failed to prune skill history {path:?}: {e}");
+            }
+        }
+    }
+
+    /// Parse `(unix_ts, same_second_seq)` out of a history filename tail
+    /// (the part after the `<name>-` prefix, i.e. `<unixts>` or
+    /// `<unixts>-<seq>`). Mirrors `AgentManager::history_file_order`;
+    /// non-numeric tails sort as (0, 0), before all real snapshots.
+    fn history_file_order(ts_seq: &str) -> (u64, u32) {
+        let mut parts = ts_seq.splitn(2, '-');
+        let ts = parts
+            .next()
+            .and_then(|t| t.parse::<u64>().ok())
+            .unwrap_or(0);
+        let seq = parts
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        (ts, seq)
+    }
+
+    /// 3c: list the version-history snapshots of a skill, NEWEST first.
+    ///
+    /// Returns an empty vec when the skill has no history (missing history
+    /// dir or no snapshots) — not an error.
+    pub fn list_skill_history(&self, name: &str) -> Vec<PathBuf> {
+        let hist = self.history_dir();
+        if !hist.is_dir() {
+            return Vec::new();
+        }
+        let name = name.trim().to_ascii_lowercase();
+        let prefix = format!("{name}-");
+        let mut snaps: Vec<(PathBuf, u64, u32)> = Vec::new();
+        let Ok(entries) = fs::read_dir(&hist) else {
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().map(|e| e == "md").unwrap_or(false) != true {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|f| f.to_str()) else {
+                continue;
+            };
+            let Some(stem) = file_name.strip_suffix(".md") else {
+                continue;
+            };
+            let Some(tail) = stem.strip_prefix(&prefix) else {
+                continue;
+            };
+            if tail.is_empty() {
+                continue;
+            }
+            let (ts, seq) = Self::history_file_order(tail);
+            if ts > 0 {
+                snaps.push((path, ts, seq));
+            }
+        }
+        snaps.sort_by_key(|(path, ts, seq)| {
+            (
+                *ts,
+                *seq,
+                path.file_name()
+                    .map(|f| f.to_os_string())
+                    .unwrap_or_default(),
+            )
+        });
+        snaps.reverse(); // newest first
+        snaps.into_iter().map(|(path, _, _)| path).collect()
+    }
+
+    /// 3c: restore a skill from one of its history snapshots.
+    ///
+    /// `snapshot` must live inside [`Self::history_dir`] and name the skill
+    /// (`<name>-<unixts>[-seq].md`). The CURRENT skill file (when it exists)
+    /// is itself snapshotted first, so a revert is reversible (the same
+    /// rule as `AgentManager::revert_agent`). Returns the restored
+    /// [`Skill`].
+    pub fn revert_skill(&self, name: &str, snapshot: &Path) -> Result<Skill, String> {
+        let name = name.trim().to_ascii_lowercase();
+        validate_skill_name(&name)?;
+        let hist = self.history_dir();
+        // The snapshot must be a direct child of the history dir.
+        if snapshot.parent() != Some(hist.as_path()) {
+            return Err(format!(
+                "history snapshot {snapshot:?} is not under the history directory {hist:?}"
+            ));
+        }
+        let file_name = snapshot
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or_default();
+        let Some(stem) = file_name.strip_suffix(".md") else {
+            return Err(format!("history snapshot {snapshot:?} must be a .md file"));
+        };
+        let Some(rest) = stem.strip_prefix(&name).and_then(|s| s.strip_prefix('-')) else {
+            return Err(format!(
+                "history snapshot {snapshot:?} does not belong to skill '{name}'"
+            ));
+        };
+        // Validate the `<unixts>[-seq]` suffix.
+        let ts_ok = !rest.is_empty()
+            && rest
+                .split('-')
+                .all(|part| !part.is_empty() && part.parse::<u64>().is_ok());
+        if !ts_ok {
+            return Err(format!(
+                "history snapshot {snapshot:?} is not a valid history file for skill '{name}'"
+            ));
+        }
+        if !snapshot.is_file() {
+            return Err(format!("history snapshot {snapshot:?} does not exist"));
+        }
+        // Reverting is itself a change: snapshot the current file (when it
+        // exists) so the user can go forward again.
+        self.snapshot_skill(&name);
+        let dst = self.path(&name);
+        fs::copy(snapshot, &dst).map_err(|e| {
+            format!(
+                "failed to revert skill '{name}' from {snapshot:?}: {e}"
+            )
+        })?;
+        self.read(&name)
+            .ok_or_else(|| format!("reverted skill '{name}' but the file no longer parses"))
     }
 }
 
