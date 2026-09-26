@@ -5,6 +5,7 @@
 //! - cost.rs: evidence gate + state persistence (I4)
 //! - effect.rs: effect check with approved-change markers (I5)
 //! - skills.rs: skill retire-signal line (3b)
+//! - fleet.rs: fleet-wide evidence + the fleet improver (2b(b)/2d)
 //!
 //! NOTE: skills.rs's e2e test flips the process-global skills-dir override
 //! (serialized on its own lock, matching memory/skills/tests.rs).
@@ -17,6 +18,7 @@ use tempfile::tempdir;
 mod collect;
 mod cost;
 mod effect;
+mod fleet;
 mod serialization;
 mod skills;
 mod suggest;

@@ -14,6 +14,54 @@ use super::ImprovementsPanel;
 use crate::ui::agent_history;
 use crate::ui::theme::Theme;
 
+/// 2d: the run-check selector's special "fleet" entry — a cross-agent review
+/// (2b(b)) instead of one profile (the tool-side counterpart is
+/// `run_self_improvement`'s `scope: "fleet"`).
+const FLEET_SCOPE: &str = "fleet";
+
+/// 2d: send a (manual) check's result over the AppEvent channel — the
+/// suggestions (if any) plus the ALWAYS-sent done signal. Shared by the
+/// per-agent and the fleet run-check buttons so the two code paths cannot
+/// drift (a lost done signal would leave "Checking…" stuck).
+fn send_check_result(
+    events: &Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
+    agent_name: &str,
+    result: &Result<Vec<wuffagent_core::types::ImprovementSuggestion>, String>,
+) {
+    let sender = match events {
+        Some(s) => s,
+        None => return,
+    };
+    let lock = match sender.lock() {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    match result {
+        Ok(suggestions) => {
+            let produced = !suggestions.is_empty();
+            if produced {
+                let _ = lock.send(AppEvent::ImprovementSuggested {
+                    agent_name: agent_name.to_string(),
+                    suggestions: suggestions.clone(),
+                    session_id: String::new(),
+                });
+            }
+            let _ = lock.send(AppEvent::ImprovementCheckFinished {
+                agent_name: agent_name.to_string(),
+                produced,
+            });
+        }
+        // Err: the check already logged the failure; just clear the running
+        // state (no suggestions to add).
+        Err(_) => {
+            let _ = lock.send(AppEvent::ImprovementCheckFinished {
+                agent_name: agent_name.to_string(),
+                produced: false,
+            });
+        }
+    }
+}
+
 impl ImprovementsPanel {
     pub fn draw(
         &mut self,
@@ -72,13 +120,17 @@ impl ImprovementsPanel {
                         .into_iter()
                         .map(|a| a.name)
                         .collect();
+                    // 2d: the selector lists every profile PLUS the special
+                    // "fleet" entry (cross-agent review, 2b(b)).
+                    let mut selector: Vec<String> = agents.clone();
+                    selector.push(FLEET_SCOPE.to_string());
                     let auto_on = memory.config().auto_improve;
-                    // Re-resolve the selector if it is empty or the agent
-                    // disappeared (fresh agent list each frame).
-                    if self.run_check_agent.is_empty() || !agents.contains(&self.run_check_agent) {
-                        if let Some(first) = agents.first().cloned() {
-                            self.run_check_agent = first;
-                        }
+                    // Re-resolve the selector if it is empty or the entry
+                    // disappeared (fresh agent list each frame). The default
+                    // is the FIRST profile (not "fleet") — per-agent checks
+                    // are the common case.
+                    if self.run_check_agent.is_empty() || !selector.contains(&self.run_check_agent) {
+                        self.run_check_agent = agents.first().cloned().unwrap_or_else(|| FLEET_SCOPE.to_string());
                     }
                     ui.horizontal(|ui| {
                         ui.label("Run check for:");
@@ -89,11 +141,8 @@ impl ImprovementsPanel {
                             .width(140.0)
                             .selected_text(self.run_check_agent.clone())
                             .show_ui(ui, |ui| {
-                                for name in agents.iter() {
+                                for name in selector.iter() {
                                     ui.selectable_value(&mut next_agent, name.clone(), name.as_str());
-                                }
-                                if agents.is_empty() {
-                                    ui.label(egui::RichText::new("No agents found").size(10.0));
                                 }
                             });
                         self.run_check_agent = next_agent;
@@ -102,62 +151,53 @@ impl ImprovementsPanel {
                         } else {
                             "Run check now"
                         };
-                        let enabled = auto_on && !self.run_check_running && !agents.is_empty();
+                        let enabled = auto_on && !self.run_check_running;
                         let hover = if !auto_on {
                             "auto_improve is off (memory settings)"
                         } else if self.run_check_running {
                             "A check is already in progress"
+                        } else if self.run_check_agent == FLEET_SCOPE {
+                            "Run an on-demand FLEET review now: cross-agent patterns (shared failures → skills / new shared agents, skill maintenance). Bypasses the per-agent cooldowns"
                         } else {
                             "Run an on-demand self-improvement check for this agent now (bypasses the cooldown)"
                         };
                         if ui.add_enabled(enabled, egui::Button::new(label)).on_hover_text(hover).clicked()
                         {
                             let agent = self.run_check_agent.clone();
-                            match agent_manager.get_agent(&agent) {
-                                Some(cfg) => {
-                                    self.run_check_running = true;
-                                    self.run_check_status = format!("Checking '{agent}'…");
-                                    let memory = memory_arc.clone();
-                                    let events = events.clone();
-                                    std::thread::spawn(move || {
-                                        let result = memory.run_improvement_check(&cfg, None);
-                                        let sender = match &events {
-                                            Some(s) => s,
-                                            None => return,
-                                        };
-                                        let lock = match sender.lock() {
-                                            Ok(l) => l,
-                                            Err(_) => return,
-                                        };
-                                        match result {
-                                            Ok(suggestions) => {
-                                                let produced = !suggestions.is_empty();
-                                                if produced {
-                                                    let _ = lock.send(AppEvent::ImprovementSuggested {
-                                                        agent_name: agent.clone(),
-                                                        suggestions,
-                                                        session_id: String::new(),
-                                                    });
-                                                }
-                                                let _ = lock.send(AppEvent::ImprovementCheckFinished {
-                                                    agent_name: agent,
-                                                    produced,
-                                                });
-                                            }
-                                            // Err: the check already logged the
-                                            // failure; just clear the running
-                                            // state (no suggestions to add).
-                                            Err(_) => {
-                                                let _ = lock.send(AppEvent::ImprovementCheckFinished {
-                                                    agent_name: agent,
-                                                    produced: false,
-                                                });
-                                            }
-                                        }
-                                    });
-                                }
-                                None => {
-                                    self.run_check_status = format!("Agent '{agent}' not found");
+                            if agent == FLEET_SCOPE {
+                                // 2d: FLEET review (2b(b)) — roster = name +
+                                // description of every known profile (the
+                                // MemoryManager does not know about profiles,
+                                // so the panel builds it).
+                                let roster: Vec<(String, String)> = agent_manager
+                                    .list_agents()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|a| (a.name, a.description))
+                                    .collect();
+                                self.run_check_running = true;
+                                self.run_check_status = "Checking the fleet…".to_string();
+                                let memory = memory_arc.clone();
+                                let events = events.clone();
+                                std::thread::spawn(move || {
+                                    let result = memory.run_fleet_improvement_check(&roster, None);
+                                    send_check_result(&events, FLEET_SCOPE, &result);
+                                });
+                            } else {
+                                match agent_manager.get_agent(&agent) {
+                                    Some(cfg) => {
+                                        self.run_check_running = true;
+                                        self.run_check_status = format!("Checking '{agent}'…");
+                                        let memory = memory_arc.clone();
+                                        let events = events.clone();
+                                        std::thread::spawn(move || {
+                                            let result = memory.run_improvement_check(&cfg, None);
+                                            send_check_result(&events, &agent, &result);
+                                        });
+                                    }
+                                    None => {
+                                        self.run_check_status = format!("Agent '{agent}' not found");
+                                    }
                                 }
                             }
                         }

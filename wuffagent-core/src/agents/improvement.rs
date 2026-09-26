@@ -589,6 +589,281 @@ fn fleet_summary_line(window_days: u64) -> String {
     }
 }
 
+/// 2d: character budget for the fleet evidence block (~2k tokens — the
+/// plan's cap for the cross-agent summary handed to the fleet improver).
+const FLEET_EVIDENCE_CHAR_BUDGET: usize = 8_000;
+/// 2d: per-agent cap on top-lesson excerpts in the fleet evidence block.
+const FLEET_TOP_LESSONS: usize = 3;
+/// 2d: character cap for one lesson excerpt in the fleet evidence block.
+const FLEET_LESSON_CHARS: usize = 120;
+
+/// 2d: fleet-wide cross-agent evidence — a SINGLE compact JSON block
+/// (2b(b)): per-agent run metrics (runs, tool calls/errors, gave_up,
+/// feedback, duration, tokens), the agent's newest tagged lessons, and
+/// fleet skill usage (read in the window vs. exists-but-never-read).
+///
+/// Returns an empty string when there is no signal at all — no agent with
+/// runs in the window, no agent-tagged lessons, no skill activity — in which
+/// case there is nothing for a fleet review to judge.
+pub fn fleet_evidence_json(
+    manager: &MemoryManager,
+    roster: &[(String, String)],
+    window_days: u64,
+) -> String {
+    let window_days = window_days.max(1);
+    let since = chrono::Utc::now() - chrono::Duration::days(window_days as i64);
+    let log = crate::agents::metrics::MetricsLog::default();
+
+    let mut agents: Vec<serde_json::Value> = Vec::new();
+    for file_name in log.agent_names() {
+        // Metrics file names are normalized (agent_file_name); map back to
+        // the real profile name from the roster so the LLM can name the
+        // agent in its suggestions (case-insensitive, first match).
+        let display_name = roster
+            .iter()
+            .find(|(n, _)| crate::agents::metrics::agent_file_name(n) == file_name)
+            .map(|(n, _)| n.clone())
+            .unwrap_or(file_name);
+        let name = display_name;
+        let s = log.summary_since(&name, Some(since));
+        // The agent's newest tagged lessons (capped) — the only per-agent
+        // free-text content in the block besides the deterministic metrics.
+        let mut tagged: Vec<MemoryEntry> = manager
+            .get_by_tag(&format!("agent:{name}"))
+            .into_iter()
+            .filter(|m| matches!(m.r#type, crate::memory::MemoryType::Lesson))
+            .collect();
+        tagged.sort_by_key(|m| std::cmp::Reverse(m.timestamp));
+        let lessons: Vec<String> = tagged
+            .into_iter()
+            .take(FLEET_TOP_LESSONS)
+            .map(|m| truncate_to(&m.content, FLEET_LESSON_CHARS))
+            .collect();
+        if s.runs == 0 && lessons.is_empty() {
+            continue;
+        }
+        let error_pct = if s.tool_calls == 0 {
+            0.0
+        } else {
+            (s.tool_errors as f64 / s.tool_calls as f64 * 1_000.0).round() / 10.0
+        };
+        agents.push(serde_json::json!({
+            "name": name,
+            "runs": s.runs,
+            "tool_calls": s.tool_calls,
+            "tool_errors": s.tool_errors,
+            "error_pct": error_pct,
+            "gave_up": s.gave_up,
+            "feedback_up": s.feedback_up,
+            "feedback_down": s.feedback_down,
+            "avg_duration_s": s.avg_duration_secs(),
+            "tokens_in": s.tokens_in,
+            "tokens_out": s.tokens_out,
+            "top_lessons": lessons,
+        }));
+    }
+
+    // Fleet skill usage (3a/3b data): what was read in the window, and what
+    // exists in the store but was never read — the retire signal, as data.
+    let skills_read: Vec<String> = log.skill_usage_since(Some(since)).into_iter().take(10).collect();
+    let skills_never_read: Vec<String> = crate::memory::skills::SkillStore::default()
+        .list()
+        .into_iter()
+        .map(|m| m.name)
+        .filter(|n| !skills_read.iter().any(|u| u == n))
+        .take(10)
+        .collect();
+
+    if agents.is_empty() && skills_read.is_empty() && skills_never_read.is_empty() {
+        return String::new();
+    }
+
+    // Budget: lessons are the bulk of the block — drop them first, keep the
+    // metrics (they are what a fleet review is FOR).
+    let build = |with_lessons: bool| {
+        let agents_json: Vec<serde_json::Value> = agents
+            .iter()
+            .map(|a| {
+                if with_lessons {
+                    a.clone()
+                } else {
+                    let mut a = a.clone();
+                    a["top_lessons"] = serde_json::json!([]);
+                    a
+                }
+            })
+            .collect();
+        serde_json::json!({
+            "window_days": window_days,
+            "agents": agents_json,
+            "skills_read": skills_read,
+            "skills_never_read": skills_never_read,
+        })
+        .to_string()
+    };
+
+    let mut json = build(true);
+    if json.len() > FLEET_EVIDENCE_CHAR_BUDGET {
+        json = build(false);
+    }
+    if json.len() > FLEET_EVIDENCE_CHAR_BUDGET {
+        let mut t: String = json.chars().take(FLEET_EVIDENCE_CHAR_BUDGET).collect();
+        t.push_str("… [truncated]");
+        json = t;
+    }
+    json
+}
+
+/// 2d: hard character cap (the fleet evidence block's lesson excerpts).
+fn truncate_to(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(max_chars).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// 2d: the fleet-wide review (2b(b)) — the cross-agent counterpart of
+/// `suggest_improvements`.
+///
+/// `roster` is the (name, description) of every known agent profile; the
+/// caller holds the `AgentManager` (the `MemoryManager` does not know about
+/// profiles). Evidence is the compact [`fleet_evidence_json`] block — a
+/// single JSON summary (~≤2k tokens, 2d). The LLM looks for CROSS-agent
+/// patterns a single-agent review would miss: the same failure across
+/// several agents (→ a shared skill, or the per-agent change each needs), a
+/// capability gap a new SHARED agent could fill (`new_agents`), and
+/// fleet-wide skill maintenance.
+///
+/// The output is the SAME suggestion JSON as the per-agent path — each
+/// suggestion names the agent it targets (`agent_name`) — so the review
+/// panel and the `AppEvent::ImprovementSuggested` plumbing handle it
+/// unchanged.
+pub async fn suggest_fleet_improvements(
+    manager: &MemoryManager,
+    roster: &[(String, String)],
+    focus: Option<&str>,
+    llm_client: &dyn LlmClient,
+) -> Result<Vec<ImprovementSuggestion>, String> {
+    if !manager.config().auto_improve {
+        tracing::debug!("auto_improve is off; skipping fleet improvement check");
+        return Ok(Vec::new());
+    }
+    let window_days = manager.config().improvement_metrics_window_days.max(1) as u64;
+    let evidence = fleet_evidence_json(manager, roster, window_days);
+    if evidence.is_empty() {
+        tracing::debug!("no fleet evidence in the window; skipping fleet improvement check");
+        return Ok(Vec::new());
+    }
+
+    let roster_text = if roster.is_empty() {
+        "(no agent profiles registered)".to_string()
+    } else {
+        roster
+            .iter()
+            .map(|(n, d)| {
+                let d: String = d.split_whitespace().collect::<Vec<_>>().join(" ");
+                format!("{n}: {}", truncate_to(&d, 160))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let focus_line = focus
+        .map(|f| format!("\nConcentrate the review on: {f}"))
+        .unwrap_or_default();
+
+    let prompt = format!(
+        "You are reviewing a FLEET of AI agent profiles in WuffAgent. Look for CROSS-AGENT \
+         patterns that a single-agent review would miss.\n\n\
+         Known agent profiles:\n{roster_text}\n\
+         {focus_line}\n\n\
+         Fleet evidence (last {window_days} day(s), single JSON block — per-agent run metrics, \
+         tool error rates, durations, tokens, top lessons, plus skill usage):\n{evidence}\n\n\
+         What to look for:\n\
+         1. The SAME failure pattern across several agents (repeated tool errors, same misbehavior) → \
+         propose a shared skill (skill_updates) capturing the fix, and/or one suggestion per \
+         affected agent (its agent_name set) with the prompt/tool change it needs.\n\
+         2. A capability gap that recurs across agents → propose a NEW SHARED agent (new_agents) \
+         the fleet can hand off to.\n\
+         3. Skills that exist but were never read fleet-wide (skills_never_read) → propose \
+         retiring (action \"delete\") the ones with no clear ongoing value; merge heavily \
+         overlapping skills.\n\
+         4. An agent clearly outperforming its siblings → suggest what the others could borrow \
+         (prompt style, tool allowlist).\n\n\
+         Rules:\n\
+         - Prefer few, high-confidence suggestions. If nothing rises above the noise, return an \
+         empty array [].\n\n\
+         Return a JSON array of suggestions (same shape as a single-agent review; empty [] if \
+         nothing to improve):\n\
+         [\n\
+           {{\n\
+             \"agent_name\": \"<profile to change>\",\n\
+             \"prompt_change\": \"new prompt text or null if no change needed\",\n\
+             \"rationale\": \"why this change is needed (cite the fleet evidence)\",\n\
+             \"description\": null,\n\
+             \"allowed_tools\": null,\n\
+             \"reasoning_effort\": null,\n\
+             \"shell_config\": null,\n\
+             \"handoff_targets\": null,\n\
+             \"task_timeout_ms\": null,\n\
+             \"new_agents\": [\n\
+               {{\"name\": \"agent_name\", \"description\": \"...\", \"system_prompt\": \"...\", \"allowed_tools\": [\"tool1\", \"tool2\"]}}\n\
+             ],\n\
+             \"skill_updates\": [\n\
+               {{\"action\": \"new|update|delete\", \"name\": \"skill-slug\", \"description\": \"one line\", \"when_to_use\": \"when this skill applies\", \"body\": \"markdown steps\"}}\n\
+             ]\n\
+           }}\n\
+         ]\n\
+         \n\
+         Return [] if no improvements are needed.",
+    );
+
+    let messages = vec![Message {
+        role: "user".to_string(),
+        content: prompt,
+        timestamp: String::new(),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+        image: None,
+    }];
+
+    let response = llm_client.complete(&messages).await?;
+
+    // Parse (same tolerant JSON extraction as the per-agent path).
+    let trimmed = response.trim();
+    let mut suggestions = if trimmed.starts_with('[') {
+        serde_json::from_str::<Vec<ImprovementSuggestion>>(trimmed)
+            .map_err(|e| format!("Failed to parse fleet improvement suggestions: {}", e))?
+    } else {
+        let start = trimmed.find('[').unwrap_or(0);
+        let end = trimmed.rfind(']').unwrap_or(trimmed.len());
+        let json = &trimmed[start..=end];
+        serde_json::from_str::<Vec<ImprovementSuggestion>>(json)
+            .map_err(|e| format!("Failed to parse fleet improvement suggestions: {}", e))?
+    };
+
+    // I3-style: attach the deterministic evidence (the fleet block itself,
+    // display-truncated) so the panel shows WHY each suggestion was made.
+    let evidence_lines = vec![truncate_for_evidence(&evidence)];
+    for s in &mut suggestions {
+        s.evidence = evidence_lines.clone();
+    }
+
+    if suggestions.is_empty() {
+        tracing::debug!("No improvements suggested by the fleet review");
+    } else {
+        tracing::info!(
+            "Generated {} improvement suggestion(s) from the fleet review",
+            suggestions.len()
+        );
+    }
+    Ok(suggestions)
+}
+
 /// 3b: the skill-RETIRE signal — one line listing the skills that EXIST in
 /// the store but were never read in the usage window, so the improver can
 /// propose `skill_updates` with `action: "delete"` for the ones with no

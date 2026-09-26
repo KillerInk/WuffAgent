@@ -183,6 +183,56 @@ impl MemoryManager {
         Ok(check)
     }
 
+    /// 2d: fleet-wide variant of [`Self::suggest_improvements`] (2b(b)) —
+    /// the LLM comes from the manager's own client (no client = no
+    /// suggestions, same as the per-agent path). `roster` is the
+    /// (name, description) of every known agent profile; the caller holds
+    /// the AgentManager.
+    pub async fn suggest_fleet_improvements(
+        &self,
+        roster: &[(String, String)],
+        focus: Option<&str>,
+    ) -> Result<Vec<crate::types::ImprovementSuggestion>, String> {
+        let llm = match &self.llm_client {
+            Some(c) => c.clone(),
+            None => return Ok(Vec::new()),
+        };
+        crate::agents::improvement::suggest_fleet_improvements(self, roster, focus, llm.as_ref()).await
+    }
+
+    /// 2d: fleet-wide variant of [`Self::run_improvement_check`] — the
+    /// BLOCKING wrapper for the `run_self_improvement` tool (scope "fleet")
+    /// and the UI's "fleet" run-check option. Same timeout / runtime /
+    /// record semantics; the check is recorded under the pseudo-agent name
+    /// "fleet" (visible in `list_improvement_status` and the panel header).
+    pub fn run_fleet_improvement_check(
+        &self,
+        roster: &[(String, String)],
+        focus: Option<&str>,
+    ) -> Result<Vec<crate::types::ImprovementSuggestion>, String> {
+        let fut = async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(IMPROVEMENT_CHECK_TIMEOUT_SECS),
+                self.suggest_fleet_improvements(roster, focus),
+            )
+            .await
+        };
+        let check = match block_on_improvement(fut) {
+            Ok(Ok(suggestions)) => suggestions,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "on-demand FLEET improvement check failed");
+                return Err(format!("failed: {e}"));
+            }
+            Err(_) => {
+                tracing::warn!("on-demand FLEET improvement check timed out");
+                return Err(format!("timed out after {IMPROVEMENT_CHECK_TIMEOUT_SECS}s"));
+            }
+        };
+        // Only a check that ran to term tracks the no-op streak (2d).
+        self.record_agent_improvement_check("fleet", !check.is_empty());
+        Ok(check)
+    }
+
     /// Search for relevant memories.
     /// Releases the mutex before running the search to avoid blocking other operations.
     pub fn search(&self, query: &str) -> Vec<MemoryEntry> {
