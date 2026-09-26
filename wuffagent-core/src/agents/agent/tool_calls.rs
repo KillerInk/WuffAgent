@@ -10,11 +10,17 @@
 //!
 //! Both append the resulting messages to the request list AND the shared
 //! store (request list + store must stay in lockstep).
+//!
+//! Both also increment the run's `RunStats` counters as they go (M1 fix):
+//! the counters accumulate per executed call because re-scanning the
+//! request list afterwards is unreliable — the loop trims that list in
+//! place mid-run, which invalidated the old start-of-run offset.
 
 use std::collections::HashSet;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::agents::types::RunStats;
 use crate::tools::{ToolDefinition, ToolManager};
 use crate::types::{Message, ToolCall};
 
@@ -38,6 +44,7 @@ pub(crate) async fn run_native_tool_calls(
     truncated_ids: &HashSet<String>,
     messages: &mut Vec<Message>,
     tool_manager: &ToolManager,
+    counters: &mut RunStats,
 ) -> Result<(), String> {
     // ── Pass 1 (no await): start whatever is not running yet ────────────
     // `start` is a no-op for ids that are already in the map, so
@@ -57,6 +64,7 @@ pub(crate) async fn run_native_tool_calls(
             pending.abort_all();
             return Err("Cancelled".to_string());
         }
+        counters.tool_calls += 1;
         if truncated_ids.contains(&call.id) {
             // Truncated mid-stream: the call cannot be executed. Abort a
             // started run (defensive — the ready callback only fires for
@@ -76,6 +84,7 @@ pub(crate) async fn run_native_tool_calls(
                 "Error: tool call arguments for '{}' were truncated (the model ran out of output tokens mid-argument), so the tool did not execute. Retry with a smaller payload - e.g. split the content across multiple tool calls or use a more targeted edit.",
                 call.function.name
             );
+            counters.tool_errors += 1;
             agent.send_event(crate::types::AppEvent::ToolCallError {
                 tool_name: call.function.name.clone(),
                 call_id: call.id.clone(),
@@ -143,6 +152,9 @@ pub(crate) async fn run_native_tool_calls(
                 format!("Error: {bad_args}")
             }
         };
+        if result_str.starts_with("Error: ") {
+            counters.tool_errors += 1;
+        }
         // The UI card gets the FULL result (it renders the image from the
         // `data_uri` field); completions are emitted in call order.
         agent.send_event(crate::types::AppEvent::ToolCallComplete {
@@ -194,6 +206,7 @@ pub(crate) async fn run_text_embedded_calls(
     pending: &PendingToolRuns,
     messages: &mut Vec<Message>,
     tool_manager: &ToolManager,
+    counters: &mut RunStats,
 ) -> Result<bool, String> {
     if tool_defs.as_ref().map(|d| d.is_empty()).unwrap_or(false) {
         // No tools offered — skip text parsing entirely.
@@ -230,6 +243,7 @@ pub(crate) async fn run_text_embedded_calls(
             pending.abort_all();
             return Err("Cancelled".to_string());
         }
+        counters.tool_calls += 1;
         // Bind the handle out of the map before awaiting: the mutex guard
         // must not live across the await (the enclosing future must stay Send).
         let outcome: Result<String, String> = match pending.take(&call.id) {
@@ -286,6 +300,9 @@ pub(crate) async fn run_text_embedded_calls(
                 format!("Error: {bad_args}")
             }
         };
+        if result_str.starts_with("Error: ") {
+            counters.tool_errors += 1;
+        }
         agent.send_event(crate::types::AppEvent::ToolCallComplete {
             tool_name: call.function.name.clone(),
             call_id: call.id.clone(),

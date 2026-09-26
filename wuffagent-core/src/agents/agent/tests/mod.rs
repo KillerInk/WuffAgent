@@ -4,6 +4,7 @@
 //! - verify.rs: verify_or_complete (judge) + trim reconciliation + nudge capture
 //! - outcomes.rs: record_verification_outcome storage/dedup
 //! - context.rs: storable-nudge, request overhead, truncated tool-call repair
+//! - tool_calls.rs: per-run tool counters (M1 regression)
 
 use super::*;
 use super::verify::record_verification_outcome;
@@ -17,6 +18,7 @@ mod hand_back;
 mod handoff;
 mod outcomes;
 mod schema;
+mod tool_calls;
 mod verify;
 
 fn make_agent(name: &str) -> Agent {

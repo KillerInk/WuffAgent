@@ -133,9 +133,12 @@ impl Agent {
         // request — original text plus everything the user added.
         let mut original_request = self.extract_original_request(messages);
 
-        // I1: mark where THIS run's messages start, so trajectory stats can
-        // be counted without including earlier turns of the conversation.
-        let run_start_len = messages.len();
+        // M1: tool-use trajectory counters, accumulated as the loop runs.
+        // (Re-scanning the request list afterwards with a start-of-run
+        // offset is unreliable: the list is trimmed in place mid-run, so on
+        // long turns the offset drifted past every recorded call and the
+        // metrics line came out all-zero.)
+        let mut run_stats = crate::agents::types::RunStats::default();
         let outcome: RunOutcome = loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
@@ -162,7 +165,9 @@ impl Agent {
                     self.config.name,
                     req.agent
                 );
-                return Ok(RunOutcome::Handoff(req));
+                // Break (not return) so the run-stats + metrics tail below
+                // still records this hop before the engine switches agents.
+                break RunOutcome::Handoff(req);
             }
 
             // A pending restart (written by the `restart` tool this turn, its
@@ -175,7 +180,8 @@ impl Agent {
                     self.config.name,
                     req.reason
                 );
-                return Ok(RunOutcome::Restart(req));
+                // Break (not return) so the metrics tail records this run.
+                break RunOutcome::Restart(req);
             }
 
             // A pending hand-back (written by the `hand_back` tool this turn;
@@ -189,7 +195,8 @@ impl Agent {
                     self.config.name,
                     req.task
                 );
-                return Ok(RunOutcome::HandBack(req));
+                // Break (not return) so the metrics tail records this run.
+                break RunOutcome::HandBack(req);
             }
 
             // Rate-limit LLM calls to avoid hitting API rate limits.
@@ -468,6 +475,7 @@ impl Agent {
                         &truncated_ids,
                         messages,
                         &tool_manager,
+                        &mut run_stats,
                     )
                     .await?;
                     continue;
@@ -483,6 +491,7 @@ impl Agent {
                 &pending_tool_runs,
                 messages,
                 &tool_manager,
+                &mut run_stats,
             )
             .await?
             {
@@ -506,16 +515,19 @@ impl Agent {
             }
         };
 
-        // I1: record this run's tool-use trajectory for the improver.
-        self.run_stats =
-            Self::run_stats_since(messages, run_start_len, verify_state.attempts);
+        // I1: record this run's tool-use trajectory for the improver;
         // M1: per-agent metrics line (trajectory + terminal verification
-        // outcome + wall-clock duration). Each handoff hop records its own
-        // line under its own agent; best-effort, never fails the run.
+        // outcome + wall-clock duration). Every Ok exit — verified,
+        // gave-up, handoff, restart, hand-back — funnels through here (the
+        // tool-driven exits `break` with their outcome instead of returning,
+        // so a run is never recorded zero or skipped). Best-effort, never
+        // fails the run.
+        run_stats.verification_attempts = verify_state.attempts;
+        self.run_stats = run_stats;
         crate::agents::metrics::record_run(
             &self.config.name,
-            self.run_stats.tool_calls as u32,
-            self.run_stats.tool_errors as u32,
+            run_stats.tool_calls as u32,
+            run_stats.tool_errors as u32,
             verify_state.attempts,
             start.elapsed().as_millis() as u64,
             verify_state.final_outcome.unwrap_or(crate::agents::metrics::RunOutcome::None),
