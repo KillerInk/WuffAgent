@@ -25,8 +25,8 @@ fn test_run_roundtrip_and_append() {
     let dir = tmp_dir("rt");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 12, 2, 1, 45_210, RunOutcome::Verified);
-    log.log_run("coder", 3, 0, 2, 8_000, RunOutcome::GaveUp);
+    log.log_run("coder", 12, 2, 1, 45_210, RunOutcome::Verified, 100, 20);
+    log.log_run("coder", 3, 0, 2, 8_000, RunOutcome::GaveUp, 0, 0);
     log.log_feedback("coder", true);
     log.log_feedback("coder", false);
 
@@ -43,6 +43,8 @@ fn test_run_roundtrip_and_append() {
             verification_attempts,
             duration_ms,
             outcome,
+            tokens_in,
+            tokens_out,
             ..
         } => {
             assert_eq!(*tool_calls, 12);
@@ -50,6 +52,9 @@ fn test_run_roundtrip_and_append() {
             assert_eq!(*verification_attempts, 1);
             assert_eq!(*duration_ms, 45_210);
             assert_eq!(*outcome, RunOutcome::Verified);
+            // 4c: token fields round-trip through the JSONL store.
+            assert_eq!(*tokens_in, 100);
+            assert_eq!(*tokens_out, 20);
         }
         other => panic!("expected run line, got {other:?}"),
     }
@@ -67,8 +72,8 @@ fn test_per_agent_files() {
     let dir = tmp_dir("peragent");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 1, 0, 1, 100, RunOutcome::Verified);
-    log.log_run("architect", 2, 1, 1, 200, RunOutcome::None);
+    log.log_run("coder", 1, 0, 1, 100, RunOutcome::Verified, 0, 0);
+    log.log_run("architect", 2, 1, 1, 200, RunOutcome::None, 0, 0);
 
     let coder = log.read_all("coder");
     let architect = log.read_all("architect");
@@ -100,7 +105,7 @@ fn test_corrupt_lines_skipped() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 5, 1, 1, 1_000, RunOutcome::Verified);
+    log.log_run("coder", 5, 1, 1, 1_000, RunOutcome::Verified, 0, 0);
     // Append garbage + an empty line + a line of the wrong shape.
     use std::io::Write;
     let mut f = OpenOptions::new().append(true).open(log.agent_path("coder")).unwrap();
@@ -130,6 +135,8 @@ fn test_summary_since_and_format_line() {
             verification_attempts: 1,
             duration_ms: 5_000,
             outcome: o,
+            tokens_in: 0,
+            tokens_out: 0,
         })
         .unwrap()
     };
@@ -175,6 +182,8 @@ fn test_summary_between_windows() {
             verification_attempts: 1,
             duration_ms: 5_000,
             outcome: o,
+            tokens_in: 0,
+            tokens_out: 0,
         })
         .unwrap()
     };
@@ -230,7 +239,7 @@ fn test_recent_caps_to_last_n() {
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
     for i in 0..7 {
-        log.log_run("coder", i, 0, 1, 100, RunOutcome::Verified);
+        log.log_run("coder", i, 0, 1, 100, RunOutcome::Verified, 0, 0);
     }
     let recent = log.recent("coder", 3);
     assert_eq!(recent.len(), 3);
@@ -269,7 +278,7 @@ fn test_default_uses_test_process_dir() {
 fn test_skill_usage_roundtrip_and_reserved_file() {
     let dir = tmp_dir("skill-usage");
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 3, 1, 1, 1000, RunOutcome::Verified);
+    log.log_run("coder", 3, 1, 1, 1000, RunOutcome::Verified, 0, 0);
     log.log_skill_use("wuffagent-self-restart");
     log.log_skill_use("git-rebase-workflow");
     log.log_skill_use("wuffagent-self-restart"); // duplicate

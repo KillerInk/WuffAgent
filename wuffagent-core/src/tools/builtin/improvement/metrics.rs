@@ -125,7 +125,8 @@ impl ReadMetricsTool {
             "Metrics for '{agent}' — window: last {days} day(s) ({} line(s)):\n  {} run(s): \
              {} verified / {} verified_after_retry / {} gave_up / {} not verified\n  {} tool \
              call(s), {} errors ({:.1}% error rate)\n  duration: avg {:.1}s, max {:.1}s\n  \
-             user feedback: {} up / {} down\nRecent lines (newest first, up to {} shown):\n{}",
+             tokens: {} in / {} out\n  user feedback: {} up / {} down\nRecent lines \
+             (newest first, up to {} shown):\n{}",
             window.len(),
             summary.runs,
             summary.verified,
@@ -141,6 +142,8 @@ impl ReadMetricsTool {
             },
             summary.avg_duration_secs(),
             max_duration_ms as f64 / 1000.0,
+            summary.tokens_in,
+            summary.tokens_out,
             summary.feedback_up,
             summary.feedback_down,
             MAX_RECENT_LINES,
@@ -290,7 +293,7 @@ mod tests {
     }
 
     fn record_run(log: &MetricsLog, agent: &str, calls: u32, errors: u32, ms: u64) {
-        log.log_run(agent, calls, errors, 1, ms, RunOutcome::Verified);
+        log.log_run(agent, calls, errors, 1, ms, RunOutcome::Verified, 0, 0);
     }
 
     #[test]
@@ -298,7 +301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = MetricsLog::new(dir.path());
         record_run(&log, "coder", 10, 2, 20_000);
-        log.log_run("coder", 4, 0, 0, 60_000, RunOutcome::GaveUp);
+        log.log_run("coder", 4, 0, 0, 60_000, RunOutcome::GaveUp, 0, 0);
         log.log_feedback("coder", true);
         log.log_feedback("coder", false);
 
@@ -317,6 +320,20 @@ mod tests {
         assert!(out.contains("feedback: down"), "got: {out}");
     }
 
+    /// 4c: token totals from per-run lines are aggregated in the summary and
+    /// surfaced as cost evidence.
+    #[test]
+    fn agent_mode_aggregates_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        log.log_run("coder", 10, 2, 1, 20_000, RunOutcome::Verified, 100, 20);
+        log.log_run("coder", 4, 0, 0, 60_000, RunOutcome::GaveUp, 50, 10);
+
+        let tool = tool_in(dir.path());
+        let out = text(call(&tool, Some("coder"), None));
+        assert!(out.contains("tokens: 150 in / 30 out"), "got: {out}");
+    }
+
     #[test]
     fn agent_mode_empty_window_falls_back_to_outside_window_lines() {
         let dir = tempfile::tempdir().unwrap();
@@ -332,6 +349,8 @@ mod tests {
                 verification_attempts: 0,
                 duration_ms: 5_000,
                 outcome: RunOutcome::None,
+                tokens_in: 0,
+                tokens_out: 0,
             },
         );
         let tool = tool_in(dir.path());

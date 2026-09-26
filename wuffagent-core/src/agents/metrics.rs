@@ -85,6 +85,13 @@ pub enum MetricsLine {
         duration_ms: u64,
         /// Terminal verification outcome.
         outcome: RunOutcome,
+        /// 4c: prompt tokens consumed across the run's LLM rounds (summed
+        /// from server-reported usage; 0 when the server reports none).
+        #[serde(default)]
+        tokens_in: u64,
+        /// 4c: completion tokens produced across the run's LLM rounds.
+        #[serde(default)]
+        tokens_out: u64,
     },
     /// User feedback on an assistant answer.
     Feedback {
@@ -113,13 +120,17 @@ impl MetricsLine {
                 verification_attempts,
                 duration_ms,
                 outcome,
+                tokens_in,
+                tokens_out,
             } => format!(
-                "{} run: {} tool calls ({} errors), {} verification attempt(s), {:.1}s, outcome: {}",
+                "{} run: {} tool calls ({} errors), {} verification attempt(s), {:.1}s, {} tokens in / {} out, outcome: {}",
                 ts.format("%Y-%m-%d %H:%M"),
                 tool_calls,
                 tool_errors,
                 verification_attempts,
                 *duration_ms as f64 / 1000.0,
+                tokens_in,
+                tokens_out,
                 outcome.as_str(),
             ),
             MetricsLine::Feedback { ts, feedback } => format!(
@@ -151,6 +162,10 @@ pub struct MetricsSummary {
     /// (2c: lets the `read_metrics` tool and the effect check report
     /// duration averages/deltas without re-reading the raw lines).
     pub total_duration_ms: u64,
+    /// 4c: total prompt tokens consumed by the counted runs (cost evidence).
+    pub tokens_in: u64,
+    /// 4c: total completion tokens produced by the counted runs.
+    pub tokens_out: u64,
 }
 
 impl MetricsSummary {
@@ -169,7 +184,7 @@ impl MetricsSummary {
         format!(
             "{label} ({} run(s), {} tool call(s) with {} errors ({:.1}%), \
              outcomes: {} verified / {} verified_after_retry / {} gave_up / {} not verified, \
-             user feedback: {} up / {} down)",
+             tokens: {} in / {} out, user feedback: {} up / {} down)",
             self.runs,
             self.tool_calls,
             self.tool_errors,
@@ -178,6 +193,8 @@ impl MetricsSummary {
             self.verified_after_retry,
             self.gave_up,
             self.not_verified,
+            self.tokens_in,
+            self.tokens_out,
             self.feedback_up,
             self.feedback_down,
         )
@@ -358,6 +375,8 @@ impl MetricsLog {
         verification_attempts: u32,
         duration_ms: u64,
         outcome: RunOutcome,
+        tokens_in: u64,
+        tokens_out: u64,
     ) {
         self.append(
             agent,
@@ -368,6 +387,8 @@ impl MetricsLog {
                 verification_attempts,
                 duration_ms,
                 outcome,
+                tokens_in,
+                tokens_out,
             },
         );
     }
@@ -496,12 +517,16 @@ impl MetricsLog {
                     tool_errors,
                     duration_ms,
                     outcome,
+                    tokens_in,
+                    tokens_out,
                     ..
                 } => {
                     s.runs += 1;
                     s.tool_calls += tool_calls;
                     s.tool_errors += tool_errors;
                     s.total_duration_ms += duration_ms;
+                    s.tokens_in += tokens_in;
+                    s.tokens_out += tokens_out;
                     match outcome {
                         RunOutcome::Verified => s.verified += 1,
                         RunOutcome::VerifiedAfterRetry => s.verified_after_retry += 1,
@@ -560,6 +585,8 @@ pub fn record_run(
     verification_attempts: u32,
     duration_ms: u64,
     outcome: RunOutcome,
+    tokens_in: u64,
+    tokens_out: u64,
 ) {
     MetricsLog::default().log_run(
         agent,
@@ -568,6 +595,8 @@ pub fn record_run(
         verification_attempts,
         duration_ms,
         outcome,
+        tokens_in,
+        tokens_out,
     );
 }
 

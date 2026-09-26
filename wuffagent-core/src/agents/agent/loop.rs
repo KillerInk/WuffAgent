@@ -139,6 +139,11 @@ impl Agent {
         // long turns the offset drifted past every recorded call and the
         // metrics line came out all-zero.)
         let mut run_stats = crate::agents::types::RunStats::default();
+        // 4c: token cost of this run, accumulated from server-reported usage
+        // each round (kept local — not part of RunStats — so the 11 existing
+        // RunStats literals stay untouched). Fed to the metrics log below.
+        let mut tokens_in = 0u64;
+        let mut tokens_out = 0u64;
         let outcome: RunOutcome = loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
@@ -390,6 +395,13 @@ impl Agent {
             // Calibrate the chars/token ratio from the server's real count so
             // subsequent trim budgets track the actual tokenizer.
             self.client.calibrate_from_usage(usage.as_ref());
+            // 4c: accumulate this round's server-reported tokens (cost
+            // evidence for the metrics log / improver). `usage` is still
+            // borrowed here — it is moved into the verify call later.
+            if let Some(u) = usage.as_ref() {
+                tokens_in = tokens_in.saturating_add(u.prompt_tokens as u64);
+                tokens_out = tokens_out.saturating_add(u.completion_tokens as u64);
+            }
             self.last_llm_call_at = Instant::now();
 
             // Commit this round's thinking block to the UI.
@@ -531,6 +543,8 @@ impl Agent {
             verify_state.attempts,
             start.elapsed().as_millis() as u64,
             verify_state.final_outcome.unwrap_or(crate::agents::metrics::RunOutcome::None),
+            tokens_in,
+            tokens_out,
         );
         Ok(outcome)
     }

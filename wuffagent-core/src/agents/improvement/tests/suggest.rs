@@ -270,6 +270,8 @@ async fn test_improvement_prompt_includes_recent_metrics() {
         1,
         12_345,
         crate::agents::metrics::RunOutcome::VerifiedAfterRetry,
+        500,
+        100,
     );
     crate::agents::metrics::record_feedback("metricsagent", false);
 
@@ -291,4 +293,6 @@ async fn test_improvement_prompt_includes_recent_metrics() {
     );
     assert!(prompt.contains("1 verified_after_retry"), "prompt: {}", prompt);
     assert!(prompt.contains("0 up / 1 down"), "prompt: {}", prompt);
+    // 4c: the metrics summary now carries token totals as cost evidence.
+    assert!(prompt.contains("tokens: 500 in / 100 out"), "prompt: {}", prompt);
 }

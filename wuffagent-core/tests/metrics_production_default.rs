@@ -37,7 +37,7 @@ fn production_default_append_roundtrip() {
     let log = MetricsLog::default();
     let path = log.agent_path("integration-selftest");
     let _ = std::fs::remove_file(&path); // idempotent across runs
-    log.log_run("integration-selftest", 1, 0, 1, 42, RunOutcome::Verified);
+    log.log_run("integration-selftest", 1, 0, 1, 42, RunOutcome::Verified, 12, 4);
     log.log_feedback("integration-selftest", true);
     let lines = log.read_all("integration-selftest");
     assert_eq!(

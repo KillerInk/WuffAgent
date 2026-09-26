@@ -1,5 +1,5 @@
 # Plan: close the self-improvement loop's remaining gaps (round 2)
-**Status:** IN PROGRESS (wuffagent) — done: 1a/1b/1c, 2a, 2b, 2c, 2e, 3a; half: 3b (retire/merge triggers missing), 4a (panel header missing). Next: 4c (tokens in metrics), 4a panel header, 4b (run-now button), 3b triggers, 3c (skill history), 2d (fleet review).
+**Status:** IN PROGRESS (wuffagent) — done: 1a/1b/1c, 2a, 2b, 2c, 2e, 3a, 4c; half: 3b (retire/merge triggers missing), 4a (panel header missing). Next: 4a panel header, 4b (run-now button), 3b triggers, 3c (skill history), 2d (fleet review).
 **Trigger:** round 2 audit (this file) — round 1 (A-I, T series) fully landed; these are the gaps that audit found in the *new* code.
 **Why this matters:** the loop proposes but rarely proves. Suggestions leak on exit, effects are invisible, the improver is blind to skills and tokens — so it improves prompts but can't maintain what it learned or judge what worked.
 
@@ -45,7 +45,8 @@
 - [~] **4a.** *Panel shows no loop status* — add a header line: "last check 12:41 · cooldown until 12:43 · 3 pending suggestions" (data from 2a's state file; the `list_improvement_status` tool already has most of it).
   - ~ HALF DONE (8eaf26e): agent-side `list_improvement_status` done; panel header still missing.
 - [ ] **4b.** *No "run check now" button in the panel* — wire a button to 2b(a) (fleet scope: 2b(b)).
-- [ ] **4c.** *Tokens missing from the metrics line* (G.7) — `record` gets `tokens_in/out` from the LLM response (the chat pipeline has them); the improver prompt then includes cost-per-task trend. One field + one prompt line.
+- [x] **4c.** *Tokens missing from the metrics line* (G.7) — `record` gets `tokens_in/out` from the LLM response (the chat pipeline has them); the improver prompt then includes cost-per-task trend. One field + one prompt line.
+  - ✅ DONE: `MetricsLine::Run` gains `tokens_in/tokens_out` (serde-defaulted; old JSONL lines parse as 0). `MetricsSummary` aggregates them; `format_labeled` + the `read_metrics` agent-mode report + per-line `describe()` all surface "tokens: X in / Y out". Tokens are accumulated in `run_llm_loop` from each round's server-reported `Usage` (kept as locals, NOT added to `RunStats` — avoids breaking 11 exhaustive test literals) and passed through `record_run` → `log_run`. The improver sees them via the metrics trend line (cost-per-task evidence). 2 new tests (token round-trip in the store; read_metrics aggregation).
 
 ## Out of scope / later (noted, not planned)
 - **Eval harness** (G.9): a golden-task suite that scores before/after an applied improvement. Big win, big build — needs its own plan once the loop's state is per-agent (2a) so "before/after" windows are well-defined.
