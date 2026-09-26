@@ -138,18 +138,16 @@ fn test_store_stays_bounded_after_trim_reconciliation() {
         c
     });
     let registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
-    let agent = Agent::new(
+    let agent = Agent::builder(
         AgentConfig {
             name: "test".to_string(),
             ..Default::default()
         },
         Arc::new(NoopLlm),
-        Arc::new(Mutex::new(ToolManager::new(registry))),
-        None,
         client,
-        None,
-        None,
-    );
+    )
+    .tool_manager(Arc::new(Mutex::new(ToolManager::new(registry))))
+    .build();
 
     // Fill the store with 30 turns of large replies, then the current
     // turn's user message, as `execute` would have recorded it.

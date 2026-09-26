@@ -2,8 +2,8 @@ use std::sync::mpsc;
 
 pub mod chat;
 pub mod http;
+mod conversation;
 pub mod persist;
-pub mod session;
 pub mod sse;
 pub mod trim_state;
 
@@ -54,7 +54,7 @@ pub use http::{
     build_request, build_stream_request, send_message, ChatRequest, Choice, NonStreamResult,
     Response,
 };
-pub use session::{clear_history, clear_session_messages, trim_conversation};
+
 // Session persistence orchestrators moved to `crate::sessions::persist`
 // (Phase 2, E2a); re-exported here so `client::{save_session, load_session, ...}`
 // keep resolving for backward compatibility.
@@ -167,7 +167,7 @@ pub struct ChatClient {
     /// failure must never break the chat.
     usage_recorder: Arc<crate::usage::recorder::UsageRecorder>,
     /// Name of the agent about to make LLM calls on this client. Set by
-    /// `Agent::new` before each agent run; agents within a session run
+    /// `Agent::builder` before each agent run; agents within a session run
     /// sequentially, so the stamp is current at request time. Shared
     /// interior-mutable like the other per-client fields, since the client
     /// handle is cloned and shared.
@@ -275,7 +275,7 @@ impl ChatClient {
     }
 
     /// Stamp the agent name on usage-log lines written by this client.
-    /// Called by `Agent::new` before each agent run (agents within a session
+    /// Called by `Agent::builder` before each agent run (agents within a session
     /// run sequentially, so the name is current when the LLM call happens).
     pub fn set_agent_name(&self, name: &str) {
         *self.agent_name.lock().unwrap() = name.to_string();
@@ -397,11 +397,11 @@ impl ChatClient {
     }
 
     pub fn clear_history(&self) {
-        session::clear_history(&self.conversation);
+        conversation::clear_history(&self.conversation);
     }
 
-    pub fn clear_session_messages(&mut self) {
-        session::clear_session_messages(&self.conversation, &|| {
+    pub fn clear_session_messages(&self) {
+        conversation::clear_session_messages(&self.conversation, &|| {
             save_session(
                 self.session_id.as_deref(),
                 &self.session_dir,

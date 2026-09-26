@@ -183,7 +183,7 @@ impl ToolManager {
 
     /// Create a new ToolManager whose `handoff` entry is replaced by the
     /// provided per-execution tool (same rebuild pattern as
-    /// [`Self::with_shell_config`]). Used by `Agent::new` to give
+    /// [`Self::with_shell_config`]). Used by `Agent::builder` to give
     /// `handoff_enabled` agents a handoff tool wired to their own mailbox,
     /// agents dir, and target allowlist.
     pub fn with_handoff_tool(&self, tool: crate::tools::builtin::handoff::HandoffTool) -> Self {
@@ -223,7 +223,7 @@ impl ToolManager {
 
     /// Create a new ToolManager whose `restart` entry is replaced by the
     /// provided per-execution tool (same rebuild pattern as
-    /// [`Self::with_handoff_tool`]). Used by `Agent::new` to give
+    /// [`Self::with_handoff_tool`]). Used by `Agent::builder` to give
     /// `restart_enabled` agents a restart tool wired to their own mailbox.
     pub fn with_restart_tool(&self, tool: crate::tools::builtin::restart::RestartTool) -> Self {
         let mut entries = self.registry.list();
@@ -263,7 +263,7 @@ impl ToolManager {
 
     /// Create a new ToolManager whose `hand_back` entry is replaced by the
     /// provided per-execution tool (same rebuild pattern as
-    /// [`Self::with_handoff_tool`]). Used by `Agent::new` to give sub-session
+    /// [`Self::with_handoff_tool`]). Used by `Agent::builder` to give sub-session
     /// agents (sessions whose meta carries a `parent_session_id`) a hand-back
     /// tool wired to their own mailbox.
     pub fn with_hand_back_tool(&self, tool: crate::tools::builtin::hand_back::HandBackTool) -> Self {

@@ -10,7 +10,7 @@ use crate::tools::types::{Tool, ToolError, ToolOutput, ToolParams, ToolSchema};
 ///
 /// Per-execution tool: each `Agent` with `handoff_enabled` gets its own
 /// instance (its own mailbox, agents dir, and target allowlist), injected in
-/// `Agent::new` exactly like the per-agent `shell` tool. It is NOT registered
+/// `Agent::builder` exactly like the per-agent `shell` tool. It is NOT registered
 /// in `register_builtins` because it needs execution-specific state.
 ///
 /// Calling it ends the current agent's turn: the tool writes a

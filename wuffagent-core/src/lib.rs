@@ -12,7 +12,6 @@
 //! │                  in request types)
 //! ├── config         (Config, ConnectionType) → re-exports agents::config,
 //! │                  memory::types
-//! ├── config_types   (shared re-exports) → agents::config, memory::types
 //! ├── agents         (Agent, AgentEngine, ChatPipeline) → llm, client, tools,
 //! │                  memory, trimming, sessions (QueuedMessage), types
 //! │   ├── agent      (Agent: execute, loop, prompt, verify, toolcall_parse,
@@ -51,14 +50,12 @@
 //!   No 2-cycles exist between top-level modules.
 //! - `client` never depends on `agents` (ChatPipeline lives in
 //!   `agents::chat_pipeline`); only `agents` may depend on `client`.
-//! - `config` re-exports from `agents::config` and `memory::types`;
-//!   `config_types` mirrors those re-exports for backward compatibility.
+//! - `config` re-exports from `agents::config` and `memory::types`.
 //! - `usage` depends only on `config`, so `client → usage` creates no cycle.
 
 pub mod agents;
 pub mod client;
 pub mod config;
-pub mod config_types;
 pub mod llm;
 pub mod memory;
 pub mod server;

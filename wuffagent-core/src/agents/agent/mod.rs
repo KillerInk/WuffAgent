@@ -82,20 +82,97 @@ pub struct Agent {
     injection_rx: Option<Arc<Mutex<std::sync::mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
 }
 
-impl Agent {
-    /// Create a new agent from config.
+/// Builder for [`Agent`] (see [`Agent::builder`]).
+///
+/// Required: `config`, `llm_client`, `client`. Optional: `tool_manager`
+/// (defaults to an empty registry — headless paths register their tools into
+/// a shared manager beforehand), `event_tx`, `memory`, `agent_session_id`.
+///
+/// The per-agent policy (reasoning effort on a client clone, shell gating,
+/// and the handoff/restart/hand_back tool injection with per-execution
+/// mailboxes) lives in exactly one place: [`AgentBuilder::build`].
+#[derive(Clone)]
+pub struct AgentBuilder {
+    config: AgentConfig,
+    llm_client: Arc<dyn LlmClient>,
+    client: Arc<ChatClient>,
+    tool_manager: Option<Arc<Mutex<ToolManager>>>,
+    event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
+    memory: Option<Arc<crate::memory::MemoryManager>>,
+    agent_session_id: Option<String>,
+}
+
+impl AgentBuilder {
+    /// Start a builder with the three required inputs.
     pub fn new(
         config: AgentConfig,
         llm_client: Arc<dyn LlmClient>,
-        tool_manager: Arc<Mutex<ToolManager>>,
-        event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
         client: Arc<ChatClient>,
-        memory: Option<Arc<crate::memory::MemoryManager>>,
-        agent_session_id: Option<String>,
     ) -> Self {
-        // Apply the agent's per-agent reasoning effort: give it its own
-        // client clone with the effort set. Off = inherit the global
-        // client setting (no override).
+        Self {
+            config,
+            llm_client,
+            client,
+            tool_manager: None,
+            event_tx: None,
+            memory: None,
+            agent_session_id: None,
+        }
+    }
+
+    /// Use this tool manager (defaults to an empty registry).
+    pub fn tool_manager(mut self, tool_manager: Arc<Mutex<ToolManager>>) -> Self {
+        self.tool_manager = Some(tool_manager);
+        self
+    }
+
+    /// UI event channel for agent events (None = no UI, e.g. tests).
+    pub fn event_tx(
+        mut self,
+        event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
+    ) -> Self {
+        self.event_tx = event_tx;
+        self
+    }
+
+    /// Memory manager for persistent context (None = memory disabled).
+    pub fn memory(mut self, memory: Option<Arc<crate::memory::MemoryManager>>) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// Session ID for this agent's persistent conversation (None = none).
+    pub fn agent_session_id(mut self, agent_session_id: Option<String>) -> Self {
+        self.agent_session_id = agent_session_id;
+        self
+    }
+
+    /// Build the agent.
+    ///
+    /// Applies the per-agent policy:
+    /// - the agent's reasoning effort goes on its own client clone (Off =
+    ///   inherit the global client setting);
+    /// - the agent's name is stamped on the usage-log lines its client
+    ///   writes (agents within a session run sequentially, so the shared
+    ///   client's name is always current at request time);
+    /// - the `shell` tool is advertised only when the agent's `shell_enabled`
+    ///   is true (a disabled shell is removed from the schema entirely, with
+    ///   the agent's shell config — allowlist/timeout — applied when enabled);
+    /// - the `handoff`/`restart`/`hand_back` tools are injected exactly when
+    ///   their config flag is set (hand_back additionally requires a
+    ///   sub-session, i.e. a `parent_session_id` in the client's session
+    ///   meta), each with its own per-execution mailbox; tools inherited from
+    ///   a previous agent in a handoff chain are dropped when the flag is off.
+    pub fn build(self) -> Agent {
+        let AgentBuilder {
+            config,
+            llm_client,
+            client,
+            tool_manager,
+            event_tx,
+            memory,
+            agent_session_id,
+        } = self;
         let client = if config.reasoning_effort != crate::types::ReasoningEffort::Off {
             let mut c = (*client).clone();
             c.set_reasoning_effort(config.reasoning_effort);
@@ -104,29 +181,23 @@ impl Agent {
             client
         };
         // Token tracker: stamp this agent's name on the usage-log lines this
-        // client writes. Agents within a session run sequentially, so the
-        // shared client's name is always current at request time.
+        // client writes.
         client.set_agent_name(&config.name);
-        // Give this agent its own tool manager whose `shell` honors the agent's
-        // shell config (allowlist/enabled/timeout), instead of sharing the global
-        // allow-all shell. All other tools are shared. This is what makes an
-        // agent's `shell` respect its per-agent restrictions on both the chat and
-        // /plan paths.
         let (tool_manager, handoff_mailbox, restart_mailbox, hand_back_mailbox) = {
-            let shared = tool_manager.lock().unwrap();
-            // The shell tool is advertised only when the agent's
-            // `shell_enabled` is true. A disabled shell is removed from the
-            // schema entirely instead of remaining as a tool whose calls
-            // always error out.
+            let tool_manager_arc = tool_manager.unwrap_or_else(|| {
+                Arc::new(Mutex::new(ToolManager::new(Arc::new(
+                    crate::tools::registry::ToolRegistry::new(
+                        vec![],
+                        Arc::new(crate::tools::types::TracingToolLogger),
+                    ),
+                ))))
+            });
+            let shared = tool_manager_arc.lock().unwrap();
             let tm = if config.get_shell_config().shell_enabled {
                 shared.with_shell_config(config.get_shell_config())
             } else {
                 shared.without_shell()
             };
-            // The handoff tool is advertised only when `handoff_enabled` —
-            // gated by flag, like the shell above, NOT by `allowed_tools`.
-            // Each execution gets its own mailbox + tool instance (per-agent
-            // target allowlist, agents dir), injected exactly like the shell.
             let (tm, handoff_mailbox) = if config.handoff_enabled {
                 let mailbox = Arc::new(Mutex::new(None));
                 let tool = crate::tools::builtin::handoff::HandoffTool::new(
@@ -137,42 +208,26 @@ impl Agent {
                 );
                 (tm.with_handoff_tool(tool), Some(mailbox))
             } else {
-                // Drop any handoff tool inherited from a previous agent in a
-                // handoff chain (the shared base manager may carry one).
                 (tm.without_handoff(), None)
             };
-            // The restart tool is advertised only when `restart_enabled` —
-            // same flag-gated, per-execution injection as handoff/shell.
             let (tm, restart_mailbox) = if config.restart_enabled {
                 let mailbox = Arc::new(Mutex::new(None));
                 let tool = crate::tools::builtin::restart::RestartTool::new(mailbox.clone());
                 (tm.with_restart_tool(tool), Some(mailbox))
             } else {
-                // Drop any restart tool inherited from a previous agent in a
-                // handoff chain (the shared base manager may carry one).
                 (tm.without_restart(), None)
             };
-            // The hand_back tool is advertised only when `hand_back_enabled`
-            // AND this session is a sub-session (its meta carries a
-            // `parent_session_id` — where to return to). Same flag-gated,
-            // per-execution injection as the tools above; the sub-session
-            // condition comes from the shared session client, so an in-turn
-            // handoff target inside a sub-session inherits the tool (with its
-            // own fresh mailbox) when its profile allows it.
             let (tm, hand_back_mailbox) =
                 if config.hand_back_enabled && client.session_meta().parent_session_id.is_some() {
                     let mailbox = Arc::new(Mutex::new(None));
                     let tool = crate::tools::builtin::hand_back::HandBackTool::new(mailbox.clone());
                     (tm.with_hand_back_tool(tool), Some(mailbox))
                 } else {
-                    // Drop any hand_back tool inherited from a previous agent
-                    // in a handoff chain (the shared base manager may carry
-                    // one).
                     (tm.without_hand_back(), None)
                 };
             (Arc::new(Mutex::new(tm)), handoff_mailbox, restart_mailbox, hand_back_mailbox)
         };
-        Self {
+        Agent {
             config,
             llm_client,
             tool_manager,
@@ -189,6 +244,18 @@ impl Agent {
             run_stats: RunStats::default(),
             injection_rx: None,
         }
+    }
+}
+
+impl Agent {
+    /// Start building an agent (see [`AgentBuilder`] for the optional inputs
+    /// and the per-agent policy `build` applies).
+    pub fn builder(
+        config: AgentConfig,
+        llm_client: Arc<dyn LlmClient>,
+        client: Arc<ChatClient>,
+    ) -> AgentBuilder {
+        AgentBuilder::new(config, llm_client, client)
     }
 
     /// Attach the current run's mid-run injection channel (see the
@@ -245,21 +312,6 @@ impl Agent {
         }
 
         messages
-    }
-
-    /// Create an agent from config with an empty tool manager.
-    pub fn from_config(
-        config: AgentConfig,
-        llm_client: Arc<dyn LlmClient>,
-        client: Arc<ChatClient>,
-        memory: Option<Arc<crate::memory::MemoryManager>>,
-    ) -> Self {
-        let tool_registry = Arc::new(crate::tools::registry::ToolRegistry::new(
-            vec![],
-            Arc::new(crate::tools::types::TracingToolLogger),
-        ));
-        let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
-        Self::new(config, llm_client, tool_manager, None, client, memory, None)
     }
 
     pub(crate) fn send_event(&self, event: crate::types::AppEvent) {

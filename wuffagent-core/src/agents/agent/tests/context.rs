@@ -163,20 +163,18 @@ async fn test_truncated_tool_call_repaired_before_storing() {
     });
 
     let client = Arc::new(ChatClient::new(&format!("http://{addr}")));
-    let mut agent = Agent::new(
+    let mut agent = Agent::builder(
         AgentConfig {
             name: "test".to_string(),
             ..Default::default()
         },
         Arc::new(NoopLlm),
-        Arc::new(Mutex::new(ToolManager::new(Arc::new(
-            ToolRegistry::new(vec![], Arc::new(TracingToolLogger)),
-        )))),
-        None,
         client,
-        None,
-        None,
-    );
+    )
+    .tool_manager(Arc::new(Mutex::new(ToolManager::new(Arc::new(
+        ToolRegistry::new(vec![], Arc::new(TracingToolLogger)),
+    )))))
+    .build();
     let mut messages = agent.build_initial_messages("write the file");
     let outcome = agent
         .run_llm_loop(&mut messages, &CancellationToken::new())

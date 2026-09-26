@@ -29,7 +29,7 @@ const WUFFAGENT_EXE_STEM: &str = "wuffagent-egui";
 /// build command) so a freshly built binary is loaded, then resume the session.
 ///
 /// Per-execution tool: each `Agent` with `restart_enabled` gets its own
-/// instance (its own mailbox), injected in `Agent::new` exactly like the
+/// instance (its own mailbox), injected in `Agent::builder` exactly like the
 /// per-agent `shell` and `handoff` tools. It is NOT registered in
 /// `register_builtins` because it needs execution-specific state.
 ///

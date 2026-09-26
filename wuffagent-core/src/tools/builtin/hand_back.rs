@@ -10,7 +10,7 @@ use crate::tools::types::{
 ///
 /// Per-execution tool: each `Agent` running in a sub-session (its session
 /// meta carries a `parent_session_id`) with `hand_back_enabled` gets its own
-/// instance (its own mailbox), injected in `Agent::new` exactly like the
+/// instance (its own mailbox), injected in `Agent::builder` exactly like the
 /// per-agent `shell`, `handoff`, and `restart` tools. It is NOT registered
 /// in `register_builtins` because it needs execution-specific state.
 ///

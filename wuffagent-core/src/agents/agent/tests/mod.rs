@@ -28,7 +28,9 @@ fn make_agent(name: &str) -> Agent {
     let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
     let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
-    Agent::new(config, llm_client, tool_manager, None, client, None, None)
+    Agent::builder(config, llm_client, client)
+        .tool_manager(tool_manager)
+        .build()
 }
 
 /// Build an agent whose shared registry contains a `shell` tool, like the
@@ -61,7 +63,9 @@ fn make_agent_with_shell(shell_enabled: bool) -> Agent {
         .unwrap();
     let tool_manager = Arc::new(Mutex::new(ToolManager::new(Arc::new(registry))));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
-    Agent::new(config, llm_client, tool_manager, None, client, None, None)
+    Agent::builder(config, llm_client, client)
+        .tool_manager(tool_manager)
+        .build()
 }
 
 fn test_msg(role: &str, content: &str) -> Message {
@@ -123,18 +127,16 @@ fn agent_with_llm(llm: std::sync::Arc<dyn LlmClient>) -> Agent {
         vec![],
         std::sync::Arc::new(TracingToolLogger),
     ));
-    Agent::new(
+    Agent::builder(
         AgentConfig {
             name: "test".to_string(),
             ..Default::default()
         },
         llm,
-        std::sync::Arc::new(Mutex::new(ToolManager::new(registry))),
-        None,
         std::sync::Arc::new(ChatClient::new("http://localhost:1")),
-        None,
-        None,
     )
+    .tool_manager(std::sync::Arc::new(Mutex::new(ToolManager::new(registry))))
+    .build()
 }
 
 fn judge_agent(

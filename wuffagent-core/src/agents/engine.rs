@@ -128,7 +128,7 @@ impl AgentEngine {
 
     /// Return a clone of the engine with the reasoning-effort mode applied:
     /// the client's forced wire level is set to the explicit level (or `Off`
-    /// for Auto, so the profile's own effort — applied by `Agent::new` — is
+    /// for Auto, so the profile's own effort — applied by `Agent::builder` — is
     /// the only one in effect), and the mode is remembered so
     /// `execute_with_tools` can resolve the chat agent's effort.
     pub fn with_reasoning_mode(self, mode: crate::types::ReasoningMode) -> Self {
@@ -198,7 +198,7 @@ impl AgentEngine {
         // session's ReasoningMode (applied by the chat pipeline via
         // `with_reasoning_mode`):
         // - Auto: the SELECTED profile's own effort wins — the UI resolved it
-        //   into `tool_policy.reasoning_effort`, and `Agent::new` applies it
+        //   into `tool_policy.reasoning_effort`, and `Agent::builder` applies it
         //   (Off there = profile unset → inherit the client's, which the
         //   pipeline reset to Off, so nothing leaks in).
         // - Explicit: the pipeline already forced the level on the client, so
@@ -219,18 +219,15 @@ impl AgentEngine {
             .unwrap_or_else(crate::agents::config::default_agents_dir);
         chat_config.agents_search_dirs = self.agents_search_dirs.clone();
 
-        // Keep a copy for the post-task improvement check (Agent::new takes ownership).
+        // Keep a copy for the post-task improvement check (Agent::builder takes ownership).
         let maintenance_config = chat_config.clone();
 
-        let mut agent = Agent::new(
-            chat_config,
-            self.llm_client.clone(),
-            self.tool_manager.clone(),
-            self.event_tx.clone(),
-            self.client.clone(),
-            self.memory.clone(),
-            self.agent_session_id.clone(),
-        );
+        let mut agent = Agent::builder(chat_config, self.llm_client.clone(), self.client.clone())
+            .tool_manager(self.tool_manager.clone())
+            .event_tx(self.event_tx.clone())
+            .memory(self.memory.clone())
+            .agent_session_id(self.agent_session_id.clone())
+            .build();
         // Mid-run injection channel: the agent loop drains it at LLM round
         // boundaries (user messages sent while this run is active are
         // injected into the current turn as soon as the model can see them).

@@ -47,15 +47,9 @@ fn test_agent_per_agent_reasoning_effort() {
     let mut config = AgentConfig::default();
     config.name = "researcher".to_string();
     config.reasoning_effort = crate::types::ReasoningEffort::High;
-    let agent = Agent::new(
-        config,
-        llm_client.clone(),
-        tool_manager.clone(),
-        None,
-        global_client.clone(),
-        None,
-        None,
-    );
+    let agent = Agent::builder(config, llm_client.clone(), global_client.clone())
+        .tool_manager(tool_manager.clone())
+        .build();
     assert_eq!(
         agent.client.reasoning_effort(),
         crate::types::ReasoningEffort::High
@@ -66,15 +60,9 @@ fn test_agent_per_agent_reasoning_effort() {
     let mut config = AgentConfig::default();
     config.name = "coder".to_string();
     config.reasoning_effort = crate::types::ReasoningEffort::Off;
-    let agent = Agent::new(
-        config,
-        llm_client,
-        tool_manager,
-        None,
-        global_client.clone(),
-        None,
-        None,
-    );
+    let agent = Agent::builder(config, llm_client, global_client.clone())
+        .tool_manager(tool_manager)
+        .build();
     assert_eq!(
         agent.client.reasoning_effort(),
         crate::types::ReasoningEffort::Medium

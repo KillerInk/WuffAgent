@@ -4,7 +4,7 @@
 use crate::types::{Message, Usage};
 use crate::trimming::ContextTrimming;
 
-use super::session;
+use super::conversation;
 use super::{ChatClient, ContextOverflow};
 
 impl ChatClient {
@@ -120,7 +120,7 @@ impl ChatClient {
 
 
     pub fn trim_conversation(&self, max_messages: usize) {
-        session::trim_conversation(&self.conversation, max_messages);
+        conversation::trim_conversation(&self.conversation, max_messages);
     }
 
     /// Trim the client's conversation to the given token budget.

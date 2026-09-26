@@ -32,7 +32,9 @@ fn make_agent_with_handoff(
     let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
     let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
-    let agent = Agent::new(config, llm_client, tool_manager, None, client, None, None);
+    let agent = Agent::builder(config, llm_client, client)
+        .tool_manager(tool_manager)
+        .build();
     (agent, dir)
 }
 
@@ -196,15 +198,11 @@ async fn test_execute_sub_session_handoff_forks_without_chaining() {
     let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
     let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
-    let mut agent = Agent::new(
-        config,
-        llm,
-        tool_manager,
-        Some(Arc::new(Mutex::new(tx))),
-        client,
-        None,
-        Some("parent-sid".to_string()),
-    );
+    let mut agent = Agent::builder(config, llm, client)
+        .tool_manager(tool_manager)
+        .event_tx(Some(Arc::new(Mutex::new(tx))))
+        .agent_session_id(Some("parent-sid".to_string()))
+        .build();
 
     // Pre-write the request the `handoff` tool would have written during a
     // tool round. The loop picks it up at the top of the first iteration —

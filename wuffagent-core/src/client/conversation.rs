@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::types::Message;
 
 /// Trim the conversation to the given max_messages, preserving the system message.
-pub fn trim_conversation(conversation: &Arc<Mutex<Vec<Message>>>, max_messages: usize) {
+pub(super) fn trim_conversation(conversation: &Arc<Mutex<Vec<Message>>>, max_messages: usize) {
     let mut conv = conversation.lock().unwrap();
     let initial_len = conv.len();
     if initial_len <= max_messages {
@@ -39,12 +39,12 @@ pub fn trim_conversation(conversation: &Arc<Mutex<Vec<Message>>>, max_messages: 
 }
 
 /// Clear all messages from the conversation.
-pub fn clear_history(conversation: &Arc<Mutex<Vec<Message>>>) {
+pub(super) fn clear_history(conversation: &Arc<Mutex<Vec<Message>>>) {
     conversation.lock().unwrap().clear();
 }
 
 /// Clear all messages from the conversation and save the (empty) session.
-pub fn clear_session_messages(
+pub(super) fn clear_session_messages(
     conversation: &Arc<Mutex<Vec<Message>>>,
     save_session_fn: &dyn Fn() -> Result<(), anyhow::Error>,
 ) {

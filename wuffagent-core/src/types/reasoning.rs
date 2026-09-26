@@ -75,7 +75,7 @@ impl ReasoningEffort {
 ///
 /// - `Auto` (default): use the reasoning effort configured on the selected
 ///   agent profile (`AgentConfig.reasoning_effort`). The profile's own value
-///   is applied by `Agent::new`, and the client's forced level is reset to
+///   is applied by `Agent::builder`, and the client's forced level is reset to
 ///   `Off` so nothing else leaks in.
 /// - `Explicit(e)`: force level `e` for the session, overriding whatever the
 ///   agent profile says.

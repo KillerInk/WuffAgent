@@ -134,22 +134,23 @@ impl Agent {
             // effort, trimming state) but shares the conversation store,
             // event channel, memory manager, and session id. `self.tool_manager`
             // (already the per-execution manager) is the shared base; the
-            // target's Agent::new applies its own shell/handoff swaps on top.
+            // target's builder applies its own shell/handoff swaps on top.
             // The task timeout is a property of the SESSION run, not the
             // profile: the target inherits the original agent's value so a
             // no-timeout chat run (task_timeout_ms=0) stays timeout-free
             // across every hop. Otherwise a profile default (e.g. 60s for
             // coder) would force-kill long tasks after a handoff.
             req.config.task_timeout_ms = self.config.task_timeout_ms;
-            let mut next = Self::new(
+            let mut next = Self::builder(
                 req.config.clone(),
                 self.llm_client.clone(),
-                self.tool_manager.clone(),
-                self.event_tx.clone(),
                 self.client.clone(),
-                self.memory.clone(),
-                self.agent_session_id.clone(),
-            );
+            )
+            .tool_manager(self.tool_manager.clone())
+            .event_tx(self.event_tx.clone())
+            .memory(self.memory.clone())
+            .agent_session_id(self.agent_session_id.clone())
+            .build();
             // The whole handoff chain is still the same turn: keep receiving
             // user injections on the next agent too.
             next.injection_rx = self.injection_rx.take();

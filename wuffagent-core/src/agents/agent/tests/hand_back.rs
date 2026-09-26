@@ -21,15 +21,10 @@ fn agent_with_meta(parent: Option<&str>, hand_back_enabled: bool, sid: &str) -> 
         ..Default::default()
     };
     config.hand_back_enabled = hand_back_enabled;
-    Agent::new(
-        config,
-        Arc::new(NoopLlm),
-        Arc::new(Mutex::new(ToolManager::new(registry))),
-        None,
-        Arc::new(client),
-        None,
-        Some(sid.to_string()),
-    )
+    Agent::builder(config, Arc::new(NoopLlm), Arc::new(client))
+        .tool_manager(Arc::new(Mutex::new(ToolManager::new(registry))))
+        .agent_session_id(Some(sid.to_string()))
+        .build()
 }
 
 fn advertised(agent: &Agent) -> Vec<String> {
@@ -110,18 +105,18 @@ async fn test_execute_hand_back_marker_and_event() {
     });
     let (tx, rx) = std::sync::mpsc::channel::<AppEvent>();
     let registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
-    let mut agent = Agent::new(
+    let mut agent = Agent::builder(
         AgentConfig {
             name: "coder".to_string(),
             ..Default::default()
         },
         Arc::new(NoopLlm),
-        Arc::new(Mutex::new(ToolManager::new(registry))),
-        Some(Arc::new(Mutex::new(tx))),
         Arc::new(client),
-        None,
-        Some("sub-sid".to_string()),
-    );
+    )
+    .tool_manager(Arc::new(Mutex::new(ToolManager::new(registry))))
+    .event_tx(Some(Arc::new(Mutex::new(tx))))
+    .agent_session_id(Some("sub-sid".to_string()))
+    .build();
 
     let mailbox = agent.hand_back_mailbox.clone().expect("mailbox expected");
     *mailbox.lock().unwrap() = Some(HandBackRequest {

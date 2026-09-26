@@ -308,13 +308,13 @@ impl ChatApp {
         if let Some(runtime) = self.sessions.session_store.get(&sid) {
             if runtime.chat_state.is_generating {
                 // AI is still working: display the message immediately and hand
-                // it to the RUNNING agent loop - the agent picks it up at its
-                // next LLM round boundary (the earliest point the model can
-                // see it) and reacts within the current turn, instead of
-                // waiting for the whole run to finish.
-                // Resolve the agent prompt/policy first - these borrow `self`
-                // and can't be called while a mutable borrow of the store is
-                // held.
+                // it to the RUNNING agent loop (see `inject_or_queue`) - the
+                // agent picks it up at its next LLM round boundary (the
+                // earliest point the model can see it) and reacts within the
+                // current turn, instead of waiting for the whole run to
+                // finish. Resolve the agent prompt/policy first - these borrow
+                // `self` and can't be called while a mutable borrow of the
+                // store is held.
                 let agent = runtime.selected_agent.clone().unwrap_or_default();
                 let agent_prompt = self.resolve_agent_prompt(&agent);
                 let tool_policy = self.resolve_tool_policy(&agent);
@@ -329,41 +329,52 @@ impl ChatApp {
                     tool_policy,
                 };
                 let image_b64 = images::data_uri_b64(queued.image.as_deref());
-                // Fast path: inject into the running agent loop. If the run
-                // already ended (race), the send fails and the message falls
-                // back to the per-session queue, which is drained when a run
-                // ends.
-                let injected = self.sessions.session_store
-                    .get(&sid)
-                    .map(|rt| rt.pipeline.inject(queued.clone()))
-                    .unwrap_or(false);
-                if let Some(cs) = self.sessions.session_store.get_mut(&sid) {
-                    cs.chat_state.messages.push(wuffagent_core::types::ChatMessage {
-                        kind: MessageKind::Normal,
-                        role: "user".to_string(),
-                        content: input.to_string(),
-                        timestamp: wuffagent_core::types::format_timestamp(),
-                        image: image_b64,
-                    });
-                    cs.chat_state.input_text.clear();
-                    if injected {
-                        cs.chat_state.show_notification(
-                            "Sent to the running agent - picked up at its next step",
-                            true,
-                        );
-                    } else {
-                        cs.chat_state.queued_messages.push(queued);
-                        cs.chat_state.show_notification(
-                            &format!("Queued - will run after the current task ({} waiting)", cs.chat_state.queued_messages.len()),
-                            true,
-                        );
-                    }
-                }
+                self.inject_or_queue(&sid, queued, input, image_b64);
             } else {
                 self.send_message_to_session(&sid);
             }
         }
         true
+    }
+
+    /// Display `text` in session `sid`'s chat and hand `queued` to the
+    /// RUNNING agent loop: injected at its next LLM round boundary (fast
+    /// path). If the run already ended (race), the injection fails and the
+    /// message falls back to the per-session queue, which is drained when a
+    /// run ends.
+    fn inject_or_queue(
+        &mut self,
+        sid: &str,
+        queued: wuffagent_core::sessions::QueuedMessage,
+        text: &str,
+        image_b64: Option<String>,
+    ) {
+        let injected = self.sessions.session_store
+            .get(sid)
+            .map(|rt| rt.pipeline.inject(queued.clone()))
+            .unwrap_or(false);
+        if let Some(cs) = self.sessions.session_store.get_mut(sid) {
+            cs.chat_state.messages.push(wuffagent_core::types::ChatMessage {
+                kind: MessageKind::Normal,
+                role: "user".to_string(),
+                content: text.to_string(),
+                timestamp: wuffagent_core::types::format_timestamp(),
+                image: image_b64,
+            });
+            cs.chat_state.input_text.clear();
+            if injected {
+                cs.chat_state.show_notification(
+                    "Sent to the running agent - picked up at its next step",
+                    true,
+                );
+            } else {
+                cs.chat_state.queued_messages.push(queued);
+                cs.chat_state.show_notification(
+                    &format!("Queued - will run after the current task ({} waiting)", cs.chat_state.queued_messages.len()),
+                    true,
+                );
+            }
+        }
     }
 
     pub(super) fn notify_chat(&mut self, msg: &str, success: bool) {
