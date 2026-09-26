@@ -42,6 +42,13 @@ impl ImprovementsPanel {
                     ui.heading("Self-Improvement Suggestions");
                     ui.label(badge);
                 });
+                // 4a: one-line loop-status header (data from 2a's state file,
+                // same snapshot the list_improvement_status tool reads). The
+                // panel is fleet-wide, so show the most recent check across
+                // the global + per-agent states.
+                let loop_status = memory.improvement_status();
+                let status_text = loop_status_header_line(&loop_status);
+                ui.label(egui::RichText::new(status_text).weak());
                 ui.separator();
 
                 if let Some(msg) = &self.message {
@@ -483,5 +490,109 @@ impl ImprovementsPanel {
                     self.persist();
                 }
             });
+    }
+}
+
+/// 4a: the panel's one-line loop-status header, e.g.
+/// "Loop: last check 12:41:05 (3m ago) · new evidence: yes · lessons: 5 · auto_improve: on".
+/// Read from the same 2a state snapshot the `list_improvement_status` tool uses.
+fn loop_status_header_line(
+    status: &wuffagent_core::memory::ImprovementStatus,
+) -> String {
+    format!(
+        "Loop: last check {} · new evidence: {} · lessons: {} · auto_improve: {}",
+        format_last_check(most_recent_check(status)),
+        if status.has_new_evidence { "yes" } else { "no" },
+        status.lesson_count,
+        if status.auto_improve { "on" } else { "off" },
+    )
+}
+
+/// The most recent improvement-check timestamp across the global state and
+/// every per-agent state (the panel is fleet-wide, so "last check" means the
+/// newest of them all).
+fn most_recent_check(
+    status: &wuffagent_core::memory::ImprovementStatus,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let mut best = status.last_check;
+    for st in status.agents.values() {
+        if let Some(ts) = st.last_check {
+            if best.map_or(true, |b| ts > b) {
+                best = Some(ts);
+            }
+        }
+    }
+    best
+}
+
+/// Render a timestamp as "HH:MM:SS (N ago)" or "never".
+fn format_last_check(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    match ts {
+        Some(ts) => {
+            let secs = chrono::Utc::now().timestamp().saturating_sub(ts.timestamp());
+            let ago = if secs < 3_600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86_400 {
+                format!("{}h ago", secs / 3_600)
+            } else {
+                format!("{}d ago", secs / 86_400)
+            };
+            format!("{} ({})", ts.format("%H:%M:%S"), ago)
+        }
+        None => "never".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests_4a {
+    use super::*;
+    use chrono::Utc;
+    use wuffagent_core::memory::{AgentImprovementState, ImprovementStatus};
+
+    fn status() -> ImprovementStatus {
+        ImprovementStatus {
+            last_check: None,
+            has_new_evidence: false,
+            auto_improve: true,
+            improvement_cooldown_tasks: 5,
+            lesson_count: 0,
+            agents: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn state(ts: Option<chrono::DateTime<chrono::Utc>>) -> AgentImprovementState {
+        AgentImprovementState {
+            last_check: ts,
+            runs_since_check: 0,
+            no_op_streak: 0,
+            last_effect_verdict: None,
+        }
+    }
+
+    #[test]
+    fn header_shows_never_when_no_check() {
+        let line = loop_status_header_line(&status());
+        assert!(line.contains("last check never"), "got: {line}");
+        assert!(line.contains("new evidence: no"), "got: {line}");
+        assert!(line.contains("auto_improve: on"), "got: {line}");
+    }
+
+    #[test]
+    fn most_recent_prefers_newest_across_agents() {
+        let mut s = status();
+        let older = Utc::now() - chrono::Duration::hours(5);
+        let newer = Utc::now() - chrono::Duration::minutes(2);
+        s.last_check = Some(older);
+        s.agents.insert("coder".into(), state(Some(newer)));
+        s.agents.insert("architect".into(), state(Some(older)));
+        assert_eq!(most_recent_check(&s), Some(newer));
+    }
+
+    #[test]
+    fn format_last_check_never_and_relative() {
+        assert_eq!(format_last_check(None), "never");
+        let recent = Utc::now() - chrono::Duration::minutes(3);
+        let out = format_last_check(Some(recent));
+        assert!(out.contains("3m ago"), "got: {out}");
     }
 }
