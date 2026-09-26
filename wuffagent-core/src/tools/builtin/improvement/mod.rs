@@ -8,10 +8,15 @@
 //! - [`run`] — `run_self_improvement`: on-demand check reusing the engine's
 //!   `suggest_improvements` (bypasses the cooldown/evidence gates; emits
 //!   `AppEvent::ImprovementSuggested` for the review panel).
+//! - [`metrics`] — `read_metrics`: agent-readable view of the run-metrics
+//!   store (windowed aggregates + recent lines; fleet mode when no agent is
+//!   named). Read-only, no LLM call.
 
+mod metrics;
 mod run;
 mod status;
 
+pub use metrics::ReadMetricsTool;
 pub use run::RunSelfImprovementTool;
 pub use status::ListImprovementStatusTool;
 
@@ -44,6 +49,11 @@ pub fn register_improvement_tools(
             "run_self_improvement",
             "Run an on-demand self-improvement check for an agent (bypasses the cooldown)",
             Arc::new(RunSelfImprovementTool::new(memory, agents, events)) as Arc<dyn Tool>,
+        ),
+        (
+            "read_metrics",
+            "Read the run-metrics store: windowed aggregates + recent lines for an agent, or a fleet overview",
+            Arc::new(ReadMetricsTool::new()) as Arc<dyn Tool>,
         ),
     ] {
         super::register_tool(registry, name, desc, tool)?;

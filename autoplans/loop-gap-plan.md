@@ -1,5 +1,5 @@
 # Plan: close the self-improvement loop's remaining gaps (round 2)
-**Status:** IN PROGRESS (wuffagent) — Phase 1 done (1a/1b/1c), 2b done, 3a done, 3b half, 4a half (agent-side). Next: 2c, 2a, 2d, 2e, 3b/3c, 4a panel header, 4b, 4c.
+**Status:** IN PROGRESS (wuffagent) — Phase 1 done (1a/1b/1c), 2b + 2c done, 3a done, 3b half, 4a half (agent-side). Next: 2a, 2d, 2e, 3b/3c, 4a panel header, 4b, 4c.
 **Trigger:** round 2 audit (this file) — round 1 (A-I, T series) fully landed; these are the gaps that audit found in the *new* code.
 **Why this matters:** the loop proposes but rarely proves. Suggestions leak on exit, effects are invisible, the improver is blind to skills and tokens — so it improves prompts but can't maintain what it learned or judge what worked.
 
@@ -22,8 +22,9 @@
 - [x] **2b.** *No on-demand / cross-agent review* (G.2b) — the loop only fires per-agent post-task with a 120s global cooldown; there is no "review agent X now" and no "review the whole fleet" (fleet-level patterns: same tool error across 3 agents → one shared fix).
   - Change: (a) agent tool `run_self_improvement(agent: name)` → runs the check immediately for that profile (bypass cooldown, still uses its lessons+metrics), routes suggestions to the panel; (b) optional `scope: "fleet"` that feeds the improver a cross-agent summary (error-rate + top lessons per agent, from the metrics store) and may propose a new shared agent or a skill.
   - ✅ DONE (commit 03e85a9): `run_self_improvement` agent tool (per-profile on-demand check, bypasses cooldown/evidence gates) + `list_improvement_status`. Fleet scope still pending (see 2d).
-- [ ] **2c.** *Agents can't read their own metrics* (G.5) — the metrics store is write-only from the agent's POV; the improver sees it, the agent doesn't.
+- [x] **2c.** *Agents can't read their own metrics* (G.5) — the metrics store is write-only from the agent's POV; the improver sees it, the agent doesn't.
   - Change: a `read_metrics(agent: name?, days: u32?)` tool returning the recent per-task lines (trimmed) + aggregates (avg duration, error rate, worst tools). Lets the agent (or a researcher handoff) do its own regression analysis. Core-only, small.
+  - ✅ DONE: `tools/builtin/improvement/metrics.rs` (`ReadMetricsTool`, registered with the improvement tools) — agent mode (windowed aggregates + up to 10 newest lines, empty-window fallback to 3 outside-window lines) and fleet mode (one `format_labeled` line per agent + skills used in window); `days` default 7, max 30. `MetricsSummary` gained `total_duration_ms` + `avg_duration_secs()` (also feeds the 1a duration deltas). Data model has no per-tool error attribution, so "worst tool" is documented as unavailable. 8 tests. NOTE: profile allowlists must be updated per agent (wuffagent done; other profiles get it only if listed).
 - [ ] **2d.** *Fleet review is missing* — covered by 2b(b); keep as its own line so the cross-agent evidence format gets designed (one JSON summary block, ≤ ~2k tokens).
 - [ ] **2e.** *Config knobs missing* — the audit noted `improvement_metrics_window_days` and an "auto-apply low-risk suggestions" threshold don't exist. Add to `Config` (serde default, no migration pain): `improvement_metrics_window_days: u32 = 7`; `improvement_min_samples: u32 = 3` (effect check refuses to judge on fewer samples — cheap guard against the "1 task, verdict: improved" trap).
 

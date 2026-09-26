@@ -147,6 +147,10 @@ pub struct MetricsSummary {
     pub not_verified: u32,
     pub feedback_up: u32,
     pub feedback_down: u32,
+    /// Total wall-clock duration of the counted runs, in milliseconds
+    /// (2c: lets the `read_metrics` tool and the effect check report
+    /// duration averages/deltas without re-reading the raw lines).
+    pub total_duration_ms: u64,
 }
 
 impl MetricsSummary {
@@ -182,6 +186,16 @@ impl MetricsSummary {
     /// One-line rendering for the improver prompt ("Recent metrics: …").
     pub fn format_line(&self) -> String {
         self.format_labeled("Recent metrics")
+    }
+
+    /// Average run duration in seconds ("0.0s" when there are no runs;
+    /// 2c — the `read_metrics` tool and the effect check).
+    pub fn avg_duration_secs(&self) -> f64 {
+        if self.runs == 0 {
+            0.0
+        } else {
+            self.total_duration_ms as f64 / self.runs as f64 / 1000.0
+        }
     }
 }
 
@@ -480,12 +494,14 @@ impl MetricsLog {
                 MetricsLine::Run {
                     tool_calls,
                     tool_errors,
+                    duration_ms,
                     outcome,
                     ..
                 } => {
                     s.runs += 1;
                     s.tool_calls += tool_calls;
                     s.tool_errors += tool_errors;
+                    s.total_duration_ms += duration_ms;
                     match outcome {
                         RunOutcome::Verified => s.verified += 1,
                         RunOutcome::VerifiedAfterRetry => s.verified_after_retry += 1,

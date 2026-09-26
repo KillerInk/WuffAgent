@@ -41,7 +41,10 @@ pub use web_search::WebSearchTool;
 // NOTE: HandoffTool is NOT registered in `register_builtins` — it is
 // per-execution (own mailbox / agents dir / allowlist) and is injected by
 // `Agent::builder` for agents with `handoff_enabled`, like the per-agent shell.
-pub use improvement::{register_improvement_tools, ListImprovementStatusTool, RunSelfImprovementTool};
+pub use improvement::{
+    register_improvement_tools, ListImprovementStatusTool, ReadMetricsTool,
+    RunSelfImprovementTool,
+};
 pub use handoff::HandoffTool;
 // NOTE: RestartTool is also per-execution (own mailbox) — injected by
 // `Agent::builder` for agents with `restart_enabled`, not registered in
