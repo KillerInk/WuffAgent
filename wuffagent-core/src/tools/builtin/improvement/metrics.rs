@@ -25,8 +25,9 @@ use crate::tools::types::{
     FieldSchema, JsonSchema, Tool, ToolOutput, ToolParams, ToolSchema, ToolResult,
 };
 
-/// Default window when `days` is omitted (matches the planned
-/// `improvement_metrics_window_days` config default; 2e wires the knob).
+/// Fallback window when `days` is omitted for the standalone constructor.
+/// 2e: the registered tool overrides this with config
+/// `improvement_metrics_window_days` (see `with_default_days`).
 const DEFAULT_DAYS: u64 = 7;
 /// Hard ceiling for `days` (guards against an accidental whole-history dump
 /// for chatty agents — the window's raw lines are capped too, but the
@@ -43,16 +44,26 @@ const OUTSIDE_WINDOW_LINES: usize = 3;
 pub struct ReadMetricsTool {
     /// Explicit log root (tests); `None` = `MetricsLog::default()`.
     log: Option<MetricsLog>,
+    /// 2e: window (days) used when `days` is omitted — wired to config
+    /// `improvement_metrics_window_days` at registration; `DEFAULT_DAYS` for
+    /// the standalone constructor.
+    default_days: u64,
 }
 
 impl ReadMetricsTool {
     pub fn new() -> Self {
-        Self { log: None }
+        Self { log: None, default_days: DEFAULT_DAYS }
     }
 
     /// Use an explicit metrics root instead of the default location (tests).
     pub fn with_log(log: MetricsLog) -> Self {
-        Self { log: Some(log) }
+        Self { log: Some(log), default_days: DEFAULT_DAYS }
+    }
+
+    /// 2e: override the default window (config `improvement_metrics_window_days`).
+    pub fn with_default_days(mut self, days: u64) -> Self {
+        self.default_days = days.max(1);
+        self
     }
 
     /// `MetricsLog` for this call. Construction is side-effect free (no
@@ -214,7 +225,8 @@ impl Tool for ReadMetricsTool {
                         FieldSchema {
                             type_name: "integer".to_string(),
                             description: format!(
-                                "Window in days (default {DEFAULT_DAYS}, max {MAX_DAYS})"
+                                "Window in days (default {}, max {MAX_DAYS})",
+                                self.default_days
                             ),
                             nullable: true,
                         },
@@ -226,8 +238,9 @@ impl Tool for ReadMetricsTool {
     }
 
     fn execute(&self, params: ToolParams) -> ToolResult<ToolOutput> {
+        let default_days = self.default_days;
         let days = match params.get::<u64>("days") {
-            None => DEFAULT_DAYS,
+            None => default_days,
             Some(d) if (1..=MAX_DAYS).contains(&d) => d,
             Some(d) => {
                 return Ok(ToolOutput::error(format!(
@@ -385,6 +398,39 @@ mod tests {
         let props = input.properties.as_ref().unwrap();
         assert!(props.contains_key("agent"));
         assert!(props.contains_key("days"));
+    }
+
+    /// 2e: `with_default_days` (wired to config `improvement_metrics_window_days`
+    /// at registration) changes both the omitted-`days` window and the schema.
+    #[test]
+    fn with_default_days_changes_window_and_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        record_run(&log, "coder", 10, 2, 20_000); // now → inside any window
+
+        let overridden = tool_in(dir.path()).with_default_days(2);
+        // Omitted `days` now resolves to the overridden default (2, not 7).
+        let out = text(call(&overridden, Some("coder"), None));
+        assert!(out.contains("window: last 2 day(s)"), "got: {out}");
+        // And the schema advertises the same default.
+        let schema = overridden.parameters_schema();
+        let days_desc = schema
+            .input_type
+            .as_ref()
+            .unwrap()
+            .properties
+            .as_ref()
+            .unwrap()
+            .get("days")
+            .unwrap()
+            .description
+            .clone();
+        assert!(days_desc.contains("default 2"), "got: {days_desc}");
+
+        // The standalone constructor still defaults to DEFAULT_DAYS (7).
+        let std_tool = tool_in(dir.path());
+        let out = text(call(&std_tool, Some("coder"), None));
+        assert!(out.contains("window: last 7 day(s)"), "got: {out}");
     }
 
     /// The `FeedbackKind` import is exercised here so the test module's use

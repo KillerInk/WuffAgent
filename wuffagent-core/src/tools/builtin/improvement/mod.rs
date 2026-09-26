@@ -39,6 +39,8 @@ pub fn register_improvement_tools(
     agents: Arc<AgentManager>,
     events: Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
 ) -> ToolResult<()> {
+    // 2e: read_metrics' default window follows the config knob.
+    let window_days = memory.config().improvement_metrics_window_days.max(1) as u64;
     for (name, desc, tool) in [
         (
             "list_improvement_status",
@@ -53,7 +55,7 @@ pub fn register_improvement_tools(
         (
             "read_metrics",
             "Read the run-metrics store: windowed aggregates + recent lines for an agent, or a fleet overview",
-            Arc::new(ReadMetricsTool::new()) as Arc<dyn Tool>,
+            Arc::new(ReadMetricsTool::new().with_default_days(window_days)) as Arc<dyn Tool>,
         ),
     ] {
         super::register_tool(registry, name, desc, tool)?;

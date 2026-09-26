@@ -176,6 +176,17 @@ pub struct MemoryConfig {
     /// 1 at the use site.
     #[serde(default = "default_improvement_cooldown_tasks")]
     pub improvement_cooldown_tasks: usize,
+    /// 2e: default window (in days) the improvement loop reads run-metrics
+    /// over — the improver prompt's before/after trend, the fleet view, and
+    /// the `read_metrics` tool's default when `days` is omitted.
+    #[serde(default = "default_improvement_metrics_window_days")]
+    pub improvement_metrics_window_days: u32,
+    /// 2e: minimum number of AFTER-change runs before the effect check will
+    /// judge "improved"/"regressed". Fewer than this yields "inconclusive"
+    /// (low sample) — a cheap guard against the "1 task, verdict: improved"
+    /// trap. Clamped to >= 1 at the use site.
+    #[serde(default = "default_improvement_min_samples")]
+    pub improvement_min_samples: u32,
     /// Whether the LLM memory-maintenance pass is enabled (opt-in).
     #[serde(default = "default_memory_maintenance")]
     pub memory_maintenance: bool,
@@ -265,6 +276,12 @@ fn default_improvement_trigger_lessons() -> usize {
 fn default_improvement_cooldown_tasks() -> usize {
     5
 }
+fn default_improvement_metrics_window_days() -> u32 {
+    7
+}
+fn default_improvement_min_samples() -> u32 {
+    3
+}
 fn default_memory_maintenance() -> bool {
     false
 }
@@ -292,6 +309,8 @@ impl Default for MemoryConfig {
             auto_improve: true,
             improvement_trigger_lessons: 1,
             improvement_cooldown_tasks: 5,
+            improvement_metrics_window_days: 7,
+            improvement_min_samples: 3,
             memory_maintenance: false,
             memory_maintenance_threshold: 40,
             memory_maintenance_timeout_secs: 600,

@@ -293,30 +293,43 @@ fn test_effect_verdict_thresholds() {
         s
     }
     let before = sum(5, 100, 30); // 30% error rate
-    assert_eq!(effect_verdict(&before, &sum(0, 0, 0)), "inconclusive (no runs after the change)");
+    // 2e: min_samples (config improvement_min_samples) is the after-run floor.
+    let m = 3u32;
     assert_eq!(
-        effect_verdict(&before, &sum(2, 100, 0)),
+        effect_verdict(&before, &sum(0, 0, 0), m),
+        "inconclusive (no runs after the change)"
+    );
+    assert_eq!(
+        effect_verdict(&before, &sum(2, 100, 0), m),
         "inconclusive (low sample after the change)"
     );
     assert_eq!(
-        effect_verdict(&before, &sum(3, 100, 0)),
+        effect_verdict(&before, &sum(3, 100, 0), m),
         "improved",
         "-30pp is clearly improved"
     );
     assert_eq!(
-        effect_verdict(&before, &sum(3, 100, 30)),
+        effect_verdict(&before, &sum(3, 100, 30), m),
         "neutral",
         "flat error rate"
     );
     assert_eq!(
-        effect_verdict(&before, &sum(3, 100, 40)),
+        effect_verdict(&before, &sum(3, 100, 40), m),
         "regressed",
         "+10pp is clearly regressed"
     );
     // Within ±1pp is neutral (100 calls: 30 vs 31 errors = +1pp → regressed;
     // 30 vs 30 = neutral already covered; 29 errors = -1pp → improved).
-    assert_eq!(effect_verdict(&before, &sum(3, 100, 31)), "regressed");
-    assert_eq!(effect_verdict(&before, &sum(3, 100, 29)), "improved");
+    assert_eq!(effect_verdict(&before, &sum(3, 100, 31), m), "regressed");
+    assert_eq!(effect_verdict(&before, &sum(3, 100, 29), m), "improved");
+    // 2e: raising the knob to 5 makes the same 3 runs a low-sample verdict
+    // (the "1 task, verdict: improved" trap guard, configurable).
+    assert_eq!(
+        effect_verdict(&before, &sum(3, 100, 0), 5),
+        "inconclusive (low sample after the change)"
+    );
+    // min_samples 0 is treated as 1 (a single after-run still judges).
+    assert_eq!(effect_verdict(&before, &sum(1, 100, 0), 0), "improved");
 }
 
 /// 2a: the effect check PERSISTS its deterministic verdict into the

@@ -42,14 +42,18 @@ pub fn no_op_backoff_multiplier(no_op_streak: u32) -> u64 {
 /// ERROR RATE delta (±1 percentage point threshold) over the two equal
 /// windows; too few after-runs (or none at all) is "inconclusive". Duration
 /// and outcomes stay in the prompt text for the LLM's qualitative half.
+///
+/// 2e: `min_samples` (config `improvement_min_samples`) is the after-run
+/// floor before a verdict is issued.
 pub fn effect_verdict(
     before: &crate::agents::metrics::MetricsSummary,
     after: &crate::agents::metrics::MetricsSummary,
+    min_samples: u32,
 ) -> &'static str {
     if after.runs == 0 {
         return "inconclusive (no runs after the change)";
     }
-    if after.runs < 3 {
+    if after.runs < min_samples.max(1) {
         return "inconclusive (low sample after the change)";
     }
     let err_rate = |s: &crate::agents::metrics::MetricsSummary| {
@@ -198,10 +202,11 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
         &after,
     );
 
-    // 4a: low-sample caveat — with fewer than 3 runs after the change the
-    // after-window is too noisy to base a revert decision on; tell the
-    // improver so it does not over-react to 1-2 runs (G4).
-    let sample_note = if after.runs < 3 {
+    // 4a: low-sample caveat — with fewer than `improvement_min_samples` runs
+    // after the change (2e) the after-window is too noisy to base a revert
+    // decision on; tell the improver so it does not over-react to 1-2 runs.
+    let min_samples = manager.config().improvement_min_samples;
+    let sample_note = if after.runs < min_samples.max(1) {
         format!(
             " (only {n} run(s) recorded after the change so far — treat the after-window as a preliminary sample, not solid evidence)",
             n = after.runs
@@ -216,7 +221,7 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
     // 2a: deterministic effect verdict, persisted for the status view and
     // appended to the evidence line (best-effort write; the LLM still gets
     // the raw windows above for its qualitative half).
-    let verdict = effect_verdict(&before, &after);
+    let verdict = effect_verdict(&before, &after, min_samples);
     manager.record_effect_verdict(agent_name, verdict);
 
     let evidence_line = format!(
@@ -313,17 +318,18 @@ pub async fn suggest_improvements(
     };
     // I1: trajectory line (also reused verbatim as evidence).
     let traj = trajectory_line(stats, prompt.chars().count());
-    // M1: this agent's recent run metrics (last 7 days) as outcome evidence —
-    // the trajectory line above covers only THIS run; the metrics cover the
-    // trend (error rate, verification outcomes, user feedback).
+    // M1: this agent's recent run metrics (default window, 2e) as outcome
+    // evidence — the trajectory line above covers only THIS run; the metrics
+    // cover the trend (error rate, verification outcomes, user feedback).
     let metrics_log = crate::agents::metrics::MetricsLog::default();
-    let since7 = chrono::Utc::now() - chrono::Duration::days(7);
+    let window_days = manager.config().improvement_metrics_window_days.max(1) as i64;
+    let since7 = chrono::Utc::now() - chrono::Duration::days(window_days);
     let metrics_line = metrics_log.summary_since(&agent_config.name, Some(since7)).format_line();
-    // 2b: fleet view — every other agent's 7-day summary on one line each, so
-    // the improver can see this agent's results in context of its siblings
+    // 2b: fleet view — every other agent's windowed summary on one line each,
+    // so the improver can see this agent's results in context of its siblings
     // (a bad handoff target, a sibling whose config is clearly working).
-    let fleet_line = fleet_summary_line();
-    // 3b: cross-agent skill usage (read_skill calls, last 7 days) — does
+    let fleet_line = fleet_summary_line(window_days as u64);
+    // 3b: cross-agent skill usage (read_skill calls, window) — does
     // procedural memory actually get used? Feeds the skill_updates signal.
     let skills_used = metrics_log.skill_usage_since(Some(since7));
     let skills_line = if skills_used.is_empty() {
@@ -333,9 +339,11 @@ pub async fn suggest_improvements(
         let more = skills_used.len() - names.len();
         let list = names.join(", ");
         if more > 0 {
-            format!("Skills read in the last 7 days (all agents): {list} (+{more} more)")
+            format!(
+                "Skills read in the last {window_days} day(s) (all agents): {list} (+{more} more)"
+            )
         } else {
-            format!("Skills read in the last 7 days (all agents): {list}")
+            format!("Skills read in the last {window_days} day(s) (all agents): {list}")
         }
     };
     // I5: effect check — the last approved prompt change for this agent and
@@ -532,12 +540,12 @@ pub async fn suggest_improvements(
 }
 
 /// 2b: the cross-agent fleet summary — one short line per agent with at
-/// least one run in the last 7 days (self-inclusive; the per-agent metrics
-/// line above already covers the target in detail). Empty string when no
-/// agent has recent metrics.
-fn fleet_summary_line() -> String {
+/// least one run in the window (2e: `window_days` days; self-inclusive; the
+/// per-agent metrics line above already covers the target in detail). Empty
+/// string when no agent has recent metrics.
+fn fleet_summary_line(window_days: u64) -> String {
     let log = crate::agents::metrics::MetricsLog::default();
-    let since = chrono::Utc::now() - chrono::Duration::days(7);
+    let since = chrono::Utc::now() - chrono::Duration::days(window_days as i64);
     let mut parts = Vec::new();
     for name in log.agent_names() {
         let s = log.summary_since(&name, Some(since));
@@ -552,7 +560,7 @@ fn fleet_summary_line() -> String {
     if parts.is_empty() {
         String::new()
     } else {
-        format!("Fleet metrics (last 7 days): {}", parts.join(" | "))
+        format!("Fleet metrics (last {window_days} day(s)): {}", parts.join(" | "))
     }
 }
 
