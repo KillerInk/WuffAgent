@@ -386,6 +386,11 @@ impl ImprovementsPanel {
                     });
                 }
 
+                // G.1: if anything was acted on this frame, the queue
+                // changed — persist what remains after the removals below.
+                let had_actions =
+                    !to_approve.is_empty() || !to_dismiss.is_empty() || !to_revert.is_empty();
+
                 // F4: execute reverts (file I/O) before approves so both see
                 // the pre-removal list; pending-list removals happen only in
                 // the single pass below, so approve indices stay valid.
@@ -471,6 +476,11 @@ impl ImprovementsPanel {
                     if i < self.pending.len() {
                         self.pending.remove(i);
                     }
+                }
+
+                // G.1: queue shrank (or changed) — persist the remainder.
+                if had_actions {
+                    self.persist();
                 }
             });
     }

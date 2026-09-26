@@ -577,3 +577,90 @@ fn test_apply_improvement_skill_updates() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&skills_root);
 }
+
+// ── G.1: pending queue persistence ───────────────────────────────────────
+
+/// A scratch file path for pending-queue tests (fresh per tag).
+fn pending_file(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "wuffagent-egui-pending-{tag}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pending.json");
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+fn test_suggestion(prompt: &str) -> ImprovementSuggestion {
+    ImprovementSuggestion {
+        agent_name: "coder".to_string(),
+        prompt_change: Some(prompt.to_string()),
+        rationale: "too many shell errors".to_string(),
+        new_agents: vec![],
+        description: None,
+        allowed_tools: None,
+        reasoning_effort: None,
+        shell_config: None,
+        handoff_targets: None,
+        task_timeout_ms: None,
+        skill_updates: vec![],
+        evidence: vec!["metrics: 3 errors".to_string()],
+    }
+}
+
+#[test]
+fn pending_queue_survives_panel_rebuild() {
+    let path = pending_file("roundtrip");
+    let mut panel = ImprovementsPanel::new();
+    panel.store = PendingStore::at(path.clone());
+    panel.handle_improvement_suggested("coder", vec![test_suggestion("proposed prompt")]);
+    assert!(path.exists(), "the batch must be persisted on arrival");
+
+    // A new app (fresh panel) restores the queue and opens the panel.
+    let mut restored = ImprovementsPanel::new();
+    restored.store = PendingStore::at(path.clone());
+    restored.load_pending();
+    assert_eq!(restored.pending.len(), 1);
+    assert_eq!(restored.pending[0].agent_name, "coder");
+    assert_eq!(restored.pending[0].prompt_change.as_deref(), Some("proposed prompt"));
+    assert_eq!(restored.pending[0].rationale, "too many shell errors");
+    assert!(restored.show_panel, "restored queue re-opens the panel");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn user_edits_are_the_persisted_prompt() {
+    let path = pending_file("edit");
+    let mut panel = ImprovementsPanel::new();
+    panel.store = PendingStore::at(path.clone());
+    panel.handle_improvement_suggested("coder", vec![test_suggestion("original")]);
+    // The user edits the proposed prompt in the panel (F1).
+    panel.pending[0].edited_prompt = Some("user's edited version".to_string());
+    panel.persist();
+
+    let mut restored = ImprovementsPanel::new();
+    restored.store = PendingStore::at(path.clone());
+    restored.load_pending();
+    assert_eq!(
+        restored.pending[0].prompt_change.as_deref(),
+        Some("user's edited version"),
+        "the user's edit wins over the LLM's original on reload"
+    );
+    assert_eq!(restored.pending[0].edited_prompt.as_deref(), Some("user's edited version"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn empty_queue_removes_the_file() {
+    let path = pending_file("empty");
+    let mut panel = ImprovementsPanel::new();
+    panel.store = PendingStore::at(path.clone());
+    panel.handle_improvement_suggested("coder", vec![test_suggestion("p")]);
+    assert!(path.exists());
+    // Everything reviewed → the file goes away (no empty doc left behind).
+    panel.pending.clear();
+    panel.persist();
+    assert!(!path.exists());
+    let _ = std::fs::remove_file(&path);
+}

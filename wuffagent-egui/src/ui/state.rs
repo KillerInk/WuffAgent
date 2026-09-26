@@ -142,7 +142,13 @@ impl ChatApp {
                 memory_panel: super::memory_panel::MemoryPanel::new(),
                 usage_panel: super::usage_panel::UsagePanel::new(),
                 mcp_panel: super::mcp_panel::McpPanel::new(),
-                improvements_panel: super::improvements::ImprovementsPanel::new(),
+                improvements_panel: {
+                    // G.1: suggestions pending since the last run come
+                    // back from disk (a missing/corrupt file is a no-op).
+                    let mut panel = super::improvements::ImprovementsPanel::new();
+                    panel.load_pending();
+                    panel
+                },
             },
             relay: groups::EventRelay {
                 pending_tx: Some(Arc::new(Mutex::new(event_tx))),

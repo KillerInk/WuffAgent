@@ -11,6 +11,7 @@
 pub mod context;
 pub mod manager;
 pub mod maintenance;
+pub mod pending_store;
 pub mod search;
 pub mod skills;
 pub mod storage;
@@ -23,6 +24,7 @@ pub use crate::agents::improvement::suggest_improvements;
 pub use crate::types::{ImprovementSuggestion, NewAgentProposal};
 pub use maintenance::{MaintenanceProgress, MaintenanceReport};
 pub use manager::{MemoryAddResult, MemoryManager};
+pub use pending_store::PendingStore;
 pub use skills::{
     build_skills_prompt_block, set_skills_dir_for_testing, Skill, SkillMeta, SkillStore,
 };

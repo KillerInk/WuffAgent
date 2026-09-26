@@ -14,7 +14,8 @@ mod memory;
 
 use eframe::egui;
 use wuffagent_core::agents::config::{AgentManager, ShellConfig};
-use wuffagent_core::types::{ReasoningEffort, SkillUpdate};
+use wuffagent_core::memory::PendingStore;
+use wuffagent_core::types::{ImprovementSuggestion, NewAgentProposal, ReasoningEffort, SkillUpdate};
 
 use super::theme::Theme;
 
@@ -128,6 +129,10 @@ pub struct ImprovementsPanel {
     pub pending: Vec<PendingImprovement>,
     pub show_panel: bool,
     pub message: Option<String>,
+    /// G.1: where the pending queue is persisted (survives an app exit).
+    /// `new()` creates the store but does NOT read from it — call
+    /// [`Self::load_pending`] once at app startup to restore the queue.
+    store: PendingStore,
 }
 
 impl ImprovementsPanel {
@@ -136,6 +141,31 @@ impl ImprovementsPanel {
             pending: Vec::new(),
             show_panel: false,
             message: None,
+            store: PendingStore::new(),
+        }
+    }
+
+    /// G.1: restore the pending queue persisted by a previous run (if any).
+    /// A missing or corrupt file leaves the queue empty. Call once at
+    /// startup, before any `handle_improvement_suggested`.
+    pub fn load_pending(&mut self) {
+        let loaded = self.store.load();
+        self.pending = loaded.iter().map(PendingImprovement::from).collect();
+        if !self.pending.is_empty() {
+            self.show_panel = true;
+        }
+    }
+
+    /// G.1: persist the current pending queue (user's in-panel edits win
+    /// over the LLM's original text, so a reloaded queue shows what the
+    /// user last typed). Call sites: after a new batch arrives and after
+    /// items are removed. A disk failure only logs — the in-memory queue
+    /// keeps working.
+    fn persist(&self) {
+        let items: Vec<ImprovementSuggestion> =
+            self.pending.iter().map(suggestion_from_pending).collect();
+        if let Err(err) = self.store.save(&items) {
+            tracing::warn!(error = %err, "failed to persist pending improvement suggestions");
         }
     }
 
@@ -183,6 +213,40 @@ impl ImprovementsPanel {
             }
         }
         self.show_panel = true;
+        // G.1: the queue changed — persist it immediately (not only on
+        // removal), so a crash/exit between suggestion and review loses
+        // nothing.
+        self.persist();
+    }
+}
+
+/// G.1: inverse of `PendingImprovement::from` — collapse a pending UI item
+/// back into the core suggestion for persistence. The user's in-panel
+/// edits win over the LLM's original text (F1 "user edit wins"), so a
+/// reloaded queue resumes where the user left off.
+fn suggestion_from_pending(p: &PendingImprovement) -> ImprovementSuggestion {
+    ImprovementSuggestion {
+        agent_name: p.agent_name.clone(),
+        prompt_change: p.edited_prompt.clone(),
+        rationale: p.rationale.clone(),
+        new_agents: p
+            .new_agents
+            .iter()
+            .map(|na| NewAgentProposal {
+                name: na.proposal.name.clone(),
+                description: na.proposal.description.clone(),
+                system_prompt: na.edited_system_prompt.clone(),
+                allowed_tools: na.proposal.allowed_tools.clone(),
+            })
+            .collect(),
+        description: p.description.clone(),
+        allowed_tools: p.allowed_tools.clone(),
+        reasoning_effort: p.reasoning_effort,
+        shell_config: p.shell_config.clone(),
+        handoff_targets: p.handoff_targets.clone(),
+        task_timeout_ms: p.task_timeout_ms,
+        skill_updates: p.skill_updates.clone(),
+        evidence: p.evidence.clone(),
     }
 }
 
