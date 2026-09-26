@@ -27,4 +27,6 @@ pub use skills::{
     build_skills_prompt_block, set_skills_dir_for_testing, Skill, SkillMeta, SkillStore,
 };
 pub use storage::{get_memories_path, load_memories, save_memories};
-pub use types::{InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode};
+pub use types::{
+    ImprovementStatus, InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode,
+};

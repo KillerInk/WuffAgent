@@ -7,7 +7,7 @@ use crate::agents::improvement::suggest_improvements;
 use super::search::get_recent_memories;
 use super::search::search_memories;
 use super::storage::{count_active_memories, get_memories_path, load_memories, save_memories};
-use super::types::{MemoryConfig, MemoryEntry, MemoryType};
+use super::types::{ImprovementStatus, MemoryConfig, MemoryEntry, MemoryType};
 use crate::llm::LlmClient;
 
 /// Main orchestrator for the memory system.
@@ -228,6 +228,26 @@ impl MemoryManager {
             .parent()
             .map(|p| p.join("improvement_state.json"))
             .unwrap_or_else(|| PathBuf::from("improvement_state.json"))
+    }
+
+    /// 1c: the improvement-loop state snapshot for the
+    /// `list_improvement_status` tool. Read-only and side-effect free — the
+    /// persisted `last_check` plus the live evidence gate and config.
+    pub fn improvement_status(&self) -> ImprovementStatus {
+        let config = self.config();
+        let memories = self.get_all_memories();
+        ImprovementStatus {
+            last_check: load_improvement_state(&self.improvement_state_path())
+                .last_check
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
+            has_new_evidence: self.has_new_improvement_evidence(),
+            auto_improve: config.auto_improve,
+            improvement_cooldown_tasks: config.improvement_cooldown_tasks,
+            lesson_count: memories
+                .iter()
+                .filter(|e| e.r#type == MemoryType::Lesson)
+                .count(),
+        }
     }
 
     /// Add a new memory entry.

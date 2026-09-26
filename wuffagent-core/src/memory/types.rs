@@ -210,6 +210,26 @@ fn default_injection_max_chars() -> usize {
 fn default_project() -> String {
     "default".to_string()
 }
+/// 1c: snapshot of the auto-improvement loop's state, read by the
+/// `list_improvement_status` tool so an agent can see WHEN the last
+/// self-improvement check ran, whether new evidence has since arrived, and
+/// the cost-control settings that gate it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImprovementStatus {
+    /// When the last improvement check ran (None = never recorded).
+    pub last_check: Option<DateTime<Utc>>,
+    /// Whether new Lesson evidence exists since `last_check` (the gate the
+    /// per-task auto check uses).
+    pub has_new_evidence: bool,
+    /// `MemoryConfig.auto_improve` (master switch).
+    pub auto_improve: bool,
+    /// `MemoryConfig.improvement_cooldown_tasks` (at most one check every N
+    /// completed tasks).
+    pub improvement_cooldown_tasks: usize,
+    /// Total Lesson entries in the store (the evidence pool size).
+    pub lesson_count: usize,
+}
+
 fn default_auto_improve() -> bool {
     true
 }

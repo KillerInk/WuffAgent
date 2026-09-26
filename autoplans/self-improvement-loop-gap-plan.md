@@ -1,6 +1,6 @@
 # Self-improvement loop: gap analysis + implementation plan
 
-**Status:** in progress (2026-09-26, wuffagent). 1a DONE.
+**Status:** in progress (2026-09-26, wuffagent). 1a + 1c DONE (1b folded into 1a).
 **Companion to:** `plans/self-improvement-gaps.md` (2026-07, T-series) and
 `autoplans/finish-self-improvement-loop.md` (2026-08-31 → 2026-09-26, A–D).
 This file is the NEXT iteration: what is still missing from the loop that
@@ -113,10 +113,10 @@ not lost.
 ### Phase 1 — evidence & visibility (~1 day)
 1a. `MetricsLog::summary_since` + `runs_since(agent, since) -> Vec<RunRecord>`
     — ✅ DONE 2026-09-26
-    Implemented as `MetricsLog::summary_between_windows(agent, before, after,
-    window_days) -> Option<MetricsSummary>` (a pair of windows is what the
-    effect check needs; `summary_since` already existed for the 7-day prompt
-    line). Added the metrics comparison to `effect_check_section` (before
+    Implemented as `MetricsLog::summary_between(agent, start: Option<DateTime>,
+    end: Option<DateTime>) -> MetricsSummary` (one bounded window; the effect
+    check calls it twice — before and after the marker; `summary_since` is
+    now a thin wrapper over it). Added the metrics comparison to `effect_check_section` (before
     window = [2w, 1w] before the marker, after = the last `window_days`) +
     run-count evidence line in `collect_evidence`. 3 new tests
     (`test_summary_between_windows` in metrics/tests.rs;
@@ -125,9 +125,21 @@ not lost.
     improvement/tests/effect.rs — the latter serializes on the shared
     `METRICS_DIR_LOCK` via `MetricsDirGuard` because `MetricsLog::default()`
     is process-global). Core 614→617, egui 24, build clean.
-1b. Wire marker timestamp → `build_improvement_prompt`; effect section shows
-    the before/after metrics table (Gap A).
-1c. `list_improvement_status` tool (Gap B half; small, no LLM).
+1b. ✅ DONE (folded into 1a): the marker timestamp was already threaded through
+    to `effect_check_section` in the 1a commit; the before/after metrics lines
+    render in the prompt section and the run counts in the evidence line.
+1c. `list_improvement_status` tool (Gap B half; small, no LLM) — ✅ DONE
+    2026-09-26
+    Implemented modularly: `memory::ImprovementStatus` (types.rs) +
+    `MemoryManager::improvement_status()` (read-only accessor over the
+    persisted last_check, the live evidence gate, and the config) +
+    `tools/builtin/improvement.rs` (`ListImprovementStatusTool`, no params,
+    one small Tool struct) registered in `register_memory_tools`. Output:
+    auto_improve on/off, cooldown setting, last-check timestamp (+~ago),
+    new-evidence yes/no, lesson count. 3 tool tests (fresh-state, after
+    check + new lesson, schema). `wuffagent` profile allowed_tools gained the
+    tool (dogfood). Gate: core 617→620, egui 24, build clean (only the
+    running-exe relink blocked in place, as usual).
 
 Gate: `cargo test -p wuffagent-core` + `-p wuffagent-egui` + workspace
 build; restart (core changed).
