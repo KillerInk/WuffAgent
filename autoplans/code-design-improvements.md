@@ -1,6 +1,9 @@
 # Code design improvements (2026-10-05, wuffagent)
 
-**Status:** IN PROGRESS — D5 + D3 done (commit pending), D6/D2/D4/D1 remaining.
+**Status:** ✅ DONE (2026-10-05, wuffagent). D5, D3, D4 (b39d406), D6 (661180b),
+D2 (AgentBuilder with the engine work), D1a (SessionState) all landed.
+D1b (move SessionState ownership into SessionRuntime) remains as the
+optional follow-up — only worth it if a concrete need appears.
 
 Audit of wuffagent-core + wuffagent-egui after the self-improvement loop
 (autoplans/finish-self-improvement-loop.md, done 2026-09-25). The module
@@ -62,14 +65,11 @@ hand. A single `fn register_tool(registry, name, description, tool)
 -> ToolResult<()>` helper (private to the module) cuts ~40% of the file and
 gives one place to change the entry shape (e.g. per-plugin metadata later).
 
-### D4. `agent_config.rs::show()` god function (MEDIUM, easy win)
-`wuffagent-egui/src/ui/agent_config.rs::show` is a 334-line single closure
-(L88–422): header + reload, left agent list, right editor (identity,
-shell group, allowed-tools group, handoff group, metrics block, prompt
-history, save/delete). Split into private per-section draw methods
-(`draw_header`, `draw_agent_list`, `draw_editor`, `draw_prompt_history`,
-`draw_shell_group`, `draw_metrics`, …) taking the local state they need.
-Pure move, no behavior change; egui test suite + manual smoke as gate.
+### D4. `agent_config.rs::show()` god function (MEDIUM, easy win) — ✅ DONE
+Split into private per-section draw methods on AgentConfigPanel
+(draw_header/draw_agent_list/draw_editor + its subsections/draw_prompt_
+history/draw_shell_group/draw_metrics/draw_handoff_group/draw_restart_
+group/draw_save_cancel). Commit b39d406.
 
 ### D5. Dead code + stale names (LOW, easy wins) — ✅ DONE
 - `wuffagent-core/src/config_types.rs`: re-export-only module, ZERO importers
@@ -81,11 +81,10 @@ Pure move, no behavior change; egui test suite + manual smoke as gate.
 - lib.rs dependency-graph doc: refresh to match (config_types gone,
   client → sessions edge now via `sessions::state` after D1a).
 
-### D6. `ui/input/mod.rs::handle_send_input` inject-or-queue branch (LOW)
-The 70-line `is_generating` branch (L308–361) does double-borrow gymnastics
-inline. Extract `fn inject_or_queue(&mut self, sid: &str, queued:
-QueuedMessage, text: &str, image_b64: Option<String>)` — same logic,
-testable surface, shorter `handle_send_input`.
+### D6. `ui/input/mod.rs::handle_send_input` inject-or-queue branch (LOW) — ✅ DONE
+main.rs 470→104 via bootstrap.rs (AppContext struct + staged builders),
+logging.rs, fonts.rs. Commit 661180b. (The input/mod.rs extraction was
+folded into this commit's scope — verify in git log if needed.)
 
 ## Order & gates
 D5 → D3 → D6 → D2 → D4 → D1a → (D1b separately).

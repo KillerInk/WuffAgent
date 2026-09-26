@@ -121,8 +121,8 @@ impl ChatClient {
         tools: Option<&[crate::tools::ToolDefinition]>,
     ) -> Result<(String, Option<Usage>), Error> {
         let request = build_request(
-            &self.system_prompt,
-            &self.conversation,
+            &self.session.system_prompt(),
+            self.session.conversation(),
             prompt,
             false,
             tools,
@@ -152,8 +152,8 @@ impl ChatClient {
                     self.trim_conversation(self.max_messages);
                     self.trim_to_token_budget(target);
                     let request2 = build_request(
-                        &self.system_prompt,
-                        &self.conversation,
+                        &self.session.system_prompt(),
+                        self.session.conversation(),
                         prompt,
                         false,
                         tools,
@@ -193,7 +193,7 @@ impl ChatClient {
         let (content, usage) = (r.content, r.usage);
 
         // Update conversation history
-        let mut conv = self.conversation.lock().unwrap();
+        let mut conv = self.session.conversation().lock().unwrap();
         conv.push(Message {
             role: "user".to_string(),
             content: prompt.to_string(),
@@ -223,7 +223,7 @@ impl ChatClient {
         // 90% of n_ctx, the full history is kept.
         let n_ctx = self.n_ctx();
         if n_ctx > 0 {
-            if estimate_conversation_tokens(&self.conversation) > self.trim_trigger_chars() {
+            if estimate_conversation_tokens(self.session.conversation()) > self.trim_trigger_chars() {
                 let target_chars = self.trim_target_chars();
                 self.trim_conversation(self.max_messages);
                 self.trim_to_token_budget(target_chars);
@@ -354,7 +354,7 @@ impl ChatClient {
     /// Check for malformed tool calls in the conversation and return warnings.
     /// A tool call is considered malformed if its arguments are not valid JSON.
     pub fn check_tool_call_warnings(&self) -> Vec<(String, String)> {
-        let conv = self.conversation.lock().unwrap();
+        let conv = self.session.conversation().lock().unwrap();
         let mut warnings = Vec::new();
 
         for msg in conv.iter() {

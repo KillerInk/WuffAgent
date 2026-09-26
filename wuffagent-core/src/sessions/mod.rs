@@ -1,8 +1,10 @@
 pub mod model;
 pub mod persist;
 pub mod runtime;
+pub mod state;
 pub use model::{Session, SessionMeta, SessionStatus};
 pub use runtime::{ActiveTool, ChatAreaState, QueuedMessage, SessionRuntime};
+pub use state::SessionState;
 
 use std::fs;
 use std::path::{Path, PathBuf};

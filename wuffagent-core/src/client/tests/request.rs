@@ -9,8 +9,8 @@ fn test_build_request_reasoning_effort() {
     // has no off-level for `reasoning_effort`).
     client.set_reasoning_effort(crate::types::ReasoningEffort::Off);
     let request = build_request(
-        &client.system_prompt,
-        &client.conversation,
+        &client.system_prompt(),
+        client.conversation(),
         "Hello",
         false,
         None,
@@ -32,8 +32,8 @@ fn test_build_request_reasoning_effort() {
     // explicitly enabled.
     client.set_reasoning_effort(crate::types::ReasoningEffort::High);
     let request = build_request(
-        &client.system_prompt,
-        &client.conversation,
+        &client.system_prompt(),
+        client.conversation(),
         "Hello",
         false,
         None,
@@ -83,8 +83,8 @@ fn test_reasoning_wire_all_levels() {
 fn test_build_request_no_system_prompt() {
     let client = ChatClient::new("http://localhost:8080");
     let request = build_request(
-        &client.system_prompt,
-        &client.conversation,
+        &client.system_prompt(),
+        client.conversation(),
         "Hello",
         false,
         None,
@@ -250,11 +250,11 @@ fn test_parse_props_n_ctx_absent_or_invalid() {
 
 #[test]
 fn test_build_request_with_system_prompt() {
-    let mut client = ChatClient::new("http://localhost:8080");
+    let client = ChatClient::new("http://localhost:8080");
     client.set_system_prompt("You are helpful.");
     let request = build_request(
-        &client.system_prompt,
-        &client.conversation,
+        &client.system_prompt(),
+        client.conversation(),
         "Hello",
         false,
         None,
@@ -273,8 +273,8 @@ fn test_build_request_with_system_prompt() {
 fn test_build_request_streaming() {
     let client = ChatClient::new("http://localhost:8080");
     let request = build_request(
-        &client.system_prompt,
-        &client.conversation,
+        &client.system_prompt(),
+        client.conversation(),
         "Hello",
         true,
         None,
@@ -301,8 +301,8 @@ fn test_build_request_with_tools() {
         },
     }];
     let request = build_request(
-        &client.system_prompt,
-        &client.conversation,
+        &client.system_prompt(),
+        client.conversation(),
         "Hello",
         false,
         Some(&tools),
@@ -317,7 +317,7 @@ fn test_build_request_with_tools() {
 fn test_build_request_includes_history() {
     let client = ChatClient::new("http://localhost:8080");
     {
-        let mut conv = client.conversation.lock().unwrap();
+        let mut conv = client.conversation().lock().unwrap();
         conv.push(Message {
             role: "user".into(),
             content: "Hi there".into(),
@@ -338,8 +338,8 @@ fn test_build_request_includes_history() {
         });
     }
     let request = build_request(
-        &client.system_prompt,
-        &client.conversation,
+        &client.system_prompt(),
+        client.conversation(),
         "What's the weather?",
         false,
         None,
@@ -359,7 +359,7 @@ fn test_build_request_includes_history() {
 fn test_build_request_skips_empty_assistant_message() {
     let client = ChatClient::new("http://localhost:8080");
     {
-        let mut conv = client.conversation.lock().unwrap();
+        let mut conv = client.conversation().lock().unwrap();
         conv.push(Message {
             role: "user".into(),
             content: "Hi".into(),
@@ -380,8 +380,8 @@ fn test_build_request_skips_empty_assistant_message() {
         });
     }
     let request = build_request(
-        &client.system_prompt,
-        &client.conversation,
+        &client.system_prompt(),
+        client.conversation(),
         "Follow up",
         false,
         None,
@@ -512,7 +512,7 @@ fn test_prompt_tps_guards() {
 fn test_build_request_return_progress() {
     let client = ChatClient::new("http://localhost:8080");
     let stream_req = build_request(
-        &client.system_prompt,
+        &client.system_prompt(),
         &client.conversation(),
         "Hello",
         true,
@@ -522,7 +522,7 @@ fn test_build_request_return_progress() {
     );
     assert_eq!(stream_req.return_progress, Some(true));
     let non_stream_req = build_request(
-        &client.system_prompt,
+        &client.system_prompt(),
         &client.conversation(),
         "Hello",
         false,

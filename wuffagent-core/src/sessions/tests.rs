@@ -64,7 +64,6 @@ fn test_save_and_reload_with_messages() {
 #[test]
 fn test_save_session_meta_persists_agent_and_reasoning() {
     use crate::sessions::persist::save_session as persist_save_session;
-    use std::collections::VecDeque;
 
     let dir = std::env::temp_dir().join("wuffagent_test_sessions_meta");
     let _ = fs::remove_dir_all(&dir);
@@ -78,7 +77,9 @@ fn test_save_session_meta_persists_agent_and_reasoning() {
         ),
         parent_session_id: None,
     };
-    let conv = std::sync::Arc::new(std::sync::Mutex::new(vec![Message {
+    let state = SessionState::new(Some(session.id.clone()), dir.clone());
+    state.set_session_meta(meta);
+    state.conversation().lock().unwrap().push(Message {
         role: "user".to_string(),
         content: "hi".to_string(),
         timestamp: String::new(),
@@ -86,18 +87,8 @@ fn test_save_session_meta_persists_agent_and_reasoning() {
         tool_call_id: None,
         reasoning_content: None,
         image: None,
-    }]));
-    persist_save_session(
-        Some(&session.id),
-        &dir,
-        &conv,
-        "",
-        &meta,
-        None,
-        &std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
-        &std::sync::Arc::new(std::sync::Mutex::new(false)),
-    )
-    .unwrap();
+    });
+    persist_save_session(&state).unwrap();
 
     let loaded = load_session(&dir, &session.id).unwrap();
     assert_eq!(loaded.selected_agent.as_deref(), Some("coder"));
@@ -142,7 +133,6 @@ fn test_save_session_meta_persists_agent_and_reasoning() {
 #[test]
 fn test_save_session_meta_persists_parent_session_id() {
     use crate::sessions::persist::save_session as persist_save_session;
-    use std::collections::VecDeque;
 
     let dir = std::env::temp_dir().join("wuffagent_test_sessions_parent");
     let _ = fs::remove_dir_all(&dir);
@@ -154,7 +144,9 @@ fn test_save_session_meta_persists_parent_session_id() {
         reasoning_mode: crate::types::ReasoningMode::Auto,
         parent_session_id: Some("parent_id_123".to_string()),
     };
-    let conv = std::sync::Arc::new(std::sync::Mutex::new(vec![Message {
+    let state = SessionState::new(Some(session.id.clone()), dir.clone());
+    state.set_session_meta(meta);
+    state.conversation().lock().unwrap().push(Message {
         role: "user".to_string(),
         content: "hi".to_string(),
         timestamp: String::new(),
@@ -162,18 +154,8 @@ fn test_save_session_meta_persists_parent_session_id() {
         tool_call_id: None,
         reasoning_content: None,
         image: None,
-    }]));
-    persist_save_session(
-        Some(&session.id),
-        &dir,
-        &conv,
-        "",
-        &meta,
-        None,
-        &std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new())),
-        &std::sync::Arc::new(std::sync::Mutex::new(false)),
-    )
-    .unwrap();
+    });
+    persist_save_session(&state).unwrap();
 
     let loaded = load_session(&dir, &session.id).unwrap();
     assert_eq!(loaded.parent_session_id.as_deref(), Some("parent_id_123"));

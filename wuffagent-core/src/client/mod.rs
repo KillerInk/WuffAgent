@@ -7,10 +7,10 @@ pub mod persist;
 pub mod sse;
 pub mod trim_state;
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::sessions::SessionState;
 use crate::types::{Message, Usage};
 
 /// Shared, live connection settings (base URL + API key).
@@ -116,11 +116,15 @@ pub struct ChatClient {
     /// propagates to every client without cloning or per-client `set_url`
     /// pushes. `new()` creates a private instance for standalone clients.
     settings: ConnectionSettings,
-    system_prompt: String,
     /// Reasoning effort level for reasoning models (see `types::ReasoningEffort`
     /// for the wire mapping; Off disables Qwen3 thinking via `enable_thinking`).
     reasoning_effort: crate::types::ReasoningEffort,
-    conversation: Arc<Mutex<Vec<Message>>>,
+    /// The per-session state (conversation buffer + session identity + save
+    /// queue): a cheaply cloneable handle, so a cloned client shares the SAME
+    /// conversation AND session identity (previously only the conversation
+    /// was shared; the identity fields were value-copied and could drift).
+    /// See `sessions::state`.
+    session: SessionState,
     /// Shared so `ChatClient::clone` is a cheap pointer bump instead of
     /// deep-copying the reqwest connection pool + TLS state.
     http_client: Arc<reqwest::Client>,
@@ -133,8 +137,6 @@ pub struct ChatClient {
     /// the connection stays silent for the given duration, so streams of
     /// arbitrary length survive as long as tokens keep flowing.
     stream_http_client: Arc<reqwest::Client>,
-    session_id: Option<String>,
-    session_dir: PathBuf,
     max_messages: usize,
     /// Context window size in tokens (0 = use server default).
     ///
@@ -153,12 +155,6 @@ pub struct ChatClient {
     /// Estimator char count of the last request's prompt, paired with
     /// `usage.prompt_tokens` by [`ChatClient::calibrate_from_usage`].
     last_prompt_chars: Arc<Mutex<usize>>,
-    /// Queue of pending save operations when a save fails.
-    save_queue: Arc<Mutex<VecDeque<()>>>,
-    /// Whether a save failure notification should be shown in the UI.
-    save_failed: Arc<Mutex<bool>>,
-    /// Encryption key for session files (32 bytes for ChaCha20Poly1305).
-    encryption_key: Option<[u8; 32]>,
     /// Channel to send tool execution events to the UI.
     tool_event_tx: Arc<Mutex<Option<mpsc::Sender<crate::types::AppEvent>>>>,
     /// Token-usage recorder: appends one JSONL line per completed LLM call
@@ -172,11 +168,6 @@ pub struct ChatClient {
     /// interior-mutable like the other per-client fields, since the client
     /// handle is cloned and shared.
     agent_name: Arc<Mutex<String>>,
-    /// Per-session UI selections (chosen agent profile + reasoning-effort
-    /// mode) stamped onto the `Session` by `persist::save_session` on every
-    /// save, so both persist with the session file. Set by the UI when the
-    /// user changes the agent/reasoning selection and when a session loads.
-    session_meta: crate::sessions::SessionMeta,
 }
 
 impl ChatClient {
@@ -208,9 +199,8 @@ impl ChatClient {
         let d = std::time::Duration::from_secs(timeout_secs);
         Self {
             settings: ConnectionSettings::new(base_url, None),
-            system_prompt: String::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
-            conversation: Arc::new(Mutex::new(Vec::new())),
+            session: SessionState::default(),
             http_client: Arc::new({
                 // Non-streaming calls: total request timeout is fine
                 // (short round-trips).
@@ -233,21 +223,15 @@ impl ChatClient {
                     .build()
                     .unwrap()
             }),
-            session_id: None,
-            session_dir: PathBuf::new(),
             max_messages: 100,
             n_ctx: Arc::new(std::sync::atomic::AtomicU32::new(4096)),
             chars_per_token_x100: Arc::new(std::sync::atomic::AtomicU32::new(
                 Self::DEFAULT_CHARS_PER_TOKEN_X100,
             )),
             last_prompt_chars: Arc::new(Mutex::new(0)),
-            save_queue: Arc::new(Mutex::new(VecDeque::new())),
-            save_failed: Arc::new(Mutex::new(false)),
-            encryption_key: None,
             tool_event_tx: Arc::new(Mutex::new(None)),
             usage_recorder: Arc::new(crate::usage::recorder::UsageRecorder::default_recorder()),
             agent_name: Arc::new(Mutex::new("chat".to_string())),
-            session_meta: crate::sessions::SessionMeta::default(),
         }
     }
 
@@ -304,7 +288,7 @@ impl ChatClient {
         let Some(usage) = usage else {
             return;
         };
-        let session_id = self.session_id.clone().unwrap_or_default();
+        let session_id = self.session.session_id().unwrap_or_default();
         let agent = self.agent_name.lock().unwrap().clone();
         self.usage_recorder
             .record(&crate::usage::recorder::UsageEntry {
@@ -365,12 +349,13 @@ impl ChatClient {
         self.settings.api_key()
     }
 
-    pub fn set_system_prompt(&mut self, prompt: &str) {
-        self.system_prompt = prompt.to_string();
+    pub fn set_system_prompt(&self, prompt: &str) {
+        self.session.set_system_prompt(prompt);
     }
 
-    pub fn system_prompt(&self) -> &str {
-        &self.system_prompt
+    /// The system prompt (owned clone — it lives in the shared session state).
+    pub fn system_prompt(&self) -> String {
+        self.session.system_prompt()
     }
 
     pub fn set_reasoning_effort(&mut self, effort: crate::types::ReasoningEffort) {
@@ -384,62 +369,66 @@ impl ChatClient {
     /// Set the per-session UI selections persisted with the session file
     /// (chosen agent profile + reasoning-effort mode). Call whenever the UI
     /// changes either selection or a session is loaded.
-    pub fn set_session_meta(&mut self, meta: crate::sessions::SessionMeta) {
-        self.session_meta = meta;
+    pub fn set_session_meta(&self, meta: crate::sessions::SessionMeta) {
+        self.session.set_session_meta(meta);
     }
 
-    pub fn session_meta(&self) -> &crate::sessions::SessionMeta {
-        &self.session_meta
+    /// The per-session UI selections (owned clone — they live in the shared
+    /// session state).
+    pub fn session_meta(&self) -> crate::sessions::SessionMeta {
+        self.session.session_meta()
+    }
+
+    /// The shared per-session state (conversation buffer + session identity +
+    /// save queue). Cloning a client shares the same state.
+    pub fn session(&self) -> &SessionState {
+        &self.session
     }
 
     pub fn conversation(&self) -> &Arc<Mutex<Vec<Message>>> {
-        &self.conversation
+        self.session.conversation()
     }
 
     pub fn clear_history(&self) {
-        conversation::clear_history(&self.conversation);
+        conversation::clear_history(self.session.conversation());
     }
 
     pub fn clear_session_messages(&self) {
-        conversation::clear_session_messages(&self.conversation, &|| {
-            save_session(
-                self.session_id.as_deref(),
-                &self.session_dir,
-                &self.conversation,
-                &self.system_prompt,
-                &self.session_meta,
-                self.encryption_key.as_ref(),
-                &self.save_queue,
-                &self.save_failed,
-            )
+        conversation::clear_session_messages(self.session.conversation(), &|| {
+            save_session(&self.session)
         });
     }
 
-
-    pub fn set_session(&mut self, session_id: Option<String>, session_dir: PathBuf) {
-        self.session_id = session_id;
-        self.session_dir = session_dir;
+    /// Bind this client to a session (id + file directory). Takes `&self` —
+    /// the binding lives in the shared session state.
+    pub fn set_session(&self, session_id: Option<String>, session_dir: PathBuf) {
+        self.session.set_session_id(session_id);
+        self.session.set_session_dir(session_dir);
     }
 
     /// Clear the current session (set session_id to None) and wipe the
     /// in-memory conversation. Call this when a session is deleted so that a
     /// subsequent save cannot resurrect the deleted session file from a
     /// stale in-memory conversation buffer.
-    pub fn clear_session(&mut self) {
-        self.session_id = None;
-        self.conversation.lock().unwrap().clear();
+    pub fn clear_session(&self) {
+        self.session.set_session_id(None);
+        self.session.conversation().lock().unwrap().clear();
     }
 
-    pub fn set_encryption_key(&mut self, key: Option<[u8; 32]>) {
-        self.encryption_key = key;
+    pub fn set_encryption_key(&self, key: Option<[u8; 32]>) {
+        self.session.set_encryption_key(key);
     }
 
-    pub fn session_dir(&self) -> &PathBuf {
-        &self.session_dir
+    /// The session file directory (owned clone — it lives in the shared
+    /// session state).
+    pub fn session_dir(&self) -> PathBuf {
+        self.session.session_dir()
     }
 
-    pub fn session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
+    /// The active session id (owned clone — it lives in the shared session
+    /// state).
+    pub fn session_id(&self) -> Option<String> {
+        self.session.session_id()
     }
 
 }

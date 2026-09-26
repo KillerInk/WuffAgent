@@ -120,7 +120,7 @@ impl ChatClient {
 
 
     pub fn trim_conversation(&self, max_messages: usize) {
-        conversation::trim_conversation(&self.conversation, max_messages);
+        conversation::trim_conversation(self.session.conversation(), max_messages);
     }
 
     /// Trim the client's conversation to the given token budget.
@@ -128,7 +128,7 @@ impl ChatClient {
     pub fn trim_to_token_budget(&self, target_tokens: usize) -> usize {
         let trimming = ContextTrimming::new();
         let config = crate::trimming::TrimConfig::default();
-        trimming.trim_conversation(&self.conversation, target_tokens, &config)
+        trimming.trim_conversation(self.session.conversation(), target_tokens, &config)
     }
 
     /// Trim a standalone message vec to the given token budget.

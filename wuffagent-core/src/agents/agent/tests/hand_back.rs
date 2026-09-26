@@ -9,7 +9,7 @@ use crate::types::{AppEvent, ReasoningMode};
 /// An agent for the given session meta (parent link or not) with a plain
 /// config (`hand_back_enabled` defaults to true) and a NoopLlm.
 fn agent_with_meta(parent: Option<&str>, hand_back_enabled: bool, sid: &str) -> Agent {
-    let mut client = ChatClient::new("http://localhost:1");
+    let client = ChatClient::new("http://localhost:1");
     client.set_session_meta(SessionMeta {
         selected_agent: None,
         reasoning_mode: ReasoningMode::Auto,
@@ -97,7 +97,7 @@ fn test_hand_back_mailbox_consumed_once() {
 /// way the `hand_back` tool would have done it in a tool round).
 #[tokio::test]
 async fn test_execute_hand_back_marker_and_event() {
-    let mut client = ChatClient::new("http://localhost:1");
+    let client = ChatClient::new("http://localhost:1");
     client.set_session_meta(SessionMeta {
         selected_agent: None,
         reasoning_mode: ReasoningMode::Auto,

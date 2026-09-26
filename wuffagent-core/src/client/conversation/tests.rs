@@ -1,14 +1,14 @@
-//! Unit tests for the `session` module (see `super`). The save/load/retry
-//! persistence tests exercise the orchestrators that now live in
-//! `crate::sessions::persist` (Phase 2, E2a) — only the import paths moved;
-//! the test logic is unchanged.
+//! Unit tests for the `conversation` helpers plus the session save/load/retry
+//! orchestrators in `crate::sessions::persist` (Phase 2, E2a). The persist
+//! tests build a [`SessionState`] per test — the argument soup (id, dir,
+//! conversation, prompt, meta, key, queue, flag) now lives in that one
+//! value (D1a).
 
 use super::*;
 use crate::client::{estimate_conversation_tokens, trim_to_token_budget};
 use crate::sessions::persist::{load_session, retry_pending_saves, save_session};
-use crate::sessions::session_exists;
+use crate::sessions::{session_exists, SessionState};
 use crate::trimming::message_char_count;
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -28,16 +28,24 @@ fn make_conversation(messages: Vec<Message>) -> Arc<Mutex<Vec<Message>>> {
     Arc::new(Mutex::new(messages))
 }
 
-fn make_save_queue() -> Arc<Mutex<VecDeque<()>>> {
-    Arc::new(Mutex::new(VecDeque::new()))
-}
-
-fn make_save_failed() -> Arc<Mutex<bool>> {
-    Arc::new(Mutex::new(false))
-}
-
 fn make_encryption_key() -> [u8; 32] {
     [42u8; 32]
+}
+
+/// A `SessionState` bound to `id` in `dir`, pre-filled with `messages` and
+/// optionally encrypted.
+fn make_session_state(
+    dir: &std::path::Path,
+    id: &str,
+    messages: Vec<Message>,
+    key: Option<[u8; 32]>,
+) -> SessionState {
+    let state = SessionState::default();
+    state.set_session_id(Some(id.to_string()));
+    state.set_session_dir(dir.to_path_buf());
+    state.conversation().lock().unwrap().extend(messages);
+    state.set_encryption_key(key);
+    state
 }
 
 /// Save session with encryption, load it back, and verify messages match.
@@ -48,41 +56,25 @@ async fn test_save_session_encrypted_roundtrip() {
     let session_id = "test_encrypted";
     let key = make_encryption_key();
 
-    let conv = make_conversation(vec![
-        make_message("system", "You are helpful"),
-        make_message("user", "Hello"),
-        make_message("assistant", "Hi there!"),
-    ]);
-
-    let save_queue = make_save_queue();
-    let save_failed = make_save_failed();
+    let state = make_session_state(
+        &session_dir,
+        session_id,
+        vec![
+            make_message("system", "You are helpful"),
+            make_message("user", "Hello"),
+            make_message("assistant", "Hi there!"),
+        ],
+        Some(key),
+    );
 
     // Save with encryption
-    save_session(
-        Some(session_id),
-        &session_dir,
-        &conv,
-        &String::new(),
-        &crate::sessions::SessionMeta::default(),
-        Some(&key),
-        &save_queue,
-        &save_failed,
-    )
-    .unwrap();
+    save_session(&state).unwrap();
 
-    // Load back into a fresh conversation
-    let loaded_conv = make_conversation(vec![]);
-    let mut system_prompt = String::new();
-    let loaded = load_session(
-        Some(session_id),
-        &session_dir,
-        &loaded_conv,
-        &mut system_prompt,
-        Some(&key),
-    )
-    .expect("should load encrypted session");
+    // Load back into a fresh state
+    let loaded_state = make_session_state(&session_dir, session_id, vec![], Some(key));
+    let loaded = load_session(&loaded_state).expect("should load encrypted session");
 
-    let messages = loaded_conv.lock().unwrap();
+    let messages = loaded_state.conversation().lock().unwrap();
     // System messages are never stored in the message history; the prompt
     // is recovered into the session's dedicated field on load.
     assert_eq!(messages.len(), 2);
@@ -90,8 +82,8 @@ async fn test_save_session_encrypted_roundtrip() {
     assert_eq!(messages[1].role, "assistant");
     assert_eq!(messages[0].content, "Hello");
     assert_eq!(loaded.name, "Untitled");
-    assert_eq!(system_prompt, "You are helpful");
-    assert!(!*save_failed.lock().unwrap());
+    assert_eq!(loaded_state.system_prompt(), "You are helpful");
+    assert!(!*loaded_state.save_failed().lock().unwrap());
 }
 
 /// Loading a non-existent session should return None.
@@ -99,20 +91,13 @@ async fn test_save_session_encrypted_roundtrip() {
 async fn test_load_session_missing_returns_none() {
     let dir = tempdir().unwrap();
     let session_dir = PathBuf::from(dir.path());
-    let conv = make_conversation(vec![]);
-    let mut system_prompt = String::new();
 
-    let result = load_session(
-        Some("nonexistent"),
-        &session_dir,
-        &conv,
-        &mut system_prompt,
-        None,
-    );
+    let state = make_session_state(&session_dir, "nonexistent", vec![], None);
+    let result = load_session(&state);
 
     assert!(result.is_none());
     // Conversation should be unchanged
-    assert_eq!(conv.lock().unwrap().len(), 0);
+    assert_eq!(state.conversation().lock().unwrap().len(), 0);
 }
 
 /// Saving a session that doesn't exist yet should create it.
@@ -122,20 +107,14 @@ async fn test_save_session_creates_new_if_missing() {
     let session_dir = PathBuf::from(dir.path());
     let session_id = "new_session";
 
-    let conv = make_conversation(vec![make_message("user", "Test message")]);
-    let save_queue = make_save_queue();
-    let save_failed = make_save_failed();
-
-    let result = save_session(
-        Some(session_id),
+    let state = make_session_state(
         &session_dir,
-        &conv,
-        &String::new(),
-        &crate::sessions::SessionMeta::default(),
+        session_id,
+        vec![make_message("user", "Test message")],
         None,
-        &save_queue,
-        &save_failed,
     );
+
+    let result = save_session(&state);
 
     assert!(result.is_ok());
     assert!(
@@ -145,16 +124,8 @@ async fn test_save_session_creates_new_if_missing() {
     );
 
     // Load it back
-    let loaded_conv = make_conversation(vec![]);
-    let mut system_prompt = String::new();
-    let loaded = load_session(
-        Some(session_id),
-        &session_dir,
-        &loaded_conv,
-        &mut system_prompt,
-        None,
-    )
-    .expect("should load newly created session");
+    let loaded_state = make_session_state(&session_dir, session_id, vec![], None);
+    let loaded = load_session(&loaded_state).expect("should load newly created session");
 
     assert_eq!(loaded.messages.len(), 1);
     assert_eq!(loaded.messages[0].content, "Test message");
@@ -167,9 +138,12 @@ async fn test_save_session_enqueues_failure_on_error() {
     let session_dir = PathBuf::from(dir.path());
     let session_id = "test_fail";
 
-    let conv = make_conversation(vec![make_message("user", "Hello")]);
-    let save_queue = make_save_queue();
-    let save_failed = make_save_failed();
+    let state = make_session_state(
+        &session_dir,
+        session_id,
+        vec![make_message("user", "Hello")],
+        None,
+    );
 
     // Create a read-only directory to force save failures
     #[cfg(unix)]
@@ -188,16 +162,7 @@ async fn test_save_session_enqueues_failure_on_error() {
     let corrupt_path = session_dir.join(format!("{}.json", session_id));
     std::fs::write(&corrupt_path, "not valid json!!!").unwrap();
 
-    let result = save_session(
-        Some(session_id),
-        &session_dir,
-        &conv,
-        &String::new(),
-        &crate::sessions::SessionMeta::default(),
-        None,
-        &save_queue,
-        &save_failed,
-    );
+    let result = save_session(&state);
 
     // Should return Err because the file exists but can't be parsed
     assert!(result.is_err());
@@ -210,43 +175,33 @@ async fn test_retry_pending_saves() {
     let session_dir = PathBuf::from(dir.path());
     let session_id = "test_retry";
 
-    let conv = make_conversation(vec![make_message("user", "Retry test")]);
+    let state = make_session_state(
+        &session_dir,
+        session_id,
+        vec![make_message("user", "Retry test")],
+        None,
+    );
 
     // Simulate a prior failure by putting items in the queue
-    let save_queue = make_save_queue();
-    let save_failed = make_save_failed();
     {
-        let mut q = save_queue.lock().unwrap();
+        let mut q = state.save_queue().lock().unwrap();
         q.push_back(());
         q.push_back(());
         drop(q);
-        *save_failed.lock().unwrap() = true;
+        *state.save_failed().lock().unwrap() = true;
     }
 
     let save_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let save_count_clone = save_count.clone();
-    let save_queue_clone = save_queue.clone();
-    let save_failed_clone = save_failed.clone();
-    let conv_clone = conv.clone();
-    let session_dir_clone = session_dir.clone();
-    let save_fn = move || {
+    let save_fn = || {
         save_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        save_session(
-            Some(session_id),
-            &session_dir_clone,
-            &conv_clone,
-            &String::new(),
-            &crate::sessions::SessionMeta::default(),
-            None,
-            &save_queue_clone,
-            &save_failed_clone,
-        )
+        save_session(&state)
     };
 
-    let result = retry_pending_saves(&save_queue, &save_failed, &save_fn);
+    let result = retry_pending_saves(&state, &save_fn);
 
     assert!(result, "retry should succeed");
-    assert!(!*save_failed.lock().unwrap());
+    assert!(!*state.save_failed().lock().unwrap());
     assert_eq!(save_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -387,43 +342,29 @@ async fn test_save_load_roundtrip_preserves_prompt_and_order() {
 
     // The in-memory conversation carries a leading system prompt (as the
     // request list does). It must NOT leak into the stored history.
-    let conv = make_conversation(vec![
-        make_message("system", "You are helpful"),
-        make_message("user", "turn 1 user"),
-        make_message("assistant", "turn 1 assistant"),
-        make_message("user", "turn 2 user"),
-        make_message("assistant", "turn 2 assistant"),
-    ]);
-    let save_queue = make_save_queue();
-    let save_failed = make_save_failed();
-
-    save_session(
-        Some(session_id),
+    let state = make_session_state(
         &session_dir,
-        &conv,
-        &"You are helpful".to_string(),
-        &crate::sessions::SessionMeta::default(),
+        session_id,
+        vec![
+            make_message("system", "You are helpful"),
+            make_message("user", "turn 1 user"),
+            make_message("assistant", "turn 1 assistant"),
+            make_message("user", "turn 2 user"),
+            make_message("assistant", "turn 2 assistant"),
+        ],
         None,
-        &save_queue,
-        &save_failed,
-    )
-    .unwrap();
+    );
+    state.set_system_prompt("You are helpful");
 
-    // Load into a fresh conversation.
-    let loaded_conv = make_conversation(vec![]);
-    let mut system_prompt = String::new();
-    load_session(
-        Some(session_id),
-        &session_dir,
-        &loaded_conv,
-        &mut system_prompt,
-        None,
-    )
-    .expect("should load the session");
+    save_session(&state).unwrap();
 
-    let messages = loaded_conv.lock().unwrap();
+    // Load into a fresh state.
+    let loaded_state = make_session_state(&session_dir, session_id, vec![], None);
+    load_session(&loaded_state).expect("should load the session");
+
+    let messages = loaded_state.conversation().lock().unwrap();
     // System prompt restored into the dedicated field...
-    assert_eq!(system_prompt, "You are helpful");
+    assert_eq!(loaded_state.system_prompt(), "You are helpful");
     // ...and never present as a stored message.
     assert!(
         messages.iter().all(|m| m.role != "system"),
@@ -444,5 +385,5 @@ async fn test_save_load_roundtrip_preserves_prompt_and_order() {
             ("assistant", "turn 2 assistant"),
         ]
     );
-    assert!(!*save_failed.lock().unwrap());
+    assert!(!*loaded_state.save_failed().lock().unwrap());
 }
