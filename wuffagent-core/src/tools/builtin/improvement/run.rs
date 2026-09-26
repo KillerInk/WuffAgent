@@ -9,7 +9,7 @@
 //! suggestions as `AppEvent::ImprovementSuggested` so they land in the
 //! review panel like an automatic check's output.
 
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 use crate::agents::AgentManager;
 use crate::memory::MemoryManager;
@@ -17,32 +17,6 @@ use crate::tools::types::{
     FieldSchema, JsonSchema, Tool, ToolOutput, ToolParams, ToolSchema, ToolResult,
 };
 use crate::types::AppEvent;
-
-/// Cached tokio current-thread runtime for use inside spawn_blocking calls
-/// (same pattern as `web_search`: never build a runtime per call).
-static BLOCKING_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build blocking runtime")
-});
-
-/// Run an async block to completion. Reuses the ambient runtime handle when
-/// available (e.g. inside `spawn_blocking`), otherwise the cached
-/// `BLOCKING_RUNTIME` (e.g. in tests).
-macro_rules! block_on {
-    ($expr:expr) => {{
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle.block_on($expr),
-            Err(_) => BLOCKING_RUNTIME.block_on($expr),
-        }
-    }};
-}
-
-/// Hard ceiling for one on-demand improvement check (the LLM call's own HTTP
-/// timeout usually fires first; this is a backstop so a wedged client cannot
-/// hold the agent's tool loop forever).
-const CHECK_TIMEOUT_SECS: u64 = 180;
 
 /// Tool that triggers one improvement check for a named agent.
 pub struct RunSelfImprovementTool {
@@ -152,44 +126,21 @@ impl Tool for RunSelfImprovementTool {
             }
         };
 
-        let task = focus.unwrap_or_else(|| {
-            format!(
-                "(on-demand self-improvement check for '{agent_name}' — no single task in context)"
-            )
-        });
-        let result =
-            "(no task result; judge the agent from its lesson memories, run metrics and \
-             the effect check below)"
-                .to_string();
-        let stats = crate::agents::RunStats::default();
-
-        let memory = self.memory.clone();
-        let fut = async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(CHECK_TIMEOUT_SECS),
-                memory.suggest_improvements(&agent_config, &task, &result, &stats),
-            )
-            .await
-        };
-        let check = match block_on!(fut) {
-            Err(_) => {
+        // 4b: the blocking check + record bookkeeping lives in core
+        // (`MemoryManager::run_improvement_check`, shared with the UI's
+        // "run check now" button). Only a check that ran to term records;
+        // timeout/failure surface as explicit errors here.
+        let check = match self
+            .memory
+            .run_improvement_check(&agent_config, focus.as_deref())
+        {
+            Ok(c) => c,
+            Err(e) => {
                 return Ok(ToolOutput::error(format!(
-                    "improvement check for '{agent_name}' timed out after {CHECK_TIMEOUT_SECS}s"
+                    "improvement check for '{agent_name}' {e}"
                 )))
             }
-            Ok(Err(e)) => {
-                return Ok(ToolOutput::error(format!(
-                    "improvement check for '{agent_name}' failed: {e}"
-                )))
-            }
-            Ok(Ok(suggestions)) => suggestions,
         };
-
-        // Same bookkeeping as the per-task path (engine.rs): record the
-        // check AFTER the attempt (2a: per-agent) so the evidence gate
-        // re-arms on the next new lesson, the no-op streak tracks empty
-        // results, and list_improvement_status reflects the on-demand check.
-        self.memory.record_agent_improvement_check(&agent_name, !check.is_empty());
 
         if !check.is_empty() {
             if let Some(tx) = &self.events {
@@ -308,6 +259,26 @@ mod tests {
         let (ok, msg) = outcome(call(&tool, "coder", Some("reduce errors")));
         assert!(ok, "got: {msg}");
         assert!(msg.contains("No improvement suggestions for 'coder'"), "got: {msg}");
+    }
+
+    /// 4b: the shared blocking helper returns `Ok(empty)` when no LLM client
+    /// is configured (nothing to improve) AND records the per-agent check —
+    /// so the evidence gate re-arms and the no-op streak tracks the empty
+    /// result. This is the bookkeeping the tool relied on before 4b, now in
+    /// core (shared with the UI's "run check now" button).
+    #[test]
+    fn test_run_improvement_check_no_llm_records_check() {
+        let c = ctx();
+        let agent = c.agents.get_agent("coder").expect("coder profile");
+        let result = c.memory.run_improvement_check(&agent, None);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+        assert!(result.unwrap().is_empty());
+        // The check was recorded (2a): last_check set, runs reset, and the
+        // empty result bumped the no-op streak.
+        let st = c.memory.agent_improvement_state("coder");
+        assert!(st.last_check.is_some(), "check must be recorded per-agent");
+        assert_eq!(st.runs_since_check, 0);
+        assert_eq!(st.no_op_streak, 1);
     }
 
     #[test]

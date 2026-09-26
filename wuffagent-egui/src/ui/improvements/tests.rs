@@ -664,3 +664,32 @@ fn empty_queue_removes_the_file() {
     assert!(!path.exists());
     let _ = std::fs::remove_file(&path);
 }
+
+// ── 4b: "run check now" button state ──────────────────────────────────────
+
+/// 4b: `mark_check_finished` (the `ImprovementCheckFinished` handler) clears
+/// the running state and records a status line that reflects whether the
+/// on-demand check produced suggestions.
+#[test]
+fn test_mark_check_finished_sets_status() {
+    let mut panel = ImprovementsPanel::new();
+    panel.run_check_running = true;
+    panel.run_check_status = String::new();
+
+    panel.mark_check_finished("coder", true);
+    assert!(!panel.run_check_running, "running flag must clear");
+    assert!(panel.run_check_status.contains("coder"), "status: {}", panel.run_check_status);
+    assert!(
+        panel.run_check_status.contains("suggestions added"),
+        "produced=true must say suggestions were added, status: {}",
+        panel.run_check_status
+    );
+
+    panel.mark_check_finished("coder", false);
+    assert!(!panel.run_check_running);
+    assert!(
+        panel.run_check_status.contains("no suggestions"),
+        "produced=false must say no suggestions, status: {}",
+        panel.run_check_status
+    );
+}

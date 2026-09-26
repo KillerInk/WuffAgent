@@ -37,6 +37,9 @@ impl ChatApp {
                 parent_session_id.clone()
             }
             AppEvent::AgentHandBack { from_session_id, .. } => from_session_id.clone(),
+            // 4b: manual "run check now" finished — not session-bound (the
+            // improvements panel is global).
+            AppEvent::ImprovementCheckFinished { .. } => String::new(),
         };
         match event {
             // Stream lifecycle arms: see `stream.rs`.
@@ -124,6 +127,13 @@ impl ChatApp {
             AppEvent::ImprovementSuggested { agent_name, suggestions, session_id: _ } => {
                 tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");
                 self.dialogs.improvements_panel.handle_improvement_suggested(&agent_name, suggestions);
+            }
+            // 4b: a manual "run check now" finished — clear the running flag
+            // and record the outcome (suggestions, when produced, already
+            // arrived via ImprovementSuggested above).
+            AppEvent::ImprovementCheckFinished { agent_name, produced } => {
+                tracing::info!(%agent_name, produced, "On-demand improvement check finished");
+                self.dialogs.improvements_panel.mark_check_finished(&agent_name, produced);
             }
             AppEvent::McpConfigChanged { .. } => {
                 // An MCP management tool rewrote config.json's mcp_servers

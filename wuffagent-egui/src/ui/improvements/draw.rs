@@ -2,10 +2,13 @@
 //! `ImprovementsPanel`, split from `mod.rs`).
 
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 use wuffagent_core::agents::config::AgentManager;
 use wuffagent_core::memory::MemoryManager;
+use wuffagent_core::types::AppEvent;
 
 use super::ImprovementsPanel;
 use crate::ui::agent_history;
@@ -19,8 +22,12 @@ impl ImprovementsPanel {
         agents_dirs: &[PathBuf],
         theme: &Theme,
         memory: &MemoryManager,
+        memory_arc: Arc<MemoryManager>,
+        events: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     ) {
-        if !self.show_panel || self.pending.is_empty() {
+        // 4b: draw the panel even with an empty queue, so the "run check now"
+        // button below stays reachable when there are no pending suggestions.
+        if !self.show_panel {
             return;
         }
         // 3b: proposed skills apply through the shared SkillStore. The default
@@ -49,6 +56,116 @@ impl ImprovementsPanel {
                 let loop_status = memory.improvement_status();
                 let status_text = loop_status_header_line(&loop_status);
                 ui.label(egui::RichText::new(status_text).weak());
+                ui.separator();
+
+                // 4b: "run check now" — an on-demand improvement check that
+                // bypasses the cooldown (the same core path the
+                // `run_self_improvement` tool uses: `run_improvement_check`).
+                // It runs on a background thread (LLM call, up to 180s); the
+                // result comes back over the AppEvent channel (suggestions →
+                // `ImprovementSuggested`, the always-sent done-signal →
+                // `ImprovementCheckFinished`, which clears the running flag).
+                {
+                    let agents: Vec<String> = agent_manager
+                        .list_agents()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|a| a.name)
+                        .collect();
+                    let auto_on = memory.config().auto_improve;
+                    // Re-resolve the selector if it is empty or the agent
+                    // disappeared (fresh agent list each frame).
+                    if self.run_check_agent.is_empty() || !agents.contains(&self.run_check_agent) {
+                        if let Some(first) = agents.first().cloned() {
+                            self.run_check_agent = first;
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Run check for:");
+                        // egui 0.36: ComboBox is a widget struct (no Ui::combo_box).
+                        // Write into a local, then copy back (matches input/mod.rs).
+                        let mut next_agent = self.run_check_agent.clone();
+                        egui::ComboBox::from_id_salt("improvements_run_check_agent")
+                            .width(140.0)
+                            .selected_text(self.run_check_agent.clone())
+                            .show_ui(ui, |ui| {
+                                for name in agents.iter() {
+                                    ui.selectable_value(&mut next_agent, name.clone(), name.as_str());
+                                }
+                                if agents.is_empty() {
+                                    ui.label(egui::RichText::new("No agents found").size(10.0));
+                                }
+                            });
+                        self.run_check_agent = next_agent;
+                        let label = if self.run_check_running {
+                            "Checking…"
+                        } else {
+                            "Run check now"
+                        };
+                        let enabled = auto_on && !self.run_check_running && !agents.is_empty();
+                        let hover = if !auto_on {
+                            "auto_improve is off (memory settings)"
+                        } else if self.run_check_running {
+                            "A check is already in progress"
+                        } else {
+                            "Run an on-demand self-improvement check for this agent now (bypasses the cooldown)"
+                        };
+                        if ui.add_enabled(enabled, egui::Button::new(label)).on_hover_text(hover).clicked()
+                        {
+                            let agent = self.run_check_agent.clone();
+                            match agent_manager.get_agent(&agent) {
+                                Some(cfg) => {
+                                    self.run_check_running = true;
+                                    self.run_check_status = format!("Checking '{agent}'…");
+                                    let memory = memory_arc.clone();
+                                    let events = events.clone();
+                                    std::thread::spawn(move || {
+                                        let result = memory.run_improvement_check(&cfg, None);
+                                        let sender = match &events {
+                                            Some(s) => s,
+                                            None => return,
+                                        };
+                                        let lock = match sender.lock() {
+                                            Ok(l) => l,
+                                            Err(_) => return,
+                                        };
+                                        match result {
+                                            Ok(suggestions) => {
+                                                let produced = !suggestions.is_empty();
+                                                if produced {
+                                                    let _ = lock.send(AppEvent::ImprovementSuggested {
+                                                        agent_name: agent.clone(),
+                                                        suggestions,
+                                                        session_id: String::new(),
+                                                    });
+                                                }
+                                                let _ = lock.send(AppEvent::ImprovementCheckFinished {
+                                                    agent_name: agent,
+                                                    produced,
+                                                });
+                                            }
+                                            // Err: the check already logged the
+                                            // failure; just clear the running
+                                            // state (no suggestions to add).
+                                            Err(_) => {
+                                                let _ = lock.send(AppEvent::ImprovementCheckFinished {
+                                                    agent_name: agent,
+                                                    produced: false,
+                                                });
+                                            }
+                                        }
+                                    });
+                                }
+                                None => {
+                                    self.run_check_status = format!("Agent '{agent}' not found");
+                                }
+                            }
+                        }
+                    });
+                    if !self.run_check_status.is_empty() {
+                        ui.label(egui::RichText::new(self.run_check_status.clone()).weak());
+                    }
+                }
                 ui.separator();
 
                 if let Some(msg) = &self.message {

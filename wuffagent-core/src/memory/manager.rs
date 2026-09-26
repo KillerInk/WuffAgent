@@ -10,6 +10,36 @@ use super::storage::{count_active_memories, get_memories_path, load_memories, sa
 use super::types::{ImprovementStatus, MemoryConfig, MemoryEntry, MemoryType};
 use crate::llm::LlmClient;
 
+/// Cached current-thread tokio runtime for blocking on the on-demand
+/// improvement check from sync callers (a UI-spawned thread, or a tool that
+/// already has no ambient runtime). The LLM call's own HTTP timeout usually
+/// fires first; this is only a backstop.
+static IMPROVEMENT_CHECK_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> =
+    std::sync::LazyLock::new(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build improvement-check runtime")
+    });
+
+/// Run an async future to completion. Reuses the ambient runtime handle when
+/// one is available (e.g. inside `spawn_blocking`), otherwise the cached
+/// [`IMPROVEMENT_CHECK_RUNTIME`] (e.g. on a plain UI-spawned thread, or in
+/// tests). Same pattern the `run_self_improvement` tool used before 4b.
+fn block_on_improvement<F>(fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(fut),
+        Err(_) => IMPROVEMENT_CHECK_RUNTIME.block_on(fut),
+    }
+}
+
+/// Hard ceiling for one on-demand improvement check (backstop against a
+/// wedged LLM client holding the caller's thread).
+const IMPROVEMENT_CHECK_TIMEOUT_SECS: u64 = 180;
+
 /// Main orchestrator for the memory system.
 ///
 /// `config` is interior-mutable so the UI (which holds an `Arc<MemoryManager>`)
@@ -91,6 +121,66 @@ impl MemoryManager {
             None => return Ok(Vec::new()),
         };
         suggest_improvements(self, agent_config, task, result, stats, llm.as_ref()).await
+    }
+
+    /// 4b: run ONE on-demand self-improvement check for `agent_config`,
+    /// bypassing the per-task cooldown/evidence gates (the `AgentEngine`
+    /// per-task path uses the gated `suggest_improvements` directly). This is
+    /// the BLOCKING wrapper for callers outside an async context — the
+    /// `run_self_improvement` tool and the UI's "run check now" button both
+    /// call it, so the timeout / runtime / record bookkeeping lives in one
+    /// place.
+    ///
+    /// Blocks until the LLM call completes or times out
+    /// (`IMPROVEMENT_CHECK_TIMEOUT_SECS`). Returns `Ok(suggestions)` when the
+    /// check ran to term (possibly an empty list = nothing to improve), and
+    /// `Err(message)` on timeout or LLM failure (logged; the message is
+    /// concise so a caller can prefix it with its own context).
+    ///
+    /// The per-agent check is recorded (2a) ONLY when the check ran to term,
+    /// so a timed-out/failed check does not re-arm the evidence gate or bump
+    /// the no-op streak. Callers are expected to check `config().auto_improve`
+    /// first (the tool reports that case explicitly; the UI disables its
+    /// button).
+    pub fn run_improvement_check(
+        &self,
+        agent_config: &crate::agents::config::AgentConfig,
+        focus: Option<&str>,
+    ) -> Result<Vec<crate::types::ImprovementSuggestion>, String> {
+        let fallback_task = format!(
+            "(on-demand self-improvement check for '{}' — no single task in context)",
+            agent_config.name
+        );
+        let task = focus.unwrap_or(&fallback_task);
+        let result =
+            "(no task result; judge the agent from its lesson memories, run metrics and \
+             the effect check below)"
+                .to_string();
+        let stats = crate::agents::RunStats::default();
+        let fut = async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(IMPROVEMENT_CHECK_TIMEOUT_SECS),
+                self.suggest_improvements(agent_config, &task, &result, &stats),
+            )
+            .await
+        };
+        let check = match block_on_improvement(fut) {
+            Ok(Ok(suggestions)) => suggestions,
+            Ok(Err(e)) => {
+                tracing::warn!(agent = %agent_config.name, error = %e, "on-demand improvement check failed");
+                return Err(format!("failed: {e}"));
+            }
+            Err(_) => {
+                tracing::warn!(agent = %agent_config.name, "on-demand improvement check timed out");
+                return Err(format!(
+                    "timed out after {IMPROVEMENT_CHECK_TIMEOUT_SECS}s"
+                ));
+            }
+        };
+        // Only a check that ran to term re-arms the evidence gate / tracks the
+        // no-op streak.
+        self.record_agent_improvement_check(&agent_config.name, !check.is_empty());
+        Ok(check)
     }
 
     /// Search for relevant memories.

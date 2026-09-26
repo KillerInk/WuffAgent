@@ -133,6 +133,11 @@ pub struct ImprovementsPanel {
     /// `new()` creates the store but does NOT read from it — call
     /// [`Self::load_pending`] once at app startup to restore the queue.
     store: PendingStore,
+    /// 4b: "run check now" button state — the selected agent profile, whether
+    /// a check is in flight, and a one-line transient status message.
+    run_check_agent: String,
+    run_check_running: bool,
+    run_check_status: String,
 }
 
 impl ImprovementsPanel {
@@ -142,7 +147,25 @@ impl ImprovementsPanel {
             show_panel: false,
             message: None,
             store: PendingStore::new(),
+            // 4b: the selector UI re-resolves the default each frame if the
+            // agent list is present, so an empty initial value is fine.
+            run_check_agent: String::new(),
+            run_check_running: false,
+            run_check_status: String::new(),
         }
+    }
+
+    /// 4b: a manual "run check now" check finished (see
+    /// `AppEvent::ImprovementCheckFinished`). Clears the running state and
+    /// records the outcome. Suggestions (when `produced`) arrive separately
+    /// via [`Self::handle_improvement_suggested`], which also opens the panel.
+    pub fn mark_check_finished(&mut self, agent_name: &str, produced: bool) {
+        self.run_check_running = false;
+        self.run_check_status = if produced {
+            format!("Checked '{agent_name}' — suggestions added below.")
+        } else {
+            format!("Checked '{agent_name}' — no suggestions.")
+        };
     }
 
     /// G.1: restore the pending queue persisted by a previous run (if any).
@@ -270,7 +293,13 @@ impl crate::ui::state::ChatApp {
         let agents_dirs = self.agents_dirs();
         let agent_manager = self.build_agent_manager();
         let theme = Theme::from_name(&self.core.config.theme);
-        self.dialogs.improvements_panel.draw(ctx, &agent_manager, &agents_dirs, &theme, &self.core.memory_manager);
+        // 4b: the "run check now" button needs a clonable memory handle and
+        // the AppEvent channel to send back the result of the check it spawns.
+        let memory_arc = self.core.memory_manager.clone();
+        let events = self.relay.pending_tx.clone();
+        self.dialogs
+            .improvements_panel
+            .draw(ctx, &agent_manager, &agents_dirs, &theme, &self.core.memory_manager, memory_arc, events);
     }
 }
 

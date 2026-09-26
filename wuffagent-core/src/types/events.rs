@@ -90,6 +90,17 @@ pub enum AppEvent {
         suggestions: Vec<ImprovementSuggestion>,
         session_id: String,
     },
+    /// 4b: a MANUAL "run check now" improvement check (the review-panel
+    /// button) finished. `produced` = whether it yielded at least one
+    /// suggestion; when it did, the suggestions themselves arrive separately
+    /// via `ImprovementSuggested` (the same path as the per-task loop). This
+    /// event is the "done" signal that clears the button's running state and
+    /// reports the outcome (including "no suggestions"). No `session_id`: it
+    /// is not session-bound — the improvements panel is global.
+    ImprovementCheckFinished {
+        agent_name: String,
+        produced: bool,
+    },
     /// The running agent (in `parent_session_id`) called `handoff(...,
     /// sub_session: true)`: the parent turn ended, and the UI must fork a
     /// CLEAN sub-session for `agent` (fresh store: only the target's system
