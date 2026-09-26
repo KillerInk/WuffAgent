@@ -184,6 +184,33 @@ the self-restart loaded the fix, a 7-tool turn recorded
 `tool_calls: 7, tool_errors: 2` (pre-fix, an ~8-tool 46-min turn had
 logged `0/0`).
 
+### D-ter. memory tools split (2026-09-26, commit caa70f6)
+`tools/builtin/memory.rs` (575 lines, 5 tools) → `memory/` module, one
+file per tool (save/update/search/consolidate/delete) following the
+`mcp` split precedent; `mod.rs` keeps the shared `snippet` helper, the
+`pub use` re-exports (registration unchanged) and the tests. Workspace
+green, no warnings.
+
+### Remaining code-design backlog (largest non-test files, exact 2026-09-26 counts)
+Candidates for the same one-concern-per-file treatment (all compile/test
+green today; split when touched):
+- `wuffagent-core/src/agents/manager.rs` (605) — AgentManager lifecycle
+  (discovery/CRUD/snapshots/revert); a `prompt_history` submodule is the
+  natural seam (snapshot/revert/rename logic is self-contained).
+- `wuffagent-core/src/memory/maintenance.rs` (566) — the consolidation
+  LLM pass; could separate scoring/prompt-building from the apply step.
+- `wuffagent-core/src/tools/manager.rs` (494) +
+  `tools/builtin/shell.rs` (561) — acceptable for now (single
+  responsibility each).
+- egui: `ui/agent_config.rs` (673 — one big `AgentConfigDialog` form;
+  the prompt history is already modular in `agent_history.rs`, so the
+  seam is form-state vs rendering), `ui/input/mod.rs` (625),
+  `ui/chat_area/mod.rs` (568 — already partially modular: `bubbles.rs`
+  etc.).
+- `agents/agent/loop.rs` (537) — deliberate core loop, already split
+  into loop/verify/tool_calls/tool_exec/context/stats/outcome; leave as
+  the one documented exception.
+
 ## Priority & gates
 A → B → C → D (A+B are small and independent; C before D so D's
 summarizer can later include skill usage if ever wanted).
