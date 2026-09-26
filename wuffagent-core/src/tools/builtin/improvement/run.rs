@@ -185,10 +185,11 @@ impl Tool for RunSelfImprovementTool {
             Ok(Ok(suggestions)) => suggestions,
         };
 
-        // Same bookkeeping as the per-task path (engine.rs): record the check
-        // after the attempt so the evidence gate re-arms on the next new
-        // lesson, and list_improvement_status reflects the on-demand check.
-        self.memory.record_improvement_check();
+        // Same bookkeeping as the per-task path (engine.rs): record the
+        // check AFTER the attempt (2a: per-agent) so the evidence gate
+        // re-arms on the next new lesson, the no-op streak tracks empty
+        // results, and list_improvement_status reflects the on-demand check.
+        self.memory.record_agent_improvement_check(&agent_name, !check.is_empty());
 
         if !check.is_empty() {
             if let Some(tx) = &self.events {

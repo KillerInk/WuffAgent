@@ -30,5 +30,6 @@ pub use skills::{
 };
 pub use storage::{get_memories_path, load_memories, save_memories};
 pub use types::{
-    ImprovementStatus, InjectionMode, MemoryConfig, MemoryEntry, MemoryType, SearchMode,
+    AgentImprovementState, ImprovementStatus, InjectionMode, MemoryConfig, MemoryEntry,
+    MemoryType, SearchMode,
 };

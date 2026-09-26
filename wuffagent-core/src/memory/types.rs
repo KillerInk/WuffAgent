@@ -210,6 +210,29 @@ fn default_injection_max_chars() -> usize {
 fn default_project() -> String {
     "default".to_string()
 }
+/// 2a: per-agent state of the auto-improvement loop, persisted in
+/// `improvement_state.json` (a sibling of the project memory file) and read
+/// by the `list_improvement_status` tool.
+///
+/// NOTE: the "approved change applied at" marker is NOT here — that lives in
+/// the memory store itself (I5: a Fact entry tagged `improvement-applied` +
+/// `agent:<name>`), which is the canonical reference for the effect check.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AgentImprovementState {
+    /// When the last improvement check ran FOR THIS AGENT (None = never).
+    pub last_check: Option<DateTime<Utc>>,
+    /// Tasks of this agent completed since its last check (the per-agent
+    /// cooldown counter; reset by a check).
+    pub runs_since_check: u64,
+    /// Consecutive checks that produced no suggestions. Drives the backoff:
+    /// the longer the streak, the more tasks required before the next check.
+    pub no_op_streak: u32,
+    /// Last deterministic effect-check verdict ("improved" / "regressed" /
+    /// "neutral" / "inconclusive …"), written by the effect check after each
+    /// improvement check that has an applied-change marker to compare.
+    pub last_effect_verdict: Option<String>,
+}
+
 /// 1c: snapshot of the auto-improvement loop's state, read by the
 /// `list_improvement_status` tool so an agent can see WHEN the last
 /// self-improvement check ran, whether new evidence has since arrived, and
@@ -228,6 +251,9 @@ pub struct ImprovementStatus {
     pub improvement_cooldown_tasks: usize,
     /// Total Lesson entries in the store (the evidence pool size).
     pub lesson_count: usize,
+    /// 2a: per-agent states (empty = no per-agent check recorded yet).
+    #[serde(default)]
+    pub agents: std::collections::BTreeMap<String, AgentImprovementState>,
 }
 
 fn default_auto_improve() -> bool {

@@ -27,6 +27,48 @@ const NEWLINE: char = '\u{a}';
 // crate::agents:: and crate::memory:: paths stay stable.
 pub use crate::types::{ImprovementSuggestion, NewAgentProposal};
 
+/// 2a: the no-op-streak backoff multiplier for the per-agent improvement
+/// cooldown (used by `MemoryManager::agent_improvement_due`): streak 1: x1,
+/// 2: x2, 3: x3, 4+: x4. A check that produces nothing slows the re-check
+/// cadence down (bounded, so the agent is never starved forever); a
+/// productive check resets the streak to 0.
+pub fn no_op_backoff_multiplier(no_op_streak: u32) -> u64 {
+    1 + no_op_streak.saturating_sub(1).min(3) as u64
+}
+
+/// 2a: deterministic effect verdict for the I5 before/after comparison.
+///
+/// Heuristic, intentionally simple and explainable: it looks at the tool
+/// ERROR RATE delta (±1 percentage point threshold) over the two equal
+/// windows; too few after-runs (or none at all) is "inconclusive". Duration
+/// and outcomes stay in the prompt text for the LLM's qualitative half.
+pub fn effect_verdict(
+    before: &crate::agents::metrics::MetricsSummary,
+    after: &crate::agents::metrics::MetricsSummary,
+) -> &'static str {
+    if after.runs == 0 {
+        return "inconclusive (no runs after the change)";
+    }
+    if after.runs < 3 {
+        return "inconclusive (low sample after the change)";
+    }
+    let err_rate = |s: &crate::agents::metrics::MetricsSummary| {
+        if s.tool_calls == 0 {
+            0.0
+        } else {
+            s.tool_errors as f64 / s.tool_calls as f64
+        }
+    };
+    let delta_pp = (err_rate(after) - err_rate(before)) * 100.0;
+    if delta_pp <= -1.0 {
+        "improved"
+    } else if delta_pp >= 1.0 {
+        "regressed"
+    } else {
+        "neutral"
+    }
+}
+
 /// Gather relevant lesson memories for an improvement check.
 ///
 /// Tag first (S3): lessons saved with the `agent:<name>` tag (the convention
@@ -171,8 +213,14 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
     let section = format!(
         "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).\n{before_line}\n{after_line}{sample_note}\nOutcomes recorded for this agent since that change:\n{list}\nIf the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
     );
+    // 2a: deterministic effect verdict, persisted for the status view and
+    // appended to the evidence line (best-effort write; the LLM still gets
+    // the raw windows above for its qualitative half).
+    let verdict = effect_verdict(&before, &after);
+    manager.record_effect_verdict(agent_name, verdict);
+
     let evidence_line = format!(
-        "Effect check: prompt last changed via approved improvement {days} day(s) ago ({date}); runs before vs after: {} vs {}; {} outcome(s) since",
+        "Effect check: prompt last changed via approved improvement {days} day(s) ago ({date}); runs before vs after: {} vs {}; {} outcome(s) since; verdict: {verdict}",
         before.runs, after.runs, outcomes.len()
     );
     Some((section, evidence_line))

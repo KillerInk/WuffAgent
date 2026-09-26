@@ -48,13 +48,6 @@ pub struct AgentEngine {
 /// progress on the oldest entries of the store.
 const MAINTENANCE_TASK_COOLDOWN: usize = 3;
 
-/// I4 (cost control): whether the auto-improvement check is due on the task
-/// completion numbered `completed` (1-based), given the configured cooldown
-/// (one check at most every N completions). `.max(1)` guards a cooldown of 0.
-fn improvement_due(completed: usize, improvement_cooldown_tasks: usize) -> bool {
-    completed % improvement_cooldown_tasks.max(1) == 0
-}
-
 impl AgentEngine {
     /// Create a new AgentEngine.
     pub fn new(
@@ -295,39 +288,51 @@ impl AgentEngine {
             }
         }
 
-        // I4 (cost control): `auto_improve` defaults ON, but the LLM call only
-        // runs on a cooldown boundary AND when new lesson/outcome/feedback
-        // evidence has arrived since the last check — cheap when idle.
+        // 2a (per-agent improvement state): `auto_improve` defaults ON, but
+        // the LLM call only runs when THIS agent's per-task cooldown has
+        // elapsed (with no-op-streak backoff) AND new lesson evidence for
+        // THIS agent has arrived since its last check — a busy agent can no
+        // longer starve an idle one's checks, and an agent with no new
+        // lessons is not re-checked.
         let mconfig = memory.config();
-        if mconfig.auto_improve
-            && improvement_due(completed, mconfig.improvement_cooldown_tasks)
-            && memory.has_new_improvement_evidence()
-        {
-            match crate::memory::suggest_improvements(
-                &memory,
-                agent_config,
-                task,
-                &task_result,
-                &stats,
-                &*self.llm_client,
-            )
-            .await
+        if mconfig.auto_improve {
+            let name = agent_config.name.clone();
+            memory.record_agent_task_completed(&name);
+            if memory.agent_improvement_due(&name, mconfig.improvement_cooldown_tasks)
+                && memory.has_new_agent_improvement_evidence(&name)
             {
-                Ok(suggestions) if !suggestions.is_empty() => {
-                    if let Some(tx) = &self.event_tx {
-                        let _ = tx.lock().unwrap().send(AppEvent::ImprovementSuggested {
-                            agent_name: agent_config.name.clone(),
-                            suggestions,
-                            session_id: self.agent_session_id.clone().unwrap_or_default(),
-                        });
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!("[AGENT] Improvement check failed: {}", e),
+                let produced =
+                    match crate::memory::suggest_improvements(
+                        &memory,
+                        agent_config,
+                        task,
+                        &task_result,
+                        &stats,
+                        &*self.llm_client,
+                    )
+                    .await
+                    {
+                        Ok(suggestions) if !suggestions.is_empty() => {
+                            if let Some(tx) = &self.event_tx {
+                                let _ = tx.lock().unwrap().send(AppEvent::ImprovementSuggested {
+                                    agent_name: name.clone(),
+                                    suggestions,
+                                    session_id: self.agent_session_id.clone().unwrap_or_default(),
+                                });
+                            }
+                            true
+                        }
+                        Ok(_) => false,
+                        Err(e) => {
+                            tracing::warn!("[AGENT] Improvement check failed: {}", e);
+                            false
+                        }
+                    };
+                // Record the check after the attempt (even on Err/empty
+                // result): new evidence since this timestamp re-arms the
+                // next check; an empty result extends the no-op streak.
+                memory.record_agent_improvement_check(&name, produced);
             }
-            // Record the check after the attempt (even on Err/empty result):
-            // new evidence since this timestamp re-arms the next check.
-            memory.record_improvement_check();
         }
     }
 }

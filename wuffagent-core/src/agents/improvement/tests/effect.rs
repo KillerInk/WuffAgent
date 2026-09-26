@@ -280,6 +280,112 @@ async fn test_effect_check_before_after_metrics() {
     );
 }
 
+/// 2a: the deterministic effect verdict — error-rate delta thresholds and the
+/// low-sample guards.
+#[test]
+fn test_effect_verdict_thresholds() {
+    use crate::agents::metrics::MetricsSummary;
+    fn sum(runs: u32, calls: u32, errors: u32) -> MetricsSummary {
+        let mut s = MetricsSummary::default();
+        s.runs = runs;
+        s.tool_calls = calls;
+        s.tool_errors = errors;
+        s
+    }
+    let before = sum(5, 100, 30); // 30% error rate
+    assert_eq!(effect_verdict(&before, &sum(0, 0, 0)), "inconclusive (no runs after the change)");
+    assert_eq!(
+        effect_verdict(&before, &sum(2, 100, 0)),
+        "inconclusive (low sample after the change)"
+    );
+    assert_eq!(
+        effect_verdict(&before, &sum(3, 100, 0)),
+        "improved",
+        "-30pp is clearly improved"
+    );
+    assert_eq!(
+        effect_verdict(&before, &sum(3, 100, 30)),
+        "neutral",
+        "flat error rate"
+    );
+    assert_eq!(
+        effect_verdict(&before, &sum(3, 100, 40)),
+        "regressed",
+        "+10pp is clearly regressed"
+    );
+    // Within ±1pp is neutral (100 calls: 30 vs 31 errors = +1pp → regressed;
+    // 30 vs 30 = neutral already covered; 29 errors = -1pp → improved).
+    assert_eq!(effect_verdict(&before, &sum(3, 100, 31)), "regressed");
+    assert_eq!(effect_verdict(&before, &sum(3, 100, 29)), "improved");
+}
+
+/// 2a: the effect check PERSISTS its deterministic verdict into the
+/// per-agent state (readable via list_improvement_status) and appends it to
+/// the evidence line.
+#[tokio::test]
+async fn test_effect_check_records_verdict() {
+    let _guard = MetricsDirGuard::new();
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("coder")).unwrap();
+    // Marker 3 days ago: BEFORE = [6,3], AFTER = [3,0].
+    writeln!(f, "{}", run_line(5, 10, 3)).unwrap(); // before: 10 calls, 30% errors
+    writeln!(f, "{}", run_line(2, 10, 0)).unwrap(); // after: 3 runs
+    writeln!(f, "{}", run_line(1, 10, 0)).unwrap(); // 30 calls, 0% errors
+    writeln!(f, "{}", run_line(0, 10, 0)).unwrap();
+    drop(f);
+
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+    manager.add(marker_for("coder", 3)).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "Trigger lesson",
+            "agent",
+            &["agent:coder"],
+        ))
+        .unwrap();
+
+    let llm = Arc::new(CaptureLlm {
+        response: r#"[{"agent_name": "coder", "prompt_change": "p", "rationale": "r"}]"#
+            .to_string(),
+        prompts: prompts.clone(),
+    });
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+    let suggestions = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+
+    // The verdict is persisted for the status view.
+    let state = manager.agent_improvement_state("coder");
+    assert_eq!(
+        state.last_effect_verdict.as_deref(),
+        Some("improved"),
+        "state: {state:?}"
+    );
+    // ...and the evidence line names it.
+    assert!(
+        suggestions[0]
+            .evidence
+            .iter()
+            .any(|e| e.starts_with("Effect check:") && e.contains("verdict: improved")),
+        "evidence: {:?})",
+        suggestions[0].evidence
+    );
+}
+
 /// 1a: with no metric lines in either window the effect check shows
 /// "(no data)" instead of omitting the windows (the LLM must be able to tell
 /// "no data" from "good data").

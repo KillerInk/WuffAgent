@@ -170,7 +170,8 @@ impl MemoryManager {
     /// evidence exists if ANY lesson exists at all — the first check then
     /// records the baseline.
     pub fn has_new_improvement_evidence(&self) -> bool {
-        let last_check = load_improvement_state(&self.improvement_state_path())
+        let last_check = self
+            .load_state_doc()
             .last_check
             .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
         let memories = self.get_all_memories();
@@ -183,31 +184,153 @@ impl MemoryManager {
         }
     }
 
-    /// I4 (cost control): record that an improvement check just ran, so the
-    /// evidence gate stays closed until new Lesson entries arrive.
+    /// I4 (cost control): record that an (agent-agnostic) improvement check
+    /// just ran, so the global evidence gate stays closed until new Lesson
+    /// entries arrive. Kept for the global status view and legacy v1
+    /// semantics; the per-task path uses `record_agent_improvement_check`.
     ///
     /// Best-effort: any failure is only logged — the state file must never
     /// be able to break task completion.
     pub fn record_improvement_check(&self) {
+        let mut doc = self.load_state_doc();
+        doc.version = 2;
+        doc.last_check = Some(chrono::Utc::now().timestamp());
+        self.save_state_doc(&doc);
+    }
+
+    // ── 2a: per-agent improvement state ────────────────────────────────────
+
+    /// 2a: this agent's improvement-loop state. The legacy v1 global
+    /// `last_check` acts as a fallback BASELINE (evidence gate) for agents
+    /// that never had a check of their own; `runs_since_check` and friends
+    /// are per-agent only.
+    pub fn agent_improvement_state(&self, agent: &str) -> crate::memory::types::AgentImprovementState {
+        let doc = self.load_state_doc();
+        let rec = doc.agents.get(agent).cloned().unwrap_or_default();
+        crate::memory::types::AgentImprovementState {
+            last_check: rec
+                .last_check
+                .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms))
+                .or_else(|| {
+                    doc.last_check
+                        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                }),
+            runs_since_check: rec.runs_since_check,
+            no_op_streak: rec.no_op_streak,
+            last_effect_verdict: rec.last_effect_verdict,
+        }
+    }
+
+    /// 2a: count one completed task of `agent` toward the per-agent
+    /// cooldown (called by the engine after every task, only while
+    /// `auto_improve` is on).
+    pub fn record_agent_task_completed(&self, agent: &str) {
+        let mut doc = self.load_state_doc();
+        doc.version = 2;
+        doc.agents.entry(agent.to_string()).or_default().runs_since_check += 1;
+        self.save_state_doc(&doc);
+    }
+
+    /// 2a: whether `agent`'s per-task cooldown has elapsed.
+    ///
+    /// Backoff: a no-op streak (consecutive checks that produced no
+    /// suggestions) multiplies the base cooldown — streak 1: x1, 2: x2,
+    /// 3: x3, 4+: x4 — so an agent whose lessons keep arriving but never
+    /// yield a suggestion is re-checked less often; any productive check
+    /// (or an applied one) resets the streak to 0.
+    pub fn agent_improvement_due(&self, agent: &str, base_cooldown_tasks: usize) -> bool {
+        let state = self.agent_improvement_state(agent);
+        let base = base_cooldown_tasks.max(1) as u64;
+        let mult = crate::agents::improvement::no_op_backoff_multiplier(state.no_op_streak);
+        state.runs_since_check >= base * mult
+    }
+
+    /// 2a: record that an improvement check for `agent` just ran.
+    /// `produced` = whether it yielded at least one suggestion (resets the
+    /// no-op streak; an empty result extends it). Either way the per-agent
+    /// cooldown counter restarts and the evidence gate baselines now.
+    pub fn record_agent_improvement_check(&self, agent: &str, produced: bool) {
+        let mut doc = self.load_state_doc();
+        doc.version = 2;
+        let rec = doc.agents.entry(agent.to_string()).or_default();
+        // Milliseconds: lesson timestamps are sub-second (see AgentStateRec).
+        rec.last_check = Some(chrono::Utc::now().timestamp_millis());
+        rec.runs_since_check = 0;
+        rec.no_op_streak = if produced { 0 } else { rec.no_op_streak.saturating_add(1) };
+        self.save_state_doc(&doc);
+    }
+
+    /// 2a: persist the effect check's deterministic verdict for `agent`
+    /// (written by `effect_check_section` after each check that has an
+    /// applied-change marker to compare against).
+    pub fn record_effect_verdict(&self, agent: &str, verdict: &str) {
+        let mut doc = self.load_state_doc();
+        doc.version = 2;
+        doc.agents
+            .entry(agent.to_string())
+            .or_default()
+            .last_effect_verdict = Some(verdict.to_string());
+        self.save_state_doc(&doc);
+    }
+
+    /// 2a: per-agent evidence gate — whether NEW Lesson evidence exists
+    /// since THIS agent's last check. Relevant evidence = lessons tagged
+    /// `agent:<name>` plus agent-less (global) lessons; OTHER agents'
+    /// lessons do not re-arm this agent.
+    pub fn has_new_agent_improvement_evidence(&self, agent: &str) -> bool {
+        let baseline = self.agent_improvement_state(agent).last_check;
+        let agent_tag = format!("agent:{agent}");
+        self.get_all_memories().iter().any(|e| {
+            if e.r#type != MemoryType::Lesson {
+                return false;
+            }
+            let relevant = e
+                .tags
+                .iter()
+                .any(|t| t == &agent_tag)
+                || !e.tags.iter().any(|t| t.starts_with("agent:"));
+            if !relevant {
+                return false;
+            }
+            match baseline {
+                Some(ts) => e.timestamp.map(|t| t > ts).unwrap_or(false),
+                None => true,
+            }
+        })
+    }
+
+    /// Load the improvement-check state document, tolerating a missing or
+    /// corrupt file (both mean "default state"; a corrupt file is left in
+    /// place for inspection — the next record overwrites it).
+    fn load_state_doc(&self) -> ImprovementStateDoc {
         let path = self.improvement_state_path();
-        let now = chrono::Utc::now();
-        let state = ImprovementState {
-            last_check: Some(now.timestamp()),
-        };
+        if !path.exists() {
+            return ImprovementStateDoc::default();
+        }
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_default()
+    }
+
+    /// 2a: atomic best-effort write of the state document (temp + rename,
+    /// mirroring `save_memories`); failures are only logged — the state
+    /// file must never be able to break task completion.
+    fn save_state_doc(&self, doc: &ImprovementStateDoc) {
+        let path = self.improvement_state_path();
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 tracing::debug!("[MEMORY] Could not create state dir {:?}: {}", parent, e);
                 return;
             }
         }
-        let content = match serde_json::to_string(&state) {
+        let content = match serde_json::to_string(doc) {
             Ok(c) => c,
             Err(e) => {
                 tracing::debug!("[MEMORY] Could not serialize improvement state: {}", e);
                 return;
             }
         };
-        // Atomic write (temp + rename), mirroring `save_memories`.
         let temp_path = path.with_extension("json.tmp");
         if let Err(e) =
             std::fs::write(&temp_path, content).and_then(|_| std::fs::rename(&temp_path, &path))
@@ -230,14 +353,18 @@ impl MemoryManager {
             .unwrap_or_else(|| PathBuf::from("improvement_state.json"))
     }
 
-    /// 1c: the improvement-loop state snapshot for the
+    /// 1c/2a: the improvement-loop state snapshot for the
     /// `list_improvement_status` tool. Read-only and side-effect free — the
-    /// persisted `last_check` plus the live evidence gate and config.
+    /// persisted state (global + per-agent) plus the live evidence gate and
+    /// config. Per-agent `last_check` here is the agent's OWN (no legacy
+    /// fallback — the fallback is a baseline detail of the evidence gate,
+    /// not something the status view should present).
     pub fn improvement_status(&self) -> ImprovementStatus {
         let config = self.config();
         let memories = self.get_all_memories();
+        let doc = self.load_state_doc();
         ImprovementStatus {
-            last_check: load_improvement_state(&self.improvement_state_path())
+            last_check: doc
                 .last_check
                 .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
             has_new_evidence: self.has_new_improvement_evidence(),
@@ -247,6 +374,23 @@ impl MemoryManager {
                 .iter()
                 .filter(|e| e.r#type == MemoryType::Lesson)
                 .count(),
+            agents: doc
+                .agents
+                .iter()
+                .map(|(name, rec)| {
+                    (
+                        name.clone(),
+                        crate::memory::types::AgentImprovementState {
+                            last_check: rec
+                                .last_check
+                                .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms)),
+                            runs_since_check: rec.runs_since_check,
+                            no_op_streak: rec.no_op_streak,
+                            last_effect_verdict: rec.last_effect_verdict.clone(),
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -538,26 +682,44 @@ fn clean_stale_entries(entries: &mut Vec<MemoryEntry>) -> usize {
     original_count - entries.len()
 }
 
-/// I4: persisted state of the last auto-improvement check (unix seconds).
-/// Private: only `record_improvement_check` / `has_new_improvement_evidence`
+/// 2a: persisted state of the auto-improvement loop (unix seconds).
+///
+/// v1 (I4) stored a single GLOBAL `last_check`. v2 keeps that field as a
+/// LEGACY fallback baseline (an agent with no per-agent entry of its own
+/// uses it as its evidence baseline) and adds per-agent counters, so a busy
+/// agent can no longer starve an idle one's checks (or vice versa). Both
+/// file shapes parse into this struct (`#[serde(default)]` everywhere), so
+/// upgrading a v1 file is just reading it — the next write re-serializes it
+/// as v2.
+///
+/// Private: only the `record_*` / `agent_improvement_*` manager methods
 /// touch it.
-#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Copy, Debug, PartialEq)]
-struct ImprovementState {
-    /// Unix timestamp (seconds) of the last improvement check, if any.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Debug)]
+struct ImprovementStateDoc {
+    #[serde(default)]
+    version: u32,
+    /// v1 global last-check (unix seconds) — legacy fallback baseline.
     #[serde(default)]
     last_check: Option<i64>,
+    /// 2a: per-agent state, keyed by agent profile name.
+    #[serde(default)]
+    agents: std::collections::BTreeMap<String, AgentStateRec>,
 }
 
-/// Load the improvement-check state, tolerating a missing or corrupt file
-/// (both mean "no check recorded yet").
-fn load_improvement_state(path: &std::path::Path) -> ImprovementState {
-    if !path.exists() {
-        return ImprovementState::default();
-    }
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+/// On-disk per-agent record. `last_check` is unix MILLISECONDS (the lesson
+/// timestamps carry sub-second precision — a seconds-precision baseline
+/// would mark same-second lessons as "newer" than the check). Converted to
+/// the public `AgentImprovementState` at the API boundary.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Debug)]
+struct AgentStateRec {
+    #[serde(default)]
+    last_check: Option<i64>,
+    #[serde(default)]
+    runs_since_check: u64,
+    #[serde(default)]
+    no_op_streak: u32,
+    #[serde(default)]
+    last_effect_verdict: Option<String>,
 }
 
 #[cfg(test)]
