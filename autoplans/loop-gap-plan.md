@@ -1,5 +1,5 @@
 # Plan: close the self-improvement loop's remaining gaps (round 2)
-**Status:** IN PROGRESS (wuffagent) — done: 1a/1b/1c, 2a, 2b, 2c, 2e, 3a, 4a, 4b, 4c; half: 3b (retire/merge triggers missing). Next: 3b triggers, 3c (skill history), 2d (fleet review).
+**Status:** IN PROGRESS (wuffagent) — done: 1a/1b/1c, 2a, 2b, 2c, 2e, 3a, 3b, 4a, 4b, 4c. Next: 3c (skill history), 2d (fleet review).
 **Trigger:** round 2 audit (this file) — round 1 (A-I, T series) fully landed; these are the gaps that audit found in the *new* code.
 **Why this matters:** the loop proposes but rarely proves. Suggestions leak on exit, effects are invisible, the improver is blind to skills and tokens — so it improves prompts but can't maintain what it learned or judge what worked.
 
@@ -35,9 +35,9 @@
 - [x] **3a.** *Skill usage isn't measured* — the `skills` tool tracks nothing; we can't tell which skills help vs. rot.
   - Change: `skill_use` metrics lines (agent, skill_name, ts) written by `read_skill`/`save_skill`/`delete_skill` handlers; aggregate into the improver evidence ("skill X read 12 times, last 2 days; skill Y never read since creation").
   - ✅ DONE (commit 4663046 "3a usage metrics"): skill usage lines + `skills_line` usage summary in the improver prompt.
-- [~] **3b.** *No skill maintenance* — no "retire unused skill" / "merge two skills" suggestion type.
+- [x] **3b.** *No skill maintenance* — no "retire unused skill" / "merge two skills" suggestion type.
   - Change: new suggestion kind `skill_updates: Vec<SkillUpdate>` in `ImprovementSuggestion` (action: update/delete/create, name, body) — the panel gets a Skills section (reuse the F1 edit-buffer pattern; applying = `SkillStore` save/delete). Trigger: 3a's usage metrics + lesson patterns ("agent re-derived procedure X that exists as skill Y" → suggest reading the skill).
-  - ~ HALF DONE (4663046 "3b skill_updates suggestions"): `skill_updates` kind exists, panel Skills section with edit buffer + apply, memory recording on approve. Missing: retire/merge triggers from usage metrics.
+  - ✅ DONE (4663046 + this commit): the `skill_updates` kind (action new/update/delete), the panel Skills section (edit buffer + apply via `apply_improvement_detailed` — `SkillStore::save` for new/update, `SkillStore::delete` for delete, independent of the agent profile file), memory recording on approve, and the RETIRE/MERGE trigger: pure helper `skill_retire_line` lists skills that exist but were never read in the metrics window (from 3a's `skills.jsonl`), spliced into the improver prompt right after the "skills read" line, with an explicit maintenance instruction (propose `delete` for no-value rot, `update`+`delete` for overlap). Both lines are also pushed to `evidence`. Tests: 4 core (pure helper x3 + e2e prompt) + 1 egui (delete/retire apply, case-insensitive, mixed batch).
 - [ ] **3c.** *No skill version history* — overwriting a skill loses the old version; a bad auto-suggested rewrite can't be reverted.
   - Change: `SkillStore` writes `<name>/v<N>.md` + a pointer file (or a `history/` dir mirroring `agent_history`), and the panel's Revert button works for skills too. Reuse the `agent_history` module's patterns directly.
 

@@ -346,6 +346,25 @@ pub async fn suggest_improvements(
             format!("Skills read in the last {window_days} day(s) (all agents): {list}")
         }
     };
+    // 3b: the RETIRE signal — skills that exist in the store but were never
+    // read in the window. `skills_line` only lists skills that WERE read, so
+    // without this the improver can propose new/updated skills but never
+    // prunes the ones that rotted. Computed via a pure helper (testable
+    // without touching the default skills dir).
+    let retire_line = skill_retire_line(
+        &crate::memory::skills::SkillStore::default().list(),
+        &skills_used,
+        window_days as u64,
+    );
+    // 3b: splice the retire signal right after the "skills read" line — both
+    // are the skill-maintenance evidence for `skill_updates` suggestions.
+    let skills_and_retire = if retire_line.is_empty() {
+        skills_line.clone()
+    } else if skills_line.is_empty() {
+        retire_line.clone()
+    } else {
+        format!("{skills_line}\n{retire_line}")
+    };
     // I5: effect check — the last approved prompt change for this agent and
     // the outcomes recorded since it (None -> no section, prompt unchanged).
     let effect = effect_check_section(manager, &agent_config.name);
@@ -385,6 +404,7 @@ pub async fn suggest_improvements(
          - Do the tool-call/error/verification numbers suggest a capability or\
          configuration problem (too many retries, repeated tool errors)?\n\
          - Is there a capability gap that would require a new specialized agent?\n\
+          - Skill maintenance: if a skill on the \"NEVER read\" line above has no clear ongoing value, propose retiring it (skill_updates with action \"delete\"). If two existing skills overlap heavily, merge them (one \"update\" that absorbs the other's steps, plus a \"delete\" for the redundant one).\n\
          \n\
          You may change the system prompt AND/OR any of these profile fields \
          (omit a field entirely when it needs no change):\n\
@@ -395,7 +415,7 @@ pub async fn suggest_improvements(
          - shell_config ({{\"shell_enabled\": bool, \"allowed_commands\": [..], \"shell_timeout_ms\": number}}, or null)\n\
          - handoff_targets (array of agent names, or null)\n\
          - task_timeout_ms (number, or null)\n\
-         - skill_updates (array of skill objects, or null)\n\
+         - skill_updates (array of skill objects with action \"new\" | \"update\" | \"delete\", or null)\n\
          \n\
          Return a JSON array of suggestions (empty [] if nothing to improve):\n\
          [\n\
@@ -413,7 +433,7 @@ pub async fn suggest_improvements(
          {{\"name\": \"agent_name\", \"description\": \"...\", \"system_prompt\": \"...\", \"allowed_tools\": [\"tool1\", \"tool2\"]}}\n\
          ],\n\
          \"skill_updates\": [\n\
-             {{\"action\": \"new|update\", \"name\": \"skill-slug\", \"description\": \"one line\", \"when_to_use\": \"when this skill applies\", \"body\": \"markdown steps\"}}\n\
+             {{\"action\": \"new|update|delete\", \"name\": \"skill-slug\", \"description\": \"one line\", \"when_to_use\": \"when this skill applies\", \"body\": \"markdown steps\"}}\n\
              ]\n\
            }}\n\
          ]\n\
@@ -431,7 +451,7 @@ pub async fn suggest_improvements(
         traj,
         metrics_line,
         fleet_line,
-        skills_line,
+        skills_and_retire,
         rejected_text,
         memories_text,
         agent_config.name,
@@ -519,6 +539,11 @@ pub async fn suggest_improvements(
     if !skills_line.is_empty() {
         evidence.push(skills_line);
     }
+    // 3b: the retire signal is evidence as well (it is what a
+    // delete/merge skill_updates suggestion would be based on).
+    if !retire_line.is_empty() {
+        evidence.push(retire_line);
+    }
     for s in &mut suggestions {
         s.evidence = evidence.clone();
     }
@@ -562,6 +587,40 @@ fn fleet_summary_line(window_days: u64) -> String {
     } else {
         format!("Fleet metrics (last {window_days} day(s)): {}", parts.join(" | "))
     }
+}
+
+/// 3b: the skill-RETIRE signal — one line listing the skills that EXIST in
+/// the store but were never read in the usage window, so the improver can
+/// propose `skill_updates` with `action: "delete"` for the ones with no
+/// clear ongoing value. Pure (takes the store's listing + the used names),
+/// so tests need no filesystem.
+///
+/// Complementary to the "skills read" line: that one lists skills with
+/// recent usage, this one lists the rest. Empty string when every existing
+/// skill was read in the window (or no skills exist at all).
+fn skill_retire_line(all_skills: &[crate::memory::skills::SkillMeta], used: &[String], window_days: u64) -> String {
+    let unused: Vec<&String> = all_skills
+        .iter()
+        .map(|m| &m.name)
+        .filter(|n| !used.iter().any(|u| u.as_str() == n.as_str()))
+        .collect();
+    if unused.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = unused.iter().take(10).map(|s| s.to_string()).collect();
+    let more = unused.len().saturating_sub(names.len());
+    let list = names.join(", ");
+    let tail = if more > 0 {
+        format!(" (+{more} more)")
+    } else {
+        String::new()
+    };
+    format!(
+        "Skills that exist but were NEVER read in the last {window_days} day(s): {list}{tail} — \
+         propose retiring (skill_updates action \"delete\") the ones with no clear ongoing value; \
+         if two existing skills overlap heavily, merge them (one \"update\" that absorbs the other's \
+         steps + a \"delete\" for the redundant one)."
+    )
 }
 
 /// I3: keep evidence strings short (they are displayed in the review panel).

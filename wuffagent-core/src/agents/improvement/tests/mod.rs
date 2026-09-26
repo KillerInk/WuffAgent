@@ -4,6 +4,10 @@
 //! - suggest.rs: suggest_improvements prompt, trajectory, wider fields (I1-I3)
 //! - cost.rs: evidence gate + state persistence (I4)
 //! - effect.rs: effect check with approved-change markers (I5)
+//! - skills.rs: skill retire-signal line (3b)
+//!
+//! NOTE: skills.rs's e2e test flips the process-global skills-dir override
+//! (serialized on its own lock, matching memory/skills/tests.rs).
 
 use super::*;
 use crate::memory::{MemoryConfig, MemoryEntry, MemoryType};
@@ -14,6 +18,7 @@ mod collect;
 mod cost;
 mod effect;
 mod serialization;
+mod skills;
 mod suggest;
 
 fn fresh_manager() -> (MemoryManager, tempfile::TempDir) {

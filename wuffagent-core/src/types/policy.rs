@@ -104,13 +104,17 @@ pub struct NewAgentProposal {
     pub allowed_tools: Vec<String>,
 }
 
-/// A proposed new or updated skill (procedural memory), suggested by the
-/// improver. `name` is a slug (re-validated at save time by `SkillStore`);
-/// saving over an existing name is the versioning mechanism, so `action`
-/// ("new"/"update") is informational — both are applied with a save.
+/// A proposed new, updated, or retired skill (procedural memory), suggested
+/// by the improver. `name` is a slug (re-validated at save time by
+/// `SkillStore`); saving over an existing name is the versioning mechanism,
+/// so `action` ("new"/"update") is informational for those — both are
+/// applied with a save. `action: "delete"` retires the skill (applied with
+/// `SkillStore::delete`); the review panel surfaces the distinction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SkillUpdate {
-    /// "new" or "update" (informational; both save/overwrite).
+    /// "new" or "update" (both save/overwrite via `SkillStore::save`) or
+    /// "delete" (retire: applied via `SkillStore::delete`; the metadata and
+    /// body fields may be empty for a delete).
     #[serde(default)]
     pub action: String,
     pub name: String,

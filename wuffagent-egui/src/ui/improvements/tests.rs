@@ -578,6 +578,58 @@ fn test_apply_improvement_skill_updates() {
     let _ = std::fs::remove_dir_all(&skills_root);
 }
 
+/// 3b: `action: "delete"` retires the skill file (an empty body is fine,
+/// which `save` would reject); deleting a missing skill is a noted no-op;
+/// the action is case-insensitive; mixed batches (delete + update) work.
+#[test]
+fn test_apply_improvement_skill_delete() {
+    let dir = temp_agents_dir("skill-del");
+    let manager = AgentManager::new(dir.clone());
+    manager.add_agent(&existing_agent("coder")).unwrap();
+    let skills_root = temp_skill_dir("skills-del-store");
+    let store = SkillStore::new(skills_root.clone());
+    store.save("stale-skill", "old", "rare", "1. old steps").unwrap();
+    store.save("keep-skill", "good", "often", "1. old steps").unwrap();
+
+    let mut imp = pending("coder", None);
+    imp.skill_updates = vec![
+        SkillUpdate {
+            name: "stale-skill".to_string(),
+            action: "delete".to_string(),
+            description: String::new(),
+            when_to_use: String::new(),
+            body: String::new(),
+        },
+        SkillUpdate {
+            name: "ghost-skill".to_string(),
+            action: "DELETE".to_string(), // case-insensitive; skill is missing
+            description: String::new(),
+            when_to_use: String::new(),
+            body: String::new(),
+        },
+        SkillUpdate {
+            name: "keep-skill".to_string(),
+            action: "update".to_string(),
+            description: "good".to_string(),
+            when_to_use: "often".to_string(),
+            body: "1. new steps".to_string(),
+        },
+    ];
+
+    let (msg, prompt_applied) = apply_improvement_detailed(&[dir.clone()], &manager, &store, &imp);
+    assert!(!prompt_applied, "no prompt proposed, msg: {msg}");
+    assert!(msg.contains("retired skill 'stale-skill'"), "msg: {msg}");
+    assert!(msg.contains("already gone"), "msg: {msg}");
+    assert!(msg.contains("saved skill 'keep-skill'"), "msg: {msg}");
+
+    assert!(store.read("stale-skill").is_none(), "delete removed the file");
+    let kept = store.read("keep-skill").expect("keep-skill still there");
+    assert_eq!(kept.body, "1. new steps");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&skills_root);
+}
+
 // ── G.1: pending queue persistence ───────────────────────────────────────
 
 /// A scratch file path for pending-queue tests (fresh per tag).

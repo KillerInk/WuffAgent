@@ -349,7 +349,11 @@ impl ImprovementsPanel {
                                     .strong(),
                                 );
                                 for sk in &imp.skill_updates {
-                                    let verb = if sk.action == "update" {
+                                    let action = sk.action.trim().to_ascii_lowercase();
+                                    let is_delete = action == "delete";
+                                    let verb = if is_delete {
+                                        "retire"
+                                    } else if action == "update" {
                                         "update"
                                     } else {
                                         "new"
@@ -359,6 +363,17 @@ impl ImprovementsPanel {
                                         egui::RichText::new(format!("{} ({})", sk.name, verb))
                                             .strong(),
                                     );
+                                    if is_delete {
+                                        // 3b: a retire carries no (or stale)
+                                        // metadata — just state what it does.
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Deletes the skill file if approved (usage: never read in the window).",
+                                            )
+                                            .weak(),
+                                        );
+                                        continue;
+                                    }
                                     if !sk.description.is_empty() {
                                         ui.label(
                                             egui::RichText::new(sk.description.clone()).weak(),

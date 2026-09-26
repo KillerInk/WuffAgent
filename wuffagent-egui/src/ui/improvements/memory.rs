@@ -198,9 +198,22 @@ pub fn apply_improvement_detailed(
     // file: skills are global, so a missing profile does not block them.
     if imp.apply_skills {
         for sk in &imp.skill_updates {
-            match skill_store.save(&sk.name, &sk.description, &sk.when_to_use, &sk.body) {
-                Ok(meta) => parts.push(format!("saved skill '{}' ({})", meta.name, sk.action)),
-                Err(e) => errors.push(format!("skipped skill '{}': {}", sk.name, e)),
+            // 3b: "delete" retires the skill (the usage-metrics trigger);
+            // "new"/"update" both save (a delete may carry an empty body,
+            // which `save` would reject).
+            match sk.action.trim().to_ascii_lowercase().as_str() {
+                "delete" => match skill_store.delete(&sk.name) {
+                    Ok(true) => parts.push(format!("retired skill '{}'", sk.name)),
+                    Ok(false) => parts.push(format!(
+                        "skill '{}' already gone (retire was a no-op)",
+                        sk.name
+                    )),
+                    Err(e) => errors.push(format!("failed to retire skill '{}': {}", sk.name, e)),
+                },
+                _ => match skill_store.save(&sk.name, &sk.description, &sk.when_to_use, &sk.body) {
+                    Ok(meta) => parts.push(format!("saved skill '{}' ({})", meta.name, sk.action)),
+                    Err(e) => errors.push(format!("skipped skill '{}': {}", sk.name, e)),
+                },
             }
         }
     }
