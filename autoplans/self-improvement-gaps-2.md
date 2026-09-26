@@ -15,6 +15,27 @@ evidence, cooldown, effect check).
 
 This round audits what is **missing** in the self-improvement loop itself.
 
+## Status log (wuffagent)
+
+- **1a–1c, 2a–2c, 3a, 3b, 3c, 4a–4c: done** (git log `4312d98`…`46956c0` and earlier;
+  see each commit). 3c note: history lives in `<skills_dir>/history/` (ts+seq names,
+  keep-20, mirrors the agent pattern) with `revert_skill`; the panel got a per-skill
+  Revert button (2-click armed).
+- **2d: done 2026-07-11** (commit `46956c0`). Implemented as `scope: "fleet"` on the
+  `run_self_improvement` tool (roster = name+description of every known profile,
+  built by the caller) instead of a separate `agent: "all"` loop: ONE combined LLM
+  call with a cross-agent prompt (shared failure patterns → skills / new shared
+  agents, skill maintenance), evidence = `fleet_evidence_json` (per-agent metrics in
+  the configured window + each agent's newest tagged lessons + fleet skill usage
+  read/never-read, single JSON block), cost-gated (no signal → no call), state
+  recorded under the pseudo-agent `"fleet"` (visible in `list_improvement_status` +
+  the panel header). The panel's run-check selector gained a `fleet` entry.
+- **2e: half done.** `improvement_metrics_window_days` (default 7) exists and is used
+  by improver + `read_metrics`. `improvement_min_interval_hours` (wall-clock lower
+  bound on top of the task cooldown) is NOT implemented.
+- **Remaining:** 2e remainder (min-interval knob), stretch F (eval harness), stretch I
+  (richer feedback). 3b's "trash dir" was superseded by 3c's history snapshots.
+
 ## What exists (verified in code, 2026-09-26)
 
 - `agents/engine.rs` (336): single merged pipeline
