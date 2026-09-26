@@ -192,6 +192,146 @@ async fn test_effect_check_marker_without_outcomes_shows_none_yet() {
     assert!(prompt.contains("(none yet)"), "prompt: {}", prompt);
 }
 
+/// One JSON metrics `run` line backdated `days_ago` days (written directly —
+/// `MetricsLine`'s variant fields are not constructible outside the metrics
+/// module).
+fn run_line(days_ago: i64, calls: u32, errors: u32) -> String {
+    serde_json::json!({
+        "kind": "run",
+        "ts": (chrono::Utc::now() - chrono::Duration::days(days_ago)).to_rfc3339(),
+        "tool_calls": calls,
+        "tool_errors": errors,
+        "verification_attempts": 1,
+        "duration_ms": 1_000,
+        "outcome": "gave_up",
+    })
+    .to_string()
+}
+
+/// 1a: the effect check shows before/after per-agent METRICS windows (not
+/// just the lesson list), and the evidence line carries the run counts.
+#[tokio::test]
+async fn test_effect_check_before_after_metrics() {
+    let _guard = MetricsDirGuard::new();
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("coder")).unwrap();
+    // Marker is 3 days ago → BEFORE window = [6, 3] days ago, AFTER = [3, 0].
+    writeln!(f, "{}", run_line(4, 5, 1)).unwrap();
+    writeln!(f, "{}", run_line(5, 5, 1)).unwrap(); // before: 2 runs, 10 calls, 2 errors → 20.0%
+    writeln!(f, "{}", run_line(1, 4, 1)).unwrap(); // after: 1 run, 4 calls, 1 error → 25.0%
+    drop(f);
+
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+    manager.add(marker_for("coder", 3)).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "Trigger lesson",
+            "agent",
+            &["agent:coder"],
+        ))
+        .unwrap();
+
+    let llm = Arc::new(CaptureLlm {
+        response: r#"[{"agent_name": "coder", "prompt_change": "p", "rationale": "r"}]"#
+            .to_string(),
+        prompts: prompts.clone(),
+    });
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+    let suggestions = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+
+    let prompt = &prompts.lock().unwrap()[0];
+    let before = prompt
+        .lines()
+        .find(|l| l.starts_with("metrics before the change"))
+        .unwrap_or_else(|| panic!("no before-metrics line in prompt:\n{prompt}"));
+    let after = prompt
+        .lines()
+        .find(|l| l.starts_with("metrics after the change"))
+        .unwrap_or_else(|| panic!("no after-metrics line in prompt:\n{prompt}"));
+    assert!(before.contains("2 run(s)"), "{before}");
+    assert!(before.contains("20.0%"), "{before}");
+    assert!(after.contains("1 run(s)"), "{after}");
+    assert!(after.contains("25.0%"), "{after}");
+
+    // The evidence line reports the before/after run counts.
+    assert!(
+        suggestions[0]
+            .evidence
+            .iter()
+            .any(|e| e.starts_with("Effect check:") && e.contains("runs before vs after: 2 vs 1")),
+        "evidence: {:?})",
+        suggestions[0].evidence
+    );
+}
+
+/// 1a: with no metric lines in either window the effect check shows
+/// "(no data)" instead of omitting the windows (the LLM must be able to tell
+/// "no data" from "good data").
+#[tokio::test]
+async fn test_effect_check_no_metrics_shows_no_data() {
+    let _guard = MetricsDirGuard::new(); // empty, guarded metrics dir
+
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+    manager.add(marker_for("coder", 3)).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "Trigger lesson",
+            "agent",
+            &["agent:coder"],
+        ))
+        .unwrap();
+
+    let llm = Arc::new(CaptureLlm {
+        response: "[]".to_string(),
+        prompts: prompts.clone(),
+    });
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+    let _ = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+
+    let prompt = &prompts.lock().unwrap()[0];
+    let before = prompt
+        .lines()
+        .find(|l| l.starts_with("metrics before the change"))
+        .unwrap_or_else(|| panic!("no before-metrics line in prompt:\n{prompt}"));
+    let after = prompt
+        .lines()
+        .find(|l| l.starts_with("metrics after the change"))
+        .unwrap_or_else(|| panic!("no after-metrics line in prompt:\n{prompt}"));
+    assert!(before.contains("(no data)"), "{before}");
+    assert!(after.contains("(no data)"), "{after}");
+}
+
 #[tokio::test]
 async fn test_effect_check_excludes_outcomes_older_than_marker() {
     let dir = tempdir().unwrap();

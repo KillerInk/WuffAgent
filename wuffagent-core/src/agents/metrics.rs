@@ -136,8 +136,10 @@ pub struct MetricsSummary {
 }
 
 impl MetricsSummary {
-    /// One-line rendering for the improver prompt ("Recent metrics: …").
-    pub fn format_line(&self) -> String {
+    /// One-line rendering with a caller-supplied label (the I5 effect check
+    /// labels its before/after windows). Returns an empty string when there
+    /// is nothing to report (no runs and no feedback).
+    pub fn format_labeled(&self, label: &str) -> String {
         if self.runs == 0 && self.feedback_up == 0 && self.feedback_down == 0 {
             return String::new();
         }
@@ -147,7 +149,7 @@ impl MetricsSummary {
             0.0
         };
         format!(
-            "Recent metrics ({} run(s), {} tool call(s) with {} errors ({:.1}%), \
+            "{label} ({} run(s), {} tool call(s) with {} errors ({:.1}%), \
              outcomes: {} verified / {} verified_after_retry / {} gave_up / {} not verified, \
              user feedback: {} up / {} down)",
             self.runs,
@@ -161,6 +163,11 @@ impl MetricsSummary {
             self.feedback_up,
             self.feedback_down,
         )
+    }
+
+    /// One-line rendering for the improver prompt ("Recent metrics: …").
+    pub fn format_line(&self) -> String {
+        self.format_labeled("Recent metrics")
     }
 }
 
@@ -379,14 +386,37 @@ impl MetricsLog {
     /// Aggregate counts for `agent` over lines with `ts >= since`
     /// (`None` = all time).
     pub fn summary_since(&self, agent: &str, since: Option<DateTime<Utc>>) -> MetricsSummary {
+        self.summary_between(agent, since, None)
+    }
+
+    /// Aggregate counts for `agent` over lines with `start <= ts < end`
+    /// (a `None` bound is unbounded; `start >= end` yields the empty
+    /// summary). The single code path behind `summary_since` (end = `None`)
+    /// and the I5 effect-check before/after windows.
+    pub fn summary_between(
+        &self,
+        agent: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> MetricsSummary {
         let mut s = MetricsSummary::default();
+        if let (Some(start), Some(end)) = (start, end) {
+            if start >= end {
+                return s;
+            }
+        }
         for line in self.read_all(agent) {
             let ts = match &line {
                 MetricsLine::Run { ts, .. } => ts,
                 MetricsLine::Feedback { ts, .. } => ts,
             };
-            if let Some(since) = since {
-                if *ts < since {
+            if let Some(start) = start {
+                if *ts < start {
+                    continue;
+                }
+            }
+            if let Some(end) = end {
+                if *ts >= end {
                     continue;
                 }
             }

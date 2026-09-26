@@ -133,14 +133,55 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
         list
     };
 
+    // 1a: the quantitative half of the effect check — per-agent metrics in
+    // two windows: AFTER = change → now, BEFORE = the immediately preceding
+    // period of the same length (min 1 day so a fresh change still gets a
+    // baseline, max 30 days so old markers don't sweep in months of
+    // history). The lesson list above stays as the qualitative half.
+    let metrics_log = crate::agents::metrics::MetricsLog::default();
+    let window_days = i64::from(days).clamp(1, 30);
+    let before_start = since - chrono::Duration::days(window_days);
+    let before = metrics_log.summary_between(agent_name, Some(before_start), Some(since));
+    let after = metrics_log.summary_between(agent_name, Some(since), None);
+    let before_line = window_metrics_line(
+        &format!(
+            "metrics before the change ({} → {})",
+            before_start.format("%Y-%m-%d"),
+            date,
+        ),
+        &before,
+    );
+    let after_line = window_metrics_line(
+        &format!("metrics after the change ({date} → now)"),
+        &after,
+    );
+
     let section = format!(
         "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).
+{before_line}
+{after_line}
 Outcomes recorded for this agent since that change:
 {list}
-If the outcomes look worse than before the change, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
+If the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
     );
-    let evidence_line = format!("Effect check: prompt last changed via approved improvement {days} day(s) ago ({date}); {} outcome(s) since", outcomes.len());
+    let evidence_line = format!(
+        "Effect check: prompt last changed via approved improvement {days} day(s) ago ({date}); runs before vs after: {} vs {}; {} outcome(s) since",
+        before.runs, after.runs, outcomes.len()
+    );
     Some((section, evidence_line))
+}
+
+/// 1a: one effect-check metrics line for a before/after window: the labeled
+/// `MetricsSummary` rendering, or "<label>: (no data)" when the agent has no
+/// metric lines in that window.
+fn window_metrics_line(
+    label: &str,
+    summary: &crate::agents::metrics::MetricsSummary,
+) -> String {
+    match summary.format_labeled(label) {
+        line if line.is_empty() => format!("{label}: (no data)"),
+        line => line,
+    }
 }
 
 /// I1: one-line trajectory summary fed to the improver (and kept as evidence).

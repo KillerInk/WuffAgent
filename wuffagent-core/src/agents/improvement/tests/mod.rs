@@ -105,6 +105,12 @@ impl MetricsDirGuard {
             _dir: dir,
         }
     }
+
+    /// The temp dir the override currently points at (tests write known
+    /// metric lines into it via `MetricsLog::new(guard.dir())`).
+    fn dir(&self) -> &std::path::Path {
+        self._dir.path()
+    }
 }
 
 impl Drop for MetricsDirGuard {

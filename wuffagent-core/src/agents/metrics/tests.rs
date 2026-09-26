@@ -160,6 +160,62 @@ fn test_summary_since_and_format_line() {
 }
 
 #[test]
+fn test_summary_between_windows() {
+    let dir = tmp_dir("between");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+
+    // Four runs on days 20..23 (same fixture shape as the since-test).
+    let line = |o: RunOutcome, day: u32| {
+        serde_json::to_string(&MetricsLine::Run {
+            ts: ts(day, 10),
+            tool_calls: 10,
+            tool_errors: 1,
+            verification_attempts: 1,
+            duration_ms: 5_000,
+            outcome: o,
+        })
+        .unwrap()
+    };
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("coder")).unwrap();
+    writeln!(f, "{}", line(RunOutcome::Verified, 20)).unwrap();
+    writeln!(f, "{}", line(RunOutcome::VerifiedAfterRetry, 21)).unwrap();
+    writeln!(f, "{}", line(RunOutcome::GaveUp, 22)).unwrap();
+    writeln!(f, "{}", line(RunOutcome::None, 23)).unwrap();
+    drop(f);
+
+    // [day21, day23) → days 21 and 22 only (end exclusive).
+    let b = log.summary_between("coder", Some(ts(21, 0)), Some(ts(23, 0)));
+    assert_eq!(b.runs, 2);
+    assert_eq!((b.verified, b.verified_after_retry, b.gave_up, b.not_verified), (0, 1, 1, 0));
+
+    // [None, day22) → days 20 and 21.
+    let b2 = log.summary_between("coder", None, Some(ts(22, 0)));
+    assert_eq!(b2.runs, 2);
+    assert_eq!((b2.verified, b2.verified_after_retry), (1, 1));
+
+    // start >= end → empty (even for an agent with data).
+    assert_eq!(
+        log.summary_between("coder", Some(ts(22, 0)), Some(ts(22, 0))),
+        MetricsSummary::default()
+    );
+    assert_eq!(
+        log.summary_between("coder", Some(ts(23, 0)), Some(ts(20, 0))),
+        MetricsSummary::default()
+    );
+
+    // summary_since is summary_between with an open end.
+    assert_eq!(
+        log.summary_since("coder", Some(ts(22, 0))),
+        log.summary_between("coder", Some(ts(22, 0)), None)
+    );
+    assert_eq!(log.summary_between("coder", None, None).runs, 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn test_agent_file_name() {
     assert_eq!(agent_file_name("coder"), "coder");
     assert_eq!(agent_file_name("My Agent!"), "my-agent");
