@@ -261,3 +261,39 @@ fn test_default_uses_test_process_dir() {
     set_metrics_dir_for_testing(None);
     let _ = std::fs::remove_dir_all(&override_dir);
 }
+
+/// 3a: skill-usage lines go to the reserved `skills.jsonl` file, are
+/// readable back (deduplicated, oldest-first), and the reserved file is not
+/// reported as an agent by `agent_names()`.
+#[test]
+fn test_skill_usage_roundtrip_and_reserved_file() {
+    let dir = tmp_dir("skill-usage");
+    let log = MetricsLog::new(&dir);
+    log.log_run("coder", 3, 1, 1, 1000, RunOutcome::Verified);
+    log.log_skill_use("wuffagent-self-restart");
+    log.log_skill_use("git-rebase-workflow");
+    log.log_skill_use("wuffagent-self-restart"); // duplicate
+
+    // Round trip through the raw lines (the file holds the reserved stem).
+    let all = log.read_all(SKILLS_FILE_STEM);
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().all(|l| matches!(l, MetricsLine::SkillUse { .. })));
+
+    let usage = log.skill_usage_since(None);
+    assert_eq!(
+        usage,
+        vec!["wuffagent-self-restart", "git-rebase-workflow"],
+        "deduplicated, first-seen order"
+    );
+    assert_eq!(log.skill_usage_since(Some(Utc::now() + chrono::Duration::hours(1))), Vec::<String>::new());
+
+    // The reserved file must not show up as an agent in the fleet list.
+    let names = log.agent_names();
+    assert_eq!(names, vec!["coder".to_string()], "got: {names:?}");
+
+    // describe() renders the line for UI lists.
+    if let MetricsLine::SkillUse { skill, .. } = &all[0] {
+        assert!(format!("{}", all[0].describe()).contains(skill));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

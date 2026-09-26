@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use wuffagent_core::agents::config::{AgentConfig, AgentManager, WorkerConfig};
+use wuffagent_core::memory::skills::SkillStore;
 use wuffagent_core::memory::{MemoryEntry, MemoryManager, MemoryType};
 
 use super::PendingImprovement;
@@ -54,6 +55,7 @@ pub fn resolve_agent_dir(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
 pub fn apply_improvement_detailed(
     agents_dirs: &[PathBuf],
     agent_manager: &AgentManager,
+    skill_store: &SkillStore,
     imp: &PendingImprovement,
 ) -> (String, bool) {
     let mut parts: Vec<String> = Vec::new();
@@ -188,6 +190,18 @@ pub fn apply_improvement_detailed(
                 "failed to create agent '{}': {}",
                 proposal.name, e
             )),
+        }
+    }
+
+    // 3b: proposed skills (procedural memory) — saved through the shared
+    // SkillStore (overwrite = versioning). Independent of the agent profile
+    // file: skills are global, so a missing profile does not block them.
+    if imp.apply_skills {
+        for sk in &imp.skill_updates {
+            match skill_store.save(&sk.name, &sk.description, &sk.when_to_use, &sk.body) {
+                Ok(meta) => parts.push(format!("saved skill '{}' ({})", meta.name, sk.action)),
+                Err(e) => errors.push(format!("skipped skill '{}': {}", sk.name, e)),
+            }
         }
     }
 

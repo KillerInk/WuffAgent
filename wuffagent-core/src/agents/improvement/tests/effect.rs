@@ -388,3 +388,89 @@ async fn test_effect_check_excludes_outcomes_older_than_marker() {
     );
     assert!(prompt.contains("(none yet)"), "prompt: {}", prompt);
 }
+
+/// 4a: with fewer than 3 runs after the change the prompt carries a
+/// low-sample caveat; with 3 or more it does not (the after-window file is
+/// rewritten between the two passes of the same test).
+#[tokio::test]
+async fn test_effect_check_low_sample_caveat() {
+    let _guard = MetricsDirGuard::new();
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    let path = log.agent_path("coder");
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+    manager.add(marker_for("coder", 3)).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "Trigger lesson",
+            "agent",
+            &["agent:coder"],
+        ))
+        .unwrap();
+
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+
+    // Pass 1: one run after the change -> caveat present.
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", run_line(1, 4, 1)).unwrap();
+    }
+    let llm = Arc::new(CaptureLlm {
+        response: "[]".to_string(),
+        prompts: prompts.clone(),
+    });
+    let _ = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+    // Scope the lock: `let r = &prompts.lock().unwrap()[i]` extends the
+    // MutexGuard to the whole function and would deadlock the second pass.
+    let (prompt, has_note) = {
+        let g = prompts.lock().unwrap();
+        (
+            g[0].clone(),
+            g[0].contains("treat the after-window as a preliminary sample"),
+        )
+    };
+    assert!(has_note, "expected low-sample caveat, prompt: {prompt}");
+
+    // Pass 2: three runs after the change -> no caveat.
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", run_line(1, 4, 1)).unwrap();
+        writeln!(f, "{}", run_line(2, 4, 1)).unwrap();
+        writeln!(f, "{}", run_line(2, 4, 1)).unwrap();
+    }
+    let llm = Arc::new(CaptureLlm {
+        response: "[]".to_string(),
+        prompts: prompts.clone(),
+    });
+    let _ = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+    let (prompt, has_note) = {
+        let g = prompts.lock().unwrap();
+        (g[1].clone(), g[1].contains("preliminary sample"))
+    };
+    assert!(!has_note, "no caveat expected with 3 runs, prompt: {prompt}");
+}

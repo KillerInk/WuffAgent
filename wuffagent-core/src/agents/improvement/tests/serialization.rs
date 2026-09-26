@@ -13,6 +13,13 @@ fn test_suggestion_serialization() {
         shell_config: None,
         handoff_targets: None,
         task_timeout_ms: Some(90_000),
+        skill_updates: vec![crate::types::SkillUpdate {
+            action: "new".to_string(),
+            name: "git-rebase-workflow".to_string(),
+            description: "How to rebase in this repo".to_string(),
+            when_to_use: "Before rebasing".to_string(),
+            body: "1. fetch\n2. rebase".to_string(),
+        }],
         evidence: vec!["Trajectory: 1 tool calls (0 errors)".to_string()],
     };
     let json = serde_json::to_string(&s).unwrap();
@@ -35,6 +42,9 @@ fn test_suggestion_serialization() {
         parsed.description,
         Some("A focused coding specialist.".to_string())
     );
+    // 3b: skill updates round-trip.
+    assert_eq!(parsed.skill_updates.len(), 1);
+    assert_eq!(parsed.skill_updates[0].name, "git-rebase-workflow");
 }
 
 #[test]
@@ -43,6 +53,8 @@ fn test_suggestion_serialization_without_description() {
     let json = r#"{"agent_name":"coder","rationale":"r","prompt_change":null,"new_agents":[],"allowed_tools":null,"reasoning_effort":null,"shell_config":null,"handoff_targets":null,"task_timeout_ms":null,"evidence":[]}"#;
     let parsed: ImprovementSuggestion = serde_json::from_str(json).unwrap();
     assert_eq!(parsed.description, None);
+    // 3b: old JSON without the `skill_updates` key defaults to empty.
+    assert!(parsed.skill_updates.is_empty());
 }
 
 #[test]

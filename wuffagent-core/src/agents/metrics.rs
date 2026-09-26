@@ -6,12 +6,16 @@
 //! {"kind":"feedback","ts":"2026-09-25T13:50:00.000Z","feedback":"up"}
 //! ```
 //!
-//! Two line kinds, one file per agent (the file name IS the agent name, so
-//! the line carries no agent field):
+//! Line kinds, one file per agent (the file name IS the agent name, so the
+//! line carries no agent field):
 //! - `run` — one completed agent LLM-loop (written at `run_llm_loop` end;
 //!   each handoff hop records its own line under its own agent).
 //! - `feedback` — a 👍/👎 the user gave on an assistant answer
 //!   (written by the chat feedback path, independent of the memory store).
+//! - `skill_use` — an agent `read_skill`-ed a skill (written by the
+//!   read_skill tool). Skills are shared across agents (no per-agent
+//!   attribution at the tool layer), so they go to the reserved
+//!   `skills.jsonl` file — `agent_names()` skips it for the fleet summary.
 //!
 //! Terminal run `outcome` values: `verified` (first-try pass, including the
 //! no-tool-outputs shortcut and verification-LLM-error default-pass),
@@ -88,6 +92,13 @@ pub enum MetricsLine {
         ts: DateTime<Utc>,
         feedback: FeedbackKind,
     },
+    /// An agent read a skill (usage signal for the improver).
+    SkillUse {
+        /// UTC timestamp of the read.
+        ts: DateTime<Utc>,
+        /// Skill name (slug) that was read.
+        skill: String,
+    },
 }
 
 impl MetricsLine {
@@ -116,6 +127,9 @@ impl MetricsLine {
                 ts.format("%Y-%m-%d %H:%M"),
                 if *feedback == FeedbackKind::Up { "up" } else { "down" }
             ),
+            MetricsLine::SkillUse { ts, skill } => {
+                format!("{} skill used: {}", ts.format("%Y-%m-%d %H:%M"), skill)
+            }
         }
     }
 }
@@ -235,6 +249,11 @@ fn test_process_dir() -> PathBuf {
     .clone()
 }
 
+/// Reserved file (without the `.jsonl` suffix) for cross-agent `skill_use`
+/// lines — skills are shared across agents and the read_skill tool has no
+/// per-agent context, so usage is recorded fleet-wide.
+pub const SKILLS_FILE_STEM: &str = "skills";
+
 /// Per-agent metrics log (append-only JSONL, one file per agent).
 ///
 /// Construction is side-effect free (no I/O); each write opens its file in
@@ -339,6 +358,18 @@ impl MetricsLog {
         );
     }
 
+    /// Append a skill-usage line to the reserved cross-agent `skills.jsonl`
+    /// file (see [`SKILLS_FILE_STEM`]).
+    pub fn log_skill_use(&self, skill: &str) {
+        self.append(
+            SKILLS_FILE_STEM,
+            &MetricsLine::SkillUse {
+                ts: Utc::now(),
+                skill: skill.to_string(),
+            },
+        );
+    }
+
     /// Append a user-feedback line for `agent`.
     pub fn log_feedback(&self, agent: &str, up: bool) {
         self.append(
@@ -397,6 +428,9 @@ impl MetricsLog {
                 .to_str()
                 .and_then(|n| n.strip_suffix(".jsonl"))
             {
+                if stem == SKILLS_FILE_STEM {
+                    continue; // reserved cross-agent file, not an agent
+                }
                 names.push(stem.to_string());
             }
         }
@@ -430,6 +464,7 @@ impl MetricsLog {
             let ts = match &line {
                 MetricsLine::Run { ts, .. } => ts,
                 MetricsLine::Feedback { ts, .. } => ts,
+                MetricsLine::SkillUse { ts, .. } => ts,
             };
             if let Some(start) = start {
                 if *ts < start {
@@ -462,9 +497,33 @@ impl MetricsLog {
                     FeedbackKind::Up => s.feedback_up += 1,
                     FeedbackKind::Down => s.feedback_down += 1,
                 },
+                MetricsLine::SkillUse { .. } => {
+                    // Not counted in the per-agent summary (the skills file
+                    // is fleet-wide); the ts filter above still applies.
+                }
             }
         }
         s
+    }
+
+    /// Skill names read in the cross-agent `skills.jsonl` log with
+    /// `ts >= since` (`None` = all time), oldest first, deduplicated
+    /// (first-seen order kept). Empty when no usage is recorded.
+    pub fn skill_usage_since(&self, since: Option<DateTime<Utc>>) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for line in self.read_all(SKILLS_FILE_STEM) {
+            if let MetricsLine::SkillUse { ts, skill } = &line {
+                if let Some(since) = since {
+                    if *ts < since {
+                        continue;
+                    }
+                }
+                if !seen.iter().any(|n| n == skill) {
+                    seen.push(skill.clone());
+                }
+            }
+        }
+        seen
     }
 
     fn report_failure(&self, msg: &str) {
@@ -500,6 +559,12 @@ pub fn record_run(
 /// feedback path). Best-effort — independent of the memory store.
 pub fn record_feedback(agent: &str, up: bool) {
     MetricsLog::default().log_feedback(agent, up);
+}
+
+/// Record a skill read in the DEFAULT metrics log (writer hook for the
+/// read_skill tool). Best-effort — usage is a signal, never load-bearing.
+pub fn record_skill_use(skill: &str) {
+    MetricsLog::default().log_skill_use(skill);
 }
 
 #[cfg(test)]

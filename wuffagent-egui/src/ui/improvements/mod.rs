@@ -14,7 +14,7 @@ mod memory;
 
 use eframe::egui;
 use wuffagent_core::agents::config::{AgentManager, ShellConfig};
-use wuffagent_core::types::ReasoningEffort;
+use wuffagent_core::types::{ReasoningEffort, SkillUpdate};
 
 use super::theme::Theme;
 
@@ -27,6 +27,8 @@ pub use memory::{
 };
 #[cfg(test)]
 pub use wuffagent_core::agents::config::AgentConfig;
+#[cfg(test)]
+pub use wuffagent_core::memory::skills::SkillStore;
 #[cfg(test)]
 use std::path::PathBuf;
 
@@ -57,6 +59,10 @@ pub struct PendingImprovement {
     pub shell_config: Option<ShellConfig>,
     pub handoff_targets: Option<Vec<String>>,
     pub task_timeout_ms: Option<u64>,
+    /// 3b: proposed skills (procedural memory) — saved via the shared
+    /// SkillStore on approve (overwriting an existing name is the versioning
+    /// mechanism).
+    pub skill_updates: Vec<SkillUpdate>,
     /// I3: per-field approve toggles. Default true (apply the change); the
     /// user can untick any field to approve the rest without it.
     pub apply_prompt: bool,
@@ -66,6 +72,7 @@ pub struct PendingImprovement {
     pub apply_shell_config: bool,
     pub apply_handoff_targets: bool,
     pub apply_task_timeout: bool,
+    pub apply_skills: bool,
     /// I3: the evidence the improver saw (trajectory line + lesson excerpts),
     /// shown in the panel so the user can judge WHY the change was proposed.
     pub evidence: Vec<String>,
@@ -102,6 +109,7 @@ impl From<&wuffagent_core::memory::ImprovementSuggestion> for PendingImprovement
             shell_config: s.shell_config.clone(),
             handoff_targets: s.handoff_targets.clone(),
             task_timeout_ms: s.task_timeout_ms,
+            skill_updates: s.skill_updates.clone(),
             apply_prompt: true,
             apply_description: true,
             apply_allowed_tools: true,
@@ -109,6 +117,7 @@ impl From<&wuffagent_core::memory::ImprovementSuggestion> for PendingImprovement
             apply_shell_config: true,
             apply_handoff_targets: true,
             apply_task_timeout: true,
+            apply_skills: true,
             evidence: s.evidence.clone(),
         }
     }
@@ -167,6 +176,7 @@ impl ImprovementsPanel {
                 existing.shell_config = s.shell_config.clone();
                 existing.handoff_targets = s.handoff_targets.clone();
                 existing.task_timeout_ms = s.task_timeout_ms;
+                existing.skill_updates = s.skill_updates.clone();
                 existing.evidence = s.evidence.clone();
             } else {
                 self.pending.push(PendingImprovement::from(&s));

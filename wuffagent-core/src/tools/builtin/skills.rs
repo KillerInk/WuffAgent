@@ -187,6 +187,9 @@ impl Tool for ReadSkillTool {
         let shown = name.trim().to_ascii_lowercase();
         match self.store.read(&name) {
             Some(skill) => {
+                // 3a: usage signal for the self-improvement loop (best-effort;
+                // the improver's evidence shows whether skills get read).
+                crate::agents::metrics::record_skill_use(&skill.name);
                 let modified = skill
                     .modified_at
                     .map(|t| format!("\n(last modified: {t})"))

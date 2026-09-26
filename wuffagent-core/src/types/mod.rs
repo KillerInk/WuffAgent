@@ -19,7 +19,7 @@ pub use events::AppEvent;
 pub use message::{Message, ToolCall, ToolFunction};
 pub use policy::{
     ChatToolPolicy, ImprovementSuggestion, NewAgentProposal, QueuedMessage, ShellConfig,
-    TrimConfig,
+    SkillUpdate, TrimConfig,
 };
 pub use reasoning::{ReasoningEffort, ReasoningMode};
 pub use timestamp::{format_timestamp, timestamp_day, timestamp_time};

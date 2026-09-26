@@ -12,6 +12,17 @@ fn temp_agents_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// A temp skills dir for tests (same scratch pattern as `temp_agents_dir`).
+fn temp_skill_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "wuffagent-egui-skills-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 fn existing_agent(name: &str) -> AgentConfig {
     AgentConfig {
         name: name.to_string(),
@@ -42,6 +53,7 @@ fn suggestion(agent: &str, rationale: &str, prompt: &str) -> wuffagent_core::mem
         shell_config: None,
         handoff_targets: None,
         task_timeout_ms: None,
+        skill_updates: vec![],
         evidence: vec![],
     }
 }
@@ -67,6 +79,8 @@ fn pending(agent: &str, prompt: Option<&str>) -> PendingImprovement {
         apply_shell_config: true,
         apply_handoff_targets: true,
         apply_task_timeout: true,
+        skill_updates: vec![],
+        apply_skills: true,
         evidence: vec![],
     }
 }
@@ -83,7 +97,7 @@ fn test_apply_improvement_updates_prompt_and_creates_agent() {
         edited_system_prompt: "helper prompt".to_string(),
     });
 
-    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &SkillStore::new(temp_skill_dir("t1")), &imp).0;
     assert!(msg.contains("updated prompt for 'coder'"), "msg: {}", msg);
     assert!(msg.contains("created new agent 'helper'"), "msg: {}", msg);
 
@@ -114,7 +128,7 @@ fn test_apply_improvement_uses_edited_prompts() {
         edited_system_prompt: "user edited helper prompt".to_string(),
     });
 
-    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &SkillStore::new(temp_skill_dir("t2")), &imp).0;
     assert!(msg.contains("updated prompt for 'coder'"), "msg: {}", msg);
     assert!(msg.contains("created new agent 'helper'"), "msg: {}", msg);
 
@@ -137,7 +151,7 @@ fn test_apply_improvement_falls_back_to_original_prompt() {
     let mut imp = pending("coder", Some("original only"));
     imp.edited_prompt = None;
 
-    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &SkillStore::new(temp_skill_dir("t3")), &imp).0;
     assert!(msg.contains("updated prompt for 'coder'"), "msg: {}", msg);
     let coder = manager.get_agent("coder").expect("coder agent");
     assert_eq!(coder.system_prompt, "original only");
@@ -153,7 +167,7 @@ fn test_apply_improvement_missing_profile_clear_error() {
     let dir = temp_agents_dir("missing");
     let manager = AgentManager::new(dir.clone());
 
-    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &pending("ghost", Some("p"))).0;
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &SkillStore::new(temp_skill_dir("t4")), &pending("ghost", Some("p"))).0;
     assert!(
         msg.contains("profile 'ghost' not found in any agents directory"),
         "msg: {}",
@@ -181,7 +195,7 @@ fn test_apply_improvement_writes_to_actual_profile_dir() {
     manager.add_search_dir(search.clone());
 
     let dirs = vec![primary.clone(), search.clone()];
-    let msg = apply_improvement_detailed(&dirs, &manager, &pending("coder", Some("new prompt"))).0;
+    let msg = apply_improvement_detailed(&dirs, &manager, &SkillStore::new(temp_skill_dir("t5")), &pending("coder", Some("new prompt"))).0;
     assert!(msg.contains("updated prompt for 'coder'"), "msg: {}", msg);
 
     // The search-dir file was updated in place...
@@ -258,7 +272,7 @@ fn test_apply_improvement_field_only_and_toggles() {
     imp.reasoning_effort = Some(ReasoningEffort::High);
     imp.apply_reasoning_effort = false; // user rejects the reasoning change
 
-    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &SkillStore::new(temp_skill_dir("t6")), &imp).0;
     assert!(msg.contains("updated tools for 'coder'"), "msg: {}", msg);
 
     let coder = manager.get_agent("coder").expect("coder agent");
@@ -285,7 +299,7 @@ fn test_apply_improvement_prompt_off_fields_on() {
     imp.apply_prompt = false;
     imp.task_timeout_ms = Some(120_000);
 
-    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &SkillStore::new(temp_skill_dir("t7")), &imp).0;
     assert!(msg.contains("updated timeout for 'coder'"), "msg: {}", msg);
 
     let coder = manager.get_agent("coder").expect("coder agent");
@@ -308,7 +322,7 @@ fn test_apply_improvement_all_toggles_off_is_noop() {
     imp.allowed_tools = Some(vec!["file_io".to_string()]);
     imp.apply_allowed_tools = false;
 
-    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &imp).0;
+    let msg = apply_improvement_detailed(&[dir.clone()], &manager, &SkillStore::new(temp_skill_dir("t8")), &imp).0;
     assert_eq!(msg, "No changes to apply.", "msg: {}", msg);
 
     let coder = manager.get_agent("coder").expect("coder agent");
@@ -501,4 +515,65 @@ fn test_remember_applied_prompt_saves_and_dedups() {
     assert_eq!(manager.count(), 2);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 3c: approved skill updates are written to the skill store; invalid names
+/// are reported and skipped; `apply_skills: false` writes nothing; the
+/// profile itself is untouched when no prompt was proposed.
+#[test]
+fn test_apply_improvement_skill_updates() {
+    let dir = temp_agents_dir("skills");
+    let manager = AgentManager::new(dir.clone());
+    manager.add_agent(&existing_agent("coder")).unwrap();
+    let skills_root = temp_skill_dir("skills-store");
+    let store = SkillStore::new(skills_root.clone());
+
+    let mut imp = pending("coder", None); // profile-only context, no prompt change
+    imp.skill_updates = vec![
+        SkillUpdate {
+            name: "good-skill".to_string(),
+            action: "new".to_string(),
+            description: "a useful procedure".to_string(),
+            when_to_use: "when the task matches".to_string(),
+            body: "1. do the thing".to_string(),
+        },
+        SkillUpdate {
+            name: "Bad_Name".to_string(), // invalid slug (underscore + uppercase)
+            action: "new".to_string(),
+            description: "d".to_string(),
+            when_to_use: "w".to_string(),
+            body: "x".to_string(),
+        },
+    ];
+
+    let (msg, prompt_applied) = apply_improvement_detailed(&[dir.clone()], &manager, &store, &imp);
+    assert!(!prompt_applied, "no prompt proposed, msg: {msg}");
+    assert!(msg.contains("saved skill 'good-skill'"), "msg: {msg}");
+    assert!(msg.contains("skipped skill 'Bad_Name'"), "msg: {msg}");
+
+    // The good skill is in the store with its frontmatter...
+    let saved = store.read("good-skill").expect("skill saved");
+    assert_eq!(saved.description, "a useful procedure");
+    // ...and the profile itself was not touched (no prompt proposed).
+    assert_eq!(
+        manager.get_agent("coder").unwrap().system_prompt,
+        "old prompt"
+    );
+
+    // Batch toggle: apply_skills = false writes nothing.
+    let mut off = pending("coder", None);
+    off.apply_skills = false;
+    off.skill_updates = vec![SkillUpdate {
+        name: "never-saved".to_string(),
+        action: "new".to_string(),
+        description: "d".to_string(),
+        when_to_use: "w".to_string(),
+        body: "x".to_string(),
+    }];
+    let (msg_off, _) = apply_improvement_detailed(&[dir.clone()], &manager, &store, &off);
+    assert_eq!(msg_off, "No changes to apply.", "msg: {msg_off}");
+    assert!(store.read("never-saved").is_none(), "apply_skills=false skips the save");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&skills_root);
 }

@@ -23,6 +23,11 @@ impl ImprovementsPanel {
         if !self.show_panel || self.pending.is_empty() {
             return;
         }
+        // 3b: proposed skills apply through the shared SkillStore. The default
+        // root is deterministic (`~/.wuffagent/skills`), so re-deriving it
+        // here (mcp `config_path` pattern) keeps the panel independent of
+        // whatever handle ChatApp happens to hold.
+        let skill_store = wuffagent_core::memory::skills::SkillStore::default();
 
         egui::Window::new("Self-Improvement Suggestions")
             .id(egui::Id::new("improvements_panel"))
@@ -206,6 +211,65 @@ impl ImprovementsPanel {
                             na.edited_system_prompt = sp;
                         }
 
+                        // 3b: proposed skills (procedural memory) — read-only
+                        // previews; Approve saves each via the SkillStore
+                        // (overwriting an existing name is the versioning
+                        // mechanism, so "update" and "new" both save).
+                        if !imp.skill_updates.is_empty() {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Proposed skills ({}):",
+                                        imp.skill_updates.len()
+                                    ))
+                                    .strong(),
+                                );
+                                for sk in &imp.skill_updates {
+                                    let verb = if sk.action == "update" {
+                                        "update"
+                                    } else {
+                                        "new"
+                                    };
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(format!("{} ({})", sk.name, verb))
+                                            .strong(),
+                                    );
+                                    if !sk.description.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(sk.description.clone()).weak(),
+                                        );
+                                    }
+                                    if !sk.when_to_use.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Use: {}",
+                                                sk.when_to_use
+                                            ))
+                                            .weak(),
+                                        );
+                                    }
+                                    let preview: String = sk.body.chars().take(400).collect();
+                                    egui::ScrollArea::vertical()
+                                        .max_height(120.0)
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(preview)
+                                                    .monospace()
+                                                    .size(11.0),
+                                            );
+                                        });
+                                }
+                                ui.checkbox(
+                                    &mut imp.apply_skills,
+                                    format!(
+                                        "Apply {} proposed skill(s)",
+                                        imp.skill_updates.len()
+                                    ),
+                                );
+                            });
+                        }
+
                         // I2/I3: per-field changes with approve toggles — the
                         // user can accept the prompt but reject a tool change
                         // (or vice versa). Only fields the LLM proposed show.
@@ -258,7 +322,8 @@ impl ImprovementsPanel {
                             || imp.reasoning_effort.is_some()
                             || imp.shell_config.is_some()
                             || imp.handoff_targets.is_some()
-                            || imp.task_timeout_ms.is_some();
+                            || imp.task_timeout_ms.is_some()
+                            || !imp.skill_updates.is_empty();
                         if has_config_change {
                             // Existing-agent prompt change → Approve + Dismiss + Revert.
                             ui.horizontal(|ui| {
@@ -364,8 +429,12 @@ impl ImprovementsPanel {
                 // Execute collected actions (file I/O + list mutation) after
                 // the loop so we never mutate while iterating.
                 for i in to_approve.into_iter().rev() {
-                    let (outcome, prompt_applied) =
-                        super::memory::apply_improvement_detailed(agents_dirs, agent_manager, &self.pending[i]);
+                    let (outcome, prompt_applied) = super::memory::apply_improvement_detailed(
+                        agents_dirs,
+                        agent_manager,
+                        &skill_store,
+                        &self.pending[i],
+                    );
                     self.message = Some(outcome);
                     // I5: an approved prompt change gets a marker so the next
                     // improvement check can weigh the outcomes since it and

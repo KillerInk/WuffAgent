@@ -156,8 +156,20 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
         &after,
     );
 
+    // 4a: low-sample caveat — with fewer than 3 runs after the change the
+    // after-window is too noisy to base a revert decision on; tell the
+    // improver so it does not over-react to 1-2 runs (G4).
+    let sample_note = if after.runs < 3 {
+        format!(
+            " (only {n} run(s) recorded after the change so far — treat the after-window as a preliminary sample, not solid evidence)",
+            n = after.runs
+        )
+    } else {
+        String::new()
+    };
+
     let section = format!(
-        "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).\n{before_line}\n{after_line}\nOutcomes recorded for this agent since that change:\n{list}\nIf the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
+        "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).\n{before_line}\n{after_line}{sample_note}\nOutcomes recorded for this agent since that change:\n{list}\nIf the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
     );
     let evidence_line = format!(
         "Effect check: prompt last changed via approved improvement {days} day(s) ago ({date}); runs before vs after: {} vs {}; {} outcome(s) since",
@@ -256,15 +268,28 @@ pub async fn suggest_improvements(
     // M1: this agent's recent run metrics (last 7 days) as outcome evidence —
     // the trajectory line above covers only THIS run; the metrics cover the
     // trend (error rate, verification outcomes, user feedback).
-    let metrics_line = {
-        let log = crate::agents::metrics::MetricsLog::default();
-        let since = chrono::Utc::now() - chrono::Duration::days(7);
-        log.summary_since(&agent_config.name, Some(since)).format_line()
-    };
+    let metrics_log = crate::agents::metrics::MetricsLog::default();
+    let since7 = chrono::Utc::now() - chrono::Duration::days(7);
+    let metrics_line = metrics_log.summary_since(&agent_config.name, Some(since7)).format_line();
     // 2b: fleet view — every other agent's 7-day summary on one line each, so
     // the improver can see this agent's results in context of its siblings
     // (a bad handoff target, a sibling whose config is clearly working).
     let fleet_line = fleet_summary_line();
+    // 3b: cross-agent skill usage (read_skill calls, last 7 days) — does
+    // procedural memory actually get used? Feeds the skill_updates signal.
+    let skills_used = metrics_log.skill_usage_since(Some(since7));
+    let skills_line = if skills_used.is_empty() {
+        String::new()
+    } else {
+        let names = skills_used.iter().take(10).cloned().collect::<Vec<_>>();
+        let more = skills_used.len() - names.len();
+        let list = names.join(", ");
+        if more > 0 {
+            format!("Skills read in the last 7 days (all agents): {list} (+{more} more)")
+        } else {
+            format!("Skills read in the last 7 days (all agents): {list}")
+        }
+    };
     // I5: effect check — the last approved prompt change for this agent and
     // the outcomes recorded since it (None -> no section, prompt unchanged).
     let effect = effect_check_section(manager, &agent_config.name);
@@ -291,6 +316,8 @@ pub async fn suggest_improvements(
          {}\n\
          {}\n\
          \n\
+         \n\
+         {}\n\
          Previously rejected suggestions (do NOT re-suggest these):\n{}\n\
          \n\
          Relevant lesson memories:\n{}\n\
@@ -312,6 +339,7 @@ pub async fn suggest_improvements(
          - shell_config ({{\"shell_enabled\": bool, \"allowed_commands\": [..], \"shell_timeout_ms\": number}}, or null)\n\
          - handoff_targets (array of agent names, or null)\n\
          - task_timeout_ms (number, or null)\n\
+         - skill_updates (array of skill objects, or null)\n\
          \n\
          Return a JSON array of suggestions (empty [] if nothing to improve):\n\
          [\n\
@@ -326,7 +354,10 @@ pub async fn suggest_improvements(
              \"handoff_targets\": null,\n\
              \"task_timeout_ms\": null,\n\
              \"new_agents\": [\n\
-               {{\"name\": \"agent_name\", \"description\": \"...\", \"system_prompt\": \"...\", \"allowed_tools\": [\"tool1\", \"tool2\"]}}\n\
+         {{\"name\": \"agent_name\", \"description\": \"...\", \"system_prompt\": \"...\", \"allowed_tools\": [\"tool1\", \"tool2\"]}}\n\
+         ],\n\
+         \"skill_updates\": [\n\
+             {{\"action\": \"new|update\", \"name\": \"skill-slug\", \"description\": \"one line\", \"when_to_use\": \"when this skill applies\", \"body\": \"markdown steps\"}}\n\
              ]\n\
            }}\n\
          ]\n\
@@ -344,6 +375,7 @@ pub async fn suggest_improvements(
         traj,
         metrics_line,
         fleet_line,
+        skills_line,
         rejected_text,
         memories_text,
         agent_config.name,
@@ -426,6 +458,10 @@ pub async fn suggest_improvements(
     // 2b: the fleet line is deterministic evidence too.
     if !fleet_line.is_empty() {
         evidence.push(fleet_line);
+    }
+    // 3b: the skill-usage line is deterministic evidence too.
+    if !skills_line.is_empty() {
+        evidence.push(skills_line);
     }
     for s in &mut suggestions {
         s.evidence = evidence.clone();

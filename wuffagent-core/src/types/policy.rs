@@ -82,6 +82,11 @@ pub struct ImprovementSuggestion {
     /// I2: change the per-task timeout in ms (None = no change).
     #[serde(default)]
     pub task_timeout_ms: Option<u64>,
+    /// 3b: new or refined skills to save (procedural memory — the improver
+    /// distills a reusable procedure the agent worked through into a skill).
+    /// Empty = none; validated + applied by the review panel (see `SkillStore`).
+    #[serde(default)]
+    pub skill_updates: Vec<SkillUpdate>,
     /// I3: the evidence the improver saw (trajectory line + lesson excerpts).
     /// Filled deterministically by `suggest_improvements`, not the LLM, so
     /// the review panel can show WHY the suggestion was made.
@@ -97,6 +102,24 @@ pub struct NewAgentProposal {
     pub system_prompt: String,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+}
+
+/// A proposed new or updated skill (procedural memory), suggested by the
+/// improver. `name` is a slug (re-validated at save time by `SkillStore`);
+/// saving over an existing name is the versioning mechanism, so `action`
+/// ("new"/"update") is informational — both are applied with a save.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SkillUpdate {
+    /// "new" or "update" (informational; both save/overwrite).
+    #[serde(default)]
+    pub action: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub when_to_use: String,
+    /// Markdown step-by-step body (must be non-empty to save).
+    pub body: String,
 }
 
 /// Configuration for intelligent context trimming.
