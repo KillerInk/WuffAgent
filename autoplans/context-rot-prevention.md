@@ -275,6 +275,47 @@ regardless.)
   at the next flush. Tool description cap wording fixed in e091a8a (input
   cap 2000; 400 only on brief-fold).
 
+### S4b as-built notes (2026-09-27)
+
+- `TrimConfig.llm_brief_polish` (types/policy.rs, serde default **true** —
+  protective feature, per-agent opt-out; missing-field test extended in
+  trimming/config/tests.rs).
+- `ContextTrimming::trim_messages_detailed(messages, target, config) ->
+  (usize, Vec<Message>)` (summarizer/mod.rs): the old `trim_messages` body,
+  now also returning the dropped span in chronological order (exactly what
+  the age sweeps removed; freshness-pass removals are NOT in the span).
+  `trim_messages` is a thin wrapper (`.0`), so all existing call sites and
+  tests are untouched.
+- `brief.rs` gains: `BRIEF_POLISH_MIN_DROPPED_CHARS` (4_000),
+  `POLISH_SPAN_MAX_CHARS` (12_000), `parse_polish` (same section grammar as
+  `from_rendered` minus the marker requirement — tolerant of model wrapper
+  text), `polish_request(prev_brief, dropped) -> [system, user]` (system
+  prompt states the merge rules + the exact section format + "use ONLY facts
+  present ... never invent"), `polish_span_text` (one line per dropped
+  message, tool-call names appended, oldest-first eviction at the cap,
+  previous brief renders excluded — carried as OLD BRIEF instead).
+- Loop wiring (agents/agent/loop.rs, the PROACTIVE trim site only):
+  `trim_messages_detailed` → when `llm_brief_polish` and the span is ≥
+  `BRIEF_POLISH_MIN_DROPPED_CHARS` chars, `Agent::polish_brief` makes ONE
+  non-streaming `complete_messages` call (no tools). Response is re-validated
+  through the deterministic contract: `parse_polish` → task restored from the
+  deterministic brief when the model dropped it → `enforce_total_cap` →
+  `render` → fit-guard (`rendered < target_chars`) → `apply_brief` (in-place
+  update, never stacked). ANY failure (LLM error, unparseable, over cap)
+  keeps the deterministic brief — it is always the fallback. Runs before
+  `reconcile_store`, so the polished brief is what the session file gets.
+  Log: `[AGENT] Agent '<name>' brief polished by the LLM (N chars)`.
+- Tests: 5 new brief.rs (request carries only brief+span; span cap keeps
+  newest + marks omitted; span excludes a previous brief; parse_polish
+  roundtrip without marker; garbage rejected) + 2 new summarizer/tests/trim.rs
+  (detailed returns the exact dropped span chronological, no drop/keep
+  overlap, net shrink = removed - briefs re-inserted; wrapper and detailed
+  agree on count and final list). Suite: 739 passed, 0 failed.
+- Not covered (deferred): the backstop (overflow-retry) trim site does not
+  polish (the emergency path should not pay for an extra round-trip); no
+  loop-level test of the polish call itself (needs a scripted LLM harness);
+  the polish request uses the agent's configured reasoning_effort.
+
 ## Constraints / notes
 
 - Trim path must stay synchronous + cheap: no LLM in S1, no extra disk I/O.

@@ -59,6 +59,16 @@ pub const BRIEF_MIN_DROPPED_CHARS: usize = 1_000;
 /// 100k+ window, large enough to carry the session state.
 pub const BRIEF_MAX_CHARS: usize = 3_500;
 
+/// S4b: minimum dropped-span size (chars) for the LLM brief polish to fire —
+/// below this the deterministic brief is good enough and the extra LLM
+/// round-trip is not worth it.
+pub const BRIEF_POLISH_MIN_DROPPED_CHARS: usize = 4_000;
+
+/// S4b: cap for the flattened dropped span inside the polish request — the
+/// request carries ONLY the old brief + the span, so it must stay small by
+/// construction (it cannot overflow the window).
+pub const POLISH_SPAN_MAX_CHARS: usize = 12_000;
+
 const TASK_MAX: usize = 800;
 const CORRECTION_MAX: usize = 400;
 const CORRECTIONS_MAX_ITEMS: usize = 6;
@@ -310,6 +320,14 @@ pub fn from_rendered(text: &str) -> Option<SessionBrief> {
     if !text.starts_with(BRIEF_MARKER) {
         return None;
     }
+    parse_sections(text)
+}
+
+/// The render/parse section grammar, shared by [`from_rendered`] (which
+/// additionally requires the marker) and [`parse_polish`] (S4b: the LLM
+/// polish response carries the section body, usually without the marker).
+/// `None` when no state could be recovered.
+fn parse_sections(text: &str) -> Option<SessionBrief> {
     let mut b = SessionBrief::default();
     let mut section = None;
     for line in text.lines() {
@@ -347,6 +365,109 @@ pub fn from_rendered(text: &str) -> Option<SessionBrief> {
         None
     } else {
         Some(b)
+    }
+}
+
+/// S4b: parse an LLM brief-polish response into a `SessionBrief` — the same
+/// section grammar as [`from_rendered`], tolerant of the model's wrapper
+/// text (preamble, code fences: non-matching lines are ignored). `None` when
+/// nothing could be recovered — the caller keeps the deterministic brief.
+pub fn parse_polish(text: &str) -> Option<SessionBrief> {
+    parse_sections(text)
+}
+
+/// S4b: build the LLM brief-polish request — `[system, user]` carrying ONLY
+/// the old brief render (if any) and the flattened dropped span (capped at
+/// [`POLISH_SPAN_MAX_CHARS`], newest kept). Small by construction: it cannot
+/// overflow the window. The response must be the brief body in the section
+/// grammar of [`parse_polish`].
+pub fn polish_request(prev_brief: Option<&str>, dropped: &[Message]) -> Vec<Message> {
+    let system = "You are the context compressor for an AI agent's session. Part of its \
+conversation was just compacted (trimmed) to fit the context window. Merge the OLD BRIEF \
+and the DROPPED SPAN below into ONE updated mission brief so the agent can continue \
+seamlessly without the trimmed history.\n\
+Rules:\n\
+- Use ONLY facts present in the OLD BRIEF or the DROPPED SPAN — never invent \
+results, file contents, line numbers, or decisions that are not there.\n\
+- Keep this exact format, omitting empty sections:\n\
+Task: <the overall task, one line>\n\
+Done:\n- <what was completed and still matters to continue>\n\
+In progress: <the single most recent in-progress state, one line>\n\
+Notes (agent-recorded state, read carefully):\n- <agent notes, verbatim>\n\
+Decisions:\n- <decisions that still constrain the work>\n\
+User notes (read carefully, newest last):\n- <user corrections and constraints>\n\
+Files touched:\n- <path (tool)>\n\
+- Drop items that are fully done and no longer needed to continue; keep the \
+most recent state and anything that constrains the next steps.\n\
+- Output ONLY the brief in that format — no commentary, no markdown fences.";
+    let mut user = String::with_capacity(POLISH_SPAN_MAX_CHARS + 512);
+    user.push_str("OLD BRIEF:\n");
+    user.push_str(prev_brief.unwrap_or("(none)"));
+    user.push_str("\n\nDROPPED SPAN (oldest to newest):\n");
+    user.push_str(&polish_span_text(dropped));
+    vec![
+        Message {
+            role: "system".to_string(),
+            content: system.to_string(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        },
+        Message {
+            role: "user".to_string(),
+            content: user,
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        },
+    ]
+}
+
+/// S4b: flatten the dropped span to request-size text — one line per message
+/// (`{role}: content`, tool-call names appended for assistant messages).
+/// When the [`POLISH_SPAN_MAX_CHARS`] cap is hit the OLDEST lines are dropped
+/// first: the state closest to the continuation point is what the brief must
+/// keep.
+fn polish_span_text(dropped: &[Message]) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(dropped.len());
+    for m in dropped {
+        if is_brief_message(m) {
+            continue; // carried as the OLD BRIEF instead
+        }
+        let mut line = format!("{}: {}", m.role, one_line(&m.content, 400));
+        if let Some(calls) = m.tool_calls.as_deref() {
+            let names: Vec<&str> = calls.iter().map(|c| c.function.name.as_str()).collect();
+            if !names.is_empty() {
+                line.push_str(&format!(" [calls: {}]", names.join(", ")));
+            }
+        }
+        if !line.trim().is_empty() {
+            lines.push(line);
+        }
+    }
+    let mut total: usize = lines.iter().map(|l| l.chars().count() + 1).sum();
+    let mut omitted = 0usize;
+    while total > POLISH_SPAN_MAX_CHARS && lines.len() > 1 {
+        total -= lines.remove(0).chars().count() + 1;
+        omitted += 1;
+    }
+    let mut out = if omitted > 0 {
+        format!("[... {omitted} older dropped message(s) omitted ...]\n")
+    } else {
+        String::new()
+    };
+    for l in &lines {
+        out.push_str(l);
+        out.push('\n');
+    }
+    if out.is_empty() {
+        "(empty)".to_string()
+    } else {
+        out
     }
 }
 
@@ -979,5 +1100,76 @@ mod tests {
             .unwrap();
         assert_eq!(task_idx, 1);
         assert_eq!(messages[task_idx].content, "the real task");
+    }
+
+    // ── S4b: LLM brief polish (request build + response parse) ──────────
+
+    #[test]
+    fn polish_request_carries_only_brief_and_span() {
+        let prev = format!("{BRIEF_MARKER} ... Task: do the thing\nDecisions:\n- use X");
+        let dropped = vec![
+            user("correction: use Y"),
+            assistant_call("w1", "write_file", "{}"),
+            assistant("I updated the file."),
+        ];
+        let req = polish_request(Some(&prev), &dropped);
+        assert_eq!(req.len(), 2);
+        assert_eq!(req[0].role, "system");
+        assert!(req[0].content.contains("ONLY facts"), "no-hallucination rule present");
+        assert_eq!(req[1].role, "user");
+        assert!(req[1].content.contains(&prev), "old brief carried");
+        assert!(req[1].content.contains("correction: use Y"), "dropped user line carried");
+        assert!(req[1].content.contains("write_file"), "dropped tool call carried");
+        assert!(
+            req[1].content.contains("I updated the file."),
+            "dropped assistant text carried"
+        );
+    }
+
+    #[test]
+    fn polish_span_text_caps_and_keeps_newest() {
+        let dropped: Vec<Message> = (0..40)
+            .map(|i| user(&format!("message {i}: {}", "x".repeat(300))))
+            .collect();
+        let text = polish_span_text(&dropped);
+        assert!(
+            text.chars().count() <= POLISH_SPAN_MAX_CHARS + 64,
+            "span capped"
+        );
+        assert!(text.contains("message 39"), "newest kept");
+        assert!(text.contains("omitted"), "oldest marked omitted");
+        assert!(!text.contains("message 0:"), "oldest dropped");
+    }
+
+    #[test]
+    fn polish_span_text_excludes_previous_brief() {
+        // A previous brief render inside the dropped span must not be
+        // flattened into the span — it is carried as the OLD BRIEF instead.
+        let old = format!("{BRIEF_MARKER} ... Task: t");
+        let dropped = vec![user(&old), user("new user line")];
+        let req = polish_request(None, &dropped);
+        assert!(req[1].content.contains("new user line"));
+        assert!(!req[1].content.contains("Task: t"));
+    }
+
+    #[test]
+    fn parse_polish_parses_section_body_without_marker() {
+        let out = "Here is the updated brief:\n\
+                   Task: refactor the trimming module\n\
+                   Done:\n- wrote the extraction heuristics\n\
+                   In progress: wire the brief into trim_messages\n\
+                   Decisions:\n- keep the deterministic fallback\n\
+                   Files touched:\n- a/brief.rs (write_file)";
+        let b = parse_polish(out).expect("parsed");
+        assert_eq!(b.task, "refactor the trimming module");
+        assert_eq!(b.in_progress.as_deref(), Some("wire the brief into trim_messages"));
+        assert_eq!(b.decisions, vec!["keep the deterministic fallback"]);
+        assert_eq!(b.files_touched, vec!["a/brief.rs (write_file)"]);
+    }
+
+    #[test]
+    fn parse_polish_rejects_garbage() {
+        assert!(parse_polish("").is_none());
+        assert!(parse_polish("no sections here at all").is_none());
     }
 }

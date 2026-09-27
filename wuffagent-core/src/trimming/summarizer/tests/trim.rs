@@ -253,3 +253,124 @@ fn test_no_empty_content_under_extreme_overage() {
     // Fresh result untouched.
     assert_eq!(messages.last().unwrap().content, "fresh");
 }
+
+// ── S4b: trim_messages_detailed returns the dropped span ──────────────
+
+fn span_messages() -> Vec<Message> {
+    let mut messages = vec![
+        Message {
+            role: "system".into(),
+            content: "sys".into(),
+            timestamp: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        },
+        user_msg("task"),
+    ];
+    for i in 0..6 {
+        messages.push(assistant_tool_call(
+            &format!("junk_{i}"),
+            &format!("{{\"n\":{i}}}"),
+        ));
+        messages.push(tool_result(&format!("junk_{i}"), &"j".repeat(800)));
+    }
+    messages.push(user_msg("go"));
+    messages.push(assistant_tool_call("t1", "{}"));
+    messages.push(tool_result("t1", &"R".repeat(2000)));
+    messages
+}
+
+/// The call id of a message, if it is a tool call (its `id`) or a tool
+/// result (its `tool_call_id`).
+fn round_id(m: &Message) -> Option<String> {
+    m.tool_call_id
+        .clone()
+        .or_else(|| m.tool_calls.as_ref().and_then(|c| c.first()).map(|c| c.id.clone()))
+}
+
+#[test]
+fn detailed_trim_returns_dropped_span_chronological() {
+    let target = 4500usize;
+    let mut messages = span_messages();
+    assert!(
+        ContextTrimming::message_char_count(&messages) > target,
+        "precondition: must start over budget"
+    );
+
+    let trimming = ContextTrimming::new();
+    let before_len = messages.len();
+    let (removed, dropped) =
+        trimming.trim_messages_detailed(&mut messages, target, &make_config());
+
+    assert!(removed > 0, "a big trim removes messages");
+    assert_eq!(
+        dropped.len(),
+        removed,
+        "the dropped span is exactly what the sweeps removed"
+    );
+    // The net list shrink is `removed` minus any mission brief the trim
+    // re-inserted in place (S1: a big drop re-anchors the rolling brief).
+    let briefs = messages
+        .iter()
+        .filter(|m| crate::trimming::brief::is_brief_message(m))
+        .count();
+    assert!(briefs <= 1, "at most one mission brief");
+    assert_eq!(
+        messages.len(),
+        before_len - removed + briefs,
+        "list shrink = removed - briefs re-inserted"
+    );
+    let dropped_ids: Vec<String> = dropped.iter().filter_map(round_id).collect();
+    assert!(
+        dropped_ids.iter().all(|id| id.starts_with("junk_")),
+        "only old junk rounds were dropped (task + recent tail protected): {dropped_ids:?}"
+    );
+    let kept_ids: Vec<String> = messages.iter().filter_map(round_id).collect();
+    assert!(
+        kept_ids.iter().all(|id| !dropped_ids.contains(id)),
+        "no message is both dropped and kept (dropped: {dropped_ids:?}, kept: {kept_ids:?})"
+    );
+    // The span is chronological: the newest dropped round is strictly older
+    // than the oldest kept junk round.
+    let last_dropped_n = dropped_ids
+        .last()
+        .and_then(|id| id.strip_prefix("junk_").and_then(|s| s.parse::<usize>().ok()))
+        .expect("newest dropped id is a junk id");
+    let first_kept_n = kept_ids
+        .iter()
+        .filter_map(|id| id.strip_prefix("junk_").and_then(|s| s.parse::<usize>().ok()))
+        .min()
+        .unwrap_or(usize::MAX);
+    assert!(
+        last_dropped_n < first_kept_n,
+        "the span ends before the kept tail (last dropped junk_{last_dropped_n}, first kept junk_{first_kept_n})"
+    );
+    assert_pairs_intact(&messages);
+    assert!(
+        ContextTrimming::message_char_count(&messages) <= target,
+        "under budget after the detailed trim"
+    );
+}
+
+#[test]
+fn detailed_trim_wrapper_agrees_on_removal_count() {
+    // Same input through wrapper and detailed: identical count and list.
+    let target = 4500usize;
+    let trimming = ContextTrimming::new();
+
+    let mut a = span_messages();
+    let (removed_a, _dropped) =
+        trimming.trim_messages_detailed(&mut a, target, &make_config());
+
+    let mut b = span_messages();
+    let removed_b = trimming.trim_messages(&mut b, target, &make_config());
+
+    assert_eq!(removed_a, removed_b, "wrapper and detailed agree on the count");
+    let seq_a: Vec<(&str, &str)> =
+        a.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect();
+    let seq_b: Vec<(&str, &str)> =
+        b.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect();
+    assert_eq!(seq_a, seq_b, "wrapper and detailed leave the same list");
+}

@@ -277,7 +277,7 @@ impl Agent {
                     // stay under the target.
                     let target_chars = self.client.trim_target_chars().saturating_sub(overhead_chars);
                     let chars_before = crate::trimming::message_char_count(messages);
-                    let removed = self.trimming.trim_messages(
+                    let (removed, dropped) = self.trimming.trim_messages_detailed(
                         messages,
                         target_chars,
                         &self.config.trim_config,
@@ -304,6 +304,27 @@ impl Agent {
                             brief_present,
                             false,
                         );
+                    }
+                    // S4b: LLM brief polish (flag-gated, best-effort). The
+                    // deterministic brief is already anchored in the list; when
+                    // the dropped span is large enough, ONE small LLM call
+                    // refines its sections in model quality. The request
+                    // carries ONLY the old brief + the dropped span (capped)
+                    // — small by construction, cannot overflow. Any failure
+                    // keeps the deterministic brief. Runs before
+                    // `reconcile_store`, so the polished brief is what the
+                    // store/session file get.
+                    if self.config.trim_config.llm_brief_polish
+                        && crate::trimming::message_char_count(&dropped)
+                            >= crate::trimming::brief::BRIEF_POLISH_MIN_DROPPED_CHARS
+                    {
+                        if let Some(text) = self.polish_brief(messages, &dropped, target_chars).await {
+                            tracing::info!(
+                                "[AGENT] Agent '{}' brief polished by the LLM ({} chars)",
+                                self.config.name,
+                                text.chars().count()
+                            );
+                        }
                     }
                     // Post-trim verification: the trim already truncates the largest
                     // message as a fallback; log if we're still over budget.
@@ -612,6 +633,48 @@ impl Agent {
             tokens_out,
         );
         Ok(outcome)
+    }
+
+    /// S4b: refine the just-updated mission brief with one small LLM call.
+    ///
+    /// The request carries ONLY the old brief render + the dropped span
+    /// (see `brief::polish_request`) — small by construction, so it cannot
+    /// overflow the window. The response is re-validated through the same
+    /// render/parse contract as the deterministic path (`parse_polish` +
+    /// `enforce_total_cap` + `render`): a malformed answer keeps the
+    /// deterministic brief, and the task is never lost (when the model drops
+    /// it, the deterministic brief's task is restored). The polished brief
+    /// is applied in place (never stacked); returns it on success.
+    async fn polish_brief(
+        &self,
+        messages: &mut Vec<Message>,
+        dropped: &[Message],
+        target_chars: usize,
+    ) -> Option<String> {
+        let prev_text = messages
+            .iter()
+            .find(|m| crate::trimming::brief::is_brief_message(m))?
+            .content
+            .clone();
+        let prev = crate::trimming::brief::from_rendered(&prev_text)?;
+        let req = crate::trimming::brief::polish_request(Some(&prev_text), dropped);
+        let (out, _usage) = self.client.complete_messages(&req, None).await.ok()?;
+        let mut polished = crate::trimming::brief::parse_polish(&out)?;
+        // The task is never lost: keep the deterministic brief's task when
+        // the model dropped it.
+        if polished.task.is_empty() {
+            polished.task = prev.task.clone();
+        }
+        crate::trimming::brief::enforce_total_cap(&mut polished);
+        let text = crate::trimming::brief::render(&polished);
+        // Same fit-guard as the deterministic insert: a brief that alone
+        // does not fit the budget would make the budget unreachable, so the
+        // deterministic brief stays in place.
+        if text.is_empty() || text.chars().count() >= target_chars {
+            return None;
+        }
+        crate::trimming::brief::apply_brief(messages, &text);
+        Some(text)
     }
 }
 

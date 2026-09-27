@@ -24,6 +24,8 @@ fn test_trim_pcts_serde_missing_fields_default() {
     let config: TrimConfig = serde_json::from_str(json).unwrap();
     assert_eq!(config.trim_trigger_pct, 90);
     assert_eq!(config.trim_target_pct, 50);
+    // S4b: the LLM brief polish is on by default (protective feature).
+    assert!(config.llm_brief_polish);
     // Explicit values round-trip.
     let mut config = TrimConfig::default();
     config.trim_trigger_pct = 65;

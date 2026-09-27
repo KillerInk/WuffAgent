@@ -183,6 +183,18 @@ pub struct TrimConfig {
     /// rounds have headroom before the next trim (S3: the hard floor to tune).
     #[serde(default = "default_trim_target_pct")]
     pub trim_target_pct: u8,
+
+    /// S4b: LLM brief polish. When a trim drops a non-trivial span (>=
+    /// `trimming::brief::BRIEF_POLISH_MIN_DROPPED_CHARS` chars), the agent
+    /// loop issues ONE small LLM call — the request carries only the old
+    /// brief + the dropped span, so it is small by construction and cannot
+    /// overflow — and refines the mission brief's sections in model quality.
+    /// The response is re-validated through the same render/parse contract
+    /// and caps as the deterministic path; any failure (error, unparseable,
+    /// over cap) keeps the deterministic brief, which is always the
+    /// fallback. See autoplans/context-rot-prevention.md (S4b).
+    #[serde(default = "default_true")]
+    pub llm_brief_polish: bool,
 }
 
 fn default_enabled() -> bool {
@@ -225,6 +237,7 @@ impl Default for TrimConfig {
             stale_file_invalidation: default_true(),
             trim_trigger_pct: default_trim_trigger_pct(),
             trim_target_pct: default_trim_target_pct(),
+            llm_brief_polish: default_true(),
         }
     }
 }

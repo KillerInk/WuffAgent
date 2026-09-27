@@ -25,6 +25,7 @@ fn make_config() -> TrimConfig {
         stale_file_invalidation: true,
         trim_trigger_pct: 90,
         trim_target_pct: 50,
+        llm_brief_polish: true,
     }
 }
 

@@ -146,20 +146,36 @@ impl ContextTrimming {
         messages.iter().map(Self::message_tokens).sum()
     }
 
-    /// Token-budget trim: remove oldest non-system messages until the token
-    /// count (chars of all messages incl. reasoning and tool-call args) is below
-    /// the target. Returns the number of messages removed.
+    /// Token-budget trim (see [`Self::trim_messages_detailed`]); returns only
+    /// the removal count.
     pub fn trim_messages(
         &self,
         messages: &mut Vec<Message>,
         target_chars: usize,
         config: &TrimConfig,
     ) -> usize {
+        self.trim_messages_detailed(messages, target_chars, config).0
+    }
+
+    /// Token-budget trim: remove oldest non-system messages until the token
+    /// count (chars of all messages incl. reasoning and tool-call args) is below
+    /// the target. Returns the number of messages removed AND the dropped
+    /// messages themselves (chronological order — what the age sweeps removed)
+    /// so the caller can use the dropped span elsewhere: S4b's LLM brief
+    /// polish refines the mission brief from it (the deterministic brief has
+    /// already folded it, so the polish is strictly an upgrade, never the
+    /// only carrier of the dropped state).
+    pub fn trim_messages_detailed(
+        &self,
+        messages: &mut Vec<Message>,
+        target_chars: usize,
+        config: &TrimConfig,
+    ) -> (usize, Vec<Message>) {
         if !config.is_enabled() {
-            return 0;
+            return (0, Vec::new());
         }
         if messages.is_empty() {
-            return 0;
+            return (0, Vec::new());
         }
 
         let mut removed = 0;
@@ -217,7 +233,7 @@ impl ContextTrimming {
         };
 
         if keep_from >= messages.len() {
-            return 0;
+            return (0, Vec::new());
         }
 
         let initial_count = messages.len();
@@ -349,7 +365,7 @@ impl ContextTrimming {
             final_chars
         );
 
-        removed
+        (removed, dropped)
     }
 
     /// Token-budget trim for Arc<Mutex<Vec<Message>>> (chat client conversation).
