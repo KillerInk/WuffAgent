@@ -15,6 +15,7 @@ use crate::memory::{MemoryConfig, MemoryEntry, MemoryType};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
+mod chat;
 mod collect;
 mod cost;
 mod effect;

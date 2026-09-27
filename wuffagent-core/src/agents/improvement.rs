@@ -21,6 +21,13 @@ const TOTAL_PROMPT_CHAR_BUDGET: usize = 24_000;
 /// Newline character (I5 effect-check glue; spelled out to keep the string
 /// literals below readable).
 const NEWLINE: char = '\u{a}';
+/// The synthetic chat profile: the UI's default agent identity. It exists
+/// in the metrics and the improver's run-check selector (where it is the
+/// first entry) but has NO backing .json file in any agents dir — so an
+/// improver suggestion targeting it must be a prompt change (approved
+/// through the profile's chat settings), never a `new_agents` creation
+/// (approving one would fail with "profile not found").
+pub const CHAT_PROFILE_NAME: &str = "chat";
 
 // ImprovementSuggestion / NewAgentProposal live in the types brick (types
 // embeds them in AppEvent::ImprovementSuggested); re-exported here so the
@@ -368,6 +375,23 @@ pub async fn suggest_improvements(
     // I5: effect check — the last approved prompt change for this agent and
     // the outcomes recorded since it (None -> no section, prompt unchanged).
     let effect = effect_check_section(manager, &agent_config.name);
+    // Chat profile: tell the LLM the profile EXISTS (so it proposes a
+    // prompt_change for it, not a new_agents entry — approving a new agent
+    // named "chat" would fail with "profile not found", and the duplicate
+    // would shadow the real chat identity in the selector).
+    let chat_note = if agent_config.name.eq_ignore_ascii_case(CHAT_PROFILE_NAME) {
+        format!(
+            "NOTE: The profile '{}' EXISTS as an agent profile (the chat agent). \
+             It has no backing .json file — it is configured through the chat settings. \
+             Propose prompt_change for agent_name \"{}\" to change it; do NOT list it in new_agents. \
+             Its current prompt is the chat agent's system prompt shown above. \
+             Its handoff targets (if any) are the real agent profiles the chat delegates to. \
+             ",
+            CHAT_PROFILE_NAME, CHAT_PROFILE_NAME
+        )
+    } else {
+        String::new()
+    };
     let effect_text = match &effect {
         Some((section, _)) => {
             let mut t = section.clone();
@@ -382,6 +406,7 @@ pub async fn suggest_improvements(
         "You are reviewing an AI agent's performance to suggest improvements.\n\n\
          Agent name: {}\n\
          Agent description: {}\n\
+         {}\
          Current system prompt:\n{}\n\
          \n\
          Recent task: {}\n\
@@ -421,7 +446,7 @@ pub async fn suggest_improvements(
          [\n\
            {{\n\
              \"agent_name\": \"{}\",\n\
-             \"prompt_change\": \"new prompt text or null if no change needed\",\n\
+             \"prompt_change\": \"the FULL new system prompt text (replace the current one shown above) or null if no change needed\",\n\
              \"rationale\": \"why this change is needed\",\n\
              \"description\": null,\n\
              \"allowed_tools\": null,\n\
@@ -441,6 +466,7 @@ pub async fn suggest_improvements(
          Return [] if no improvements are needed.",
         agent_config.name,
         agent_config.description,
+        chat_note,
         if prompt.is_empty() {
             format!("You are the '{}' agent. {}", agent_config.name, agent_config.description)
         } else {
@@ -546,6 +572,23 @@ pub async fn suggest_improvements(
     }
     for s in &mut suggestions {
         s.evidence = evidence.clone();
+        // Synthetic-profile guard: the LLM occasionally targets a name that
+        // has no backing profile file (e.g. "chat" — the UI's default
+        // identity, which exists only in the metrics, not in the agents
+        // dirs). Approving such an item then fails with "profile not found
+        // in any agents directory — nothing was written" even though the
+        // proposed prompt was exactly what the user wanted. Re-target the
+        // change onto the profile being reviewed, which owns the lessons,
+        // metrics and effect evidence this suggestion is based on.
+        if !s.agent_name.eq_ignore_ascii_case(&agent_config.name) {
+            tracing::info!(
+                "Improvement for '{}' targets unknown profile '{}' — re-targeting to '{}'",
+                agent_config.name,
+                s.agent_name,
+                agent_config.name
+            );
+            s.agent_name = agent_config.name.clone();
+        }
     }
 
     if suggestions.is_empty() {
@@ -562,6 +605,95 @@ pub async fn suggest_improvements(
     }
 
     Ok(suggestions)
+}
+
+/// 2d: re-target suggestions whose `agent_name` does not match a profile in
+/// the `roster` (case-insensitive) onto the best-matching roster entry by
+/// name similarity (a Dice coefficient over the lowercased names, matching
+/// the metrics file-name normalisation).
+///
+/// Rationale: the fleet review sees agent names from the metrics (which
+/// include synthetic identities like "chat" — the UI's default chat profile
+/// has no backing file in any agents dir). A suggestion targeting such a
+/// name fails on approve with "profile not found in any agents directory —
+/// nothing was written". The fleet prompt asks the LLM to name the profile
+/// it changes, and the roster IS the set of real profiles, so a
+/// near-miss name is almost certainly a spelling/case drift of a roster
+/// entry (e.g. "Orchestrator" vs "orchestrator") — snap it to the real
+/// one. Exact matches are left untouched.
+fn sanitize_fleet_agent_names(suggestions: &mut [ImprovementSuggestion], roster: &[(String, String)]) {
+    if suggestions.is_empty() || roster.is_empty() {
+        return;
+    }
+    for s in suggestions.iter_mut() {
+        let exact = roster
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case(&s.agent_name));
+        if exact {
+            continue;
+        }
+        // Best fuzzy match: highest Dice coefficient over the lowercased
+        // names, ignoring separators (spaces, underscores, hyphens) so
+        // "sub session" and "subsession" match. Requires a minimum
+        // similarity (0.6) to avoid snapping an unrelated name onto a
+        // random roster entry; otherwise the suggestion keeps its original
+        // name (and fails on approve, as before).
+        let norm = |s: &str| -> String {
+            s.to_ascii_lowercase()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect()
+        };
+        let target = norm(&s.agent_name);
+        let mut best: Option<(f64, String)> = None;
+        for (n, _) in roster.iter() {
+            let a = norm(n);
+            if a.is_empty() || target.is_empty() {
+                continue;
+            }
+            let score = dice(&a, &target);
+            let is_better = best.as_ref().map_or(true, |(b, _)| score > *b);
+            if is_better {
+                best = Some((score, n.clone()));
+            }
+        }
+        if let Some((score, name)) = best {
+            if score >= 0.6 {
+                tracing::info!(
+                    "Fleet improvement targets unknown profile '{}' — re-targeting to roster entry '{}' (similarity {:.2})",
+                    s.agent_name,
+                    name,
+                    score
+                );
+                s.agent_name = name;
+            }
+        }
+    }
+}
+
+/// Dice coefficient over two strings (character-bag overlap), in [0, 1].
+/// `dice("abc", "abc") == 1.0`; `dice("abc", "") == 0.0`.
+fn dice(a: &str, b: &str) -> f64 {
+    use std::collections::HashMap;
+    let count = |s: &str| {
+        let mut m: HashMap<char, usize> = HashMap::new();
+        for c in s.chars() {
+            *m.entry(c).or_insert(0) += 1;
+        }
+        m
+    };
+    let ca = count(a);
+    let cb = count(b);
+    let overlap: usize = ca
+        .iter()
+        .map(|(c, n)| (*n).min(cb.get(c).copied().unwrap_or(0)))
+        .sum();
+    let la: usize = ca.values().sum();
+    let lb: usize = cb.values().sum();
+    if la == 0 || lb == 0 {
+        return 0.0;
+    }
+    2.0 * overlap as f64 / (la + lb) as f64
 }
 
 /// 2b: the cross-agent fleet summary — one short line per agent with at
@@ -624,12 +756,29 @@ pub fn fleet_evidence_json(
             .find(|(n, _)| crate::agents::metrics::agent_file_name(n) == file_name)
             .map(|(n, _)| n.clone())
             .unwrap_or(file_name);
-        let name = display_name;
+        let plain_name = display_name;
+        let name = plain_name.clone();
         let s = log.summary_since(&name, Some(since));
+        // The chat profile has metrics (it is the UI's default agent identity)
+        // but no backing profile file — tell the fleet improver that a
+        // suggestion targeting it must be a prompt change, never a new_agents
+        // creation (approving one would fail with "profile not found" and the
+        // duplicate would shadow the real chat identity in the selector).
+        let chat_note = if name.eq_ignore_ascii_case(CHAT_PROFILE_NAME) {
+            format!(
+                " (note: '{}' is the chat profile — it has no backing .json file; \
+                 suggest prompt_change for it, never new_agents)",
+                CHAT_PROFILE_NAME
+            )
+        } else {
+            String::new()
+        };
         // The agent's newest tagged lessons (capped) — the only per-agent
         // free-text content in the block besides the deterministic metrics.
+        // (Tag lookup uses the PLAIN profile name: the chat_note suffix only
+        // decorates the name shown in the JSON below.)
         let mut tagged: Vec<MemoryEntry> = manager
-            .get_by_tag(&format!("agent:{name}"))
+            .get_by_tag(&format!("agent:{plain_name}"))
             .into_iter()
             .filter(|m| matches!(m.r#type, crate::memory::MemoryType::Lesson))
             .collect();
@@ -648,7 +797,7 @@ pub fn fleet_evidence_json(
             (s.tool_errors as f64 / s.tool_calls as f64 * 1_000.0).round() / 10.0
         };
         agents.push(serde_json::json!({
-            "name": name,
+            "name": format!("{name}{chat_note}"),
             "runs": s.runs,
             "tool_calls": s.tool_calls,
             "tool_errors": s.tool_errors,
@@ -761,14 +910,35 @@ pub async fn suggest_fleet_improvements(
     let roster_text = if roster.is_empty() {
         "(no agent profiles registered)".to_string()
     } else {
-        roster
+        let existing_list = roster
+            .iter()
+            .map(|(n, d)| {
+                let d: String = d.split_whitespace().collect::<Vec<_>>().join(" ");
+                format!("{n} ({})", truncate_to(&d, 160))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let roster_block = roster
             .iter()
             .map(|(n, d)| {
                 let d: String = d.split_whitespace().collect::<Vec<_>>().join(" ");
                 format!("{n}: {}", truncate_to(&d, 160))
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        // The synthetic chat profile exists (it is the UI's default identity,
+        // configured through the chat settings) but has no backing .json file
+        // in any agents dir — listing it among the real profiles would let the
+        // LLM propose a NEW agent named "chat" (approving one would fail with
+        // "profile not found" and the duplicate would shadow the real chat
+        // identity in the selector).
+        format!(
+            "Existing agent profiles (do NOT propose these as new agents): {existing_list}. \
+             Note: the chat profile ('{CHAT_PROFILE_NAME}') also exists — it is the UI's default \
+             agent, configured through the chat settings; it has no backing .json file, so a \
+             suggestion for it must be a prompt_change (never a new_agents entry). \
+             \n\nRoster (name: description):\n{roster_block}"
+        )
     };
 
     let focus_line = focus
@@ -787,7 +957,7 @@ pub async fn suggest_fleet_improvements(
          propose a shared skill (skill_updates) capturing the fix, and/or one suggestion per \
          affected agent (its agent_name set) with the prompt/tool change it needs.\n\
          2. A capability gap that recurs across agents → propose a NEW SHARED agent (new_agents) \
-         the fleet can hand off to.\n\
+         the fleet can hand off to.\n         2b. The chat profile ('{CHAT_PROFILE_NAME}') has no backing profile file - target it with \n         prompt_change, never new_agents (its run metrics may make it look like an existing profile; \n         approving a new 'chat' agent would fail and shadow the real chat identity).\n\
          3. Skills that exist but were never read fleet-wide (skills_never_read) → propose \
          retiring (action \"delete\") the ones with no clear ongoing value; merge heavily \
          overlapping skills.\n\
@@ -801,7 +971,7 @@ pub async fn suggest_fleet_improvements(
          [\n\
            {{\n\
              \"agent_name\": \"<profile to change>\",\n\
-             \"prompt_change\": \"new prompt text or null if no change needed\",\n\
+             \"prompt_change\": \"the FULL new system prompt text (replace the current one shown above) or null if no change needed\",\n\
              \"rationale\": \"why this change is needed (cite the fleet evidence)\",\n\
              \"description\": null,\n\
              \"allowed_tools\": null,\n\
@@ -852,6 +1022,13 @@ pub async fn suggest_fleet_improvements(
     for s in &mut suggestions {
         s.evidence = evidence_lines.clone();
     }
+
+    // Synthetic-profile guard (fleet variant): the LLM occasionally names a
+    // profile that exists only in the metrics (e.g. "chat" — the UI's
+    // default identity, which has no backing file) or drifts on the
+    // spelling/case of a roster entry. Re-target those onto the nearest
+    // roster entry so approve can find a real profile to write.
+    sanitize_fleet_agent_names(&mut suggestions, roster);
 
     if suggestions.is_empty() {
         tracing::debug!("No improvements suggested by the fleet review");
