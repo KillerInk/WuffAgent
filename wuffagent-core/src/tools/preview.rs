@@ -36,8 +36,8 @@ pub fn tool_args_summary(name: &str, arguments: &str) -> String {
         // Preferred argument fields per tool (first present field wins).
         let fields: &[&str] = match name {
             "shell" => &["command"],
-            "read_file" | "append_file" | "apply_diff" | "write_file" | "delete" | "file_info"
-            | "mkdir" | "list_dir" => &["path"],
+            "read_file" | "append_file" | "apply_diff" | "replace_lines" | "write_file"
+            | "delete" | "file_info" | "mkdir" | "list_dir" => &["path"],
             "copy" | "move" => &["dest"],
             "search_files" => &["pattern"],
             "search_content" => &["pattern", "path"],

@@ -45,6 +45,42 @@ fn test_apply_diff_tool_executes() {
 }
 
 #[test]
+fn test_replace_lines_tool_executes() {
+    let dir = temp_dir("toolrl");
+    let p = dir.join("tr.txt");
+    write(p.to_str().unwrap(), "one\ntwo\nthree\n");
+    let tool = ReplaceLinesTool::new();
+    assert_eq!(tool.name(), "replace_lines");
+    let mut prms = ToolParams {
+        values: std::collections::HashMap::new(),
+    };
+    prms.values.insert("path".to_string(), serde_json::json!(p.to_str().unwrap()));
+    prms.values.insert("start_line".to_string(), serde_json::json!(2));
+    prms.values.insert("end_line".to_string(), serde_json::json!(2));
+    prms.values.insert("new_content".to_string(), serde_json::json!("TWO"));
+    prms.values
+        .insert("verify_contains".to_string(), serde_json::json!("two"));
+    let out = tool.execute(prms).unwrap();
+    let json = success_json(out);
+    assert_eq!(json["lines_replaced"].as_u64().unwrap(), 1);
+    assert_eq!(json["verified"].as_bool().unwrap(), true);
+    assert_eq!(read_string(p.to_str().unwrap()), "one\nTWO\nthree\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_replace_lines_tool_missing_start_line() {
+    let tool = ReplaceLinesTool::new();
+    let err = tool
+        .execute(params(&[("path", "x.txt"), ("end_line", "1"), ("new_content", "a")]))
+        .unwrap_err();
+    let ToolError::InvalidParams(msg) = &err else {
+        panic!("{err:?}")
+    };
+    assert!(msg.contains("start_line"), "msg: {msg}");
+}
+
+#[test]
 fn test_mkdir_tool_executes() {
     let dir = temp_dir("toolmkdir");
     let nested = dir.join("x/y");

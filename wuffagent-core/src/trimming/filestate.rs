@@ -3,8 +3,9 @@
 //! The size/age-based trimmer knows nothing about whether its content is still
 //! true. That is wrong for `read_file` results: once the agent edits a file,
 //! every earlier snapshot of it is stale — kept in context it actively misleads
-//! (`apply_diff` SEARCH blocks stop matching, the model reasons about deleted
-//! lines) while eating budget that still-relevant context could use.
+//! (`apply_diff` SEARCH blocks stop matching, `replace_lines` line numbers go
+//! stale, the model reasons about deleted lines) while eating budget that
+//! still-relevant context could use.
 //!
 //! The stale state is derived at trim time as a **pure function of the message
 //! list** (see [`build_file_state_index`]) instead of being tracked in per-agent
@@ -133,14 +134,14 @@ pub fn is_protected_read(index: &FileStateIndex, key: &str, snapshot: &str) -> b
 
 /// Map a successful file-tool call to the paths it mutated (v1 table):
 ///
-/// - `write_file` / `append_file` / `apply_diff` / `delete` → `path`
+/// - `write_file` / `append_file` / `apply_diff` / `replace_lines` / `delete` → `path`
 /// - `copy` → `dest` only (copy does not mutate `src`)
 /// - `move` → `src` (gone) and `dest` (new content)
 ///
 /// Everything else (`shell`, search tools, …) mutates nothing trackable in v1.
 fn mutated_paths(name: &str, params: &ToolParams) -> Vec<String> {
     match name {
-        "write_file" | "append_file" | "apply_diff" | "delete" => {
+        "write_file" | "append_file" | "apply_diff" | "replace_lines" | "delete" => {
             params.get::<String>("path").into_iter().collect()
         }
         "copy" => params.get::<String>("dest").into_iter().collect(),

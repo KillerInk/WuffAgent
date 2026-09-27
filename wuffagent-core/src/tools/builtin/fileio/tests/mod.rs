@@ -3,6 +3,7 @@
 //! - `write.rs`: write/append/list_dir
 //! - `search.rs`: search_files + path validation
 //! - `diff.rs`: apply_diff (blocks, CRLF payload, anchoring)
+//! - `replace_lines.rs`: replace_lines (ranges, verify guard, preservation)
 //! - `move_copy.rs`: mkdir/delete/copy/move/file_info
 //! - `wiring.rs`: named tool wiring
 //! - `lineendings.rs`: CRLF / BOM / UTF-16 handling
@@ -15,6 +16,7 @@ mod diff;
 mod lineendings;
 mod move_copy;
 mod read;
+mod replace_lines;
 mod search;
 mod wiring;
 mod write;

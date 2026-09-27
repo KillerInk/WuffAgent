@@ -292,6 +292,54 @@ impl Tool for ApplyDiffTool {
     }
 }
 
+/// Replace a line range in an existing file (line-based alternative to
+/// `apply_diff`).
+pub struct ReplaceLinesTool;
+
+impl ReplaceLinesTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Tool for ReplaceLinesTool {
+    fn name(&self) -> &str {
+        "replace_lines"
+    }
+    fn description(&self) -> &str {
+        "Replace a line range in an existing file: the model names which lines (1-indexed, from read_file) to replace and the new text. Simpler than apply_diff — no exact-text search. An optional verify_contains guard (the targeted lines must contain that text) catches off-by-N line numbers; if it fails the error shows the actual targeted lines. Empty new_content deletes the range. The file's line ending (CRLF/LF) and UTF-8 BOM are preserved."
+    }
+    fn parameters_schema(&self) -> ToolSchema {
+        build_schema(
+            "replace_lines",
+            "Replace a line range in an existing file",
+            &[
+                ("path", "string", "Path of the file to edit.", false),
+                ("start_line", "integer", "First line to replace (1-indexed, as shown by read_file).", false),
+                ("end_line", "integer", "Last line to replace (1-indexed, inclusive).", false),
+                ("new_content", "string", "Replacement text for the whole range (may span multiple lines). Empty string = delete the range.", false),
+                ("verify_contains", "string", "Optional guard: the targeted lines must contain this text, otherwise the tool fails and reports the actual targeted lines. Use it to protect against stale line numbers.", true),
+            ],
+            &["path", "start_line", "end_line", "new_content"],
+        )
+    }
+    fn execute(&self, params: ToolParams) -> crate::tools::types::ToolResult<ToolOutput> {
+        let path = required_str(&params, "path")?;
+        if let Err(e) = validate_path(&path) {
+            return Err(e);
+        }
+        let start_line: usize = params
+            .get("start_line")
+            .ok_or_else(|| ToolError::InvalidParams("start_line is required".into()))?;
+        let end_line: usize = params
+            .get("end_line")
+            .ok_or_else(|| ToolError::InvalidParams("end_line is required".into()))?;
+        let new_content = required_str(&params, "new_content")?;
+        let verify_contains: Option<String> = params.get("verify_contains");
+        replace_lines(&path, start_line, end_line, &new_content, verify_contains.as_deref())
+    }
+}
+
 /// Create a directory.
 pub struct MkdirTool;
 

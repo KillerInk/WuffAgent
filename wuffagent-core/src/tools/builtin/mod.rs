@@ -24,7 +24,7 @@ pub use fetch_url::FetchUrlTool;
 pub use image::ShowImageTool;
 pub use fileio::{
     AppendFileTool, ApplyDiffTool, CopyTool, DeleteTool, FileInfoTool, ListDirTool, MkdirTool,
-    MoveTool, ReadFileTool, SearchFilesTool, WriteFileTool,
+    MoveTool, ReadFileTool, ReplaceLinesTool, SearchFilesTool, WriteFileTool,
 };
 pub use memory::{
     ConsolidateMemoriesTool, DeleteMemoryTool, SaveMemoryTool, SearchMemoryTool, UpdateMemoryTool,
@@ -152,6 +152,11 @@ pub fn register_builtins(
             "apply_diff",
             "Apply targeted edits to an existing file using SEARCH/REPLACE blocks",
             std::sync::Arc::new(ApplyDiffTool::new()) as std::sync::Arc<dyn Tool>,
+        ),
+        (
+            "replace_lines",
+            "Replace a line range in an existing file (start_line/end_line + new text; optional verify_contains guard)",
+            std::sync::Arc::new(ReplaceLinesTool::new()) as std::sync::Arc<dyn Tool>,
         ),
         (
             "mkdir",

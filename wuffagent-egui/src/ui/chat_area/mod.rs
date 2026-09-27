@@ -451,7 +451,7 @@ impl ChatApp {
         match name {
             "shell" => "⚡",
             "read_file" => "📄",
-            "write_file" | "append_file" | "apply_diff" => "✏️",
+            "write_file" | "append_file" | "apply_diff" | "replace_lines" => "✏️",
             "list_dir" | "mkdir" => "📁",
             "search_files" | "search_content" => "🔍",
             "copy" | "move" | "delete" | "file_info" => "📦",

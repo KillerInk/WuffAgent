@@ -244,3 +244,116 @@ pub(crate) fn parse_search_replace_blocks(diff: &str) -> Result<Vec<(String, Str
     }
     Ok(blocks)
 }
+
+/// Replace a line range in an existing file.
+///
+/// The model names WHICH lines to replace (1-indexed, inclusive) and the
+/// replacement text — no exact-text search needed.
+///
+/// `verify_contains` is an optional guard: when given, the targeted lines
+/// must contain that text (substring match, line-ending normalized) or the
+/// tool fails and reports the actual targeted lines. This catches off-by-N
+/// line numbers when the model edited a file it read earlier.
+///
+/// Line endings and BOM are handled exactly like `apply_diff`: matching
+/// happens on a line-split view of the file, and the file's dominant line
+/// ending (CRLF vs LF decided by majority) and UTF-8 BOM are restored before
+/// writing, so editing a CRLF file never rewrites it as LF. The original
+/// trailing-newline state of the file is preserved.
+///
+/// Failure never touches the file; error messages are self-correcting
+/// (they report the total line count or the actual targeted lines so the
+/// model can retry without a full re-read).
+pub(crate) fn replace_lines(
+    path: &str,
+    start_line: usize,
+    end_line: usize,
+    new_content: &str,
+    verify_contains: Option<&str>,
+) -> crate::tools::types::ToolResult<ToolOutput> {
+    let raw = read_text_file(path)?;
+    let had_bom = raw.starts_with(UTF8_BOM);
+    let content = strip_utf8_bom(&raw);
+    let eol = detect_eol(content.as_bytes());
+    let had_trailing_newline = content.ends_with('\n') || content.ends_with('\r');
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return Err(ToolError::Execution(format!(
+            "File '{}' is empty (no lines to replace); use write_file instead",
+            path
+        )));
+    }
+    if start_line < 1 {
+        return Err(ToolError::Execution(format!(
+            "start_line must be >= 1 (1-indexed); got {} in '{}'",
+            start_line, path
+        )));
+    }
+    if start_line > end_line {
+        return Err(ToolError::Execution(format!(
+            "start_line ({}) is after end_line ({}) in '{}'; the range must target at least one existing line",
+            start_line, end_line, path
+        )));
+    }
+    if end_line > total {
+        let from = total.saturating_sub(7).max(1);
+        let snippet: String = lines[from - 1..]
+            .iter()
+            .enumerate()
+            .map(|(i, l)| format!("{}: {}", from + i, l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(ToolError::Execution(format!(
+            "end_line ({}) is beyond the end of '{}' which has {} lines; last lines:\n{}",
+            end_line,
+            path,
+            total,
+            snippet
+        )));
+    }
+
+    let (lo, hi) = (start_line - 1, end_line);
+    if let Some(verify) = verify_contains {
+        let verify = verify.replace("\r\n", "\n");
+        let targeted = lines[lo..hi].join("\n");
+        if !targeted.contains(verify.as_str()) {
+            return Err(ToolError::Execution(format!(
+                "verify_contains text not found in lines {}–{} of '{}'; targeted lines:\n{}",
+                start_line,
+                end_line,
+                path,
+                targeted
+            )));
+        }
+    }
+
+    let replacement: Vec<&str> = new_content.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(total - (hi - lo) + replacement.len());
+    out.extend_from_slice(&lines[..lo]);
+    out.extend_from_slice(&replacement);
+    out.extend_from_slice(&lines[hi..]);
+
+    let sep = eol.as_str();
+    let mut result = out.join(sep);
+    if had_trailing_newline && !result.is_empty() && !result.ends_with(sep) {
+        result.push_str(sep);
+    }
+    if had_bom {
+        result.insert(0, UTF8_BOM);
+    }
+    fs::write(path, &result).map_err(|e| {
+        ToolError::Execution(format!("Failed to write patched file '{}': {}", path, e))
+    })?;
+
+    Ok(ToolOutput::Success(serde_json::json!({
+        "path": path,
+        "start_line": start_line,
+        "end_line": end_line,
+        "lines_replaced": hi - lo,
+        "lines_inserted": replacement.len(),
+        "verified": verify_contains.is_some(),
+        "success": true,
+    })))
+}

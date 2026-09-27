@@ -73,7 +73,7 @@ const FILES_MAX_ITEMS: usize = 12;
 /// Tools whose effect outlives the trimmed round: the model should remember
 /// which files it WROTE even after the write rounds are gone.
 const FILE_MUTATING_TOOLS: &[&str] = &[
-    "write_file", "apply_diff", "append_file", "mkdir", "move", "copy", "delete",
+    "write_file", "apply_diff", "replace_lines", "append_file", "mkdir", "move", "copy", "delete",
 ];
 
 /// One line of the rendered brief that `from_rendered` must map back to a
