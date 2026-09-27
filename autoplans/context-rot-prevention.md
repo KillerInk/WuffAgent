@@ -264,6 +264,16 @@ regardless.)
   appears in the NEXT LLM request (would need a scripted LLM harness in
   tests/context.rs style); covered indirectly by the apply_note/reanchor
   unit tests + the tool tests. No `note` metrics line (per the design).
+- Known cosmetic gap (observed during the 2026-09-28 dogfood): the note
+  message is `record_in_store`d but emits no UI event, so it does not
+  appear as a bubble in the transcript view until the next session
+  flush/reload. It IS present in every LLM request (the primary purpose)
+  and in the store. If it matters, emit an `AppEvent` for it in the loop
+  drain.
+- Live dogfood (2026-09-28, relaunch build from 1e3ea23): `session_note`
+  call returned `session_note_queued`; marker expected in the session file
+  at the next flush. Tool description cap wording fixed in e091a8a (input
+  cap 2000; 400 only on brief-fold).
 
 ## Constraints / notes
 
