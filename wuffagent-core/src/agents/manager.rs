@@ -76,7 +76,10 @@ impl AgentManager {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(config) = serde_json::from_str::<AgentConfig>(&content) {
                         if seen.insert(config.name.clone(), ()).is_none() {
-                            tracing::info!(
+                            // debug (not info): list_agents() re-scans the dirs on
+                            // every UI frame / get_agent() call, so info-level
+                            // per-agent lines flooded the log.
+                            tracing::debug!(
                                 "Discovered agent: {} from {:?} (tools={:?})",
                                 config.name,
                                 dir,
@@ -112,7 +115,8 @@ impl AgentManager {
                             session_note_enabled: true,
                         };
                         if seen.insert(config.name.clone(), ()).is_none() {
-                            tracing::info!(
+                            // debug (not info): see the note on the non-legacy path.
+                            tracing::debug!(
                                 "Discovered legacy agent: {} from {:?} (tools={:?})",
                                 config.name,
                                 dir,
@@ -151,6 +155,15 @@ impl AgentManager {
         }
 
         agents.sort_by(|a, b| a.name.cmp(&b.name));
+        // debug: list_agents() is called on hot paths (UI frames, get_agent),
+        // so an info-level summary per scan would flood the log. Deliberate
+        // reloads still log via reload() below.
+        tracing::debug!(
+            "list_agents: scanned {:?} + {} search dir(s), found {} agent(s)",
+            self.agents_dir,
+            self.search_dirs.len(),
+            agents.len()
+        );
         Ok(agents)
     }
 
