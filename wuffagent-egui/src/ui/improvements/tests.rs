@@ -787,3 +787,51 @@ fn test_mark_check_finished_sets_status() {
         panel.run_check_status
     );
 }
+
+// ── Agent list cache (the per-frame list_agents() log-flood fix) ──────────
+
+/// The agent list is cached: while the scanned agent dirs are untouched, a
+/// refresh must NOT re-read them (that per-frame re-scan + per-agent logging
+/// flooded the log while tokens streamed). Proof without log capture: an
+/// agent FILE rewritten between refreshes is invisible to the cache (file
+/// content is not part of the dir-mtime fingerprint); after the DIR's mtime
+/// changes, the re-scan picks the new content up.
+#[test]
+fn agent_list_cache_skips_rescan_until_dirs_change() {
+    let dir = temp_agents_dir("cache");
+    AgentManager::new(dir.clone())
+        .add_agent(&existing_agent("coder"))
+        .unwrap();
+    let mut panel = ImprovementsPanel::new();
+    let manager = AgentManager::new(dir.clone());
+
+    panel.refresh_agent_cache(&manager);
+    assert_eq!(panel.agents().len(), 1, "first refresh populates the cache");
+    assert_eq!(panel.agents()[0].system_prompt, "old prompt");
+
+    // Rewrite the agent FILE in place (a content write does NOT change the
+    // dir's mtime) → the next refresh must still serve the cache, so the
+    // on-disk change stays invisible.
+    let mut changed = existing_agent("coder");
+    changed.system_prompt = "changed on disk".to_string();
+    changed.save_to_file(&dir.join("coder.json")).unwrap();
+    panel.refresh_agent_cache(&manager);
+    assert_eq!(
+        panel.agents()[0].system_prompt,
+        "old prompt",
+        "untouched dir: refresh must skip the re-scan and serve the cache"
+    );
+
+    // A dir mtime change (an agent file saved/edited) must invalidate —
+    // creating a file in the dir bumps its mtime (a non-.json name, so the
+    // re-scan ignores it as an agent).
+    std::fs::write(dir.join("mtime-bump.tmp"), b"x").unwrap();
+    panel.refresh_agent_cache(&manager);
+    assert_eq!(
+        panel.agents()[0].system_prompt,
+        "changed on disk",
+        "changed dir mtime: the re-scan must see the rewritten file"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
