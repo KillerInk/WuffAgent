@@ -96,6 +96,11 @@ impl ImprovementsPanel {
             .collapsible(true)
             .resizable(true)
             .show(ctx, |ui| {
+                // Re-fetch the agent list ONLY if the agent dirs changed
+                // since the last frame (see AgentListCache) — the previous
+                // per-frame list_agents() re-scan flooded the log while
+                // tokens streamed.
+                self.refresh_agent_cache(agent_manager);
                 // 4a: one-line loop-status header (data from 2a's state file,
                 // same snapshot the list_improvement_status tool reads). The
                 // panel is fleet-wide, so show the most recent check across
@@ -113,11 +118,10 @@ impl ImprovementsPanel {
                 // `ImprovementSuggested`, the always-sent done-signal →
                 // `ImprovementCheckFinished`, which clears the running flag).
                 {
-                    let agents: Vec<String> = agent_manager
-                        .list_agents()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|a| a.name)
+                    let agents: Vec<String> = self
+                        .agents()
+                        .iter()
+                        .map(|a| a.name.clone())
                         .collect();
                     // 2d: the selector lists every profile PLUS the special
                     // "fleet" entry (cross-agent review, 2b(b)).
@@ -168,11 +172,10 @@ impl ImprovementsPanel {
                                 // description of every known profile (the
                                 // MemoryManager does not know about profiles,
                                 // so the panel builds it).
-                                let roster: Vec<(String, String)> = agent_manager
-                                    .list_agents()
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .map(|a| (a.name, a.description))
+                                let roster: Vec<(String, String)> = self
+                                    .agents()
+                                    .iter()
+                                    .map(|a| (a.name.clone(), a.description.clone()))
                                     .collect();
                                 self.run_check_running = true;
                                 self.run_check_status = "Checking the fleet…".to_string();
@@ -183,7 +186,12 @@ impl ImprovementsPanel {
                                     send_check_result(&events, FLEET_SCOPE, &result);
                                 });
                             } else {
-                                match agent_manager.get_agent(&agent) {
+                                match self
+                                    .agents()
+                                    .iter()
+                                    .find(|a| a.name == agent)
+                                    .cloned()
+                                {
                                     Some(cfg) => {
                                         self.run_check_running = true;
                                         self.run_check_status = format!("Checking '{agent}'…");
@@ -241,6 +249,21 @@ impl ImprovementsPanel {
                     })
                     .collect();
 
+                // The CURRENT system prompt of each pending item's agent (for
+                // the I3 old-vs-new comparison), from the cached agent list
+                // (NOT a fresh disk scan per frame). Precomputed because the
+                // loop below holds a &mut borrow of `self.pending`.
+                let current_prompts: Vec<Option<String>> = self
+                    .pending
+                    .iter()
+                    .map(|p| {
+                        self.agents()
+                            .iter()
+                            .find(|a| a.name == p.agent_name)
+                            .map(|c| c.system_prompt.clone())
+                    })
+                    .collect();
+
                 // Collect actions to execute AFTER the loop (avoids mutating
                 // `self.pending` while iterating).
                 let mut to_remove: Vec<usize> = Vec::new();
@@ -266,9 +289,7 @@ impl ImprovementsPanel {
                         if let Some(new_prompt) = &imp.prompt_change {
                             // I3: old-vs-new side by side — current prompt
                             // (read-only) next to the proposed one (editable).
-                            let current_prompt = agent_manager
-                                .get_agent(&imp.agent_name)
-                                .map(|c| c.system_prompt.clone());
+                            let current_prompt = &current_prompts[i];
                             // Equal columns: a plain ui.horizontal lets the
                             // read-only side (a long unwrapped label whose
                             // desired size is the full line length) eat the

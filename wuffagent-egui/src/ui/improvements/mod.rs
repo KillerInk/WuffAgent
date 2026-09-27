@@ -26,12 +26,11 @@ pub use memory::{
     apply_improvement_detailed, applied_marker, rejection_lesson, remember_applied_prompt,
     remember_dismissal, resolve_agent_dir,
 };
-#[cfg(test)]
 pub use wuffagent_core::agents::config::AgentConfig;
 #[cfg(test)]
 pub use wuffagent_core::memory::skills::SkillStore;
-#[cfg(test)]
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 /// A pending suggestion in the review panel (UI-level wrapper around the core
 /// `ImprovementSuggestion`).
@@ -129,6 +128,19 @@ impl From<&wuffagent_core::memory::ImprovementSuggestion> for PendingImprovement
     }
 }
 
+/// A cached [`AgentManager::list_agents`] result plus the fingerprint of
+/// the directories that produced it (each dir's path + mtime).
+///
+/// The panel used to call `list_agents()` on EVERY frame — a full disk
+/// re-scan that re-reads and re-logs every agent profile, flooding the log
+/// while tokens streamed (egui redraws on each streamed token). The list is
+/// now refreshed only when a scanned dir's mtime changes (an agent file was
+/// saved or edited) or the dir set changed.
+struct AgentListCache {
+    fingerprint: Vec<(PathBuf, SystemTime)>,
+    agents: Vec<AgentConfig>,
+}
+
 /// Review panel state, owned by `ChatApp`.
 pub struct ImprovementsPanel {
     pub pending: Vec<PendingImprovement>,
@@ -143,6 +155,9 @@ pub struct ImprovementsPanel {
     run_check_agent: String,
     run_check_running: bool,
     run_check_status: String,
+    /// Cached agent list (see [`AgentListCache`]); refreshed per frame only
+    /// when the scanned agent dirs actually changed.
+    agent_cache: Option<AgentListCache>,
 }
 
 impl ImprovementsPanel {
@@ -157,7 +172,46 @@ impl ImprovementsPanel {
             run_check_agent: String::new(),
             run_check_running: false,
             run_check_status: String::new(),
+            agent_cache: None,
         }
+    }
+
+    /// Re-fetch the cached agent list, but only when the scanned agent dirs
+    /// actually changed (a dir's mtime or the dir set itself differs from
+    /// the cache fingerprint). Cheap per-frame: just `stat`s the dirs.
+    fn refresh_agent_cache(&mut self, manager: &AgentManager) {
+        // The same dir set `list_agents()` scans: primary first, search
+        // dirs after (skipping duplicates of the primary).
+        let primary = manager.agents_dir().clone();
+        let dirs: Vec<PathBuf> = std::iter::once(primary.clone())
+            .chain(manager.search_dirs().iter().filter(|d| *d != &primary).cloned())
+            .collect();
+        let fingerprint: Vec<(PathBuf, SystemTime)> = dirs
+            .iter()
+            .map(|d| {
+                let mtime = std::fs::metadata(d)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                (d.clone(), mtime)
+            })
+            .collect();
+        let fresh = self
+            .agent_cache
+            .as_ref()
+            .is_some_and(|c| c.fingerprint == fingerprint);
+        if !fresh {
+            let agents = manager.list_agents().unwrap_or_default();
+            self.agent_cache = Some(AgentListCache { fingerprint, agents });
+        }
+    }
+
+    /// The cached agent list (empty until the first refresh).
+    fn agents(&self) -> &[AgentConfig] {
+        self.agent_cache
+            .as_ref()
+            .map(|c| c.agents.as_slice())
+            .unwrap_or(&[])
     }
 
     /// 4b: a manual "run check now" check finished (see
