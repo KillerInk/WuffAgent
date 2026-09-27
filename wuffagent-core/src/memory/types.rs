@@ -187,6 +187,18 @@ pub struct MemoryConfig {
     /// trap. Clamped to >= 1 at the use site.
     #[serde(default = "default_improvement_min_samples")]
     pub improvement_min_samples: u32,
+    /// 2f: wall-clock floor for the AUTO improvement check (in hours).
+    ///
+    /// ON TOP OF the per-agent task cooldown
+    /// (`improvement_cooldown_tasks` × no-op backoff): the per-task auto
+    /// check does not run again until at least this much REAL time has
+    /// passed since the agent's last check — so a burst of tasks can no
+    /// longer burn through several LLM checks in a minute. 0 = off (the
+    /// legacy pure task-count gate). The on-demand paths
+    /// (`run_self_improvement` tool, the panel's "Run check") are NOT
+    /// affected by this floor.
+    #[serde(default = "default_improvement_min_interval_hours")]
+    pub improvement_min_interval_hours: u32,
     /// Whether the LLM memory-maintenance pass is enabled (opt-in).
     #[serde(default = "default_memory_maintenance")]
     pub memory_maintenance: bool,
@@ -260,6 +272,10 @@ pub struct ImprovementStatus {
     /// `MemoryConfig.improvement_cooldown_tasks` (at most one check every N
     /// completed tasks).
     pub improvement_cooldown_tasks: usize,
+    /// 2f: `MemoryConfig.improvement_min_interval_hours` (wall-clock floor
+    /// on top of the task cooldown; 0 = off).
+    #[serde(default)]
+    pub improvement_min_interval_hours: u32,
     /// Total Lesson entries in the store (the evidence pool size).
     pub lesson_count: usize,
     /// 2a: per-agent states (empty = no per-agent check recorded yet).
@@ -281,6 +297,9 @@ fn default_improvement_metrics_window_days() -> u32 {
 }
 fn default_improvement_min_samples() -> u32 {
     3
+}
+fn default_improvement_min_interval_hours() -> u32 {
+    0
 }
 fn default_memory_maintenance() -> bool {
     false
@@ -311,6 +330,7 @@ impl Default for MemoryConfig {
             improvement_cooldown_tasks: 5,
             improvement_metrics_window_days: 7,
             improvement_min_samples: 3,
+            improvement_min_interval_hours: 0,
             memory_maintenance: false,
             memory_maintenance_threshold: 40,
             memory_maintenance_timeout_secs: 600,

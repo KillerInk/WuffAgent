@@ -75,9 +75,10 @@ impl Tool for ListImprovementStatusTool {
                 .unwrap_or_default();
             let mult =
                 crate::agents::improvement::no_op_backoff_multiplier(state.no_op_streak.max(1));
+            let min_interval = min_interval_label(status.improvement_min_interval_hours);
             return Ok(ToolOutput::success(format!(
                 "Improvement loop for '{name}': auto_improve={}; last check: {}; \
-                 tasks since last check: {} (cooldown base {} task(s), backoff x{} = {}); \
+                 tasks since last check: {} (cooldown base {} task(s), backoff x{} = {}, min interval: {}); \
                  no-op streak: {}; new evidence since last check: {}; last effect verdict: {}; \
                  lessons in store: {}{}",
                 if status.auto_improve { "on" } else { "off" },
@@ -86,6 +87,7 @@ impl Tool for ListImprovementStatusTool {
                 status.improvement_cooldown_tasks,
                 mult,
                 status.improvement_cooldown_tasks.saturating_mul(mult as usize),
+                min_interval,
                 state.no_op_streak,
                 if self
                     .memory
@@ -110,11 +112,14 @@ impl Tool for ListImprovementStatusTool {
         }
 
         // Global view (legacy v1 semantics) + a compact per-agent listing.
+        let min_interval = min_interval_label(status.improvement_min_interval_hours);
         let mut out = format!(
-            "Improvement loop: auto_improve={}; cooldown=at most 1 check per {} completed task(s); \
-             last check (global/legacy): {}; new evidence since last check: {}; lessons in store: {}",
+            "Improvement loop: auto_improve={}; cooldown=at most 1 check per {} completed task(s), \
+             min interval: {}; last check (global/legacy): {}; new evidence since last check: {}; \
+             lessons in store: {}",
             if status.auto_improve { "on" } else { "off" },
             status.improvement_cooldown_tasks,
+            min_interval,
             last_check,
             if status.has_new_evidence { "yes" } else { "no" },
             status.lesson_count,
@@ -134,6 +139,15 @@ impl Tool for ListImprovementStatusTool {
             }
         }
         Ok(ToolOutput::success(out))
+    }
+}
+
+/// 2f: render the wall-clock floor: "off" for 0 (disabled), else "Nh".
+fn min_interval_label(hours: u32) -> String {
+    if hours == 0 {
+        "off".to_string()
+    } else {
+        format!("{hours}h")
     }
 }
 
@@ -212,6 +226,8 @@ mod tests {
         assert!(out.contains("auto_improve=on"), "got: {out}");
         assert!(out.contains("last check (global/legacy): never"), "got: {out}");
         assert!(out.contains("new evidence since last check: no"), "got: {out}");
+        // 2f: the default (0h) wall-clock floor renders as "off".
+        assert!(out.contains("min interval: off"), "got: {out}");
         assert!(out.contains("lessons in store: 0"), "got: {out}");
     }
 
@@ -268,6 +284,8 @@ mod tests {
         assert!(out.contains("no-op streak: 2"), "got: {out}");
         // Default cooldown base is 5 → x2 = 10.
         assert!(out.contains("backoff x2 = 10"), "got: {out}");
+        // 2f: the default (0h) wall-clock floor renders as "off".
+        assert!(out.contains("min interval: off"), "got: {out}");
         assert!(out.contains("new evidence since last check: no"), "got: {out}");
         assert!(out.contains("last effect verdict: neutral"), "got: {out}");
 
@@ -294,5 +312,27 @@ mod tests {
         let schema = tool.parameters_schema();
         assert_eq!(schema.name, "list_improvement_status");
         assert!(schema.input_type.as_ref().unwrap().required.is_empty());
+    }
+
+    /// 2f: a configured wall-clock floor renders as "Nh" in both views (the
+    /// default 0 renders as "off" — covered by the tests above).
+    #[test]
+    fn test_2f_status_shows_configured_min_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = MemoryConfig {
+            improvement_min_interval_hours: 12,
+            memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        let manager = Arc::new(MemoryManager::new(config).unwrap());
+        manager.record_agent_improvement_check("coder", true);
+        manager.record_agent_task_completed("coder");
+        let tool = ListImprovementStatusTool::new(manager);
+
+        assert!(run(&tool).contains("min interval: 12h"), "12h → 12h (global)");
+        assert!(
+            run_with_agent(&tool, "coder").contains("min interval: 12h"),
+            "12h → 12h (per-agent)"
+        );
     }
 }

@@ -65,3 +65,21 @@ fn test_i4_cooldown_and_auto_improve_defaults() {
         serde_json::from_str(r#"{"auto_improve": false}"#).expect("config should load");
     assert!(!explicit.auto_improve);
 }
+
+#[test]
+fn test_2f_min_interval_hours_default_and_explicit() {
+    // 2f: the wall-clock floor is OFF by default (0 = the legacy pure
+    // task-count gate), old config files load with that default, and an
+    // explicit value is respected.
+    let config = MemoryConfig::default();
+    assert_eq!(config.improvement_min_interval_hours, 0, "2f: off by default");
+
+    let legacy: MemoryConfig =
+        serde_json::from_str(r#"{ "enabled": true }"#).expect("old config should load");
+    assert_eq!(legacy.improvement_min_interval_hours, 0, "legacy files default to off");
+
+    let explicit: MemoryConfig =
+        serde_json::from_str(r#"{ "improvement_min_interval_hours": 24 }"#)
+            .expect("config should load");
+    assert_eq!(explicit.improvement_min_interval_hours, 24);
+}

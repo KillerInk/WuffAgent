@@ -1,7 +1,8 @@
 # WuffAgent Self-Improvement — Gap Analysis Round 2 (plan, 2026-09-26)
 
-**Status:** MOSTLY DONE (wuffagent; status log below is current, last updated in 123c02e).
-Remaining: 2e min-interval knob + stretch F/I. Companion to `plans/self-improvement-gaps.md`
+**Status:** DONE except stretch (wuffagent; status log below is current).
+Remaining: only stretch F (eval harness) + I (richer feedback). Companion to
+`plans/self-improvement-gaps.md`
 (round 1, 2026-07 — now fully implemented) and
 `autoplans/finish-self-improvement-loop.md` (round 1's execution log, done
 2026-09-25).
@@ -31,11 +32,19 @@ This round audits what is **missing** in the self-improvement loop itself.
   read/never-read, single JSON block), cost-gated (no signal → no call), state
   recorded under the pseudo-agent `"fleet"` (visible in `list_improvement_status` +
   the panel header). The panel's run-check selector gained a `fleet` entry.
-- **2e: half done.** `improvement_metrics_window_days` (default 7) exists and is used
-  by improver + `read_metrics`. `improvement_min_interval_hours` (wall-clock lower
-  bound on top of the task cooldown) is NOT implemented.
-- **Remaining:** 2e remainder (min-interval knob), stretch F (eval harness), stretch I
-  (richer feedback). 3b's "trash dir" was superseded by 3c's history snapshots.
+- **2e: done 2026-09-27.** `improvement_metrics_window_days` (default 7) existed; the
+  remainder — `improvement_min_interval_hours` (wall-clock floor, default 0 = off) —
+  is implemented: `MemoryConfig` field (serde-defaulted, old configs load) +
+  `MemoryManager::agent_improvement_due` now also requires that much REAL time since
+  the agent's last check (per-agent ts, v1 global fallback — same rule as the
+  evidence gate), on top of the task-count cooldown × no-op backoff. The on-demand
+  paths (`run_self_improvement` tool, panel "Run check") bypass it. Surfaced as
+  "min interval: Nh|off" in `list_improvement_status` (both views) and the panel
+  header. Tests: gate on/off, floor-elapsed, task-gate-still-rules, v1 fallback
+  (cost.rs), config default/explicit (types/tests.rs), tool rendering (status.rs),
+  egui header (draw.rs). `cargo test --workspace` green.
+- **Remaining:** stretch F (eval harness), stretch I (richer feedback). 3b's "trash
+  dir" was superseded by 3c's history snapshots.
 
 ## What exists (verified in code, 2026-09-26)
 
@@ -212,12 +221,13 @@ Thumbs up/down per message only. No per-tool-error feedback, no
   overlapping/missing roles") → suggestions for any agent incl.
   `new_agents`. Keep it ONE call (cost). Config:
   `improvement_global_enabled: bool` (default true, tool-gated anyway).
-- **2e. MemoryConfig knobs (fixes H.1/H.2).**
+- **2e. MemoryConfig knobs (fixes H.1/H.2). — DONE (both knobs; 2026-09-27).**
   `improvement_metrics_window_days: u32` (default 7; used in
-  improvement.rs:225 instead of hardcoded), optional
-  `improvement_min_interval_hours: u64` (default 0 = off; wall-clock
-  lower bound on top of the task cooldown — `ImprovementState` already
-  stores timestamps).
+  improvement.rs:225 instead of hardcoded) + `improvement_min_interval_hours: u32`
+  (implemented as u32, default 0 = off; wall-clock lower bound ON TOP of the
+  per-agent task cooldown × no-op backoff, checked in
+  `MemoryManager::agent_improvement_due` using the per-agent/v1-fallback
+  `last_check` timestamps).
 
 ### Phase 3 — skills become first-class improvement memory (1–2 days)
 - **3a. Skill usage line in metrics (foundation for E).**

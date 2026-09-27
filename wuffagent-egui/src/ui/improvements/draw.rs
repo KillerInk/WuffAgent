@@ -746,17 +746,24 @@ fn skill_snapshot_ts(path: &std::path::Path, name: &str) -> u64 {
 }
 
 /// 4a: the panel's one-line loop-status header, e.g.
-/// "Loop: last check 12:41:05 (3m ago) · new evidence: yes · lessons: 5 · auto_improve: on".
+/// "Loop: last check 12:41:05 (3m ago) · new evidence: yes · lessons: 5 · auto_improve: on
+/// · min interval: off".
 /// Read from the same 2a state snapshot the `list_improvement_status` tool uses.
 fn loop_status_header_line(
     status: &wuffagent_core::memory::ImprovementStatus,
 ) -> String {
+    let min_interval = if status.improvement_min_interval_hours == 0 {
+        "off".to_string()
+    } else {
+        format!("{}h", status.improvement_min_interval_hours)
+    };
     format!(
-        "Loop: last check {} · new evidence: {} · lessons: {} · auto_improve: {}",
+        "Loop: last check {} · new evidence: {} · lessons: {} · auto_improve: {} · min interval: {}",
         format_last_check(most_recent_check(status)),
         if status.has_new_evidence { "yes" } else { "no" },
         status.lesson_count,
         if status.auto_improve { "on" } else { "off" },
+        min_interval,
     )
 }
 
@@ -807,6 +814,7 @@ mod tests_4a {
             has_new_evidence: false,
             auto_improve: true,
             improvement_cooldown_tasks: 5,
+            improvement_min_interval_hours: 0,
             lesson_count: 0,
             agents: std::collections::BTreeMap::new(),
         }
@@ -827,6 +835,15 @@ mod tests_4a {
         assert!(line.contains("last check never"), "got: {line}");
         assert!(line.contains("new evidence: no"), "got: {line}");
         assert!(line.contains("auto_improve: on"), "got: {line}");
+        assert!(line.contains("min interval: off"), "got: {line}");
+    }
+
+    #[test]
+    fn header_shows_configured_min_interval() {
+        let mut s = status();
+        s.improvement_min_interval_hours = 24;
+        let line = loop_status_header_line(&s);
+        assert!(line.contains("min interval: 24h"), "got: {line}");
     }
 
     #[test]

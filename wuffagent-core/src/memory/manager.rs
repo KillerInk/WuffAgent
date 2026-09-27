@@ -378,11 +378,42 @@ impl MemoryManager {
     /// 3: x3, 4+: x4 — so an agent whose lessons keep arriving but never
     /// yield a suggestion is re-checked less often; any productive check
     /// (or an applied one) resets the streak to 0.
+    ///
+    /// 2f: wall-clock floor (config `improvement_min_interval_hours` > 0):
+    /// the check is ALSO not due until that much real time has passed since
+    /// the agent's last check (per-agent timestamp, with the legacy v1
+    /// global baseline as fallback — the same rule as the evidence gate).
+    /// A burst of tasks can no longer burn through several LLM checks in a
+    /// minute. 0 = off (the legacy pure task-count gate). The on-demand
+    /// paths (`run_self_improvement`, the panel's "Run check") bypass this
+    /// gate entirely.
     pub fn agent_improvement_due(&self, agent: &str, base_cooldown_tasks: usize) -> bool {
-        let state = self.agent_improvement_state(agent);
         let base = base_cooldown_tasks.max(1) as u64;
-        let mult = crate::agents::improvement::no_op_backoff_multiplier(state.no_op_streak);
-        state.runs_since_check >= base * mult
+        let doc = self.load_state_doc();
+        let rec = doc.agents.get(agent);
+        let runs = rec.map_or(0, |r| r.runs_since_check);
+        let streak = rec.map_or(0, |r| r.no_op_streak);
+        let mult = crate::agents::improvement::no_op_backoff_multiplier(streak);
+        if runs < base * mult {
+            return false;
+        }
+        let min_hours = self.config().improvement_min_interval_hours;
+        if min_hours > 0 {
+            let last = rec
+                .and_then(|r| r.last_check)
+                .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms))
+                .or_else(|| {
+                    doc.last_check
+                        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                });
+            if let Some(last) = last {
+                let elapsed_h = chrono::Utc::now().signed_duration_since(last).num_hours().max(0);
+                if elapsed_h < min_hours as i64 {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// 2a: record that an improvement check for `agent` just ran.
@@ -510,6 +541,7 @@ impl MemoryManager {
             has_new_evidence: self.has_new_improvement_evidence(),
             auto_improve: config.auto_improve,
             improvement_cooldown_tasks: config.improvement_cooldown_tasks,
+            improvement_min_interval_hours: config.improvement_min_interval_hours,
             lesson_count: memories
                 .iter()
                 .filter(|e| e.r#type == MemoryType::Lesson)

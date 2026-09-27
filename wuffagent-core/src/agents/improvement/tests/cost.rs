@@ -300,3 +300,101 @@ fn test_v1_state_file_compat() {
         .unwrap();
     assert!(manager.has_new_agent_improvement_evidence("coder"));
 }
+
+// ── 2f: wall-clock floor (improvement_min_interval_hours) ──
+
+/// 2f test helper: backdate the persisted improvement check by N hours —
+/// either the per-agent `last_check` (unix ms) or the legacy v1 GLOBAL one
+/// (unix seconds, `agent = None`). The state doc is private to the manager,
+/// so the file is edited as plain JSON.
+fn backdate_check(dir: &std::path::Path, agent: Option<&str>, hours: i64) {
+    let path = dir.join("improvement_state.json");
+    let content = std::fs::read_to_string(&path).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    match agent {
+        Some(a) => {
+            let ms = (chrono::Utc::now() - chrono::Duration::hours(hours)).timestamp_millis();
+            v["agents"][a]["last_check"] = serde_json::json!(ms);
+        }
+        None => {
+            let secs = (chrono::Utc::now() - chrono::Duration::hours(hours)).timestamp();
+            v["last_check"] = serde_json::json!(secs);
+        }
+    }
+    std::fs::write(&path, v.to_string()).unwrap();
+}
+
+/// 2f: with a wall-clock floor configured, passing the task-count gate is
+/// NOT enough — the check is only due once the floor has elapsed since the
+/// agent's last check; the task-count gate still rules on its own.
+#[test]
+fn test_min_interval_hours_gates_due() {
+    let dir = tempdir().unwrap();
+    let make = |hours: u32| {
+        let config = MemoryConfig {
+            improvement_min_interval_hours: hours,
+            improvement_cooldown_tasks: 1,
+            memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        MemoryManager::new(config).unwrap()
+    };
+
+    // 0h (the default) → the legacy pure task-count gate: 1 task, base 1 → due.
+    let m = make(0);
+    m.record_agent_task_completed("coder");
+    assert!(m.agent_improvement_due("coder", 1), "0h: no wall-clock gate");
+
+    // 1h floor: a check recorded just now + 3 tasks (task gate 3/1 passes)
+    // → still NOT due (the wall-clock gate holds it back).
+    let m = make(1);
+    m.record_agent_improvement_check("coder", true);
+    for _ in 0..3 {
+        m.record_agent_task_completed("coder");
+    }
+    assert!(!m.agent_improvement_due("coder", 1), "fresh check + 1h floor → not due");
+
+    // Backdate the check 2h → the floor has elapsed → due.
+    backdate_check(dir.path(), Some("coder"), 2);
+    assert!(m.agent_improvement_due("coder", 1), "floor elapsed → due");
+
+    // The floor never OVERRIDES the task-count gate: 0 tasks since the check
+    // → not due, even with an ancient check.
+    let m = make(1);
+    m.record_agent_improvement_check("coder", true);
+    backdate_check(dir.path(), Some("coder"), 48);
+    assert!(!m.agent_improvement_due("coder", 1), "task-count gate still rules");
+}
+
+/// 2f: the floor falls back to the legacy v1 GLOBAL baseline when the agent
+/// has no check of its own (the same rule as the evidence gate).
+#[test]
+fn test_min_interval_uses_v1_fallback_baseline() {
+    let dir = tempdir().unwrap();
+    // v1 state: only a global last_check (unix seconds), 1h old.
+    std::fs::write(
+        dir.path().join("improvement_state.json"),
+        serde_json::json!({
+            "version": 1,
+            "last_check": (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = MemoryConfig {
+        improvement_min_interval_hours: 2,
+        improvement_cooldown_tasks: 1,
+        memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let manager = MemoryManager::new(config).unwrap();
+    manager.record_agent_task_completed("coder");
+
+    // v1 baseline is 1h old < 2h floor → not due (task gate 1/1 passes).
+    assert!(!manager.agent_improvement_due("coder", 1), "v1 baseline within floor → not due");
+
+    // Backdate the v1 baseline 3h → the floor has elapsed → due.
+    backdate_check(dir.path(), None, 3);
+    assert!(manager.agent_improvement_due("coder", 1), "v1 baseline past floor → due");
+}
