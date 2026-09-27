@@ -84,19 +84,18 @@ impl ImprovementsPanel {
         // whatever handle ChatApp happens to hold.
         let skill_store = wuffagent_core::memory::skills::SkillStore::default();
 
-        egui::Window::new("Self-Improvement Suggestions")
+        // The window title bar is the panel's ONE identity: the pending
+        // count is part of the title (visible even when the window is
+        // collapsed), and there is no second heading row inside repeating
+        // it. The window id is pinned explicitly, so the dynamic title
+        // never changes the window's id (nor the child widgets' ids).
+        let title = panel_title(self.pending.len());
+        egui::Window::new(title)
             .id(egui::Id::new("improvements_panel"))
             .default_size([520.0, 360.0])
             .collapsible(true)
             .resizable(true)
             .show(ctx, |ui| {
-                let badge = egui::RichText::new(format!("({} pending)", self.pending.len()))
-                    .strong()
-                    .color(theme.accent);
-                ui.horizontal(|ui| {
-                    ui.heading("Self-Improvement Suggestions");
-                    ui.label(badge);
-                });
                 // 4a: one-line loop-status header (data from 2a's state file,
                 // same snapshot the list_improvement_status tool reads). The
                 // panel is fleet-wide, so show the most recent check across
@@ -745,6 +744,17 @@ fn skill_snapshot_ts(path: &std::path::Path, name: &str) -> u64 {
     crate::ui::agent_history::parse_ts_seq(tail).0
 }
 
+/// The window title is the panel's single identifying label (no inner
+/// heading repeats it). The pending count rides in the title so it stays
+/// visible even when the window is collapsed.
+fn panel_title(pending: usize) -> String {
+    if pending == 0 {
+        "Self-Improvement Suggestions".to_string()
+    } else {
+        format!("Self-Improvement Suggestions ({pending} pending)")
+    }
+}
+
 /// 4a: the panel's one-line loop-status header, e.g.
 /// "Loop: last check 12:41:05 (3m ago) · new evidence: yes · lessons: 5 · auto_improve: on
 /// · min interval: off".
@@ -827,6 +837,15 @@ mod tests_4a {
             no_op_streak: 0,
             last_effect_verdict: None,
         }
+    }
+
+    #[test]
+    fn panel_title_is_single_identity_and_carries_count() {
+        // No duplicate identity: the plain title is the panel's name, and the
+        // pending count is appended (not a second heading row inside).
+        assert_eq!(panel_title(0), "Self-Improvement Suggestions");
+        assert_eq!(panel_title(1), "Self-Improvement Suggestions (1 pending)");
+        assert_eq!(panel_title(5), "Self-Improvement Suggestions (5 pending)");
     }
 
     #[test]
