@@ -1,6 +1,7 @@
 # WuffAgent Self-Improvement — Gap Analysis Round 2 (plan, 2026-09-26)
 
-**Status:** planned (wuffagent). Companion to `plans/self-improvement-gaps.md`
+**Status:** MOSTLY DONE (wuffagent; status log below is current, last updated in 123c02e).
+Remaining: 2e min-interval knob + stretch F/I. Companion to `plans/self-improvement-gaps.md`
 (round 1, 2026-07 — now fully implemented) and
 `autoplans/finish-self-improvement-loop.md` (round 1's execution log, done
 2026-09-25).
@@ -260,6 +261,8 @@ Thumbs up/down per message only. No per-tool-error feedback, no
   follow-up question after an approval (feeds F5-style lessons).
 
 ## Explicit backlog (out of scope here)
+- Effect check only covers the LATEST applied marker (LOW; dropped from the
+  first draft `self-improvement-loop-gap-plan.md` Phase 4b — revisit if it bites).
 - Typed `LlmError` (known since step 20; cross-cutting).
 - `agents/manager.rs` (605) / `memory/maintenance.rs` (566) / egui
   `agent_config.rs` (673) splits — do when touched (see

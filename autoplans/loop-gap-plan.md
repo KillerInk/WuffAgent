@@ -1,5 +1,7 @@
 # Plan: close the self-improvement loop's remaining gaps (round 2)
-**Status:** IN PROGRESS (wuffagent) — done: 1a/1b/1c, 2a, 2b, 2c, 2e, 3a, 3b, 3c, 4a, 4b, 4c. Next: 2d (fleet review).
+**Status:** SUPERSEDED (2026-09-26) — all items done; 2d (fleet review) landed in 46956c0.
+Canonical status lives in `self-improvement-gaps-2.md` (remaining there: the 2e
+min-interval knob + stretch F/I).
 **Trigger:** round 2 audit (this file) — round 1 (A-I, T series) fully landed; these are the gaps that audit found in the *new* code.
 **Why this matters:** the loop proposes but rarely proves. Suggestions leak on exit, effects are invisible, the improver is blind to skills and tokens — so it improves prompts but can't maintain what it learned or judge what worked.
 

@@ -1,7 +1,10 @@
 # Self-improvement loop: gap analysis + implementation plan
 
-**Status:** Phase 1+2 DONE (2026-09-26, wuffagent). 1a/1b/1c + 2a/2b/2c all
-implemented and tested (core 626, egui 24, clean build).
+**Status:** SUPERSEDED (2026-09-26) — this was the first draft of the round-2
+gap plan; phases 3–4 were re-planned as 3a–3c/4a–4c in
+`self-improvement-gaps-2.md` (canonical status). Everything here is done except
+the Phase 4b "effect check for non-latest markers" (LOW), which moved to
+`self-improvement-gaps-2.md`'s explicit backlog.
 **Companion to:** `plans/self-improvement-gaps.md` (2026-07, T-series) and
 `autoplans/finish-self-improvement-loop.md` (2026-08-31 → 2026-09-26, A–D).
 This file is the NEXT iteration: what is still missing from the loop that
