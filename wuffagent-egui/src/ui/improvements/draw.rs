@@ -311,15 +311,26 @@ impl ImprovementsPanel {
                                             .strong()
                                             .weak(),
                                     );
-                                    egui::ScrollArea::vertical()
-                                        .max_height(120.0)
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new(cur)
-                                                    .monospace()
-                                                    .size(11.0),
-                                            );
-                                        });
+                                    // Item-scoped id: a ScrollArea auto-derives
+                                    // its ID from the drawn content, and the
+                                    // current + proposed boxes hold the same
+                                    // prompt text, which trips egui's
+                                    // "First/Second use of widget ID" clash
+                                    // guard (same reason the item header uses
+                                    // an explicit push_id). The push_id scopes
+                                    // the scroll area's content-derived ID per
+                                    // box.
+                                    ui.push_id("imp_prompt_current", |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .max_height(120.0)
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(cur)
+                                                        .monospace()
+                                                        .size(11.0),
+                                                );
+                                            });
+                                    });
                                 });
                             }
                             {
@@ -330,25 +341,32 @@ impl ImprovementsPanel {
                                 };
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new(title).strong());
-                                    egui::ScrollArea::vertical()
-                                        .max_height(150.0)
-                                        .show(ui, |ui| {
-                                            let mut buf = imp
-                                                .edited_prompt
-                                                .as_deref()
-                                                .unwrap_or(new_prompt)
-                                                .to_string();
-                                            ui.add(
-                                                egui::TextEdit::multiline(&mut buf)
-                                                    .desired_width(f32::INFINITY)
-                                                    .desired_rows(6),
-                                            );
-                                            // F1: persist the edited value in
-                                            // place so the user's changes survive
-                                            // across frames and are what gets
-                                            // applied on Approve.
-                                            imp.edited_prompt = Some(buf);
-                                        });
+                                    // Item-scoped id (see the "Current" box
+                                    // above): without it the two scroll areas
+                                    // holding the same prompt text would
+                                    // collide on their auto-derived IDs.
+                                    ui.push_id("imp_prompt_proposed", |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .max_height(150.0)
+                                            .show(ui, |ui| {
+                                                let mut buf = imp
+                                                    .edited_prompt
+                                                    .as_deref()
+                                                    .unwrap_or(new_prompt)
+                                                    .to_string();
+                                                ui.add(
+                                                    egui::TextEdit::multiline(&mut buf)
+                                                        .desired_width(f32::INFINITY)
+                                                        .desired_rows(6),
+                                                );
+                                                // F1: persist the edited value
+                                                // in place so the user's
+                                                // changes survive across frames
+                                                // and are what gets applied on
+                                                // Approve.
+                                                imp.edited_prompt = Some(buf);
+                                            });
+                                    });
                                 });
                             }
                             ui.checkbox(&mut imp.apply_prompt, "Apply prompt change");
