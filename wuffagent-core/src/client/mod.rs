@@ -168,6 +168,13 @@ pub struct ChatClient {
     /// interior-mutable like the other per-client fields, since the client
     /// handle is cloned and shared.
     agent_name: Arc<Mutex<String>>,
+    /// (trigger%, target%) of the context window for the agent about to run
+    /// on this client. Stamped by `Agent::builder` from the agent's
+    /// `TrimConfig` before each run (per-run state like `agent_name` — the
+    /// client handle is shared across agents). Defaults to the proven 90/50
+    /// values until an agent stamps its own (S3, autoplans/
+    /// context-rot-prevention.md: the cliff is now tunable per agent).
+    trim_pcts: Arc<Mutex<(u64, u64)>>,
 }
 
 impl ChatClient {
@@ -232,6 +239,10 @@ impl ChatClient {
             tool_event_tx: Arc::new(Mutex::new(None)),
             usage_recorder: Arc::new(crate::usage::recorder::UsageRecorder::default_recorder()),
             agent_name: Arc::new(Mutex::new("chat".to_string())),
+            trim_pcts: Arc::new(Mutex::new((
+                Self::TRIM_TRIGGER_PCT,
+                Self::TRIM_TARGET_PCT,
+            ))),
         }
     }
 
@@ -263,6 +274,20 @@ impl ChatClient {
     /// run sequentially, so the name is current when the LLM call happens).
     pub fn set_agent_name(&self, name: &str) {
         *self.agent_name.lock().unwrap() = name.to_string();
+    }
+
+    /// Stamp this agent's trim thresholds (percent of the n_ctx window:
+    /// trigger / target) from its `TrimConfig`. Called by `Agent::builder`
+    /// before each agent run, like [`Self::set_agent_name`]; the client then
+    /// derives its char budgets from these values
+    /// (`trim_trigger_chars` / `trim_target_chars`).
+    pub fn set_trim_pcts(&self, trigger_pct: u64, target_pct: u64) {
+        *self.trim_pcts.lock().unwrap() = (trigger_pct, target_pct);
+    }
+
+    /// The stamped (trigger%, target%) pair (defaults: the proven 90/50).
+    fn trim_pcts(&self) -> (u64, u64) {
+        *self.trim_pcts.lock().unwrap()
     }
 
     /// Inject a custom usage recorder (mainly for tests: point the log at a

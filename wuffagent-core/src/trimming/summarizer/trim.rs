@@ -84,12 +84,22 @@ impl super::ContextTrimming {
     /// the model keeps its working snapshot of actively-edited files as long
     /// as the budget allows. `trim_messages` runs a second sweep with an
     /// empty set when the budget still cannot be met, so the trim always
-    /// converges. Returns the number of messages removed.
+    /// converges.
+    ///
+    /// Never removed (skipped in place, so everything AFTER them can still be
+    /// trimmed): the last user message, the FIRST user message (the task —
+    /// otherwise it is the first casualty of the age sweep), and the mission
+    /// brief (the anchored re-insertion point for the dropped content).
+    ///
+    /// Everything removed is appended to `dropped` (chronological order) so
+    /// the caller can fold it into the mission brief. Returns the number of
+    /// messages removed.
     pub(super) fn age_sweep(
         messages: &mut Vec<Message>,
         target_chars: usize,
         start: usize,
         protected_reads: &HashSet<String>,
+        dropped: &mut Vec<Message>,
     ) -> usize {
         let mut removed = 0;
         let mut keep_from = start;
@@ -120,6 +130,23 @@ impl super::ContextTrimming {
                     continue;
                 }
             }
+            // Never remove the mission brief: it is the re-insertion point
+            // for everything the trims dropped (see the brief pass in
+            // `trim_messages`).
+            if crate::trimming::brief::is_brief_message(&messages[keep_from]) {
+                keep_from += 1;
+                continue;
+            }
+            // Never remove the FIRST user message (the task): it is the
+            // oldest message and would be the first casualty of the age
+            // sweep. The mission brief carries it too, but the verbatim task
+            // stays as well (belt and braces).
+            if let Some(fui) = messages.iter().position(|m| m.role == "user") {
+                if keep_from == fui {
+                    keep_from += 1;
+                    continue;
+                }
+            }
             // Tool pairs (assistant with tool_calls + its tool results): remove
             // the entire pair as a unit. The model has already consumed these
             // results in an older round, so they are safe to drop. Removing the
@@ -141,12 +168,12 @@ impl super::ContextTrimming {
                     keep_from = pair_end;
                     continue;
                 }
-                messages.drain(keep_from..pair_end);
+                dropped.extend(messages.drain(keep_from..pair_end));
                 removed += pair_end - keep_from;
                 continue;
             }
             // Plain user/assistant turn: remove it.
-            messages.remove(keep_from);
+            dropped.push(messages.remove(keep_from));
             removed += 1;
         }
         removed
@@ -159,11 +186,15 @@ impl super::ContextTrimming {
     /// set to a placeholder and skipped, so no message — in particular no
     /// `role: "tool"` result — ever ends up with empty content.
     /// `min_shrink_chars`: only messages with content LONGER than this are
-    /// candidates. Collapsing a message at the floor writes the 41-char
-    /// placeholder, so shrinking a message of 41 chars or fewer GROWS the
+    /// candidates. Collapsing a message at the floor writes the 39-char
+    /// placeholder, so shrinking a message of 39 chars or fewer GROWS the
     /// total — pass 0 for pre-tail rounds (existing behavior) and the
     /// placeholder length for the last-resort tail stage, so the fresh user
     /// request is never destroyed for no savings.
+    ///
+    /// The mission brief is never a candidate: halving the re-anchoring text
+    /// would destroy the state it exists to preserve for at most a few
+    /// hundred chars of savings (it is capped anyway).
     pub(super) fn truncate_largest_message(
         messages: &mut [Message],
         target_tokens: usize,
@@ -190,6 +221,7 @@ impl super::ContextTrimming {
                 .filter(|&i| i < protect_from)
                 .filter(|&i| messages[i].content.chars().count() > min_shrink_chars)
                 .filter(|&i| messages[i].content != TRUNCATED_PLACEHOLDER)
+                .filter(|&i| !crate::trimming::brief::is_brief_message(&messages[i]))
                 // A halved file snapshot invites the model to hallucinate
                 // line contents it no longer has — file content is either
                 // fully present or fully absent.

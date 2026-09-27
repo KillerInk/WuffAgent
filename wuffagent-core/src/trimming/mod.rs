@@ -22,6 +22,7 @@
 /// let tool_output = "line1\nline2\nline3";
 /// let summarized = trimming.summarize_tool_result(tool_output, &config);
 /// ```
+pub mod brief;
 pub mod classifier;
 pub mod config;
 pub mod filestate;

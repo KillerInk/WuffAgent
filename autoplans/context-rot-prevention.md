@@ -1,6 +1,6 @@
 # Context-Rot Prevention After Trimming
 
-Created: 2026-07-21. Status: **PLANNED** (not started).
+Created: 2026-09-27. Status: **S1+S2+S3 DONE** (2026-09-27), S4 pending (stretch).
 
 Goal: stop the model from "going off the rails" after the context window is
 reached and history is trimmed — it should keep the TASK, the user's
@@ -12,7 +12,7 @@ happened.
 `trim_messages` (wuffagent-core/src/trimming/summarizer/mod.rs:148) runs:
 freshness pass (stale read_file pairs removed) → `age_sweep` (oldest-first
 removal) → `summarize_old_tool_messages` (in-place tool-result summarization)
-→ `truncate_largest_message` (halve → 41-char placeholder) → last-resort tail
+→ `truncate_largest_message` (halve → 39-char placeholder) → last-resort tail
 halving. Trigger/target: 90% / 50% of n_ctx (client `TRIM_TRIGGER_PCT` /
 `TRIM_TARGET_PCT`, applied in agents/agent/loop.rs:223-277).
 
@@ -91,23 +91,62 @@ regardless.)
 
 ### Steps (each independently shippable + testable)
 
-- [ ] **S1 — Mission Brief v1 (deterministic).** `brief.rs` + wiring above.
+- [x] **S1 — Mission Brief v1 (deterministic).** `brief.rs` + wiring above.
       Unit tests: extraction (task/corrections/decisions/completed/files from a
       synthetic dropped span), merge + caps + never-drop-task, render marker,
       anchoring (brief survives a second trim, is replaced not stacked),
       first-user-message protection, no brief when nothing was dropped,
       idempotency. This is ~300-400 lines incl. tests; the biggest bang for the
+      Deviations from the sketch above (final behavior):
+      - Anchor: the brief is inserted right after the VERBATIM TASK (first
+        non-system user message) when one exists, else at the system-1/front
+        position — the task is the beginning of the conversation; the brief
+        summarizes what happened since. (`apply_brief` in brief.rs.)
+      - Fit guard: the brief is protected from every shrink stage, so it is
+        NOT inserted when it alone does not fit `target_chars` (the budget
+        would be unreachable). Tiny test budgets skip the brief; real budgets
+        (50% of n_ctx) never do.
+      - Test updates: `test_plain_chat_no_tool_messages_noop` 2→1 (first user
+        message now protected); `test_tool_heavy_history_is_trimmed_under_
+        budget` now gets a brief after its task (no system message).
+       buck.
+       DONE 2026-09-27. Implementation notes: stateless (no instance field) —
+       the previous brief is re-parsed from the rendered message already in the
+       list (`from_rendered`; render/parse contract); the task seed is the first
+       NON-brief user message still in context; freshness-pass drops are not
+       extracted (stale by definition). Tests: `brief.rs` unit tests (extraction,
+       merge/caps, roundtrip, anchoring) + `summarizer/tests/brief.rs`
+       (anchored-after-big-drop, rolling-not-stacked second trim, trivial-drop
+       no-brief).
       buck.
-- [ ] **S2 — Measure rot.** New `MetricsLog::log_trim(agent, chars_before,
-      chars_after, methods, brief_updated)` line, written from the agent loop
-      where the trim runs (loop.rs:246). Later: improver/effect-check
+- [x] **S2 — Measure rot.** DONE 2026-09-27. `MetricsLine::Trim`
+      (ts, chars_before, chars_after, messages_removed, brief_updated,
+      overflow) + `MetricsLog::log_trim` + `record_trim` writer hook; `MetricsSummary`
+      gained `trims` (rendered in `format_labeled`, so the improver's
+      before/after windows include trim counts). Written from the agent loop at
+      BOTH trim sites: the proactive trigger→target trim (overflow=false) and
+      the 400-exceed-context backstop (overflow=true). `brief_updated` records
+      whether a mission brief was present in the post-trim context (the
+      re-anchoring the model can rely on). NOTE: the first S2 diff accidentally
+      replaced the `SkillUse` variant instead of adding `Trim` beside it —
+      fixed in the same commit (lesson: additive enum changes need the old
+      variant in the SEARCH context). LATER (not done): improver/effect-check
       correlation — runs after a trim → verification outcome + tool-error rate
       vs. baseline (the I5 pattern), feeding the self-improvement loop.
-- [ ] **S3 — Soften the cliff (config, no default behavior change).** Add
-      `trim_trigger_pct` / `trim_target_pct` to `TrimConfig` (defaults 90/50 —
-      today's proven values), read by `ChatClient::trim_trigger_chars` /
-      `trim_target_chars`. Once S2 data exists, tune per agent (e.g. 90→65
-      first cut, 50 hard floor) with evidence instead of guessing.
+- [x] **S3 — Soften the cliff (config, no default behavior change).**
+      DONE 2026-09-27. `TrimConfig.trim_trigger_pct` / `trim_target_pct`
+      (u8, serde defaults 90/50 — old config files deserialize unchanged).
+      `ChatClient` gained a per-run stamp (`set_trim_pcts`, like
+      `set_agent_name`; the client is shared across agents) and
+      `trim_trigger_chars` / `trim_target_chars` derive from it (defaults
+      keep today's behavior for plain chat). `Agent::builder` stamps the
+      agent's `TrimConfig` pcts before each run, so per-agent tuning is now
+      just config: e.g. `"trim_trigger_pct": 65` for a softer first cut.
+      Tests: serde-missing-field defaults + stamped-pct budget test
+      (`client/tests/request.rs`). Once S2 data exists, tune per agent
+      (e.g. 90→65 first cut, 50 hard floor) with evidence instead of
+      guessing — the overflow=true share of Trim lines is the miscalibration
+      signal to watch.
 - [ ] **S4 — Stretch: agent-side scratchpad + LLM polish.**
       a) `session_note` tool: the agent explicitly records "state / next step";
          the loop re-injects the note right after the system prompt on every

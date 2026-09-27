@@ -188,7 +188,8 @@ fn line_ts(line: &MetricsLine) -> chrono::DateTime<chrono::Utc> {
     match line {
         MetricsLine::Run { ts, .. }
         | MetricsLine::Feedback { ts, .. }
-        | MetricsLine::SkillUse { ts, .. } => *ts,
+        | MetricsLine::SkillUse { ts, .. }
+        | MetricsLine::Trim { ts, .. } => *ts,
     }
 }
 

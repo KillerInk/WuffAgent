@@ -183,6 +183,13 @@ impl AgentBuilder {
         // Token tracker: stamp this agent's name on the usage-log lines this
         // client writes.
         client.set_agent_name(&config.name);
+        // Trim thresholds: stamp this agent's configured trigger/target
+        // percentages of the n_ctx window (default 90/50) on the shared
+        // client so the char budgets follow its TrimConfig (S3).
+        client.set_trim_pcts(
+            config.trim_config.trim_trigger_pct as u64,
+            config.trim_config.trim_target_pct as u64,
+        );
         let (tool_manager, handoff_mailbox, restart_mailbox, hand_back_mailbox) = {
             let tool_manager_arc = tool_manager.unwrap_or_else(|| {
                 Arc::new(Mutex::new(ToolManager::new(Arc::new(

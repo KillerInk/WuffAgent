@@ -42,19 +42,21 @@ impl ChatClient {
         ((n_ctx as u64) * pct * c / 10_000) as usize
     }
 
-    /// Trim trigger in char units for the current n_ctx: 90% of the window,
-    /// converted via the calibrated ratio. Trimming only kicks in once the
-    /// estimated conversation exceeds this.
+    /// Trim trigger in char units for the current n_ctx: the configured
+    /// trigger percentage of the window (default 90, stamped per agent via
+    /// `set_trim_pcts`), converted via the calibrated ratio. Trimming only
+    /// kicks in once the estimated conversation exceeds this.
     pub fn trim_trigger_chars(&self) -> usize {
-        self.char_budget_pct(Self::TRIM_TRIGGER_PCT)
+        self.char_budget_pct(self.trim_pcts().0)
     }
 
-    /// Trim target in char units for the current n_ctx: 50% of the window,
-    /// converted via the calibrated ratio. Once the trigger is exceeded, the
-    /// conversation is trimmed all the way down to this — far below the
-    /// limit, not just under it.
+    /// Trim target in char units for the current n_ctx: the configured target
+    /// percentage of the window (default 50, stamped per agent via
+    /// `set_trim_pcts`), converted via the calibrated ratio. Once the trigger
+    /// is exceeded, the conversation is trimmed all the way down to this —
+    /// far below the limit, not just under it.
     pub fn trim_target_chars(&self) -> usize {
-        self.char_budget_pct(Self::TRIM_TARGET_PCT)
+        self.char_budget_pct(self.trim_pcts().1)
     }
 
     /// Record the estimator char count of a prompt about to be sent, so the

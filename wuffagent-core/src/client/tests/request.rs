@@ -185,6 +185,29 @@ fn test_trim_trigger_and_target_chars_use_calibrated_ratio() {
 }
 
 #[test]
+fn test_trim_pcts_stamp_overrides_defaults() {
+    // The agent builder stamps the agent's TrimConfig pcts (S3): the budgets
+    // must follow the stamped values instead of the 90/50 defaults.
+    let client = ChatClient::new("http://localhost:8080");
+    client.set_n_ctx(100_000);
+    assert_eq!(
+        client.trim_trigger_chars(),
+        (100_000u64 * 90 * 350 / 10_000) as usize,
+        "default trigger = 90%"
+    );
+    // Softer cliff: trigger at 65%, trim down to 30%.
+    client.set_trim_pcts(65, 30);
+    assert_eq!(
+        client.trim_trigger_chars(),
+        (100_000u64 * 65 * 350 / 10_000) as usize
+    );
+    assert_eq!(
+        client.trim_target_chars(),
+        (100_000u64 * 30 * 350 / 10_000) as usize
+    );
+}
+
+#[test]
 fn test_estimate_tokens_from_chars_over_estimates() {
     let client = ChatClient::new("http://localhost:8080");
     // Default 3.5: 7000 chars => 2000 tokens

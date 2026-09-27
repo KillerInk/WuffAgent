@@ -306,3 +306,72 @@ fn test_skill_usage_roundtrip_and_reserved_file() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// S2 (context-rot): trim lines round-trip through the JSONL store, are
+/// counted in the summary, and render for UI lists.
+#[test]
+fn test_trim_line_roundtrip_and_summary() {
+    let dir = tmp_dir("trim-line");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+    log.log_run("coder", 12, 1, 1, 40_000, RunOutcome::Verified, 50_000, 1_200);
+    log.log_trim("coder", 900_000, 450_000, 34, true, false);
+    log.log_trim("coder", 990_000, 430_000, 41, true, true); // overflow backstop
+
+    let lines = log.read_all("coder");
+    assert_eq!(lines.len(), 3);
+    match &lines[1] {
+        MetricsLine::Trim {
+            chars_before,
+            chars_after,
+            messages_removed,
+            brief_updated,
+            overflow,
+            ..
+        } => {
+            assert_eq!(*chars_before, 900_000);
+            assert_eq!(*chars_after, 450_000);
+            assert_eq!(*messages_removed, 34);
+            assert!(brief_updated);
+            assert!(!overflow);
+        }
+        other => panic!("expected trim line, got {other:?}"),
+    }
+    match &lines[2] {
+        MetricsLine::Trim { overflow, .. } => assert!(*overflow),
+        other => panic!("expected overflow trim line, got {other:?}"),
+    }
+
+    // The summary counts trims (and still reports runs), and renders them.
+    let s = log.summary_since("coder", None);
+    assert_eq!(s.runs, 1);
+    assert_eq!(s.trims, 2);
+    let rendered = s.format_line();
+    assert!(rendered.contains("context trims: 2"), "got: {rendered}");
+    assert!(
+        rendered.contains("run(s)"),
+        "trim-only summary must not hide the run stats: {rendered}"
+    );
+
+    // describe() renders the line for raw-line lists.
+    let d = lines[1].describe();
+    assert!(d.contains("34 messages removed"), "got: {d}");
+    assert!(d.contains("brief updated"), "got: {d}");
+    let d2 = lines[2].describe();
+    assert!(d2.contains("overflow backstop"), "got: {d2}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A trim-only history must still render a summary (the empty-check includes
+/// `trims`).
+#[test]
+fn test_trim_only_summary_is_not_empty() {
+    let dir = tmp_dir("trim-only");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+    log.log_trim("coder", 100_000, 50_000, 5, false, false);
+    let s = log.summary_since("coder", None);
+    assert_eq!(s.trims, 1);
+    assert!(!s.format_line().is_empty(), "trim-only summary must not be empty");
+    let _ = std::fs::remove_dir_all(&dir);
+}

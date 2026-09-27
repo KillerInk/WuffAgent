@@ -170,6 +170,19 @@ pub struct TrimConfig {
     /// summarization).
     #[serde(default = "default_true")]
     pub stale_file_invalidation: bool,
+
+    /// Percentage (1-100) of the context window at which the age-based trim
+    /// kicks in. Default 90 — the proven value (see autoplans/
+    /// context-rot-prevention.md, S3: tune per agent with S2 evidence).
+    /// Read by the agent loop via the client (`trim_trigger_chars`).
+    #[serde(default = "default_trim_trigger_pct")]
+    pub trim_trigger_pct: u8,
+
+    /// Percentage (1-100) of the context window to trim DOWN TO once the
+    /// trigger fires. Default 50 — well below the trigger so the following
+    /// rounds have headroom before the next trim (S3: the hard floor to tune).
+    #[serde(default = "default_trim_target_pct")]
+    pub trim_target_pct: u8,
 }
 
 fn default_enabled() -> bool {
@@ -193,6 +206,12 @@ fn default_list_max_items() -> usize {
 fn default_true() -> bool {
     true
 }
+fn default_trim_trigger_pct() -> u8 {
+    90
+}
+fn default_trim_target_pct() -> u8 {
+    50
+}
 
 impl Default for TrimConfig {
     fn default() -> Self {
@@ -204,6 +223,8 @@ impl Default for TrimConfig {
             log_max_lines: default_log_max_lines(),
             list_max_items: default_list_max_items(),
             stale_file_invalidation: default_true(),
+            trim_trigger_pct: default_trim_trigger_pct(),
+            trim_target_pct: default_trim_target_pct(),
         }
     }
 }

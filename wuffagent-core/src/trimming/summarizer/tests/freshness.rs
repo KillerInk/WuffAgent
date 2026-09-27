@@ -238,7 +238,10 @@ fn test_plain_chat_no_tool_messages_noop() {
     let trimming = ContextTrimming::new();
     let removed = trimming.trim_messages(&mut messages, 50, &make_config());
 
-    assert_eq!(removed, 2, "age-based removal must still run");
+    assert_eq!(
+        removed, 1,
+        "age-based removal must still run (the first user message is now protected)"
+    );
     assert!(
         !messages
             .iter()

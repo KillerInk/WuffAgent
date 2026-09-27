@@ -3,11 +3,13 @@
 //! - `trim.rs`: basic `trim_messages` behavior (protected tail, tool pairs)
 //! - `freshness.rs`: stale/superseded read_file eviction, last-resort shrink
 //! - `age_pass.rs`: protected current reads in the age-based removal
+//! - `brief.rs`: the mission-brief re-insertion (rolling session state)
 
 use super::super::config::TrimConfig;
 use super::*;
 
 mod age_pass;
+mod brief;
 mod freshness;
 mod kinds;
 mod trim;
@@ -21,6 +23,8 @@ fn make_config() -> TrimConfig {
         log_max_lines: 8,
         list_max_items: 10,
         stale_file_invalidation: true,
+        trim_trigger_pct: 90,
+        trim_target_pct: 50,
     }
 }
 

@@ -16,6 +16,11 @@
 //!   read_skill tool). Skills are shared across agents (no per-agent
 //!   attribution at the tool layer), so they go to the reserved
 //!   `skills.jsonl` file — `agent_names()` skips it for the fleet summary.
+//! - `trim` — the agent's context was trimmed before an LLM call (written
+//!   by the agent loop at both trim sites: the proactive 90%→50% trim and
+//!   the 400-exceed-context backstop). The context-rot signal: how often
+//!   the model is forced to drop its own history, and whether the mission
+//!   brief re-anchored the state.
 //!
 //! Terminal run `outcome` values: `verified` (first-try pass, including the
 //! no-tool-outputs shortcut and verification-LLM-error default-pass),
@@ -106,6 +111,27 @@ pub enum MetricsLine {
         /// Skill name (slug) that was read.
         skill: String,
     },
+    /// An agent's context was trimmed before an LLM call (context-rot
+    /// signal — how often the model loses its own history mid-run).
+    Trim {
+        /// UTC timestamp of the trim.
+        ts: DateTime<Utc>,
+        /// Estimated chars of the request before the trim (messages only,
+        /// the same metric as `chars_after`, so the delta is meaningful).
+        chars_before: u64,
+        /// Estimated chars of the request after the trim.
+        chars_after: u64,
+        /// Messages removed by the trim.
+        messages_removed: u32,
+        /// A mission brief was present in the post-trim context (the state
+        /// re-anchoring — task/corrections/decisions/files — was available to
+        /// the model after the drop).
+        brief_updated: bool,
+        /// The trim was the 400-exceed-context backstop (force-trim to 85%
+        /// of the reported window) rather than the proactive 90%→50% trim.
+        /// Frequent `true` means the estimator/trigger is miscalibrated.
+        overflow: bool,
+    },
 }
 
 impl MetricsLine {
@@ -141,6 +167,22 @@ impl MetricsLine {
             MetricsLine::SkillUse { ts, skill } => {
                 format!("{} skill used: {}", ts.format("%Y-%m-%d %H:%M"), skill)
             }
+            MetricsLine::Trim {
+                ts,
+                chars_before,
+                chars_after,
+                messages_removed,
+                brief_updated,
+                overflow,
+            } => format!(
+                "{} context trim{}: {} messages removed ({} → {} chars){}",
+                ts.format("%Y-%m-%d %H:%M"),
+                if *overflow { " (overflow backstop)" } else { "" },
+                messages_removed,
+                chars_before,
+                chars_after,
+                if *brief_updated { ", brief updated" } else { "" },
+            ),
         }
     }
 }
@@ -166,6 +208,9 @@ pub struct MetricsSummary {
     pub tokens_in: u64,
     /// 4c: total completion tokens produced by the counted runs.
     pub tokens_out: u64,
+    /// Context trims applied to the counted agent's runs (context-rot
+    /// signal: how often the model was forced to drop its own history).
+    pub trims: u32,
 }
 
 impl MetricsSummary {
@@ -173,7 +218,11 @@ impl MetricsSummary {
     /// labels its before/after windows). Returns an empty string when there
     /// is nothing to report (no runs and no feedback).
     pub fn format_labeled(&self, label: &str) -> String {
-        if self.runs == 0 && self.feedback_up == 0 && self.feedback_down == 0 {
+        if self.runs == 0
+            && self.feedback_up == 0
+            && self.feedback_down == 0
+            && self.trims == 0
+        {
             return String::new();
         }
         let error_rate = if self.tool_calls > 0 {
@@ -184,7 +233,7 @@ impl MetricsSummary {
         format!(
             "{label} ({} run(s), {} tool call(s) with {} errors ({:.1}%), \
              outcomes: {} verified / {} verified_after_retry / {} gave_up / {} not verified, \
-             tokens: {} in / {} out, user feedback: {} up / {} down)",
+             tokens: {} in / {} out, user feedback: {} up / {} down, context trims: {})",
             self.runs,
             self.tool_calls,
             self.tool_errors,
@@ -197,6 +246,7 @@ impl MetricsSummary {
             self.tokens_out,
             self.feedback_up,
             self.feedback_down,
+            self.trims,
         )
     }
 
@@ -405,6 +455,29 @@ impl MetricsLog {
         );
     }
 
+    /// Append a context-trim line for `agent` (the context-rot signal).
+    pub fn log_trim(
+        &self,
+        agent: &str,
+        chars_before: u64,
+        chars_after: u64,
+        messages_removed: u32,
+        brief_updated: bool,
+        overflow: bool,
+    ) {
+        self.append(
+            agent,
+            &MetricsLine::Trim {
+                ts: Utc::now(),
+                chars_before,
+                chars_after,
+                messages_removed,
+                brief_updated,
+                overflow,
+            },
+        );
+    }
+
     /// Append a user-feedback line for `agent`.
     pub fn log_feedback(&self, agent: &str, up: bool) {
         self.append(
@@ -500,6 +573,7 @@ impl MetricsLog {
                 MetricsLine::Run { ts, .. } => ts,
                 MetricsLine::Feedback { ts, .. } => ts,
                 MetricsLine::SkillUse { ts, .. } => ts,
+                MetricsLine::Trim { ts, .. } => ts,
             };
             if let Some(start) = start {
                 if *ts < start {
@@ -538,6 +612,9 @@ impl MetricsLog {
                     FeedbackKind::Up => s.feedback_up += 1,
                     FeedbackKind::Down => s.feedback_down += 1,
                 },
+                MetricsLine::Trim { .. } => {
+                    s.trims += 1;
+                }
                 MetricsLine::SkillUse { .. } => {
                     // Not counted in the per-agent summary (the skills file
                     // is fleet-wide); the ts filter above still applies.
@@ -597,6 +674,26 @@ pub fn record_run(
         outcome,
         tokens_in,
         tokens_out,
+    );
+}
+
+/// Record a context trim in the DEFAULT metrics log (writer hook for the
+/// agent loop). Best-effort — the rot signal must never break the run.
+pub fn record_trim(
+    agent: &str,
+    chars_before: u64,
+    chars_after: u64,
+    messages_removed: u32,
+    brief_updated: bool,
+    overflow: bool,
+) {
+    MetricsLog::default().log_trim(
+        agent,
+        chars_before,
+        chars_after,
+        messages_removed,
+        brief_updated,
+        overflow,
     );
 }
 

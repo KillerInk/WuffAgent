@@ -2,6 +2,10 @@
 ///
 /// Each summarizer knows how to compress a particular content type
 /// while preserving key information (paths, error messages, line counts).
+///
+/// `trim_messages` additionally re-inserts the rolling "mission brief"
+/// (see `crate::trimming::brief`) after the age-based removals, so the
+/// state of the dropped conversation survives the trim.
 use super::classifier::{classify_content, ContentType};
 use super::config::TrimConfig;
 use super::filestate;
@@ -235,12 +239,58 @@ impl ContextTrimming {
         // Age-based removal: oldest first, tool pairs as units, stopping
         // before the protected tail. Pairs holding a protected current file
         // snapshot (see the freshness pass) are deferred to a second sweep.
-        removed += Self::age_sweep(messages, target_chars, keep_from, &protected_reads);
+        let mut dropped: Vec<Message> = Vec::new();
+        removed += Self::age_sweep(messages, target_chars, keep_from, &protected_reads, &mut dropped);
         if Self::message_char_count(messages) > target_chars {
             // Still over budget: the protected snapshots can no longer defer
             // removal — sweep again without protection (oldest first) so the
             // trim always converges.
-            removed += Self::age_sweep(messages, target_chars, keep_from, &HashSet::new());
+            removed += Self::age_sweep(messages, target_chars, keep_from, &HashSet::new(), &mut dropped);
+        }
+
+        // Mission brief (autoplans/context-rot-prevention.md, S1): when the
+        // sweeps dropped a non-trivial span, fold its content into the
+        // ROLLING session brief (task / user corrections / decisions /
+        // done / files touched) and (re)insert it anchored after the system
+        // prompt — so the trimmed-away state survives and the model knows
+        // compaction happened. Stateless: the previous brief is the message
+        // already sitting in the list, re-parsed from its render. The later
+        // summarize/truncate stages run on the updated list, so the brief is
+        // counted in the final budget (and is itself protected from
+        // truncation).
+        if !dropped.is_empty() {
+            let dropped_chars: usize = dropped.iter().map(Self::message_tokens).sum();
+            if dropped_chars >= crate::trimming::brief::BRIEF_MIN_DROPPED_CHARS {
+                let prev = messages
+                    .iter()
+                    .find(|m| crate::trimming::brief::is_brief_message(m))
+                    .and_then(|m| crate::trimming::brief::from_rendered(&m.content));
+                // The verbatim task still in context (the first NON-brief user
+                // message — the brief itself is a user-role message).
+                let task_seed = messages
+                    .iter()
+                    .find(|m| m.role == "user" && !crate::trimming::brief::is_brief_message(m))
+                    .map(|m| m.content.clone());
+                let mut brief = crate::trimming::brief::SessionBrief::merge_dropped(
+                    prev.as_ref(),
+                    task_seed.as_deref(),
+                    &dropped,
+                );
+                crate::trimming::brief::enforce_total_cap(&mut brief);
+                let text = crate::trimming::brief::render(&brief);
+                // The brief is protected from every later shrink stage — if it
+                // alone does not fit the budget, inserting it would make the
+                // budget unreachable, so skip it (better no brief than an
+                // over-budget request).
+                if !text.is_empty() && text.chars().count() < target_chars {
+                    crate::trimming::brief::apply_brief(messages, &text);
+                    tracing::info!(
+                        "trimming: mission brief updated (dropped_chars={}, brief_chars={})",
+                        dropped_chars,
+                        text.chars().count()
+                    );
+                }
+            }
         }
 
         // Second pass: compress already-consumed tool rounds in place

@@ -226,10 +226,11 @@ impl Agent {
             // tool result (100k+ tokens) can exceed n_ctx and the server
             // rejects the request.
             //
-            // Two thresholds: history grows freely until it crosses the
-            // trigger (90% of n_ctx); once it does, we do NOT stop just
-            // under the limit — we trim all the way down to the target
-            // (50% of n_ctx) so the following rounds have headroom.
+            // Two thresholds (per-agent `TrimConfig` pcts, default 90/50):
+            // history grows freely until it crosses the trigger (90% of
+            // n_ctx); once it does, we do NOT stop just under the limit —
+            // we trim all the way down to the target (50% of n_ctx) so the
+            // following rounds have headroom.
             if self.client.n_ctx() > 0 {
                 let msg_count = messages.len();
                 // The request also carries the tool schemas and attached
@@ -238,11 +239,13 @@ impl Agent {
                 let overhead_chars = request_overhead_chars(tool_defs.as_deref(), messages);
                 let total_chars = crate::trimming::message_char_count(messages) + overhead_chars;
                 if msg_count > 4 && total_chars > self.client.trim_trigger_chars() {
-                    // Target in char units: 50% of n_ctx tokens converted to
-                    // chars via the client's calibrated chars-per-token ratio,
-                    // minus the per-request overhead so messages + overhead
-                    // together stay under the target.
+                    // Target in char units: the configured target percentage
+                    // of n_ctx (default 50) converted to chars via the
+                    // client's calibrated chars-per-token ratio, minus the
+                    // per-request overhead so messages + overhead together
+                    // stay under the target.
                     let target_chars = self.client.trim_target_chars().saturating_sub(overhead_chars);
+                    let chars_before = crate::trimming::message_char_count(messages);
                     let removed = self.trimming.trim_messages(
                         messages,
                         target_chars,
@@ -255,6 +258,20 @@ impl Agent {
                             removed,
                             self.client.n_ctx(),
                             target_chars
+                        );
+                        // S2 (context-rot signal): how often the model is forced
+                        // to drop its own history, and whether the mission brief
+                        // re-anchored the state. Best-effort — never breaks the run.
+                        let brief_present = messages
+                            .iter()
+                            .any(crate::trimming::brief::is_brief_message);
+                        crate::agents::metrics::record_trim(
+                            &self.config.name,
+                            chars_before as u64,
+                            crate::trimming::message_char_count(messages) as u64,
+                            removed as u32,
+                            brief_present,
+                            false,
                         );
                     }
                     // Post-trim verification: the trim already truncates the largest
@@ -372,6 +389,7 @@ impl Agent {
                                     tool_defs.as_deref(),
                                     messages,
                                 ));
+                            let chars_before = crate::trimming::message_char_count(messages);
                             let removed = self
                                 .trimming
                                 .trim_messages(messages, target, &self.config.trim_config);
@@ -380,6 +398,22 @@ impl Agent {
                                 "[AGENT] Agent '{}' force-trim removed {} messages (target_chars={})",
                                 self.config.name, removed, target
                             );
+                            // S2 (context-rot signal): the backstop path fired —
+                            // frequent `overflow` trims mean the proactive
+                            // estimator/trigger is miscalibrated.
+                            if removed > 0 {
+                                let brief_present = messages
+                                    .iter()
+                                    .any(crate::trimming::brief::is_brief_message);
+                                crate::agents::metrics::record_trim(
+                                    &self.config.name,
+                                    chars_before as u64,
+                                    crate::trimming::message_char_count(messages) as u64,
+                                    removed as u32,
+                                    brief_present,
+                                    true,
+                                );
+                            }
                             self.client.note_prompt_chars(crate::trimming::message_char_count(messages));
                             pending_tool_runs.abort_all();
                             pending_tool_runs.clear();
