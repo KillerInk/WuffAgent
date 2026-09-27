@@ -296,74 +296,59 @@ impl ImprovementsPanel {
                         }
 
                         if let Some(new_prompt) = &imp.prompt_change {
-                            // I3: old-vs-new side by side — current prompt
-                            // (read-only) next to the proposed one (editable).
+                            // I3: old-vs-new comparison — the current prompt
+                            // (read-only) stacked ABOVE the proposed one
+                            // (editable), both height-capped. The previous
+                            // side-by-side layout let a long prompt stretch the
+                            // item to the full text height; the read-only side
+                            // is already capped (ScrollArea), so the editable
+                            // side gets the same cap.
                             let current_prompt = &current_prompts[i];
-                            // Equal columns: a plain ui.horizontal lets the
-                            // read-only side (a long unwrapped label whose
-                            // desired size is the full line length) eat the
-                            // whole row and squeeze the editable side into
-                            // an unreadable sliver. ui.columns pins each side
-                            // to half the width.
                             if let Some(cur) = &current_prompt {
-                                ui.columns(2, |cols| {
-                                    {
-                                        let ui = &mut cols[0];
-                                        ui.label(
-                                            egui::RichText::new("Current (read-only)")
-                                                .strong()
-                                                .weak(),
-                                        );
-                                        egui::ScrollArea::vertical()
-                                            .max_height(150.0)
-                                            .show(ui, |ui| {
-                                                ui.label(
-                                                    egui::RichText::new(cur)
-                                                        .monospace()
-                                                        .size(11.0),
-                                                );
-                                            });
-                                    }
-                                    {
-                                        let ui = &mut cols[1];
-                                        ui.label(
-                                            egui::RichText::new("Proposed (editable)").strong(),
-                                        );
-                                        let mut buf = imp
-                                            .edited_prompt
-                                            .as_deref()
-                                            .unwrap_or(new_prompt)
-                                            .to_string();
-                                        ui.add(
-                                            egui::TextEdit::multiline(&mut buf)
-                                                .desired_width(f32::INFINITY)
-                                                .desired_rows(6),
-                                        );
-                                        // F1: persist the edited value in place so
-                                        // the user's changes survive across frames
-                                        // and are what gets applied on Approve.
-                                        imp.edited_prompt = Some(buf);
-                                    }
-                                });
-                            } else {
-                                // No current prompt to compare against: the
-                                // proposed side gets the full width.
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        egui::RichText::new("Proposed system prompt (editable)")
-                                            .strong(),
+                                        egui::RichText::new("Current (read-only)")
+                                            .strong()
+                                            .weak(),
                                     );
-                                    let mut buf = imp
-                                        .edited_prompt
-                                        .as_deref()
-                                        .unwrap_or(new_prompt)
-                                        .to_string();
-                                    ui.add(
-                                        egui::TextEdit::multiline(&mut buf)
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(6),
-                                    );
-                                    imp.edited_prompt = Some(buf);
+                                    egui::ScrollArea::vertical()
+                                        .max_height(120.0)
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(cur)
+                                                    .monospace()
+                                                    .size(11.0),
+                                            );
+                                        });
+                                });
+                            }
+                            {
+                                let title = if current_prompt.is_some() {
+                                    "Proposed (editable)"
+                                } else {
+                                    "Proposed system prompt (editable)"
+                                };
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new(title).strong());
+                                    egui::ScrollArea::vertical()
+                                        .max_height(150.0)
+                                        .show(ui, |ui| {
+                                            let mut buf = imp
+                                                .edited_prompt
+                                                .as_deref()
+                                                .unwrap_or(new_prompt)
+                                                .to_string();
+                                            ui.add(
+                                                egui::TextEdit::multiline(&mut buf)
+                                                    .desired_width(f32::INFINITY)
+                                                    .desired_rows(6),
+                                            );
+                                            // F1: persist the edited value in
+                                            // place so the user's changes survive
+                                            // across frames and are what gets
+                                            // applied on Approve.
+                                            imp.edited_prompt = Some(buf);
+                                        });
                                 });
                             }
                             ui.checkbox(&mut imp.apply_prompt, "Apply prompt change");
@@ -757,6 +742,18 @@ impl ImprovementsPanel {
                 // G.1: queue shrank (or changed) — persist the remainder.
                 if had_actions {
                     self.persist();
+                }
+
+                // Close button: the window's own ✕ only collapses it (it is
+                // collapsible), and per-item Dismiss/Approve buttons make no
+                // sense once the queue is empty — so the panel had no way to
+                // go away (it is only hidden by `show_panel = false`). The
+                // pending queue itself is persisted (G.1) and restored at
+                // startup; re-open with the ✨ menu button.
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    self.show_panel = false;
+                    self.message = None;
                 }
             });
     }
