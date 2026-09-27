@@ -68,6 +68,7 @@ impl ImprovementsPanel {
         ctx: &egui::Context,
         agent_manager: &AgentManager,
         agents_dirs: &[PathBuf],
+        config: &mut wuffagent_core::config::Config,
         theme: &Theme,
         memory: &MemoryManager,
         memory_arc: Arc<MemoryManager>,
@@ -186,12 +187,24 @@ impl ImprovementsPanel {
                                     send_check_result(&events, FLEET_SCOPE, &result);
                                 });
                             } else {
-                                match self
-                                    .agents()
-                                    .iter()
-                                    .find(|a| a.name == agent)
-                                    .cloned()
+                                // The chat profile is synthetic (no backing
+                                // .json file) — build its config here with the
+                                // LIVE app prompt (the panel holds the config),
+                                // so the check analyzes what the chat actually
+                                // runs, not the static base text.
+                                let cfg = if agent
+                                    .eq_ignore_ascii_case(
+                                        wuffagent_core::agents::improvement::CHAT_PROFILE_NAME
+                                    )
                                 {
+                                    let mut cfg =
+                                        wuffagent_core::agents::improvement::synthetic_chat_config();
+                                    cfg.system_prompt = config.system_prompt.clone();
+                                    Some(cfg)
+                                } else {
+                                    self.agents().iter().find(|a| a.name == agent).cloned()
+                                };
+                                match cfg {
                                     Some(cfg) => {
                                         self.run_check_running = true;
                                         self.run_check_status = format!("Checking '{agent}'…");
@@ -203,7 +216,8 @@ impl ImprovementsPanel {
                                         });
                                     }
                                     None => {
-                                        self.run_check_status = format!("Agent '{agent}' not found");
+                                        self.run_check_status =
+                                            format!("Agent '{agent}' not found");
                                     }
                                 }
                             }
@@ -251,12 +265,20 @@ impl ImprovementsPanel {
 
                 // The CURRENT system prompt of each pending item's agent (for
                 // the I3 old-vs-new comparison), from the cached agent list
-                // (NOT a fresh disk scan per frame). Precomputed because the
-                // loop below holds a &mut borrow of `self.pending`.
+                // (NOT a fresh disk scan per frame). The chat profile is
+                // synthetic (its prompt lives in the app config, not a
+                // profile file) — for it the LIVE config prompt is shown, so
+                // the diff compares against what the chat actually runs.
+                // Precomputed because the loop below holds a &mut borrow of
+                // `self.pending`.
+                let chat_profile = wuffagent_core::agents::improvement::CHAT_PROFILE_NAME;
                 let current_prompts: Vec<Option<String>> = self
                     .pending
                     .iter()
                     .map(|p| {
+                        if p.agent_name.eq_ignore_ascii_case(chat_profile) {
+                            return Some(config.system_prompt.clone());
+                        }
                         self.agents()
                             .iter()
                             .find(|a| a.name == p.agent_name)
@@ -738,12 +760,27 @@ impl ImprovementsPanel {
                 // Execute collected actions (file I/O + list mutation) after
                 // the loop so we never mutate while iterating.
                 for i in to_approve.into_iter().rev() {
-                    let (outcome, prompt_applied) = super::memory::apply_improvement_detailed(
-                        agents_dirs,
-                        agent_manager,
-                        &skill_store,
-                        &self.pending[i],
-                    );
+                    // The chat profile is synthetic (no backing .json file):
+                    // its prompt lives in the app config, so an approval for
+                    // it writes config.json instead of a profile file
+                    // (previously it failed with "profile not found" and
+                    // nothing was written).
+                    let (outcome, prompt_applied) = if self
+                        .pending[i]
+                        .agent_name
+                        .eq_ignore_ascii_case(
+                            wuffagent_core::agents::improvement::CHAT_PROFILE_NAME
+                        )
+                    {
+                        super::memory::apply_chat_improvement(config, agent_manager, &skill_store, &self.pending[i])
+                    } else {
+                        super::memory::apply_improvement_detailed(
+                            agents_dirs,
+                            agent_manager,
+                            &skill_store,
+                            &self.pending[i],
+                        )
+                    };
                     self.message = Some(outcome);
                     // I5: an approved prompt change gets a marker so the next
                     // improvement check can weigh the outcomes since it and

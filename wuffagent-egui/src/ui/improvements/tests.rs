@@ -87,6 +87,81 @@ fn pending(agent: &str, prompt: Option<&str>) -> PendingImprovement {
     }
 }
 
+/// A temp app `Config` backed by a real (temp) `config.json` path, so
+/// `apply_chat_improvement`'s `config.save()` has somewhere to persist.
+fn temp_config(tag: &str) -> (wuffagent_core::config::Config, PathBuf) {
+    let path = std::env::temp_dir().join(format!(
+        "wuffagent-egui-imp-{tag}-{}-config.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut cfg = wuffagent_core::config::Config::default();
+    cfg.file_path = path.clone();
+    cfg.system_prompt = "live chat prompt".to_string();
+    cfg.save().unwrap();
+    (cfg, path)
+}
+
+/// The synthetic chat profile (no backing .json file) is approved through the
+/// APP CONFIG, not an agents dir: the prompt lands in `config.json` (persisted),
+/// bundled new agents are still created, profile-field changes are reported as
+/// skipped, and the result reports `prompt_applied` like the file-backed path.
+#[test]
+fn test_apply_chat_improvement_writes_config() {
+    let dir = temp_agents_dir("chat");
+    let manager = AgentManager::new(dir.clone());
+    let (mut config, cfg_path) = temp_config("chat");
+
+    let mut imp = pending("chat", Some("llm chat prompt"));
+    imp.edited_prompt = Some("user edited chat prompt".to_string());
+    imp.new_agents.push(PendingNewAgent {
+        proposal: proposal("helper", "helper prompt"),
+        edited_system_prompt: "helper prompt".to_string(),
+    });
+    imp.allowed_tools = Some(vec!["shell".to_string()]);
+
+    let (msg, prompt_applied) =
+        apply_chat_improvement(&mut config, &manager, &SkillStore::new(temp_skill_dir("chat")), &imp);
+    assert!(prompt_applied, "chat prompt write must report prompt_applied: {msg}");
+    assert!(msg.contains("updated prompt for the chat profile in config.json"), "msg: {msg}");
+    assert!(msg.contains("created new agent 'helper'"), "msg: {msg}");
+    assert!(msg.contains("skipped chat-profile field change(s) tools"), "msg: {msg}");
+
+    // The user-edited prompt (not the LLM text) is in the in-memory config
+    // AND persisted to config.json.
+    assert_eq!(config.system_prompt, "user edited chat prompt");
+    let on_disk = wuffagent_core::config::Config::load(&cfg_path).unwrap();
+    assert_eq!(on_disk.system_prompt, "user edited chat prompt");
+
+    // Bundled new agents still go through the agent files.
+    assert_eq!(manager.get_agent("helper").expect("helper").system_prompt, "helper prompt");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&cfg_path);
+}
+
+/// Approving a chat suggestion whose prompt is already current is a no-op
+/// success (prompt_applied, "unchanged").
+#[test]
+fn test_apply_chat_improvement_prompt_unchanged() {
+    let dir = temp_agents_dir("chat-same");
+    let manager = AgentManager::new(dir.clone());
+    let (mut config, cfg_path) = temp_config("chat-same");
+
+    let imp = pending("chat", Some("live chat prompt"));
+    let (msg, prompt_applied) = apply_chat_improvement(
+        &mut config,
+        &manager,
+        &SkillStore::new(temp_skill_dir("chat-same")),
+        &imp,
+    );
+    assert!(prompt_applied, "msg: {msg}");
+    assert!(msg.contains("chat prompt unchanged"), "msg: {msg}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&cfg_path);
+}
+
 #[test]
 fn test_apply_improvement_updates_prompt_and_creates_agent() {
     let dir = temp_agents_dir("update");

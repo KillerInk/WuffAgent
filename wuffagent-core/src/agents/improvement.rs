@@ -29,6 +29,21 @@ const NEWLINE: char = '\u{a}';
 /// (approving one would fail with "profile not found").
 pub const CHAT_PROFILE_NAME: &str = "chat";
 
+/// The synthetic [`AgentConfig`] for the chat profile: the identity the
+/// improver needs (name + a base system prompt). Callers that hold the
+/// live app config should overwrite `system_prompt` with the user's actual
+/// chat system prompt - the static base text is what the tool-side check
+/// (`run_self_improvement`) sees when the tool does not hold the config.
+pub fn synthetic_chat_config() -> AgentConfig {
+    AgentConfig {
+        name: CHAT_PROFILE_NAME.to_string(),
+        description: "General purpose agent (the chat UI's default profile; no backing file - configured through the chat settings)"
+            .to_string(),
+        system_prompt: "You are WuffAgent, a self-improving general-purpose agent.".to_string(),
+        ..Default::default()
+    }
+}
+
 // ImprovementSuggestion / NewAgentProposal live in the types brick (types
 // embeds them in AppEvent::ImprovementSuggested); re-exported here so the
 // crate::agents:: and crate::memory:: paths stay stable.

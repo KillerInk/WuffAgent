@@ -174,3 +174,19 @@ async fn test_fleet_prompt_lists_existing_agent_names() {
         prompt
     );
 }
+
+/// The synthetic chat config carries the profile identity the improver and
+/// the run-check paths need (name "chat", non-empty base prompt) so a
+/// `run_self_improvement` check for "chat" runs even though no profile file
+/// exists; callers with the live app config overwrite the system prompt.
+#[test]
+fn test_synthetic_chat_config_identity() {
+    let cfg = synthetic_chat_config();
+    assert_eq!(cfg.name, CHAT_PROFILE_NAME);
+    assert!(!cfg.system_prompt.is_empty(), "base prompt must be non-empty");
+    assert!(
+        cfg.description.contains("chat settings"),
+        "description must point at the chat settings as the profile's home: {}",
+        cfg.description
+    );
+}

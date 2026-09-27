@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use wuffagent_core::agents::config::{AgentConfig, AgentManager, WorkerConfig};
+use wuffagent_core::config::Config;
 use wuffagent_core::memory::skills::SkillStore;
 use wuffagent_core::memory::{MemoryEntry, MemoryManager, MemoryType};
 
@@ -222,6 +223,132 @@ pub fn apply_improvement_detailed(
                 _ => match skill_store.save(&sk.name, &sk.description, &sk.when_to_use, &sk.body) {
                     Ok(meta) => parts.push(format!("saved skill '{}' ({})", meta.name, sk.action)),
                     Err(e) => errors.push(format!("skipped skill '{}': {}", sk.name, e)),
+                },
+            }
+        }
+    }
+
+    let msg = if parts.is_empty() && errors.is_empty() {
+        "No changes to apply.".to_string()
+    } else {
+        let mut msg = parts.join("; ");
+        if !errors.is_empty() {
+            if !msg.is_empty() {
+                msg.push_str("; ");
+            }
+            msg.push_str(&errors.join("; "));
+        }
+        msg
+    };
+    (msg, prompt_applied)
+}
+
+/// The chat-profile counterpart of [`apply_improvement_detailed`]: approving
+/// a suggestion for "chat" (a synthetic profile — no backing .json file in
+/// any agents dir, configured through the chat settings) writes the prompt
+/// change into the app `Config` (`config.json`) and persists it, instead of
+/// failing with "profile not found".
+///
+/// Returns the same `(message, prompt_applied)` pair the file-backed path
+/// reports, so the caller's I5 effect-check bookkeeping is identical. New
+/// agents and skills bundled with the suggestion still go through the shared
+/// `AgentManager` / `SkillStore` (they are not chat-profile state); profile
+/// FIELD changes (tools/timeout/...) have no chat-profile home and are
+/// reported as skipped rather than silently dropped.
+pub fn apply_chat_improvement(
+    config: &mut Config,
+    agent_manager: &AgentManager,
+    skill_store: &SkillStore,
+    imp: &PendingImprovement,
+) -> (String, bool) {
+    let mut parts: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut prompt_applied = false;
+
+    let prompt = if imp.apply_prompt {
+        imp.edited_prompt
+            .as_deref()
+            .or(imp.prompt_change.as_deref())
+    } else {
+        None
+    };
+
+    // Profile fields have no chat-profile home (the chat settings dialog
+    // only covers the system prompt) — say so instead of dropping them.
+    let fields_skipped = [
+        ("tools", imp.apply_allowed_tools && imp.allowed_tools.is_some()),
+        ("reasoning effort", imp.apply_reasoning_effort && imp.reasoning_effort.is_some()),
+        ("shell config", imp.apply_shell_config && imp.shell_config.is_some()),
+        ("handoff targets", imp.apply_handoff_targets && imp.handoff_targets.is_some()),
+        ("task timeout", imp.apply_task_timeout && imp.task_timeout_ms.is_some()),
+        ("description", imp.apply_description && imp.description.is_some()),
+    ]
+    .into_iter()
+    .filter(|(_, on)| *on)
+    .map(|(label, _)| label.to_string())
+    .collect::<Vec<_>>();
+
+    match prompt {
+        Some(text) => {
+            if config.system_prompt != text {
+                config.system_prompt = text.to_string();
+                if let Err(e) = config.save() {
+                    errors.push(format!(
+                        "failed to save the chat prompt to config.json: {e}"
+                    ));
+                } else {
+                    prompt_applied = true;
+                    parts.push(format!(
+                        "updated prompt for the chat profile in config.json ({} chars)",
+                        text.chars().count()
+                    ));
+                }
+            } else {
+                prompt_applied = true;
+                parts.push("chat prompt unchanged (already matches the suggestion)".to_string());
+            }
+        }
+        None => parts.push("no prompt change to apply for the chat profile".to_string()),
+    }
+
+    if !fields_skipped.is_empty() {
+        errors.push(format!(
+            "skipped chat-profile field change(s) {} (the chat profile is configured through the chat settings, which only covers the system prompt)",
+            fields_skipped.join(", ")
+        ));
+    }
+
+    for na in &imp.new_agents {
+        let mut proposal = na.proposal.clone();
+        // F1: the user's edit wins over the LLM text.
+        proposal.system_prompt = na.edited_system_prompt.clone();
+        let config = AgentConfig {
+            name: proposal.name.clone(),
+            description: proposal.description.clone(),
+            system_prompt: proposal.system_prompt.clone(),
+            allowed_tools: proposal.allowed_tools.clone(),
+            ..Default::default()
+        };
+        match agent_manager.add_agent(&config) {
+            Ok(()) => parts.push(format!("created new agent '{}'", proposal.name)),
+            Err(e) => errors.push(format!("failed to create agent '{}': {e}", proposal.name)),
+        }
+    }
+
+    if imp.apply_skills {
+        for sk in &imp.skill_updates {
+            match sk.action.trim().to_ascii_lowercase().as_str() {
+                "delete" => match skill_store.delete(&sk.name) {
+                    Ok(true) => parts.push(format!("retired skill '{}'", sk.name)),
+                    Ok(false) => parts.push(format!(
+                        "skill '{}' already gone (retire was a no-op)",
+                        sk.name
+                    )),
+                    Err(e) => errors.push(format!("failed to retire skill '{}': {e}", sk.name)),
+                },
+                _ => match skill_store.save(&sk.name, &sk.description, &sk.when_to_use, &sk.body) {
+                    Ok(meta) => parts.push(format!("saved skill '{}' ({})", meta.name, sk.action)),
+                    Err(e) => errors.push(format!("skipped skill '{}': {e}", sk.name)),
                 },
             }
         }

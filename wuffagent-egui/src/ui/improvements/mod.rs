@@ -19,18 +19,18 @@ use wuffagent_core::types::{
     ImprovementSuggestion, NewAgentProposal, ReasoningEffort, SkillUpdate,
 };
 
+use std::path::PathBuf;
+
 use super::theme::Theme;
+pub use wuffagent_core::agents::config::AgentConfig;
 
 // Re-export for tests (`use super::*`); the non-test build has no external
 // callers for these, so gate to avoid unused-import warnings.
 #[cfg(test)]
 pub use memory::{
-    applied_marker, apply_improvement_detailed, rejection_lesson, remember_applied_prompt,
-    remember_dismissal, resolve_agent_dir,
+    applied_marker, apply_chat_improvement, apply_improvement_detailed, rejection_lesson,
+    remember_applied_prompt, remember_dismissal, resolve_agent_dir,
 };
-#[cfg(test)]
-use std::path::PathBuf;
-pub use wuffagent_core::agents::config::AgentConfig;
 #[cfg(test)]
 pub use wuffagent_core::memory::skills::SkillStore;
 
@@ -344,12 +344,11 @@ fn suggestion_from_pending(p: &PendingImprovement) -> ImprovementSuggestion {
 
 /// ChatApp extension: the improvements panel integration.
 impl crate::ui::state::ChatApp {
-    /// Build an AgentManager with the same discovery set the chat agent
-    /// selector uses (`agents_dirs` in `input.rs`): the config-dir
-    /// `agents/` as primary (new agents are written there), plus the
-    /// project-level `agents/` dirs as search dirs.
-    pub(super) fn build_agent_manager(&self) -> AgentManager {
-        let dirs = self.agents_dirs();
+    /// Build an AgentManager from an explicit directory set (the config-dir
+    /// `agents/` as primary — new agents are written there — plus the
+    /// project-level `agents/` dirs as search dirs; the same discovery set
+    /// `agents_dirs` derives).
+    pub(super) fn agent_manager_from_dirs(dirs: &[PathBuf]) -> AgentManager {
         let mut manager = AgentManager::new(dirs[0].clone());
         for dir in &dirs[1..] {
             manager.add_search_dir(dir.clone());
@@ -358,20 +357,33 @@ impl crate::ui::state::ChatApp {
     }
 
     /// Draw the improvements panel.
+    ///
+    /// Field-borrowed (instead of passing `&mut self` through) so the panel
+    /// may take the live app `Config` by mutable reference: approving a
+    /// suggestion for the synthetic chat profile writes `config.json`
+    /// (`apply_chat_improvement`) and must update the config the app holds,
+    /// not a stale clone. The `&self`-receiver helpers (`agents_dirs`) run
+    /// FIRST so their whole-`self` borrow ends before the field borrows
+    /// start.
     pub(super) fn draw_improvements_panel(&mut self, ctx: &egui::Context) {
         let agents_dirs = self.agents_dirs();
-        let agent_manager = self.build_agent_manager();
-        let theme = Theme::from_name(&self.core.config.theme);
+        let agent_manager = Self::agent_manager_from_dirs(&agents_dirs);
+        let config = &mut self.core.config;
+        let memory_manager = &mut self.core.memory_manager;
+        let relay = &mut self.relay;
+        let panel = &mut self.dialogs.improvements_panel;
+        let theme = Theme::from_name(&config.theme);
         // 4b: the "run check now" button needs a clonable memory handle and
         // the AppEvent channel to send back the result of the check it spawns.
-        let memory_arc = self.core.memory_manager.clone();
-        let events = self.relay.pending_tx.clone();
-        self.dialogs.improvements_panel.draw(
+        let memory_arc = memory_manager.clone();
+        let events = relay.pending_tx.clone();
+        panel.draw(
             ctx,
             &agent_manager,
             &agents_dirs,
+            config,
             &theme,
-            &self.core.memory_manager,
+            memory_manager,
             memory_arc,
             events,
         );

@@ -193,6 +193,15 @@ impl Tool for RunSelfImprovementTool {
 
         let agent_config = match self.agents.get_agent(&agent_name) {
             Some(c) => c,
+            // The chat profile is synthetic (no backing .json file): the UI's
+            // default agent identity. Run the check with a synthetic config so
+            // `agent: "chat"` does not fail with "profile not found" — but
+            // note the tool does not hold the live app config, so the check
+            // analyzes the profile's base prompt, not the user's customized
+            // one (the UI's "run check now" button passes the live prompt).
+            None if agent_name.eq_ignore_ascii_case(crate::agents::improvement::CHAT_PROFILE_NAME) => {
+                crate::agents::improvement::synthetic_chat_config()
+            }
             None => {
                 let available: Vec<String> = self
                     .agents
@@ -407,6 +416,23 @@ mod tests {
         // 2d: `agent` is validated at runtime (required for 'agent' scope),
         // so the schema itself requires nothing up front.
         assert!(input.required.is_empty(), "got: {:?}", input.required);
+    }
+
+    /// The chat profile is synthetic (no backing .json file): `agent: "chat"`
+    /// must run the check against the synthetic chat config (and be recorded
+    /// per-agent under "chat") instead of failing with "profile not found".
+    #[test]
+    fn test_chat_profile_runs_without_backing_file() {
+        let c = ctx();
+        let tool = RunSelfImprovementTool::new(c.memory.clone(), c.agents, None);
+        let (ok, msg) = outcome(call(&tool, "chat", None, None));
+        assert!(ok, "got: {msg}");
+        assert!(
+            msg.contains("No improvement suggestions for 'chat'"),
+            "got: {msg}"
+        );
+        let st = c.memory.agent_improvement_state("chat");
+        assert!(st.last_check.is_some(), "chat check must be recorded per-agent");
     }
 
     /// 2d: `scope: "fleet"` runs the cross-agent review — with no LLM client
