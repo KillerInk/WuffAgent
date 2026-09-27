@@ -112,6 +112,21 @@ impl Agent {
             );
         }
 
+        // S4a: session-note guidance. Only shown when the tool is injected
+        // (`session_note_enabled`, default true) so the prompt never advertises
+        // a tool the agent does not have.
+        if self.config.session_note_enabled {
+            prompt.push_str(
+                "\n\n## SESSION NOTE\n\
+                 You can pin a short state note (≤2000 chars) to this session with the `session_note` tool (param `note`). \
+                 Use it when you reach a significant state that must survive context compaction and session reloads: \
+                 a decision, an invariant, the next step, or where work stands. \
+                 The note is anchored right after the system prompt in every later LLM call. \
+                 At most 3 notes are kept — older ones are folded into the session brief. \
+                 Your turn CONTINUES after the call (unlike handoff): pin the note, then carry on.",
+            );
+        }
+
         // Note: system prompt caching would require &'mut self, which conflicts
         // with the LLM loop. The prompt is cheap to rebuild (~100ns).
         prompt

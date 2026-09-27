@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod plugins;
 pub mod restart;
 pub mod search;
+pub mod session_note;
 pub mod shell;
 pub mod skills;
 pub mod time;
@@ -34,6 +35,10 @@ pub use mcp::{
 };
 pub use plugins::{AddPluginPathTool, ReloadPluginsTool};
 pub use search::SearchContentTool;
+// NOTE: SessionNoteTool is also per-execution (own mailbox) — injected by
+// `Agent::builder` for EVERY agent (S4a: pinned session notes), not
+// registered in `register_builtins`.
+pub use session_note::SessionNoteTool;
 pub use shell::{ShellConfig, ShellTool};
 pub use skills::{DeleteSkillTool, ListSkillsTool, ReadSkillTool, SaveSkillTool};
 pub use time::TimeTool;

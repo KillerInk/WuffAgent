@@ -137,11 +137,24 @@ impl super::ContextTrimming {
                 keep_from += 1;
                 continue;
             }
+            // Never remove an anchored session note (S4a): it is the model's
+            // explicitly re-injected state, and it is re-anchored on every
+            // LLM call (removing it here would just cost a re-insert).
+            if crate::trimming::brief::is_note_message(&messages[keep_from]) {
+                keep_from += 1;
+                continue;
+            }
             // Never remove the FIRST user message (the task): it is the
             // oldest message and would be the first casualty of the age
             // sweep. The mission brief carries it too, but the verbatim task
-            // stays as well (belt and braces).
-            if let Some(fui) = messages.iter().position(|m| m.role == "user") {
+            // stays as well (belt and braces). Notes and the brief are
+            // user-role messages too — the task is the first user message
+            // that is NEITHER (S4a).
+            if let Some(fui) = messages.iter().position(|m| {
+                m.role == "user"
+                    && !crate::trimming::brief::is_brief_message(m)
+                    && !crate::trimming::brief::is_note_message(m)
+            }) {
                 if keep_from == fui {
                     keep_from += 1;
                     continue;
@@ -222,6 +235,9 @@ impl super::ContextTrimming {
                 .filter(|&i| messages[i].content.chars().count() > min_shrink_chars)
                 .filter(|&i| messages[i].content != TRUNCATED_PLACEHOLDER)
                 .filter(|&i| !crate::trimming::brief::is_brief_message(&messages[i]))
+                // Anchored session notes (S4a) are the same: halving explicit
+                // state to save a few hundred chars defeats the purpose.
+                .filter(|&i| !crate::trimming::brief::is_note_message(&messages[i]))
                 // A halved file snapshot invites the model to hallucinate
                 // line contents it no longer has — file content is either
                 // fully present or fully absent.

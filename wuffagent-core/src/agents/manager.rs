@@ -109,6 +109,7 @@ impl AgentManager {
                             handoff_targets: legacy.can_invoke,
                             restart_enabled: true,
                             hand_back_enabled: true,
+                            session_note_enabled: true,
                         };
                         if seen.insert(config.name.clone(), ()).is_none() {
                             tracing::info!(
@@ -586,6 +587,7 @@ impl AgentManager {
             handoff_targets: legacy.can_invoke,
             restart_enabled: true,
             hand_back_enabled: true,
+            session_note_enabled: true,
         })
     }
 

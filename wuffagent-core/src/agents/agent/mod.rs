@@ -72,6 +72,12 @@ pub struct Agent {
     /// `parent_session_id`). The `hand_back` tool writes a request here;
     /// `run_llm_loop` picks it up before the next LLM round.
     hand_back_mailbox: Option<Arc<Mutex<Option<crate::agents::types::HandBackRequest>>>>,
+    /// Per-execution session-note mailbox (S4a), present on EVERY agent. The
+    /// `session_note` tool writes a request here; `run_llm_loop` picks it up
+    /// before the next LLM round, inserts the note as an anchored user
+    /// message (right after the system prompt) and records it in the shared
+    /// store — so the note survives trims and session reloads.
+    session_note_mailbox: Arc<Mutex<Option<crate::agents::types::SessionNoteRequest>>>,
     /// I1: trajectory stats of the last completed `run_llm_loop`.
     run_stats: RunStats,
     /// Mid-run injection channel (UI → this run), if the chat pipeline
@@ -162,7 +168,11 @@ impl AgentBuilder {
     ///   their config flag is set (hand_back additionally requires a
     ///   sub-session, i.e. a `parent_session_id` in the client's session
     ///   meta), each with its own per-execution mailbox; tools inherited from
-    ///   a previous agent in a handoff chain are dropped when the flag is off.
+    ///   a previous agent in a handoff chain are dropped when the flag is off;
+    /// - the `session_note` tool (S4a) is injected for EVERY agent, with its
+    ///   own per-execution mailbox: `run_llm_loop` turns a queued note into an
+    ///   anchored user message (right after the system prompt) + a store
+    ///   record, so pinned state survives trims and session reloads.
     pub fn build(self) -> Agent {
         let AgentBuilder {
             config,
@@ -190,7 +200,13 @@ impl AgentBuilder {
             config.trim_config.trim_trigger_pct as u64,
             config.trim_config.trim_target_pct as u64,
         );
-        let (tool_manager, handoff_mailbox, restart_mailbox, hand_back_mailbox) = {
+        let (
+            tool_manager,
+            handoff_mailbox,
+            restart_mailbox,
+            hand_back_mailbox,
+            session_note_mailbox,
+        ) = {
             let tool_manager_arc = tool_manager.unwrap_or_else(|| {
                 Arc::new(Mutex::new(ToolManager::new(Arc::new(
                     crate::tools::registry::ToolRegistry::new(
@@ -224,7 +240,7 @@ impl AgentBuilder {
             } else {
                 (tm.without_restart(), None)
             };
-            let (tm, hand_back_mailbox) =
+            let (mut tm, hand_back_mailbox) =
                 if config.hand_back_enabled && client.session_meta().parent_session_id.is_some() {
                     let mailbox = Arc::new(Mutex::new(None));
                     let tool = crate::tools::builtin::hand_back::HandBackTool::new(mailbox.clone());
@@ -232,7 +248,22 @@ impl AgentBuilder {
                 } else {
                     (tm.without_hand_back(), None)
                 };
-            (Arc::new(Mutex::new(tm)), handoff_mailbox, restart_mailbox, hand_back_mailbox)
+            // S4a: agents with `session_note_enabled` (default true) get a
+            // pinned-note tool wired to their own mailbox. The mailbox is
+            // always created (the `run_llm_loop` drain is a no-op when the
+            // tool was never injected), so the Agent field stays a plain Arc.
+            let mailbox = Arc::new(Mutex::new(None));
+            if config.session_note_enabled {
+                let tool = crate::tools::builtin::session_note::SessionNoteTool::new(mailbox.clone());
+                tm = tm.with_session_note_tool(tool);
+            }
+            (
+                Arc::new(Mutex::new(tm)),
+                handoff_mailbox,
+                restart_mailbox,
+                hand_back_mailbox,
+                mailbox,
+            )
         };
         Agent {
             config,
@@ -248,6 +279,7 @@ impl AgentBuilder {
             handoff_mailbox,
             restart_mailbox,
             hand_back_mailbox,
+            session_note_mailbox,
             run_stats: RunStats::default(),
             injection_rx: None,
         }

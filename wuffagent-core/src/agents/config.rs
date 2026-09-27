@@ -231,6 +231,13 @@ pub struct AgentConfig {
     /// turned off per profile.
     #[serde(default = "default_true")]
     pub hand_back_enabled: bool,
+    /// Whether this agent gets the `session_note` tool (S4a: pin a short
+    /// state note that is anchored after the system prompt, survives trims
+    /// and session reloads, and folds into the mission brief at the cap).
+    /// Protective feature: defaults to true so it can be turned off per
+    /// profile.
+    #[serde(default = "default_true")]
+    pub session_note_enabled: bool,
 }
 
 fn default_enabled_agent() -> bool {
@@ -268,6 +275,7 @@ impl Default for AgentConfig {
             handoff_targets: Vec::new(),
             restart_enabled: true,
             hand_back_enabled: true,
+            session_note_enabled: true,
         }
     }
 }
@@ -306,6 +314,7 @@ fn parse_agent_file(path: &Path) -> Option<AgentConfig> {
         handoff_targets: legacy.can_invoke,
         restart_enabled: true,
         hand_back_enabled: true,
+        session_note_enabled: true,
     })
 }
 
@@ -532,6 +541,7 @@ impl AgentConfig {
                             handoff_targets: legacy.can_invoke,
                             restart_enabled: true,
                             hand_back_enabled: true,
+                            session_note_enabled: true,
                         };
                         agents.push(config);
                     } else {

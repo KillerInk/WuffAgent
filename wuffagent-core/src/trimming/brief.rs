@@ -2,7 +2,10 @@
 //! conversation parts that trimming dropped, re-inserted after every trim so
 //! the model keeps the TASK, the user's CORRECTIONS, the DECISIONS, and the
 //! CURRENT STATE — and knows that compaction happened (prevents context rot;
-//! see autoplans/context-rot-prevention.md, step S1).
+//! see autoplans/context-rot-prevention.md, steps S1/S4a) — plus the
+//! "session note" mechanism (S4a): agent-authored state notes anchored after
+//! the system prompt, protected from every trim, and folded into the brief's
+//! `Notes:` section when the note cap is reached.
 //!
 //! Design constraints:
 //! - **Deterministic** (no LLM, no I/O): the trim path must stay synchronous
@@ -13,17 +16,40 @@
 //!   session file by store reconciliation, re-parsed via `from_rendered` —
 //!   which also survives a session reload).
 //! - **Anchored**: the rendered brief is a single user-role message carrying
-//!   [`BRIEF_MARKER`]. `age_sweep` and `truncate_largest_message` skip it, so
-//!   it survives later trims; each new trim re-renders it in place (never
-//!   stacks).
+//!   [`BRIEF_MARKER`], and each session note is a user-role message carrying
+//!   [`NOTE_MARKER`]. `age_sweep` and `truncate_largest_message` skip both,
+//!   so they survive later trims; each new trim re-renders the brief in
+//!   place (never stacks).
 //! - **Capped**: every field has a char cap, every list an item cap, and the
 //!   render a total cap — the task is never evicted.
+//!
+//! NOTE on "first user message = the task": with anchored notes in the list
+//! the first user message is usually a NOTE, not the task. Every site that
+//! resolves "the task" must look for the first user message that is neither
+//! a brief nor a note (see the task guards in `summarizer/trim.rs` and the
+//! `task_seed` in `summarizer/mod.rs`).
 
 use crate::types::Message;
 
 /// Marker prefix of the rendered brief message. STABLE: the anchor guards in
 /// `age_sweep` / `truncate_largest_message` and `is_brief_message` rely on it.
 pub const BRIEF_MARKER: &str = "[SESSION BRIEF";
+
+/// Marker prefix of a session-note message (S4a). STABLE: `is_note_message`,
+/// the `age_sweep` / `truncate_largest_message` guards and the task
+/// disambiguation rely on it.
+pub const NOTE_MARKER: &str = "[SESSION NOTE — ";
+
+/// Cap for tool input to `session_note` (chars): longer notes are truncated
+/// with an ellipsis marker — a note is a pointer, not a transcript.
+pub const NOTE_INPUT_MAX: usize = 2_000;
+
+/// Cap for a note line once folded into the brief's `Notes:` section.
+const NOTE_MAX: usize = 400;
+
+/// Max anchored note messages kept in the request list (S4a): the oldest is
+/// folded into the brief (top priority) before a new one is inserted.
+pub const NOTES_MAX_ITEMS: usize = 3;
 
 /// Minimum chars of dropped content for a brief to be worth (re)building —
 /// below this the brief itself would cost a comparable share of the savings.
@@ -56,6 +82,7 @@ const FILE_MUTATING_TOOLS: &[&str] = &[
 enum Section {
     Done,
     InProgress,
+    Note,
     Decision,
     Correction,
     File,
@@ -77,6 +104,11 @@ pub struct SessionBrief {
     pub decisions: Vec<String>,
     /// Files written/edited by dropped rounds, oldest → newest ("path (tool)").
     pub files_touched: Vec<String>,
+    /// Agent-authored session notes (S4a): folded in when an anchored note
+    /// message is evicted by the note cap, plus any note found in a dropped
+    /// span. Newest appended; evicted LAST by [`enforce_total_cap`] (agent
+    /// state outranks everything the heuristics can re-derive).
+    pub notes: Vec<String>,
 }
 
 impl SessionBrief {
@@ -88,6 +120,7 @@ impl SessionBrief {
             && self.in_progress.is_none()
             && self.decisions.is_empty()
             && self.files_touched.is_empty()
+            && self.notes.is_empty()
     }
 
     /// Fold the DROPPED span (chronological order) into `prev` (the previous
@@ -113,6 +146,14 @@ impl SessionBrief {
             }
             match m.role.as_str() {
                 "user" => {
+                    if is_note_message(m) {
+                        // Agent-authored state note (S4a): top priority — fold
+                        // into the notes section, never the task/corrections.
+                        if let Some(text) = note_content(m) {
+                            push_capped(&mut b.notes, &one_line(text, NOTE_MAX), NOTES_MAX_ITEMS * 2);
+                        }
+                        continue;
+                    }
                     if b.task.is_empty() {
                         let line = one_line(&m.content, TASK_MAX);
                         if !line.is_empty() {
@@ -189,6 +230,27 @@ pub fn is_brief_message(m: &Message) -> bool {
     m.role == "user" && m.content.starts_with(BRIEF_MARKER)
 }
 
+/// True for a session-note message (S4a: user role + [`NOTE_MARKER`]).
+pub fn is_note_message(m: &Message) -> bool {
+    m.role == "user" && m.content.starts_with(NOTE_MARKER)
+}
+
+/// The note text of a note message (content after the marker, without the
+/// closing bracket), if any. `apply_note` renders notes as
+/// `{NOTE_MARKER}{note}]`, so the closing `]` is stripped back off here —
+/// otherwise the bracket leaks into the brief's `Notes:` section whenever a
+/// note is folded in. (A note whose own text ends in `]` still round-trips:
+/// only the LAST char, which is always the closing bracket we appended, is
+/// removed.)
+pub fn note_content(m: &Message) -> Option<&str> {
+    if is_note_message(m) {
+        let body = m.content.strip_prefix(NOTE_MARKER)?;
+        Some(body.strip_suffix(']').unwrap_or(body))
+    } else {
+        None
+    }
+}
+
 /// Render the brief as its single anchored user message. Returns an empty
 /// string when there is nothing to report (the caller inserts nothing).
 ///
@@ -212,6 +274,12 @@ pub fn render(b: &SessionBrief) -> String {
     }
     if let Some(ip) = &b.in_progress {
         s.push_str(&format!("In progress: {ip}\n"));
+    }
+    if !b.notes.is_empty() {
+        s.push_str("Notes (agent-recorded state, read carefully):\n");
+        for n in &b.notes {
+            s.push_str(&format!("- {n}\n"));
+        }
     }
     if !b.decisions.is_empty() {
         s.push_str("Decisions:\n");
@@ -254,6 +322,8 @@ pub fn from_rendered(text: &str) -> Option<SessionBrief> {
         } else if let Some(rest) = line.strip_prefix("In progress: ") {
             b.in_progress = Some(rest.trim().to_string());
             section = None;
+        } else if line == "Notes (agent-recorded state, read carefully):" {
+            section = Some(Section::Note);
         } else if line == "Decisions:" {
             section = Some(Section::Decision);
         } else if line == "User notes (read carefully, newest last):" {
@@ -268,6 +338,7 @@ pub fn from_rendered(text: &str) -> Option<SessionBrief> {
                 Section::Decision => b.decisions.push(item),
                 Section::Correction => b.corrections.push(item),
                 Section::File => b.files_touched.push(item),
+                Section::Note => b.notes.push(item),
                 Section::InProgress => {}
             }
         }
@@ -281,7 +352,8 @@ pub fn from_rendered(text: &str) -> Option<SessionBrief> {
 
 /// Replace any existing brief message with `text` (or insert one) at the
 /// anchor slot — right after the leading system prompt (or at the front when
-/// there is none), and, when the verbatim task (the first user message) sits
+/// there is none), past the anchored note block (S4a), and, when the verbatim
+/// task (the first user message that is neither a brief nor a note) sits
 /// there, right AFTER it: the task is the beginning of the conversation and
 /// the brief summarizes what happened since. Empty `text` is a no-op.
 pub fn apply_brief(messages: &mut Vec<Message>, text: &str) {
@@ -293,7 +365,10 @@ pub fn apply_brief(messages: &mut Vec<Message>, text: &str) {
     } else {
         0
     };
-    // Keep the verbatim task before the brief.
+    // Keep the anchored notes and the verbatim task before the brief.
+    while at < messages.len() && is_note_message(&messages[at]) {
+        at += 1;
+    }
     if at < messages.len() && messages[at].role == "user" {
         at += 1;
     }
@@ -322,6 +397,111 @@ pub fn apply_brief(messages: &mut Vec<Message>, text: &str) {
     }
 }
 
+/// Insert a session note (S4a) as an anchored user message right after the
+/// system prompt (before the task), or at the front when there is no system
+/// prompt; multiple notes form a contiguous block in insertion order.
+///
+/// Caps: at most [`NOTES_MAX_ITEMS`] anchored notes — adding one beyond the
+/// cap first FOLDS the oldest note's content into the session brief's
+/// `Notes:` section (top priority; the brief is (re)inserted in place even
+/// though no trim is happening), then removes the note message. The note's
+/// state is therefore carried by the anchored message or by the brief — never
+/// both lost. Duplicate notes (identical text) are a no-op.
+///
+/// Returns the index of the (new or existing) note message so the caller can
+/// `record_in_store` it (the note must survive session reloads). `None` for
+/// empty notes.
+pub fn apply_note(messages: &mut Vec<Message>, note: &str) -> Option<usize> {
+    let note = note.trim();
+    if note.is_empty() {
+        return None;
+    }
+    let text = format!("{NOTE_MARKER}{note}]");
+    // Dedupe: the identical note is already in the list (a drifted position is
+    // fixed by the next `reanchor_notes` pass).
+    if let Some(i) = messages.iter().position(|m| m.content == text) {
+        return Some(i);
+    }
+    if messages.iter().filter(|m| is_note_message(m)).count() >= NOTES_MAX_ITEMS {
+        // Note cap reached: fold the OLDEST note into the brief first.
+        let i = messages.iter().position(is_note_message)?;
+        let msg = messages[i].clone();
+        if let Some(folded) = note_content(&msg).map(|t| one_line(t, NOTE_MAX)) {
+            let mut brief = messages
+                .iter()
+                .find(|m| is_brief_message(m))
+                .and_then(|m| from_rendered(&m.content))
+                .unwrap_or_default();
+            push_capped(&mut brief.notes, &folded, NOTES_MAX_ITEMS * 2);
+            enforce_total_cap(&mut brief);
+            let brief_text = render(&brief);
+            if !brief_text.is_empty() {
+                apply_brief(messages, &brief_text);
+            }
+        }
+        messages.remove(i);
+    }
+    let at = anchor_note_slot(messages);
+    messages.insert(
+        at,
+        Message {
+            role: "user".into(),
+            content: text,
+            timestamp: crate::types::format_timestamp(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        },
+    );
+    Some(at)
+}
+
+/// The slot where the NEXT anchored note goes: right after the leading
+/// system prompt, past any already-anchored note block.
+fn anchor_note_slot(messages: &[Message]) -> usize {
+    let mut at = if messages.first().is_some_and(|m| m.role == "system") {
+        1
+    } else {
+        0
+    };
+    while at < messages.len() && is_note_message(&messages[at]) {
+        at += 1;
+    }
+    at
+}
+
+/// Re-anchor drifted session notes (S4a) into the contiguous block right
+/// after the system prompt, in list order (oldest → newest), so the notes sit
+/// "right after the system prompt" in EVERY request — including right after a
+/// session reload, where the store's append order has them at the end of the
+/// list. No-op when every note is already anchored.
+pub fn reanchor_notes(messages: &mut Vec<Message>) {
+    let sys_end = if messages.first().is_some_and(|m| m.role == "system") {
+        1
+    } else {
+        0
+    };
+    let anchored = (sys_end..messages.len())
+        .take_while(|&i| is_note_message(&messages[i]))
+        .count();
+    let total = messages.iter().filter(|m| is_note_message(m)).count();
+    if anchored == total {
+        return; // already anchored, in order
+    }
+    // Collect in list order (remove from the back to keep indices valid).
+    let mut notes = Vec::with_capacity(total);
+    for i in (0..messages.len()).rev() {
+        if is_note_message(&messages[i]) {
+            notes.push(messages.remove(i));
+        }
+    }
+    notes.reverse();
+    for (k, msg) in notes.into_iter().enumerate() {
+        messages.insert(sys_end + k, msg);
+    }
+}
+
 /// Evict oldest list items (never the task) until the render fits
 /// [`BRIEF_MAX_CHARS`].
 pub fn enforce_total_cap(b: &mut SessionBrief) {
@@ -332,17 +512,22 @@ pub fn enforce_total_cap(b: &mut SessionBrief) {
     }
 }
 
-/// Drop the single oldest item from the longest non-task section.
+/// Drop the single oldest item from the longest non-task section. Notes
+/// (S4a, agent-authored state) sit LAST in the priority: on equal lengths the
+/// oldest heuristic section is evicted first.
 fn drop_oldest(b: &mut SessionBrief) -> bool {
     let lens = [
         b.completed.len(),
         b.corrections.len(),
         b.decisions.len(),
         b.files_touched.len(),
+        b.notes.len(),
     ];
-    let Some(idx) = (0..4).max_by_key(|&i| lens[i]).filter(|&i| lens[i] > 0) else {
+    let max_len = lens.iter().copied().max().unwrap_or(0);
+    if max_len == 0 {
         return false;
-    };
+    }
+    let idx = (0..lens.len()).find(|&i| lens[i] == max_len).unwrap();
     match idx {
         0 => {
             b.completed.remove(0);
@@ -353,8 +538,11 @@ fn drop_oldest(b: &mut SessionBrief) -> bool {
         2 => {
             b.decisions.remove(0);
         }
-        _ => {
+        3 => {
             b.files_touched.remove(0);
+        }
+        _ => {
+            b.notes.remove(0);
         }
     }
     true
@@ -565,6 +753,7 @@ mod tests {
             in_progress: Some("Next: wire the event channel".into()),
             decisions: vec!["will use the AppEvent channel for the done signal".into()],
             files_touched: vec!["M:/wuffagent-egui/src/ui/improvements/draw.rs (write_file)".into()],
+            notes: vec!["pinned: the event channel design is settled".into()],
         };
         let text = render(&b);
         assert!(text.starts_with(BRIEF_MARKER));
@@ -648,5 +837,147 @@ mod tests {
         let n = messages.len();
         apply_brief(&mut messages, "");
         assert_eq!(messages.len(), n);
+    }
+
+    #[test]
+    fn apply_note_anchors_after_system_before_task() {
+        let mut messages = vec![
+            {
+                let mut m = user("sys");
+                m.role = "system".into();
+                m
+            },
+            user("task"),
+            assistant("thinking"),
+        ];
+        let idx = apply_note(&mut messages, "decision: keep the marker stable")
+            .expect("note applied");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(idx, 1, "right after the system prompt, before the task");
+        assert!(is_note_message(&messages[1]));
+        assert_eq!(
+            note_content(&messages[1]),
+            Some("decision: keep the marker stable")
+        );
+        assert_eq!(messages[2].content, "task");
+    }
+
+    #[test]
+    fn apply_note_dedupes_identical_notes() {
+        let mut messages = vec![user("task")];
+        apply_note(&mut messages, "one").unwrap();
+        let len = messages.len();
+        // Identical text: no second message, returns the existing index.
+        let idx = apply_note(&mut messages, "one").unwrap();
+        assert_eq!(messages.len(), len);
+        assert!(is_note_message(&messages[idx]));
+        assert_eq!(
+            messages.iter().filter(|m| is_note_message(m)).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn apply_note_folds_oldest_into_brief_at_cap() {
+        let mut messages = vec![user("task")];
+        // A brief with existing state, so the folded note has a home.
+        let brief = SessionBrief {
+            task: "task".into(),
+            ..Default::default()
+        };
+        apply_brief(&mut messages, &render(&brief));
+        for i in 0..NOTES_MAX_ITEMS {
+            apply_note(&mut messages, &format!("note {i}")).unwrap();
+        }
+        assert_eq!(
+            messages.iter().filter(|m| is_note_message(m)).count(),
+            NOTES_MAX_ITEMS
+        );
+        // One more: the oldest note ("note 0") is folded into the brief's
+        // Notes: section and its message removed; the new one is anchored.
+        apply_note(&mut messages, "note 3").unwrap();
+        let notes: Vec<&Message> = messages.iter().filter(|m| is_note_message(m)).collect();
+        assert_eq!(notes.len(), NOTES_MAX_ITEMS);
+        assert!(!notes.iter().any(|m| note_content(m) == Some("note 0")));
+        let brief_msg = messages.iter().find(|m| is_brief_message(m)).unwrap();
+        let parsed = from_rendered(&brief_msg.content).unwrap();
+        assert!(
+            parsed.notes.iter().any(|n| n.starts_with("note 0")),
+            "folded note lives in the brief's Notes: section, got {:?}",
+            parsed.notes
+        );
+    }
+
+    #[test]
+    fn reanchor_notes_pulls_drifted_notes_back() {
+        // Drift: notes landed at the END of the list (the post-reload shape:
+        // store append order) — reanchoring must move them right after the
+        // system prompt, in list order.
+        let mut messages = vec![
+            {
+                let mut m = user("sys");
+                m.role = "system".into();
+                m
+            },
+            user("task"),
+            assistant("work"),
+            user(&format!("{NOTE_MARKER}old note]")),
+            user(&format!("{NOTE_MARKER}new note]")),
+        ];
+        reanchor_notes(&mut messages);
+        assert_eq!(messages.len(), 5, "reanchoring moves, never adds");
+        assert!(is_note_message(&messages[1]), "first note at slot 1");
+        assert!(is_note_message(&messages[2]), "second note at slot 2");
+        assert_eq!(note_content(&messages[1]), Some("old note"));
+        assert_eq!(note_content(&messages[2]), Some("new note"));
+        assert_eq!(messages[3].content, "task");
+        // Idempotent: already anchored is a no-op.
+        let before: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+        reanchor_notes(&mut messages);
+        let after: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn note_content_strips_only_the_closing_bracket() {
+        // The note's own text may contain (or even end with) brackets: only
+        // the LAST char — the closing bracket `apply_note` appended — is
+        // removed.
+        let m = user(&format!("{NOTE_MARKER}use [a] format]"));
+        assert_eq!(note_content(&m), Some("use [a] format"));
+        let m = user(&format!("{NOTE_MARKER}ends with bracket]"));
+        assert_eq!(note_content(&m), Some("ends with bracket"));
+    }
+
+    #[test]
+    fn reanchor_notes_without_system_prompt() {
+        let mut messages = vec![
+            user("task"),
+            assistant("work"),
+            user(&format!("{NOTE_MARKER}pinned]")),
+        ];
+        reanchor_notes(&mut messages);
+        assert!(is_note_message(&messages[0]), "note anchored at the front");
+        assert_eq!(messages[1].content, "task");
+    }
+
+    #[test]
+    fn note_message_never_in_first_user_task_scan() {
+        // The task is the first user message that is neither brief nor note:
+        // a drifted note before the task must not count as the task.
+        let messages = vec![
+            user(&format!("{NOTE_MARKER}pinned]")),
+            user("the real task"),
+        ];
+        let task_idx = messages
+            .iter()
+            .position(|m| {
+                m.role == "user"
+                    && !is_brief_message(m)
+                    && !is_note_message(m)
+            })
+            .unwrap();
+        assert_eq!(task_idx, 1);
+        assert_eq!(messages[task_idx].content, "the real task");
     }
 }

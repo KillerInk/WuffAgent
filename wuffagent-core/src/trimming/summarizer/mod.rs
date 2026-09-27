@@ -265,11 +265,16 @@ impl ContextTrimming {
                     .iter()
                     .find(|m| crate::trimming::brief::is_brief_message(m))
                     .and_then(|m| crate::trimming::brief::from_rendered(&m.content));
-                // The verbatim task still in context (the first NON-brief user
-                // message — the brief itself is a user-role message).
+                // The verbatim task still in context (the first user message
+                // that is neither brief nor session note — both are
+                // user-role messages too, S4a).
                 let task_seed = messages
                     .iter()
-                    .find(|m| m.role == "user" && !crate::trimming::brief::is_brief_message(m))
+                    .find(|m| {
+                        m.role == "user"
+                            && !crate::trimming::brief::is_brief_message(m)
+                            && !crate::trimming::brief::is_note_message(m)
+                    })
                     .map(|m| m.content.clone());
                 let mut brief = crate::trimming::brief::SessionBrief::merge_dropped(
                     prev.as_ref(),

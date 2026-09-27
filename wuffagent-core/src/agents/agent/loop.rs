@@ -107,6 +107,13 @@ impl Agent {
                 if self.config.restart_enabled && !allowlist.iter().any(|t| t == "restart") {
                     allowlist.push("restart".to_string());
                 }
+                // S4a: the session-note tool is per-execution (own mailbox),
+                // so when it is injected it must survive the allowlist filter
+                // like handoff/restart.
+                if self.config.session_note_enabled && !allowlist.iter().any(|t| t == "session_note")
+                {
+                    allowlist.push("session_note".to_string());
+                }
                 manager.with_allowlist(&allowlist)
             }
         };
@@ -161,6 +168,30 @@ impl Agent {
             // long tool call (e.g. a `restart` build) is recorded in the
             // store and survives the handoff snapshot / process relaunch.
             self.drain_injections(messages, &mut original_request);
+
+            // ── S4a: session notes ─────────────────────────────────────────
+            // A note queued by the `session_note` tool this round is pinned
+            // into the conversation: inserted as an anchored user message
+            // right after the system prompt (before the task) via
+            // `brief::apply_note` and recorded in the shared store, so it
+            // survives this run's trims AND session reloads. Unlike
+            // handoff/restart/hand-back this does NOT end the run — the next
+            // LLM round simply sees the note. `reanchor_notes` then fixes any
+            // note that drifted (e.g. right after a session reload, where the
+            // store's append order has the notes at the END of the list), so
+            // they sit right after the system prompt in EVERY request.
+            if let Some(req) = self.session_note_mailbox.lock().unwrap().take() {
+                let note = truncate_note(&req.note);
+                if let Some(idx) = crate::trimming::brief::apply_note(messages, &note) {
+                    self.record_in_store(&messages[idx]);
+                    tracing::info!(
+                        "[AGENT] Agent '{}' pinned a session note ({} chars); the run continues",
+                        self.config.name,
+                        note.chars().count()
+                    );
+                }
+            }
+            crate::trimming::brief::reanchor_notes(messages);
 
             // A pending handoff (written by the `handoff` tool this turn)
             // ends this agent's run: `execute` switches to the target agent.
@@ -582,4 +613,17 @@ impl Agent {
         );
         Ok(outcome)
     }
+}
+
+/// S4a: truncate a session-note input to
+/// [`crate::trimming::brief::NOTE_INPUT_MAX`] chars (char boundary), marking
+/// the cut with "…" — a note is a pointer, not a transcript (the same rule
+/// the tool advertises).
+fn truncate_note(note: &str) -> String {
+    if note.chars().count() <= crate::trimming::brief::NOTE_INPUT_MAX {
+        return note.to_string();
+    }
+    let mut out: String = note.chars().take(crate::trimming::brief::NOTE_INPUT_MAX - 1).collect();
+    out.push('…');
+    out
 }

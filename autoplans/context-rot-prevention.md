@@ -1,6 +1,6 @@
 # Context-Rot Prevention After Trimming
 
-Created: 2026-09-27. Status: **S1+S2+S3 DONE** (2026-09-27), S4 pending (stretch).
+Created: 2026-09-27. Status: **S1+S2+S3 DONE** (2026-09-27), **S4a DONE** (2026-09-28, session_note tool + anchored notes), S4b pending (stretch).
 
 Goal: stop the model from "going off the rails" after the context window is
 reached and history is trimmed — it should keep the TASK, the user's
@@ -151,11 +151,119 @@ regardless.)
       a) `session_note` tool: the agent explicitly records "state / next step";
          the loop re-injects the note right after the system prompt on every
          call (capped); the brief merges it with top priority. Strongest
-         guarantee — survives ANY trim.
+         guarantee — survives ANY trim. **DONE 2026-09-28 — detailed design +
+         as-built notes below.**
       b) Optional LLM brief polish behind a flag: when a dropped span is large
          and a client is available, refine the brief (request carries ONLY the
          dropped span + old brief — small, cannot overflow); deterministic
          extraction is always the fallback.
+
+      ### S4a detailed design (session_note)
+
+      **Shape: anchored state message, not a re-injected copy.** The note is a
+      real user-role message `[SESSION NOTE — <note>]` inserted ONCE at the
+      anchor slot (right after the system prompt, BEFORE the task) and is
+      PROTECTED from trimming exactly like the task: `age_sweep` and
+      `truncate_largest_message` skip it. "Re-injected on every call" is
+      satisfied structurally (it is in every request list) plus a belt-and-
+      braces `reanchor_notes` pass at each loop boundary that moves a drifted
+      note (e.g. after a session reload, where store append-order puts it at
+      the END of the list) back into the anchor slot before the LLM call.
+
+      **Capped + folded into the brief (top priority):** max 3 anchored note
+      messages (`NOTES_MAX_ITEMS`). Adding a 4th evicts the OLDEST note: its
+      content is folded into the session brief's new `Notes:` section FIRST
+      (the brief is rendered + (re)inserted in place even though no trim is
+      happening), then the note message is removed. So a note's state is
+      carried either as the verbatim anchored message or inside the brief —
+      never both lost. `SessionBrief.notes: Vec<String>` (cap 400 chars per
+      line, newest kept; evicted LAST by `drop_oldest`, after files — agent-
+      authored state outranks derivable file lists). Render/parse contract
+      gains a `Notes:` section (between `In progress:` and `Decisions:`).
+
+      **Task disambiguation (the one real bug risk):** with a note at index 1,
+      "the first user message" is the note, not the task. Every "first user
+      message = task" site must mean "first user message that is neither a
+      brief nor a note": `age_sweep`'s task guard, `trim_messages`'
+      `task_seed`, and `apply_brief`'s anchor (skip the note block, then the
+      task). `merge_dropped` folds a dropped note message into `brief.notes`
+      (belt-and-braces; notes are protected so the sweep cannot drop them,
+      but the cap-evicted note still reaches the brief via the fold path).
+
+      **Wiring:** `SessionNoteRequest { note }` (agents/types.rs);
+      `SessionNoteTool` with its own per-execution mailbox (same pattern as
+      `hand_back`); injected in `AgentBuilder::build` exactly when
+      `AgentConfig.session_note_enabled` (new flag, serde default TRUE —
+      protective feature, opt-out per agent; set in all three parse sites).
+      At the top of `run_llm_loop` (after `drain_injections`): take pending
+      note → `brief::apply_note(messages, &note)` → `record_in_store` the
+      anchored message (persisted + visible in the transcript — the user can
+      see what the agent recorded) → `reanchor_notes(messages)`. The
+      `allowed_tools` filter must let `session_note` through like
+      `shell`/`handoff`/`restart` when the flag is on. System prompt gains a
+      short `## SESSION NOTE` section when enabled (when to call it: durable
+      state / decisions / what's-next, especially before long tool-heavy
+      steps; keep it short and self-contained). Caps: tool input truncated at
+      2000 chars (`NOTE_INPUT_MAX`); brief line cap 400 (`NOTE_MAX`).
+
+      **Store/reload semantics:** `reconcile_store` (post-trim) replaces the
+      store with the request list's storable projection, so after any trim the
+      store matches the anchored layout exactly. Between note-apply and the
+      next trim the store still holds the note at its append position (and
+      any cap-evicted note message) — on reload that is strictly MORE state,
+      and `reanchor_notes` re-anchors before the first LLM call. No state can
+      be lost: a note is in the request list (verbatim) or in the brief
+      (folded) or in the store (pre-reconcile) at all times.
+
+      **Metrics:** no new line kind for now (S2's Trim lines already capture
+      the rot signal; note usage is visible in the transcript + brief). Add a
+      `note` line only if the improver needs the evidence later.
+
+      **Tests:** brief.rs (note roundtrip through render/parse; merge_dropped
+      folds a dropped note into `notes`, not corrections/task; drop_oldest
+      evicts notes last; apply_note: insert-at-anchor, dedupe, cap-eviction
+      folds oldest into the brief + removes the message; reanchor_notes moves
+      a tail note to the anchor); summarizer tests (a note survives a big
+      trim untouched; the task guard still protects the REAL task with a note
+      at index 1); session_note.rs (mailbox write, merge of two pending,
+      empty no-op, input truncation).
+
+### S4a as-built notes (2026-09-28)
+
+- All design points landed as written: `brief.rs` gained
+  `SessionBrief.notes` + `NOTE_MARKER` + `is_note_message` / `note_content` /
+  `apply_note` / `reanchor_notes` (max 3 anchored notes, cap-fold into the
+  brief's `Notes:` section); the summarizer extraction skips note messages;
+  `trim_messages` / `truncate_largest_message` / the first-user-task scan all
+  treat "the task" as the first user message that is neither brief nor note;
+  `SessionNoteRequest` (agents/types.rs) + `SessionNoteTool` (per-execution
+  mailbox, `with_session_note_tool` rebuild in tools/manager.rs) injected in
+  `Agent::builder` when `session_note_enabled` (serde default true; all legacy
+  parse sites set it true); the loop drains the mailbox after
+  `drain_injections`, `apply_note` + `record_in_store` (the note is a REAL
+  user message in the transcript and the store, so it survives reloads), then
+  `reanchor_notes` every round (fixes the post-reload drift where the store's
+  append order leaves notes at the end); the allowlist push and the
+  `## SESSION NOTE` prompt block are both gated on the flag; tool input is
+  truncated at `NOTE_INPUT_MAX` (2000 chars) in the loop (`truncate_note`).
+- Bug found while testing: `note_content` left the closing `]` in the note
+  text (render is `{NOTE_MARKER}{note}]`, the impl only stripped the prefix),
+  so folded brief lines read `note 0]`. Fixed: strip the trailing `]` (only
+  the last char — a note whose own text ends in `]` still round-trips).
+  Regression test added.
+- Tests as planned: 7 new brief.rs note tests (anchor slot, dedupe, cap-fold,
+  reanchor drift/idempotent/no-system, note_content bracket edge, task-scan
+  disambiguation) + the existing render/parse roundtrip now carries a note;
+  6 session_note.rs tool tests (mailbox write, second-pending error,
+  empty/missing, schema).
+- Deviation (intentional): the mailbox is created for EVERY agent and only the
+  TOOL injection is flag-gated, so `Agent.session_note_mailbox` stays a plain
+  `Arc` (no `Option` plumbing); with the flag off the drain is a no-op and
+  the tool is simply absent from the registry.
+- Not covered (deferred): no agent-level loop test that a pending note
+  appears in the NEXT LLM request (would need a scripted LLM harness in
+  tests/context.rs style); covered indirectly by the apply_note/reanchor
+  unit tests + the tool tests. No `note` metrics line (per the design).
 
 ## Constraints / notes
 

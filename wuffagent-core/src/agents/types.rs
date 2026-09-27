@@ -41,6 +41,23 @@ pub struct HandBackRequest {
     pub task: String,
 }
 
+/// A pending request to pin a session note to the current session (S4a:
+/// written by the `session_note` tool into the per-execution mailbox;
+/// available on every agent run).
+///
+/// The agent loop picks it up before the next LLM round, inserts the note as
+/// an anchored user message right after the system prompt (via
+/// `trimming::brief::apply_note`) and records it in the shared store, so the
+/// note survives trims and session reloads (it is re-anchored on every LLM
+/// call). Unlike `HandoffRequest`/`HandBackRequest`/`RestartRequest` it does
+/// NOT end the turn — the run continues with the note visible from the next
+/// LLM round.
+#[derive(Clone, Debug)]
+pub struct SessionNoteRequest {
+    /// The note text (the agent's own one-line state, ≤400 chars).
+    pub note: String,
+}
+
 /// A pending request to restart the WuffAgent process (written by the
 /// `restart` tool into the per-execution mailbox).
 ///

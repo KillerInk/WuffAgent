@@ -530,6 +530,9 @@ impl AgentConfigDialog {
             // The agent editor has no hand_back toggle yet; keep the default
             // (enabled) so sub-session agents can return to their parent.
             hand_back_enabled: true,
+            // The agent editor has no session_note toggle yet; keep the
+            // default (enabled) — S4a pinned notes are on for every agent.
+            session_note_enabled: true,
         };
 
         // Ensure the directory exists before saving

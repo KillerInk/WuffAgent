@@ -301,6 +301,51 @@ impl ToolManager {
         }
     }
 
+    /// Create a new ToolManager whose `session_note` entry is replaced by the
+    /// provided per-execution tool (same rebuild pattern as
+    /// [`Self::with_hand_back_tool`]). Used by `Agent::builder` to give EVERY
+    /// agent (S4a) a pinned-note tool wired to its own mailbox; the note is
+    /// inserted as an anchored user message by `run_llm_loop` before the next
+    /// LLM round.
+    pub fn with_session_note_tool(
+        &self,
+        tool: crate::tools::builtin::session_note::SessionNoteTool,
+    ) -> Self {
+        let mut entries = self.registry.list();
+        tracing::debug!(
+            entries = entries.len(),
+            "Rebuilding per-agent tool registry (with per-execution session_note tool)"
+        );
+        let meta = entries
+            .iter()
+            .find(|e| e.metadata.name == "session_note")
+            .map(|e| e.metadata.clone())
+            .unwrap_or_else(|| crate::tools::types::ToolMetadata {
+                name: "session_note".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Pin a short session state note (survives trims and reloads)"
+                    .to_string(),
+                dependencies: vec![],
+            });
+        entries.retain(|e| e.metadata.name != "session_note");
+        entries.push(crate::tools::registry::ToolEntry {
+            tool: std::sync::Arc::new(tool),
+            metadata: meta,
+            loaded_at: std::time::Instant::now(),
+            plugin: None,
+        });
+        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
+        for entry in entries {
+            let _ = registry.register(entry);
+        }
+        Self {
+            registry: std::sync::Arc::new(registry),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
+        }
+    }
+
     /// Create a new ToolManager where the `handoff` tool is removed from the
     /// schema entirely. Used for agents whose `handoff_enabled` is false —
     /// including target agents in a handoff chain built on top of a manager
