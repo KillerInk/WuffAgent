@@ -60,6 +60,14 @@ async fn test_improvement_prompt_includes_trajectory_and_rejections() {
         "prompt: {}",
         prompt
     );
+    // prompt_change is the FULL replacement prompt — the LLM must see the
+    // current prompt as the complete text it is replacing (a short
+    // suggestion must not wipe the long profile prompt).
+    assert!(
+        prompt.contains("FULL — prompt_change below is a FULL replacement"),
+        "the prompt must state prompt_change is a full replacement: {}",
+        prompt
+    );
     assert!(
         prompt.contains("rejected by the user: shorten the prompt"),
         "rejected history must be in the prompt: {}",

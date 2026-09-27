@@ -207,3 +207,34 @@ async fn test_fleet_auto_improve_off_skips() {
     assert!(suggestions.is_empty());
     assert!(prompts.lock().unwrap().is_empty(), "auto_improve off → no LLM call");
 }
+
+/// The fuzzy name-snap must NOT re-target a "chat" suggestion onto a roster
+/// entry — "chat" is an existing (synthetic) profile, so it keeps its
+/// target even when it is not in the roster (and no roster name is
+/// fuzzy-close enough to matter).
+#[test]
+fn test_fleet_sanitize_keeps_chat_target() {
+    let roster = vec![
+        ("coder".to_string(), "writes code".to_string()),
+        ("reviewer".to_string(), "reviews code".to_string()),
+    ];
+    let mut suggestions = vec![crate::memory::ImprovementSuggestion {
+        agent_name: "chat".to_string(),
+        prompt_change: Some("new chat prompt".to_string()),
+        rationale: "improve chat".to_string(),
+        new_agents: Vec::new(),
+        description: None,
+        allowed_tools: None,
+        reasoning_effort: None,
+        shell_config: None,
+        handoff_targets: None,
+        task_timeout_ms: None,
+        skill_updates: Vec::new(),
+        evidence: Vec::new(),
+    }];
+    sanitize_fleet_agent_names(&mut suggestions, &roster);
+    assert_eq!(
+        suggestions[0].agent_name, "chat",
+        "a 'chat' suggestion must keep its target (not be snapped to a roster entry)"
+    );
+}

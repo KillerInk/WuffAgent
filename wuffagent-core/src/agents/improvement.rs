@@ -407,7 +407,7 @@ pub async fn suggest_improvements(
          Agent name: {}\n\
          Agent description: {}\n\
          {}\
-         Current system prompt:\n{}\n\
+         Current system prompt (FULL — prompt_change below is a FULL replacement of this text, not an edit or diff):\n{}\n\
          \n\
          Recent task: {}\n\
          Result: {}\n\
@@ -572,15 +572,19 @@ pub async fn suggest_improvements(
     }
     for s in &mut suggestions {
         s.evidence = evidence.clone();
-        // Synthetic-profile guard: the LLM occasionally targets a name that
-        // has no backing profile file (e.g. "chat" — the UI's default
-        // identity, which exists only in the metrics, not in the agents
-        // dirs). Approving such an item then fails with "profile not found
-        // in any agents directory — nothing was written" even though the
-        // proposed prompt was exactly what the user wanted. Re-target the
-        // change onto the profile being reviewed, which owns the lessons,
-        // metrics and effect evidence this suggestion is based on.
-        if !s.agent_name.eq_ignore_ascii_case(&agent_config.name) {
+        // Re-target guard: the LLM occasionally targets a name that has no
+        // backing profile file and is not the profile being reviewed either
+        // (e.g. "coder" while reviewing "wuffagent"). Approving such an item
+        // fails with "profile not found in any agents directory — nothing was
+        // written" even though the proposed change was based on the reviewed
+        // profile's own lessons, metrics and effect evidence. Re-target the
+        // change onto the profile being reviewed. The chat profile ("chat")
+        // is EXEMPT: it is an existing (synthetic) profile — the prompt
+        // declares it and the panel applies a prompt_change for it to the
+        // chat settings — so a "chat" suggestion is kept, not re-targeted.
+        if !s.agent_name.eq_ignore_ascii_case(&agent_config.name)
+            && !s.agent_name.eq_ignore_ascii_case(CHAT_PROFILE_NAME)
+        {
             tracing::info!(
                 "Improvement for '{}' targets unknown profile '{}' — re-targeting to '{}'",
                 agent_config.name,
@@ -628,7 +632,12 @@ fn sanitize_fleet_agent_names(suggestions: &mut [ImprovementSuggestion], roster:
     for s in suggestions.iter_mut() {
         let exact = roster
             .iter()
-            .any(|(n, _)| n.eq_ignore_ascii_case(&s.agent_name));
+            .any(|(n, _)| n.eq_ignore_ascii_case(&s.agent_name))
+            // The chat profile is an EXISTING (synthetic) profile — the
+            // prompt declares it and the panel applies a prompt_change for
+            // it to the chat settings — so a "chat" suggestion is kept, not
+            // re-targeted onto a fuzzy-matched roster entry.
+            || s.agent_name.eq_ignore_ascii_case(CHAT_PROFILE_NAME);
         if exact {
             continue;
         }

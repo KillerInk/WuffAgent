@@ -304,6 +304,31 @@ impl ImprovementsPanel {
                             // is already capped (ScrollArea), so the editable
                             // side gets the same cap.
                             let current_prompt = &current_prompts[i];
+                            // Chat profile ("chat" is synthetic — no backing
+                            // profile file, so `current_prompts[i]` is None):
+                            // the CURRENT prompt IS this profile's prompt, and
+                            // it is persisted in the chat settings (the
+                            // settings dialog's system-prompt field), not in a
+                            // profile file. Show it read-only here so the
+                            // user can see what the proposal replaces and
+                            // where the old text lives.
+                            if imp.agent_name.eq_ignore_ascii_case("chat") {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Current (read-only — from chat settings)")
+                                            .strong()
+                                            .weak(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "'Chat' is a synthetic profile: approving writes the proposed prompt \
+                                             into the chat settings (Settings → Chat → System prompt), not a profile file.",
+                                        )
+                                        .weak()
+                                        .size(11.0),
+                                    );
+                                });
+                            }
                             if let Some(cur) = &current_prompt {
                                 ui.vertical(|ui| {
                                     ui.label(
@@ -334,7 +359,7 @@ impl ImprovementsPanel {
                                 });
                             }
                             {
-                                let title = if current_prompt.is_some() {
+                                let title = if current_prompt.is_some() || imp.agent_name.eq_ignore_ascii_case("chat") {
                                     "Proposed (editable)"
                                 } else {
                                     "Proposed system prompt (editable)"

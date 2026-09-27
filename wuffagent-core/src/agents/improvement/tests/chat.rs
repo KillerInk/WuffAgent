@@ -107,6 +107,46 @@ async fn test_chat_suggestion_is_prompt_change_only() {
     );
 }
 
+/// The re-target guard must NOT re-target a "chat" suggestion onto the
+/// reviewed profile — "chat" is an existing (synthetic) profile, so the
+/// suggestion keeps its "chat" target even when the review ran for a
+/// different profile.
+#[tokio::test]
+async fn test_retarget_guard_keeps_chat_target() {
+    let dir = tempdir().unwrap();
+    let (manager, _prompts, _keep) = auto_improve_manager(dir.path());
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "A lesson that triggers the check",
+            "agent",
+            &["agent:coder"],
+        ))
+        .unwrap();
+
+    let llm = Arc::new(CaptureLlm {
+        response: r#"[{"agent_name": "chat", "prompt_change": "new chat prompt", "rationale": "improve chat"}]"#
+            .to_string(),
+        prompts: Arc::new(Mutex::new(Vec::new())),
+    });
+    let stats = crate::agents::RunStats::default();
+    let suggestions = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(suggestions.len(), 1);
+    assert_eq!(
+        suggestions[0].agent_name, "chat",
+        "a 'chat' suggestion must keep its target (not be re-targeted to 'coder')"
+    );
+}
+
 /// The prompt's new-agent section names every EXISTING profile so the LLM
 /// never proposes one that already exists (and the roster's descriptions are
 /// shown, which a chat-profile review needs to know the fleet it delegates to).
