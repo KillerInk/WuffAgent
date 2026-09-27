@@ -12,7 +12,12 @@ use wuffagent_core::types::ChatMessage;
 /// `profile_name` is the agent profile that produced the answer,
 /// `task_snippet` a short excerpt of the user request it answered,
 /// `comment` the optional 👎 comment (empty = none). Pure + unit-testable.
-pub fn feedback_lesson(profile_name: &str, good: bool, task_snippet: &str, comment: &str) -> MemoryEntry {
+pub fn feedback_lesson(
+    profile_name: &str,
+    good: bool,
+    task_snippet: &str,
+    comment: &str,
+) -> MemoryEntry {
     let rating = if good { "good" } else { "bad" };
     let comment = comment.trim();
     let content = format!(
@@ -47,7 +52,9 @@ pub fn remember_feedback(
     if !memory.config().enabled {
         return Ok(false);
     }
-    memory.add(feedback_lesson(profile_name, good, task_snippet, comment)).map(|_| true)
+    memory
+        .add(feedback_lesson(profile_name, good, task_snippet, comment))
+        .map(|_| true)
 }
 
 /// S2: a short snippet of the user request the assistant message at
@@ -85,7 +92,9 @@ impl crate::ui::state::ChatApp {
         };
         let Some((profile, snippet)) = self.sessions.session_store.get(&sid).map(|r| {
             (
-                r.selected_agent.clone().unwrap_or_else(|| "unknown".to_string()),
+                r.selected_agent
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
                 task_snippet_for(&r.chat_state.messages, index),
             )
         }) else {

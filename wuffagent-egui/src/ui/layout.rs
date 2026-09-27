@@ -32,107 +32,97 @@ impl ChatApp {
             self.switch_session(&id);
         }
 
-        egui::Panel::top("menu_bar").resizable(false).show(ui, |ui| {
-            ui.set_min_height(32.0);
-            ui.set_max_height(36.0);
+        egui::Panel::top("menu_bar")
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.set_min_height(32.0);
+                ui.set_max_height(36.0);
 
-            let theme = Theme::from_name(&self.core.config.theme);
-            ui.visuals_mut().panel_fill = theme.background;
+                let theme = Theme::from_name(&self.core.config.theme);
+                ui.visuals_mut().panel_fill = theme.background;
 
-            ui.horizontal(|ui| {
-                // App title with accent color
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.visuals_mut().override_text_color = Some(theme.primary);
-                ui.heading("WuffAgent");
-                ui.visuals_mut().override_text_color = None;
+                ui.horizontal(|ui| {
+                    // App title with accent color
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.visuals_mut().override_text_color = Some(theme.primary);
+                    ui.heading("WuffAgent");
+                    ui.visuals_mut().override_text_color = None;
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Theme toggle button
-                    let theme_btn = egui::Button::new("◐")
-                        .fill(theme.surface_light)
-                        .corner_radius(4);
-                    if ui
-                        .add(theme_btn)
-                        .on_hover_text("Toggle light/dark theme")
-                        .clicked()
-                    {
-                        self.toggle_theme(ui.ctx());
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Theme toggle button
+                        let theme_btn = egui::Button::new("◐")
+                            .fill(theme.surface_light)
+                            .corner_radius(4);
+                        if ui
+                            .add(theme_btn)
+                            .on_hover_text("Toggle light/dark theme")
+                            .clicked()
+                        {
+                            self.toggle_theme(ui.ctx());
+                        }
 
-                    // Memory panel button
-                    let memory_btn = egui::Button::new("🧠")
-                        .fill(theme.surface_light)
-                        .corner_radius(4);
-                    if ui
-                        .add(memory_btn)
-                        .on_hover_text("Memory panel")
-                        .clicked()
-                    {
-                        self.dialogs.memory_panel.show_panel = true;
-                    }
+                        // Memory panel button
+                        let memory_btn = egui::Button::new("🧠")
+                            .fill(theme.surface_light)
+                            .corner_radius(4);
+                        if ui.add(memory_btn).on_hover_text("Memory panel").clicked() {
+                            self.dialogs.memory_panel.show_panel = true;
+                        }
 
-                    // Token usage panel button
-                    let usage_btn = egui::Button::new("📊")
-                        .fill(theme.surface_light)
-                        .corner_radius(4);
-                    if ui
-                        .add(usage_btn)
-                        .on_hover_text("Token usage")
-                        .clicked()
-                    {
-                        self.dialogs.usage_panel.show_panel = true;
-                    }
+                        // Token usage panel button
+                        let usage_btn = egui::Button::new("📊")
+                            .fill(theme.surface_light)
+                            .corner_radius(4);
+                        if ui.add(usage_btn).on_hover_text("Token usage").clicked() {
+                            self.dialogs.usage_panel.show_panel = true;
+                        }
 
-                    // MCP servers button
-                    let mcp_btn = egui::Button::new("🔌")
-                        .fill(theme.surface_light)
-                        .corner_radius(4);
-                    if ui
-                        .add(mcp_btn)
-                        .on_hover_text("MCP servers (external tools)")
-                        .clicked()
-                    {
-                        self.dialogs.mcp_panel.show_panel = true;
-                    }
+                        // MCP servers button
+                        let mcp_btn = egui::Button::new("🔌")
+                            .fill(theme.surface_light)
+                            .corner_radius(4);
+                        if ui
+                            .add(mcp_btn)
+                            .on_hover_text("MCP servers (external tools)")
+                            .clicked()
+                        {
+                            self.dialogs.mcp_panel.show_panel = true;
+                        }
 
-                    // Improvements panel button
-                    let improvements_btn = egui::Button::new("✨")
-                        .fill(theme.surface_light)
-                        .corner_radius(4);
-                    if ui
-                        .add(improvements_btn)
-                        .on_hover_text("Agent improvements (pending suggestions)")
-                        .clicked()
-                    {
-                        self.dialogs.improvements_panel.show_panel = true;
-                    }
+                        // Improvements panel button
+                        let improvements_btn = egui::Button::new("✨")
+                            .fill(theme.surface_light)
+                            .corner_radius(4);
+                        if ui
+                            .add(improvements_btn)
+                            .on_hover_text("Agent improvements (pending suggestions)")
+                            .clicked()
+                        {
+                            self.dialogs.improvements_panel.show_panel = true;
+                        }
 
-                    // Agent config button
-                    let agent_btn = egui::Button::new("🤖")
-                        .fill(theme.surface_light)
-                        .corner_radius(4);
-                    if ui
-                        .add(agent_btn)
-                        .on_hover_text("Agent configuration")
-                        .clicked()
-                    {
-                        self.dialogs.show_agent_config = true;
-                    }
+                        // Agent config button
+                        let agent_btn = egui::Button::new("🤖")
+                            .fill(theme.surface_light)
+                            .corner_radius(4);
+                        if ui
+                            .add(agent_btn)
+                            .on_hover_text("Agent configuration")
+                            .clicked()
+                        {
+                            self.dialogs.show_agent_config = true;
+                        }
 
-                    // Settings button
-                    let settings_btn = egui::Button::new("⚙")
-                        .fill(theme.surface_light)
-                        .corner_radius(4);
-                    if ui
-                        .add(settings_btn)
-                        .on_hover_text("Settings")
-                        .clicked()
-                    {
-                        self.dialogs.show_settings = true;
-                    }
+                        // Settings button
+                        let settings_btn = egui::Button::new("⚙")
+                            .fill(theme.surface_light)
+                            .corner_radius(4);
+                        if ui.add(settings_btn).on_hover_text("Settings").clicked() {
+                            self.dialogs.show_settings = true;
+                        }
+                    });
                 });
             });
-        });
 
         // Bottom panels stack upward, so bottom_bar must be declared first to be at the bottom
         egui::Panel::bottom("bottom_bar").show(ui, |ui| {
@@ -169,7 +159,9 @@ impl ChatApp {
         self.draw_memory_panel(ctx);
 
         // Draw token-usage panel on top.
-        self.dialogs.usage_panel.draw(ctx, &Theme::from_name(&self.core.config.theme));
+        self.dialogs
+            .usage_panel
+            .draw(ctx, &Theme::from_name(&self.core.config.theme));
 
         // Draw MCP panel on top (disjoint field borrows; `&mut self.core.config`
         // so the panel can persist server changes).
@@ -179,8 +171,12 @@ impl ChatApp {
     fn draw_memory_panel(&mut self, ctx: &egui::Context) {
         // Disjoint field borrows: the panel (mutable) + manager, runtime, config
         // (immutable) are separate struct fields, so they can coexist.
-        let updated = self.dialogs.memory_panel
-            .draw(ctx, &self.core.memory_manager, self.core.memory_runtime.as_ref(), &self.core.config);
+        let updated = self.dialogs.memory_panel.draw(
+            ctx,
+            &self.core.memory_manager,
+            self.core.memory_runtime.as_ref(),
+            &self.core.config,
+        );
         if let Some(mconfig) = updated {
             // I4: persist memory settings — before this they were runtime-only
             // (set_config) and reverted on restart.
@@ -194,11 +190,17 @@ impl ChatApp {
     fn draw_mcp_panel(&mut self, ctx: &egui::Context) {
         // Disjoint field borrows: the panel (mutable) + manager (immutable)
         // + config (mutable) are separate struct fields, so they can coexist.
-        self.dialogs.mcp_panel.draw(ctx, &self.core.mcp_manager, &mut self.core.config);
+        self.dialogs
+            .mcp_panel
+            .draw(ctx, &self.core.mcp_manager, &mut self.core.config);
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {
-        let new_theme: &str = if self.core.config.theme == "dark" { "light" } else { "dark" };
+        let new_theme: &str = if self.core.config.theme == "dark" {
+            "light"
+        } else {
+            "dark"
+        };
         self.core.config.theme = new_theme.to_string();
         if let Err(e) = self.save_config() {
             tracing::warn!(error = %e, "Failed to save theme");

@@ -62,8 +62,7 @@ pub fn apply_improvement_detailed(
     let mut errors: Vec<String> = Vec::new();
     let mut prompt_applied = false;
 
-    let apply_prompt = imp
-        .apply_prompt
+    let apply_prompt = imp.apply_prompt
         && imp
             .edited_prompt
             .as_deref()
@@ -71,7 +70,10 @@ pub fn apply_improvement_detailed(
             .is_some();
     // I2: the profile fields the user actually approved (None = not proposed
     // or not toggled on).
-    let do_tools = imp.apply_allowed_tools.then(|| imp.allowed_tools.clone()).flatten();
+    let do_tools = imp
+        .apply_allowed_tools
+        .then(|| imp.allowed_tools.clone())
+        .flatten();
     let do_reasoning = imp
         .apply_reasoning_effort
         .then(|| imp.reasoning_effort)
@@ -84,12 +86,22 @@ pub fn apply_improvement_detailed(
         .apply_handoff_targets
         .then(|| imp.handoff_targets.clone())
         .flatten();
-    let do_timeout = imp.apply_task_timeout.then(|| imp.task_timeout_ms).flatten();
+    let do_timeout = imp
+        .apply_task_timeout
+        .then(|| imp.task_timeout_ms)
+        .flatten();
     // 2c: the one-line description (user's edited text is stored back into
     // imp.description by the panel, so this picks up the edit automatically).
-    let do_description = imp.apply_description.then(|| imp.description.clone()).flatten();
-    let has_field_change =
-        do_tools.is_some() || do_reasoning.is_some() || do_shell.is_some() || do_handoff.is_some() || do_timeout.is_some() || do_description.is_some();
+    let do_description = imp
+        .apply_description
+        .then(|| imp.description.clone())
+        .flatten();
+    let has_field_change = do_tools.is_some()
+        || do_reasoning.is_some()
+        || do_shell.is_some()
+        || do_handoff.is_some()
+        || do_timeout.is_some()
+        || do_description.is_some();
 
     if apply_prompt || has_field_change {
         // F3: locate the profile's ACTUAL directory (primary first) and edit
@@ -186,10 +198,7 @@ pub fn apply_improvement_detailed(
         };
         match agent_manager.add_agent(&config) {
             Ok(()) => parts.push(format!("created new agent '{}'", proposal.name)),
-            Err(e) => errors.push(format!(
-                "failed to create agent '{}': {}",
-                proposal.name, e
-            )),
+            Err(e) => errors.push(format!("failed to create agent '{}': {}", proposal.name, e)),
         }
     }
 

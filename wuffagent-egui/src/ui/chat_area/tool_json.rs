@@ -11,16 +11,28 @@ impl ChatApp {
     /// Render a tool result that is valid JSON with smart field extraction.
     /// Called only with the tool card already expanded, so long content
     /// (e.g. file reads) is shown directly in a height-capped scroll area.
-    pub(super) fn draw_tool_json_result(&self, ui: &mut egui::Ui, json: &serde_json::Value, raw: &str, theme: &Theme) {
+    pub(super) fn draw_tool_json_result(
+        &self,
+        ui: &mut egui::Ui,
+        json: &serde_json::Value,
+        raw: &str,
+        theme: &Theme,
+    ) {
         // Image result (show_image): render the picture itself, then a small
         // metadata line (format/dimensions/size + source path or URL).
-        if json.get("data_uri").and_then(|v| v.as_str()).is_some_and(|d| d.starts_with("data:image/")) {
+        if json
+            .get("data_uri")
+            .and_then(|v| v.as_str())
+            .is_some_and(|d| d.starts_with("data:image/"))
+        {
             if let Some(caption) = json.get("caption").and_then(|v| v.as_str()) {
                 if !caption.trim().is_empty() {
-                    ui.label(egui::RichText::new(caption)
-                        .color(theme.text_secondary)
-                        .size(11.5)
-                        .italics());
+                    ui.label(
+                        egui::RichText::new(caption)
+                            .color(theme.text_secondary)
+                            .size(11.5)
+                            .italics(),
+                    );
                     ui.add_space(2.0);
                 }
             }
@@ -32,20 +44,28 @@ impl ChatApp {
                 let format = json.get("format").and_then(|v| v.as_str()).unwrap_or("?");
                 let w = json.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
                 let h = json.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                let kb = json.get("bytes").and_then(|v| v.as_u64()).map(|b| b / 1024).unwrap_or(0);
-                ui.label(egui::RichText::new(format!("{format} · {w}×{h} · {kb} KB"))
-                    .color(theme.text_dim)
-                    .size(10.0)
-                    .monospace());
+                let kb = json
+                    .get("bytes")
+                    .and_then(|v| v.as_u64())
+                    .map(|b| b / 1024)
+                    .unwrap_or(0);
+                ui.label(
+                    egui::RichText::new(format!("{format} · {w}×{h} · {kb} KB"))
+                        .color(theme.text_dim)
+                        .size(10.0)
+                        .monospace(),
+                );
                 if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
                     if json.get("source").and_then(|v| v.as_str()) == Some("file") {
                         self.draw_tool_path_badge(ui, path, theme);
                     } else if !path.is_empty() {
                         let p: String = path.chars().take(80).collect();
-                        ui.label(egui::RichText::new(p)
-                            .color(theme.text_dim)
-                            .size(10.0)
-                            .monospace());
+                        ui.label(
+                            egui::RichText::new(p)
+                                .color(theme.text_dim)
+                                .size(10.0)
+                                .monospace(),
+                        );
                     }
                 }
             });
@@ -57,61 +77,79 @@ impl ChatApp {
         if json.get("exit_code").is_some() {
             let exit_code = json.get("exit_code").and_then(|v| v.as_u64()).unwrap_or(0);
             let dur = json.get("duration_ms").and_then(|v| v.as_u64());
-            let truncated = json.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+            let truncated = json
+                .get("truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             ui.horizontal(|ui| {
                 if exit_code == 0 {
                     ui.colored_label(theme.success, "✓");
                 } else {
                     ui.colored_label(theme.warning, "✗");
                 }
-                ui.label(egui::RichText::new(format!("exit code {}", exit_code))
-                    .color(if exit_code == 0 { theme.text_dim } else { theme.warning })
-                    .size(11.0));
+                ui.label(
+                    egui::RichText::new(format!("exit code {}", exit_code))
+                        .color(if exit_code == 0 {
+                            theme.text_dim
+                        } else {
+                            theme.warning
+                        })
+                        .size(11.0),
+                );
                 if let Some(d) = dur {
-                    ui.label(egui::RichText::new(format!("· {}", Self::format_duration(d)))
-                        .color(theme.text_dim)
-                        .size(10.5));
+                    ui.label(
+                        egui::RichText::new(format!("· {}", Self::format_duration(d)))
+                            .color(theme.text_dim)
+                            .size(10.5),
+                    );
                 }
                 if truncated {
-                    ui.label(egui::RichText::new("· output truncated")
-                        .color(theme.text_dim)
-                        .size(10.5));
+                    ui.label(
+                        egui::RichText::new("· output truncated")
+                            .color(theme.text_dim)
+                            .size(10.5),
+                    );
                 }
             });
-            let stream_block = |ui: &mut egui::Ui, title: &str, value: &str, color: egui::Color32| {
-                if value.trim().is_empty() {
-                    return;
-                }
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(title)
-                    .color(theme.text_dim)
-                    .size(10.0)
-                    .monospace());
-                ui.add_space(2.0);
-                Self::code_block(ui, theme, |ui| {
-                    let lines: Vec<&str> = value.lines().collect();
-                    const MAX_LINES: usize = 300;
-                    ui.vertical(|ui| {
-                        for line in &lines[..lines.len().min(MAX_LINES)] {
-                            ui.add(Self::breaking_label(
-                                line,
-                                egui::FontId::monospace(11.5),
-                                color,
-                                false,
-                            ));
-                        }
-                        if lines.len() > MAX_LINES {
-                            ui.add_space(2.0);
-                            ui.label(egui::RichText::new(format!(
-                                "… ({} more lines)",
-                                lines.len() - MAX_LINES
-                            ))
+            let stream_block =
+                |ui: &mut egui::Ui, title: &str, value: &str, color: egui::Color32| {
+                    if value.trim().is_empty() {
+                        return;
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(title)
                             .color(theme.text_dim)
-                            .size(10.5));
-                        }
+                            .size(10.0)
+                            .monospace(),
+                    );
+                    ui.add_space(2.0);
+                    Self::code_block(ui, theme, |ui| {
+                        let lines: Vec<&str> = value.lines().collect();
+                        const MAX_LINES: usize = 300;
+                        ui.vertical(|ui| {
+                            for line in &lines[..lines.len().min(MAX_LINES)] {
+                                ui.add(Self::breaking_label(
+                                    line,
+                                    egui::FontId::monospace(11.5),
+                                    color,
+                                    false,
+                                ));
+                            }
+                            if lines.len() > MAX_LINES {
+                                ui.add_space(2.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "… ({} more lines)",
+                                        lines.len() - MAX_LINES
+                                    ))
+                                    .color(theme.text_dim)
+                                    .size(10.5),
+                                );
+                            }
+                        });
                     });
-                });
-            };
+                };
             stream_block(
                 ui,
                 "stdout",
@@ -130,7 +168,8 @@ impl ChatApp {
         if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
             // Has a path field — likely a file operation result
             let is_file_read = json.get("content").is_some();
-            let is_file_write = json.get("bytes_written").is_some() || json.get("success").is_some();
+            let is_file_write =
+                json.get("bytes_written").is_some() || json.get("success").is_some();
             let is_dir_list = json.get("entries").is_some();
 
             if is_dir_list {
@@ -139,34 +178,44 @@ impl ChatApp {
                 ui.add_space(4.0);
                 if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
                     let max_entries = 50;
-                    let display_entries: Vec<&serde_json::Value> = entries.iter().take(max_entries).collect();
+                    let display_entries: Vec<&serde_json::Value> =
+                        entries.iter().take(max_entries).collect();
                     Self::code_block(ui, theme, |ui| {
-                            for entry in display_entries {
-                                // New list_dir returns {name, type, size} objects;
-                                // older sessions stored plain strings.
-                                let line = if let Some(s) = entry.as_str() {
-                                    s.to_string()
-                                } else {
-                                    let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                                    let typ = entry.get("type").and_then(|v| v.as_str()).unwrap_or("file");
-                                    let size = entry.get("size").and_then(|v| v.as_u64())
-                                        .map(|n| format!("  {} bytes", n))
-                                        .unwrap_or_default();
-                                    format!("{}  [{}{}]", name, typ, size)
-                                };
-                                ui.add(Self::breaking_label(
-                                    line,
-                                    egui::FontId::monospace(13.0),
-                                    theme.code_text,
-                                    false,
-                                ));
-                            }
-                            if entries.len() > max_entries {
-                                ui.label(egui::RichText::new(format!("... and {} more entries", entries.len() - max_entries))
-                                    .color(theme.text_dim)
-                                    .size(10.0));
-                            }
-                        });
+                        for entry in display_entries {
+                            // New list_dir returns {name, type, size} objects;
+                            // older sessions stored plain strings.
+                            let line = if let Some(s) = entry.as_str() {
+                                s.to_string()
+                            } else {
+                                let name =
+                                    entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                                let typ =
+                                    entry.get("type").and_then(|v| v.as_str()).unwrap_or("file");
+                                let size = entry
+                                    .get("size")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|n| format!("  {} bytes", n))
+                                    .unwrap_or_default();
+                                format!("{}  [{}{}]", name, typ, size)
+                            };
+                            ui.add(Self::breaking_label(
+                                line,
+                                egui::FontId::monospace(13.0),
+                                theme.code_text,
+                                false,
+                            ));
+                        }
+                        if entries.len() > max_entries {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "... and {} more entries",
+                                    entries.len() - max_entries
+                                ))
+                                .color(theme.text_dim)
+                                .size(10.0),
+                            );
+                        }
+                    });
                 }
             } else if is_file_read {
                 // File read: path badge + content in a height-capped scroll area
@@ -193,7 +242,14 @@ impl ChatApp {
                 ui.add_space(4.0);
                 if let Some(bytes) = json.get("bytes_written").and_then(|v| v.as_u64()) {
                     ui.horizontal(|ui| {
-                        ui.colored_label(theme.success, format!("✓ Written {} byte{}", bytes, if bytes == 1 { "" } else { "s" }));
+                        ui.colored_label(
+                            theme.success,
+                            format!(
+                                "✓ Written {} byte{}",
+                                bytes,
+                                if bytes == 1 { "" } else { "s" }
+                            ),
+                        );
                     });
                 } else if let Some(success) = json.get("success").and_then(|v| v.as_bool()) {
                     if success {
@@ -239,47 +295,45 @@ impl ChatApp {
 
     /// Render JSON as a key-value list.
     fn draw_tool_json_kv(&self, ui: &mut egui::Ui, json: &serde_json::Value, theme: &Theme) {
-        Self::code_block(ui, theme, |ui| {
-                match json {
-                    serde_json::Value::Object(map) => {
-                        for (key, value) in map {
-                            ui.horizontal(|ui| {
-                                ui.add(Self::breaking_label(
-                                    format!("{}:", key),
-                                    egui::FontId::monospace(11.0),
-                                    theme.text_secondary,
-                                    false,
-                                ));
-                                let val_str = Self::json_value_to_string(value);
-                                ui.add(Self::breaking_label(
-                                    val_str,
-                                    egui::FontId::monospace(11.0),
-                                    theme.code_text,
-                                    false,
-                                ));
-                            });
-                        }
-                    }
-                    serde_json::Value::Array(arr) => {
-                        for item in arr {
-                            ui.add(Self::breaking_label(
-                                Self::json_value_to_string(item),
-                                egui::FontId::monospace(11.0),
-                                theme.code_text,
-                                false,
-                            ));
-                        }
-                    }
-                    other => {
+        Self::code_block(ui, theme, |ui| match json {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    ui.horizontal(|ui| {
                         ui.add(Self::breaking_label(
-                            Self::json_value_to_string(other),
+                            format!("{}:", key),
+                            egui::FontId::monospace(11.0),
+                            theme.text_secondary,
+                            false,
+                        ));
+                        let val_str = Self::json_value_to_string(value);
+                        ui.add(Self::breaking_label(
+                            val_str,
                             egui::FontId::monospace(11.0),
                             theme.code_text,
                             false,
                         ));
-                    }
+                    });
                 }
-            });
+            }
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    ui.add(Self::breaking_label(
+                        Self::json_value_to_string(item),
+                        egui::FontId::monospace(11.0),
+                        theme.code_text,
+                        false,
+                    ));
+                }
+            }
+            other => {
+                ui.add(Self::breaking_label(
+                    Self::json_value_to_string(other),
+                    egui::FontId::monospace(11.0),
+                    theme.code_text,
+                    false,
+                ));
+            }
+        });
     }
 
     /// Convert a JSON value to a display string.
@@ -294,7 +348,8 @@ impl ChatApp {
                 format!("[{}]", items.join(", "))
             }
             serde_json::Value::Object(map) => {
-                let pairs: Vec<String> = map.iter()
+                let pairs: Vec<String> = map
+                    .iter()
                     .map(|(k, v)| format!("{}: {}", k, Self::json_value_to_string(v)))
                     .collect();
                 format!("{{{}}}", pairs.join(", "))

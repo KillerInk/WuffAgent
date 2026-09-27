@@ -1,8 +1,8 @@
-﻿use eframe::egui;
+use eframe::egui;
 use std::sync::{Arc, Mutex};
 
-use wuffagent_core::config::{get_presets_path, Config, PresetStore, SearchBackend};
 use super::theme::Theme;
+use wuffagent_core::config::{get_presets_path, Config, PresetStore, SearchBackend};
 
 /// The settings dialog.
 pub struct SettingsDialog {
@@ -74,26 +74,33 @@ impl SettingsDialog {
                     });
                     ui.separator();
                     if self.presets.presets.is_empty() {
-                        ui.label(egui::RichText::new("No presets saved yet. Click \"Manage Presets…\" to create one.")
-                            .size(12.0).color(theme.text_secondary));
+                        ui.label(
+                            egui::RichText::new(
+                                "No presets saved yet. Click \"Manage Presets…\" to create one.",
+                            )
+                            .size(12.0)
+                            .color(theme.text_secondary),
+                        );
                     } else {
-                        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                            for preset in self.presets.presets.iter() {
-                                let label = format!("{} ({})", preset.name(), preset.preset_type());
-                                let selected = self.selected_preset.as_deref() == Some(preset.name());
-                                let btn = if selected {
-                                    egui::Button::new(label).fill(theme.primary)
-                                } else {
-                                    egui::Button::new(label)
-                                };
-                                if ui.add(btn).clicked() {
-                                    self.selected_preset =
-                                        Some(preset.name().to_string());
+                        egui::ScrollArea::vertical()
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                for preset in self.presets.presets.iter() {
+                                    let label =
+                                        format!("{} ({})", preset.name(), preset.preset_type());
+                                    let selected =
+                                        self.selected_preset.as_deref() == Some(preset.name());
+                                    let btn = if selected {
+                                        egui::Button::new(label).fill(theme.primary)
+                                    } else {
+                                        egui::Button::new(label)
+                                    };
+                                    if ui.add(btn).clicked() {
+                                        self.selected_preset = Some(preset.name().to_string());
+                                    }
                                 }
-                            }
-                        });
-                        if self.selected_preset.is_some()
-                            && ui.button("Clear selection").clicked()
+                            });
+                        if self.selected_preset.is_some() && ui.button("Clear selection").clicked()
                         {
                             self.selected_preset = None;
                         }
@@ -112,9 +119,16 @@ impl SettingsDialog {
                         ui.label(egui::RichText::new("Chat").strong().color(theme.primary));
                     });
                     ui.separator();
-                    ui.label(egui::RichText::new("System prompt:").size(12.0).color(theme.text_secondary));
+                    ui.label(
+                        egui::RichText::new("System prompt:")
+                            .size(12.0)
+                            .color(theme.text_secondary),
+                    );
                     ui.text_edit_multiline(&mut self.system_prompt);
-                    ui.add(egui::Slider::new(&mut self.max_messages, 10..=500).text("Max messages to keep"));
+                    ui.add(
+                        egui::Slider::new(&mut self.max_messages, 10..=500)
+                            .text("Max messages to keep"),
+                    );
                 });
 
                 ui.separator();
@@ -122,14 +136,20 @@ impl SettingsDialog {
                 // Section: Web search
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Web search").strong().color(theme.primary));
+                        ui.label(
+                            egui::RichText::new("Web search")
+                                .strong()
+                                .color(theme.primary),
+                        );
                     });
                     ui.separator();
 
                     // Combo box options; "Brave (API key)" is only offered when
                     // the config already uses it (compat, never re-created here).
-                    let options: Vec<String> =
-                        ["Auto", "Bing", "Yahoo", "DuckDuckGo", "SearXNG"].iter().map(|s| s.to_string()).collect();
+                    let options: Vec<String> = ["Auto", "Bing", "Yahoo", "DuckDuckGo", "SearXNG"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                     let options = if self.search_backend_label == "Brave (API key)" {
                         let mut o = options;
                         o.push("Brave (API key)".to_string());
@@ -155,31 +175,46 @@ impl SettingsDialog {
                         });
                     }
 
-                    ui.label(egui::RichText::new("Backend changes take effect when the app restarts.")
-                        .size(12.0).color(theme.text_secondary));
+                    ui.label(
+                        egui::RichText::new("Backend changes take effect when the app restarts.")
+                            .size(12.0)
+                            .color(theme.text_secondary),
+                    );
                 });
 
                 ui.separator();
 
                 // Action buttons
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new("Save")
-                        .fill(theme.primary)
-                        .corner_radius(6)
-                    ).clicked() {
+                    if ui
+                        .add(
+                            egui::Button::new("Save")
+                                .fill(theme.primary)
+                                .corner_radius(6),
+                        )
+                        .clicked()
+                    {
                         self.save(self.config.clone());
                         closed = true;
                     }
-                    if ui.add(egui::Button::new("Reset")
-                        .fill(theme.surface_light)
-                        .corner_radius(6)
-                    ).clicked() {
+                    if ui
+                        .add(
+                            egui::Button::new("Reset")
+                                .fill(theme.surface_light)
+                                .corner_radius(6),
+                        )
+                        .clicked()
+                    {
                         *self = SettingsDialog::new(&self.config);
                     }
-                    if ui.add(egui::Button::new("Close")
-                        .fill(theme.surface_light)
-                        .corner_radius(6)
-                    ).clicked() {
+                    if ui
+                        .add(
+                            egui::Button::new("Close")
+                                .fill(theme.surface_light)
+                                .corner_radius(6),
+                        )
+                        .clicked()
+                    {
                         closed = true;
                     }
                 });

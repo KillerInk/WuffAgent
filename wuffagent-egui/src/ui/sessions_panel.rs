@@ -1,12 +1,12 @@
-﻿use eframe::egui;
-use std::sync::{Arc, Mutex};
+use eframe::egui;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use wuffagent_core::config::Config;
-use wuffagent_core::sessions;
-use super::theme::Theme;
 use super::sessions_actions::PanelAction;
 use super::sessions_utils::{relative_time, truncate};
+use super::theme::Theme;
+use wuffagent_core::config::Config;
+use wuffagent_core::sessions;
 
 #[derive(Clone, Debug)]
 pub struct SessionsPanel {
@@ -105,7 +105,8 @@ impl SessionsPanel {
     /// Check if the current notification has expired (after ~3 seconds).
     pub fn update_notification(&mut self, ctx: &egui::Context) {
         if self.notification.is_some() {
-            let elapsed = (chrono::Utc::now().timestamp_millis() as f64 - self.notification_start) / 1000.0;
+            let elapsed =
+                (chrono::Utc::now().timestamp_millis() as f64 - self.notification_start) / 1000.0;
             if elapsed > 3.0 {
                 self.notification = None;
                 ctx.request_repaint();
@@ -119,7 +120,10 @@ impl SessionsPanel {
         session_store: &std::collections::HashMap<String, wuffagent_core::sessions::SessionRuntime>,
         session_id: &str,
     ) -> bool {
-        session_store.get(session_id).map(|r| r.is_generating()).unwrap_or(false)
+        session_store
+            .get(session_id)
+            .map(|r| r.is_generating())
+            .unwrap_or(false)
     }
 
     /// Render the session button with metadata: name, message count,
@@ -152,18 +156,12 @@ impl SessionsPanel {
         let label = if is_generating {
             format!(
                 "▶ {}\n{}  •  {}\n{}",
-                session.name,
-                count_text,
-                preview_truncated,
-                timestamp_text
+                session.name, count_text, preview_truncated, timestamp_text
             )
         } else {
             format!(
                 "{}\n{}  •  {}\n{}",
-                session.name,
-                count_text,
-                preview_truncated,
-                timestamp_text
+                session.name, count_text, preview_truncated, timestamp_text
             )
         };
 
@@ -173,14 +171,16 @@ impl SessionsPanel {
             label
         };
 
-        let response = ui.add(egui::Button::new(display_label)
-            .fill(if is_selected || is_renaming {
-                egui::Color32::from_rgba_premultiplied(59, 130, 246, 38) // #3B82F6 @ 15%
-            } else {
-                egui::Color32::TRANSPARENT
-            })
-            .corner_radius(4)
-            .sense(egui::Sense::click()));
+        let response = ui.add(
+            egui::Button::new(display_label)
+                .fill(if is_selected || is_renaming {
+                    egui::Color32::from_rgba_premultiplied(59, 130, 246, 38) // #3B82F6 @ 15%
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .corner_radius(4)
+                .sense(egui::Sense::click()),
+        );
 
         response
     }

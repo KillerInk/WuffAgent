@@ -81,12 +81,7 @@ impl McpPanel {
     ///
     /// Takes disjoint references into app state (manager + `&mut Config` so
     /// changes can be persisted) — the panel is itself a field of `ChatApp`.
-    pub fn draw(
-        &mut self,
-        ctx: &egui::Context,
-        mcp: &Arc<McpManager>,
-        config: &mut Config,
-    ) {
+    pub fn draw(&mut self, ctx: &egui::Context, mcp: &Arc<McpManager>, config: &mut Config) {
         // Collect a finished job (even while the window is closed).
         if let Some(job) = &mut self.job {
             let label = job.label.clone();
@@ -148,7 +143,9 @@ impl McpPanel {
                 }
 
                 if servers.is_empty() {
-                    ui.label("No MCP servers configured yet. Add one to expose its tools to the agents.");
+                    ui.label(
+                        "No MCP servers configured yet. Add one to expose its tools to the agents.",
+                    );
                 }
 
                 // Server list
@@ -204,7 +201,12 @@ impl McpPanel {
         mcp: &Arc<McpManager>,
         config: &mut Config,
     ) {
-        let title = if self.editing.as_ref().map(|e| e.existing.is_some()).unwrap_or(false) {
+        let title = if self
+            .editing
+            .as_ref()
+            .map(|e| e.existing.is_some())
+            .unwrap_or(false)
+        {
             "Edit MCP server"
         } else {
             "Add MCP server"
@@ -281,7 +283,9 @@ impl McpPanel {
                     });
                     ui.horizontal(|ui| {
                         ui.label("Working dir:");
-                        ui.add(egui::TextEdit::singleline(&mut edit.working_dir).desired_width(320.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut edit.working_dir).desired_width(320.0),
+                        );
                     });
                     ui.label("Env (one KEY=VALUE per line):");
                     ui.add(
@@ -316,17 +320,24 @@ impl McpPanel {
                     )
                     .changed();
                 let enabled_changed = ui
-                    .add(egui::Checkbox::new(&mut edit.enabled, "Enabled (auto-connect at startup)"))
+                    .add(egui::Checkbox::new(
+                        &mut edit.enabled,
+                        "Enabled (auto-connect at startup)",
+                    ))
                     .changed();
                 ui.label("Allowed tools (comma separated, empty = all):");
                 let allowed_changed = ui
-                    .add(egui::TextEdit::singleline(&mut edit.allowed_tools).desired_width(f32::INFINITY))
+                    .add(
+                        egui::TextEdit::singleline(&mut edit.allowed_tools)
+                            .desired_width(f32::INFINITY),
+                    )
                     .changed();
 
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new("Save").fill(theme.primary)).clicked()
-                        || (is_new
-                            && (enabled_changed || timeout_changed || allowed_changed))
+                    if ui
+                        .add(egui::Button::new("Save").fill(theme.primary))
+                        .clicked()
+                        || (is_new && (enabled_changed || timeout_changed || allowed_changed))
                     {
                         save_requested = true;
                     }
@@ -352,7 +363,8 @@ impl McpPanel {
         let cfg = match edit.build() {
             Some(c) => c,
             None => {
-                self.message = Some("✗ Invalid server config (check name / command / url)".to_string());
+                self.message =
+                    Some("✗ Invalid server config (check name / command / url)".to_string());
                 self.editing = Some(edit);
                 return;
             }
@@ -369,7 +381,9 @@ impl McpPanel {
                     *slot = cfg.clone();
                 }
                 if let Err(e) = config.save() {
-                    self.message = Some(format!("✗ Saved in memory, but config file write failed: {e}"));
+                    self.message = Some(format!(
+                        "✗ Saved in memory, but config file write failed: {e}"
+                    ));
                     return;
                 }
                 // Connect right away if enabled and not already connected.
@@ -420,46 +434,44 @@ impl McpPanel {
                     McpOp::Connect(name) => {
                         let m = mcp.clone();
                         let n = name.clone();
-                        timeout_op(timeout, move || m.connect_sync(&n).map_err(|e| e.to_string()))
-                            .map(|cnt| format!("✓ {name} connected ({cnt} tools registered)"))
+                        timeout_op(timeout, move || {
+                            m.connect_sync(&n).map_err(|e| e.to_string())
+                        })
+                        .map(|cnt| format!("✓ {name} connected ({cnt} tools registered)"))
                     }
                     McpOp::Disconnect(name) => {
                         let m = mcp.clone();
                         let n = name.clone();
-                        timeout_op(timeout, move || m.disconnect_sync(&n).map_err(|e| e.to_string()))
-                            .map(|_| format!("✓ {name} disconnected"))
+                        timeout_op(timeout, move || {
+                            m.disconnect_sync(&n).map_err(|e| e.to_string())
+                        })
+                        .map(|_| format!("✓ {name} disconnected"))
                     }
                     McpOp::Refresh(name) => {
                         let m = mcp.clone();
                         let n = name.clone();
-                        timeout_op(
-                            timeout,
-                            move || m.refresh_tools_sync(&n).map_err(|e| e.to_string()),
-                        )
+                        timeout_op(timeout, move || {
+                            m.refresh_tools_sync(&n).map_err(|e| e.to_string())
+                        })
                         .map(|cnt| format!("✓ {name}: {cnt} tools registered"))
                     }
                     McpOp::Remove(name) => {
                         let m = mcp.clone();
                         let n = name.clone();
-                        timeout_op(
-                            timeout,
-                            move || m.remove_server_sync(&n).map_err(|e| e.to_string()),
-                        )
+                        timeout_op(timeout, move || {
+                            m.remove_server_sync(&n).map_err(|e| e.to_string())
+                        })
                         .map(|_| format!("✓ {name} removed"))
                     }
                     McpOp::SetEnabled(name, enabled) => {
                         let m = mcp.clone();
                         let n = name.clone();
                         let en = enabled;
-                        timeout_op(
-                            timeout,
-                            move || m.set_server_enabled_sync(&n, en).map_err(|e| e.to_string()),
-                        )
+                        timeout_op(timeout, move || {
+                            m.set_server_enabled_sync(&n, en).map_err(|e| e.to_string())
+                        })
                         .map(|_| {
-                            format!(
-                                "✓ {name} {}",
-                                if enabled { "enabled" } else { "disabled" }
-                            )
+                            format!("✓ {name} {}", if enabled { "enabled" } else { "disabled" })
                         })
                     }
                 };

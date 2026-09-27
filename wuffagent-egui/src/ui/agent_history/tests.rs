@@ -1,10 +1,11 @@
-﻿//! Unit tests for the `agent_history` module (see `super`).
+//! Unit tests for the `agent_history` module (see `super`).
 
 use super::*;
 use wuffagent_core::agents::config::AgentConfig;
 
 fn temp_agents_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("wuffagent-egui-hist-{tag}-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("wuffagent-egui-hist-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -56,8 +57,13 @@ fn test_list_history_spans_dirs_newest_first() {
     let cap = list_history(&dirs, "cap");
     assert_eq!(cap.len(), 2, "expected 2 snapshots of 'cap'");
     assert!(cap[0].ts >= cap[1].ts, "newest first");
-    assert!(cap.iter().all(|e| e.dir == dir_b), "snapshots belong to dir_b");
-    assert!(cap.iter().all(|e| e.path.starts_with(dir_b.join("history"))));
+    assert!(
+        cap.iter().all(|e| e.dir == dir_b),
+        "snapshots belong to dir_b"
+    );
+    assert!(cap
+        .iter()
+        .all(|e| e.path.starts_with(dir_b.join("history"))));
 
     let other = list_history(&dirs, "other");
     assert_eq!(other.len(), 1);
@@ -97,7 +103,10 @@ fn test_revert_restores_prompt_and_stays_reversible() {
 fn test_prompt_preview_truncates_and_flattens() {
     let dir = temp_agents_dir("preview");
     let mgr = AgentManager::new(dir.clone());
-    let long = format!("You are a very specific agent. {}", "lorem ipsum dolor sit amet ".repeat(10));
+    let long = format!(
+        "You are a very specific agent. {}",
+        "lorem ipsum dolor sit amet ".repeat(10)
+    );
     mgr.add_agent(&agent("cap", &long)).unwrap();
     mgr.edit_agent("cap", &agent("cap", "v2")).unwrap();
 
@@ -105,7 +114,11 @@ fn test_prompt_preview_truncates_and_flattens() {
     assert_eq!(entries.len(), 1);
     let preview = prompt_preview(&entries[0].path);
     assert!(!preview.contains('\n'), "preview must be single-line");
-    assert!(preview.ends_with("..."), "long preview must be truncated: {}", preview);
+    assert!(
+        preview.ends_with("..."),
+        "long preview must be truncated: {}",
+        preview
+    );
     assert!(preview.starts_with("You are a very specific agent."));
     assert_eq!(preview.chars().count(), 60);
 

@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use tokio::task::JoinHandle;
 

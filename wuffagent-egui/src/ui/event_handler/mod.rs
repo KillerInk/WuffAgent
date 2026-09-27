@@ -33,17 +33,21 @@ impl ChatApp {
             // the explicit ids they own. `SubSessionHandoff` concerns the
             // parent (whose turn just ended); `AgentHandBack` the sub-session
             // (whose turn just ended).
-            AppEvent::SubSessionHandoff { parent_session_id, .. } => {
-                parent_session_id.clone()
-            }
-            AppEvent::AgentHandBack { from_session_id, .. } => from_session_id.clone(),
+            AppEvent::SubSessionHandoff {
+                parent_session_id, ..
+            } => parent_session_id.clone(),
+            AppEvent::AgentHandBack {
+                from_session_id, ..
+            } => from_session_id.clone(),
             // 4b: manual "run check now" finished — not session-bound (the
             // improvements panel is global).
             AppEvent::ImprovementCheckFinished { .. } => String::new(),
         };
         match event {
             // Stream lifecycle arms: see `stream.rs`.
-            AppEvent::StreamChunk { content, .. } => self.handle_stream_chunk(&content, &sid, n_ctx),
+            AppEvent::StreamChunk { content, .. } => {
+                self.handle_stream_chunk(&content, &sid, n_ctx)
+            }
             AppEvent::StreamPromptProgress { progress, .. } => {
                 self.handle_stream_prompt_progress(progress, &sid)
             }
@@ -59,22 +63,37 @@ impl ChatApp {
             }
             AppEvent::StreamThinkingComplete { .. } => self.handle_thinking_complete(&sid),
             // Tool-call arms: see `tool.rs`.
-            AppEvent::ToolCallWarning { tool_name, message, .. } => {
-                self.handle_tool_call_warning(&tool_name, &message)
-            }
-            AppEvent::ToolCallStart { tool_name, call_id, args_preview, .. } => {
-                self.handle_tool_call_start(&tool_name, &call_id, args_preview, &sid)
-            }
-            AppEvent::ToolCallProgress { tool_name, call_id, text, .. } => {
-                self.handle_tool_call_progress(&tool_name, &call_id, text, &sid)
-            }
-            AppEvent::ToolCallComplete { tool_name, call_id, result, .. } => {
-                self.handle_tool_call_complete(&tool_name, &call_id, result, &sid)
-            }
-            AppEvent::ToolCallError { tool_name, call_id, error, .. } => {
-                self.handle_tool_call_error(&tool_name, &call_id, error, &sid)
-            }
-            AppEvent::NCtxUpdated { n_ctx, session_id: _ } => {
+            AppEvent::ToolCallWarning {
+                tool_name, message, ..
+            } => self.handle_tool_call_warning(&tool_name, &message),
+            AppEvent::ToolCallStart {
+                tool_name,
+                call_id,
+                args_preview,
+                ..
+            } => self.handle_tool_call_start(&tool_name, &call_id, args_preview, &sid),
+            AppEvent::ToolCallProgress {
+                tool_name,
+                call_id,
+                text,
+                ..
+            } => self.handle_tool_call_progress(&tool_name, &call_id, text, &sid),
+            AppEvent::ToolCallComplete {
+                tool_name,
+                call_id,
+                result,
+                ..
+            } => self.handle_tool_call_complete(&tool_name, &call_id, result, &sid),
+            AppEvent::ToolCallError {
+                tool_name,
+                call_id,
+                error,
+                ..
+            } => self.handle_tool_call_error(&tool_name, &call_id, error, &sid),
+            AppEvent::NCtxUpdated {
+                n_ctx,
+                session_id: _,
+            } => {
                 tracing::info!(n_ctx, "n_ctx updated");
             }
             AppEvent::AgentHandoff { from, to, task, .. } => {
@@ -100,7 +119,11 @@ impl ChatApp {
                     );
                 }
             }
-            AppEvent::SubSessionHandoff { parent_session_id, agent, task } => {
+            AppEvent::SubSessionHandoff {
+                parent_session_id,
+                agent,
+                task,
+            } => {
                 // Placeholder (step 16 wires the full handler: create the sub
                 // runtime, open its tab, post the first turn).
                 tracing::info!(
@@ -124,16 +147,31 @@ impl ChatApp {
                 );
                 let _ = task;
             }
-            AppEvent::ImprovementSuggested { agent_name, suggestions, session_id: _ } => {
-                tracing::info!(agent_name, count = suggestions.len(), "Improvement suggestions received");
-                self.dialogs.improvements_panel.handle_improvement_suggested(&agent_name, suggestions);
+            AppEvent::ImprovementSuggested {
+                agent_name,
+                suggestions,
+                session_id: _,
+            } => {
+                tracing::info!(
+                    agent_name,
+                    count = suggestions.len(),
+                    "Improvement suggestions received"
+                );
+                self.dialogs
+                    .improvements_panel
+                    .handle_improvement_suggested(&agent_name, suggestions);
             }
             // 4b: a manual "run check now" finished — clear the running flag
             // and record the outcome (suggestions, when produced, already
             // arrived via ImprovementSuggested above).
-            AppEvent::ImprovementCheckFinished { agent_name, produced } => {
+            AppEvent::ImprovementCheckFinished {
+                agent_name,
+                produced,
+            } => {
                 tracing::info!(%agent_name, produced, "On-demand improvement check finished");
-                self.dialogs.improvements_panel.mark_check_finished(&agent_name, produced);
+                self.dialogs
+                    .improvements_panel
+                    .mark_check_finished(&agent_name, produced);
             }
             AppEvent::McpConfigChanged { .. } => {
                 // An MCP management tool rewrote config.json's mcp_servers
@@ -152,7 +190,9 @@ impl ChatApp {
                     }
                 }
             }
-            AppEvent::RestartRequested { reason, exe_path, .. } => {
+            AppEvent::RestartRequested {
+                reason, exe_path, ..
+            } => {
                 tracing::info!(reason, "Restart requested");
                 // Persist the transcript so nothing is lost across the relaunch,
                 // show a banner, then relaunch the (optionally newly built)
@@ -177,7 +217,9 @@ impl ChatApp {
                 // already displayed in the chat at send time, so
                 // `already_displayed = true`.
                 tracing::info!(text = %message.text, "User message drained after run ended - starting next turn");
-                let generating = self.sessions.session_store
+                let generating = self
+                    .sessions
+                    .session_store
                     .get(&sid)
                     .map(|r| r.chat_state.is_generating)
                     .unwrap_or(false);

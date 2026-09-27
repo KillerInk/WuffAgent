@@ -1,4 +1,4 @@
-﻿//! Cross-directory prompt-history helpers for the agent editor and the
+//! Cross-directory prompt-history helpers for the agent editor and the
 //! improvements panel (F4 UI).
 //!
 //! `AgentManager` keeps snapshots in `<primary>/history/`. Because the F3
@@ -30,8 +30,14 @@ pub struct HistoryEntry {
 /// `AgentManager::history_file_order`; non-numeric parts yield 0.
 pub fn parse_ts_seq(tail: &str) -> (u64, u32) {
     let mut parts = tail.splitn(2, '-');
-    let ts = parts.next().and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
-    let seq = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let ts = parts
+        .next()
+        .and_then(|t| t.parse::<u64>().ok())
+        .unwrap_or(0);
+    let seq = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
     (ts, seq)
 }
 
@@ -102,7 +108,11 @@ pub fn prompt_preview(path: &Path) -> String {
     };
     let prompt = serde_json::from_str::<serde_json::Value>(&content)
         .ok()
-        .and_then(|v| v.get("system_prompt").and_then(|s| s.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("system_prompt")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     let flat: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     let chars: Vec<char> = flat.chars().collect();

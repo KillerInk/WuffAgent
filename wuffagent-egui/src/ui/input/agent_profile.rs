@@ -11,7 +11,10 @@ impl ChatApp {
     /// `agents/` first, then the project-level `agents/` dirs (cwd, exe dir) —
     /// the same discovery set the UI agent dialog, the improvements panel (F3/F4), and the bootstrap engine use.
     pub(in crate::ui) fn agents_dirs(&self) -> Vec<PathBuf> {
-        let agents_dir = self.core.config.file_path
+        let agents_dir = self
+            .core
+            .config
+            .file_path
             .parent()
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| self.core.config.file_path.clone());
@@ -36,7 +39,10 @@ impl ChatApp {
     /// Load the first matching agent profile (by `name`) from the known agents
     /// directories, handling both current `AgentConfig` and legacy `WorkerConfig`
     /// (via the core loader, which preserves every field incl. handoff settings).
-    fn load_agent_config(&self, names: &[&str]) -> Option<wuffagent_core::agents::config::AgentConfig> {
+    fn load_agent_config(
+        &self,
+        names: &[&str],
+    ) -> Option<wuffagent_core::agents::config::AgentConfig> {
         let dirs = self.agents_dirs();
         for name in names {
             if let Some(cfg) = wuffagent_core::agents::config::load_agent_from_dirs(&dirs, name) {
@@ -49,7 +55,10 @@ impl ChatApp {
     /// Resolve the tool policy for an agent profile by name. An empty name
     /// ("Auto") or a profile not found yields an unrestricted policy (all tools
     /// + allow-all shell, no handoff).
-    pub(super) fn resolve_tool_policy(&self, agent_name: &str) -> wuffagent_core::types::ChatToolPolicy {
+    pub(super) fn resolve_tool_policy(
+        &self,
+        agent_name: &str,
+    ) -> wuffagent_core::types::ChatToolPolicy {
         let names: Vec<&str> = if agent_name.is_empty() {
             vec!["general", "generalist"]
         } else {
@@ -102,12 +111,18 @@ impl ChatApp {
                         continue;
                     }
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::AgentConfig>(&content) {
+                        if let Ok(cfg) = serde_json::from_str::<
+                            wuffagent_core::agents::config::AgentConfig,
+                        >(&content)
+                        {
                             if names.iter().any(|n| cfg.name == *n) {
                                 prompt = cfg.system_prompt;
                                 break;
                             }
-                        } else if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::WorkerConfig>(&content) {
+                        } else if let Ok(cfg) = serde_json::from_str::<
+                            wuffagent_core::agents::config::WorkerConfig,
+                        >(&content)
+                        {
                             if names.iter().any(|n| cfg.name == *n) {
                                 prompt = cfg.system_prompt;
                                 break;
@@ -143,11 +158,17 @@ impl ChatApp {
                             continue;
                         }
                         if let Ok(content) = std::fs::read_to_string(&path) {
-                            if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::AgentConfig>(&content) {
+                            if let Ok(cfg) = serde_json::from_str::<
+                                wuffagent_core::agents::config::AgentConfig,
+                            >(&content)
+                            {
                                 if cfg.enabled && seen.insert(cfg.name.clone()) {
                                     names.push(cfg.name);
                                 }
-                            } else if let Ok(cfg) = serde_json::from_str::<wuffagent_core::agents::config::WorkerConfig>(&content) {
+                            } else if let Ok(cfg) = serde_json::from_str::<
+                                wuffagent_core::agents::config::WorkerConfig,
+                            >(&content)
+                            {
                                 if cfg.enabled && seen.insert(cfg.name.clone()) {
                                     names.push(cfg.name);
                                 }

@@ -44,7 +44,13 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
                 &app.core.agent_engine,
                 session.id.clone(),
                 session.name.clone(),
-                app.relay.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
+                app.relay
+                    .pending_tx
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .clone(),
             );
 
             // Default the new session agent to "general" (per-session
@@ -52,13 +58,17 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             // selections on the client so the first save persists them with
             // the session file. A brand-new session is top-level (no parent).
             runtime.selected_agent = Some("general".to_string());
-            runtime.client.set_session_meta(wuffagent_core::sessions::SessionMeta {
-                selected_agent: runtime.selected_agent.clone(),
-                reasoning_mode: runtime.reasoning_mode,
-                parent_session_id: None,
-            });
+            runtime
+                .client
+                .set_session_meta(wuffagent_core::sessions::SessionMeta {
+                    selected_agent: runtime.selected_agent.clone(),
+                    reasoning_mode: runtime.reasoning_mode,
+                    parent_session_id: None,
+                });
 
-            app.sessions.session_store.insert(session.id.clone(), runtime);
+            app.sessions
+                .session_store
+                .insert(session.id.clone(), runtime);
             *panel.selected_id_mut() = Some(session.id.clone());
 
             {
@@ -108,8 +118,11 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             } else {
                 PathBuf::from(panel.export_path())
             };
-            match wuffagent_core::sessions::export_session(&sessions_dir, &session_id, &output_path) {
-                Ok(()) => panel.show_notification(&format!("Exported to {}", output_path.display()), true),
+            match wuffagent_core::sessions::export_session(&sessions_dir, &session_id, &output_path)
+            {
+                Ok(()) => {
+                    panel.show_notification(&format!("Exported to {}", output_path.display()), true)
+                }
                 Err(e) => panel.show_notification(&format!("Export failed: {}", e), false),
             }
         }

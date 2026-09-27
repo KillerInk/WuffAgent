@@ -9,10 +9,8 @@ use wuffagent_core::memory::{
     InjectionMode, MaintenanceProgress, MaintenanceReport, MemoryConfig, MemoryManager,
 };
 
-use super::{
-    MIN_MAINTENANCE_TIMEOUT_SECS, MaintenanceJob, MemoryPanel, short_id,
-};
 use super::super::theme::Theme;
+use super::{short_id, MaintenanceJob, MemoryPanel, MIN_MAINTENANCE_TIMEOUT_SECS};
 
 impl MemoryPanel {
     /// Draw the entry editor (content + tags text fields) when an entry is
@@ -47,9 +45,14 @@ impl MemoryPanel {
                         .desired_width(f32::INFINITY),
                 );
                 ui.label("Tags (comma separated):");
-                ui.add(egui::TextEdit::singleline(&mut self.edit_tags).desired_width(f32::INFINITY));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.edit_tags).desired_width(f32::INFINITY),
+                );
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new("Save").fill(theme.primary)).clicked() {
+                    if ui
+                        .add(egui::Button::new("Save").fill(theme.primary))
+                        .clicked()
+                    {
                         let tags: Vec<String> = self
                             .edit_tags
                             .split(',')
@@ -87,11 +90,17 @@ impl MemoryPanel {
     ///
     /// Returns the new config if the user changed anything — the caller
     /// (ChatApp) persists it via the centralized `save_config()` (I4).
-    pub(super) fn draw_settings(&mut self, ui: &mut egui::Ui, memory: &MemoryManager) -> Option<MemoryConfig> {
+    pub(super) fn draw_settings(
+        &mut self,
+        ui: &mut egui::Ui,
+        memory: &MemoryManager,
+    ) -> Option<MemoryConfig> {
         let mut mconfig = memory.config();
 
         ui.collapsing("Settings", |ui| {
-            let enabled = ui.add(egui::Checkbox::new(&mut mconfig.enabled, "Memory enabled")).changed();
+            let enabled = ui
+                .add(egui::Checkbox::new(&mut mconfig.enabled, "Memory enabled"))
+                .changed();
 
             ui.horizontal(|ui| {
                 ui.label("Injection mode:");
@@ -116,7 +125,11 @@ impl MemoryPanel {
             });
 
             let max_changed = ui
-                .add(egui::DragValue::new(&mut mconfig.max_entries).range(1..=10_000).suffix(" max entries"))
+                .add(
+                    egui::DragValue::new(&mut mconfig.max_entries)
+                        .range(1..=10_000)
+                        .suffix(" max entries"),
+                )
                 .changed();
             let inj_changed = ui
                 .add(
@@ -126,7 +139,12 @@ impl MemoryPanel {
                 )
                 .changed();
 
-            let maint_changed = ui.add(egui::Checkbox::new(&mut mconfig.memory_maintenance, "LLM maintenance (opt-in)")).changed();
+            let maint_changed = ui
+                .add(egui::Checkbox::new(
+                    &mut mconfig.memory_maintenance,
+                    "LLM maintenance (opt-in)",
+                ))
+                .changed();
             let thresh_changed = ui
                 .add(
                     egui::DragValue::new(&mut mconfig.memory_maintenance_threshold)
@@ -148,7 +166,12 @@ impl MemoryPanel {
                         .suffix(" s step timeout"),
                 )
                 .changed();
-            let auto_changed = ui.add(egui::Checkbox::new(&mut mconfig.auto_improve, "Auto-improve prompts (gated: cooldown + new evidence)")).changed();
+            let auto_changed = ui
+                .add(egui::Checkbox::new(
+                    &mut mconfig.auto_improve,
+                    "Auto-improve prompts (gated: cooldown + new evidence)",
+                ))
+                .changed();
             let cooldown_changed = ui
                 .add(
                     egui::DragValue::new(&mut mconfig.improvement_cooldown_tasks)
@@ -157,7 +180,16 @@ impl MemoryPanel {
                 )
                 .changed();
 
-            if enabled || max_changed || inj_changed || maint_changed || thresh_changed || batch_changed || timeout_changed || auto_changed || cooldown_changed {
+            if enabled
+                || max_changed
+                || inj_changed
+                || maint_changed
+                || thresh_changed
+                || batch_changed
+                || timeout_changed
+                || auto_changed
+                || cooldown_changed
+            {
                 memory.set_config(mconfig.clone());
                 self.message = Some("✓ Memory settings updated".to_string());
                 Some(mconfig)
@@ -218,14 +250,14 @@ impl MemoryPanel {
             } else if count < mconfig.memory_maintenance_threshold {
                 format!("below threshold ({})", mconfig.memory_maintenance_threshold)
             } else {
-                format!(
-                    "ready (runs in batches of {})",
-                    batch_size
-                )
+                format!("ready (runs in batches of {})", batch_size)
             };
 
             if ui
-                .add_enabled(can_run, egui::Button::new("Run maintenance now").fill(theme.primary))
+                .add_enabled(
+                    can_run,
+                    egui::Button::new("Run maintenance now").fill(theme.primary),
+                )
                 .clicked()
             {
                 self.start_maintenance(memory, runtime, total_timeout);
@@ -234,7 +266,9 @@ impl MemoryPanel {
         });
 
         if let Some(report) = &self.maintenance_report {
-            ui.add(egui::Label::new(egui::RichText::new(report).color(theme.text_secondary)).wrap());
+            ui.add(
+                egui::Label::new(egui::RichText::new(report).color(theme.text_secondary)).wrap(),
+            );
         }
     }
 
@@ -271,7 +305,8 @@ impl MemoryPanel {
                 // pass (steps × per-step limit; each batch already self-bounds
                 // inside the manager). Dropping it cancels the pass.
                 let result = runtime.block_on(async {
-                    tokio::time::timeout(total_timeout, memory.run_maintenance_full(Some(progress))).await
+                    tokio::time::timeout(total_timeout, memory.run_maintenance_full(Some(progress)))
+                        .await
                 });
                 let outcome: Result<MaintenanceReport, String> = match result {
                     Ok(inner) => inner,

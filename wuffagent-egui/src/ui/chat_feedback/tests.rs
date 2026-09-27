@@ -38,16 +38,37 @@ fn test_feedback_lesson_shape() {
     let entry = feedback_lesson("coder", true, "list the directory", "");
     assert!(matches!(entry.r#type, MemoryType::Lesson));
     assert_eq!(entry.source, "user-feedback");
-    assert!(entry.tags.contains(&"user-feedback".to_string()), "tags: {:?}", entry.tags);
-    assert!(entry.tags.contains(&"agent:coder".to_string()), "tags: {:?}", entry.tags);
+    assert!(
+        entry.tags.contains(&"user-feedback".to_string()),
+        "tags: {:?}",
+        entry.tags
+    );
+    assert!(
+        entry.tags.contains(&"agent:coder".to_string()),
+        "tags: {:?}",
+        entry.tags
+    );
     assert!(entry.content.contains("good"), "{}", entry.content);
     assert!(entry.content.contains("coder"), "{}", entry.content);
-    assert!(entry.content.contains("list the directory"), "{}", entry.content);
+    assert!(
+        entry.content.contains("list the directory"),
+        "{}",
+        entry.content
+    );
     assert!(entry.content.contains("none"), "{}", entry.content);
 
-    let bad = feedback_lesson("researcher", false, "summarize the docs", "missed the key API");
+    let bad = feedback_lesson(
+        "researcher",
+        false,
+        "summarize the docs",
+        "missed the key API",
+    );
     assert!(bad.content.contains("bad"), "{}", bad.content);
-    assert!(bad.content.contains("missed the key API"), "{}", bad.content);
+    assert!(
+        bad.content.contains("missed the key API"),
+        "{}",
+        bad.content
+    );
     assert!(bad.tags.contains(&"agent:researcher".to_string()));
 }
 
@@ -56,10 +77,7 @@ fn test_feedback_lesson_shape() {
 #[test]
 fn test_remember_feedback_saves_and_dedups() {
     wuffagent_core::agents::metrics::set_metrics_dir_for_testing(Some(test_metrics_dir()));
-    let dir = std::env::temp_dir().join(format!(
-        "wuffagent-user-feedback-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("wuffagent-user-feedback-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let config = wuffagent_core::memory::MemoryConfig {
@@ -106,7 +124,10 @@ fn test_remember_feedback_skipped_when_disabled() {
     };
     let memory = wuffagent_core::memory::MemoryManager::new(config).unwrap();
 
-    assert_eq!(remember_feedback(&memory, "coder", true, "t", "").unwrap(), false);
+    assert_eq!(
+        remember_feedback(&memory, "coder", true, "t", "").unwrap(),
+        false
+    );
     assert_eq!(memory.count(), 0);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -130,6 +151,10 @@ fn test_task_snippet_for() {
 
     let long = vec![msg("user", &"x".repeat(500)), msg("assistant", "a")];
     let s = snippet(&long, 1);
-    assert!(s.chars().count() <= 201, "snippet must be bounded: {} chars", s.chars().count());
+    assert!(
+        s.chars().count() <= 201,
+        "snippet must be bounded: {} chars",
+        s.chars().count()
+    );
     assert!(s.ends_with('…'));
 }

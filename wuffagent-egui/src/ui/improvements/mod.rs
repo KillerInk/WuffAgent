@@ -15,7 +15,9 @@ mod memory;
 use eframe::egui;
 use wuffagent_core::agents::config::{AgentManager, ShellConfig};
 use wuffagent_core::memory::PendingStore;
-use wuffagent_core::types::{ImprovementSuggestion, NewAgentProposal, ReasoningEffort, SkillUpdate};
+use wuffagent_core::types::{
+    ImprovementSuggestion, NewAgentProposal, ReasoningEffort, SkillUpdate,
+};
 
 use super::theme::Theme;
 
@@ -23,14 +25,14 @@ use super::theme::Theme;
 // callers for these, so gate to avoid unused-import warnings.
 #[cfg(test)]
 pub use memory::{
-    apply_improvement_detailed, applied_marker, rejection_lesson, remember_applied_prompt,
+    applied_marker, apply_improvement_detailed, rejection_lesson, remember_applied_prompt,
     remember_dismissal, resolve_agent_dir,
 };
+#[cfg(test)]
+use std::path::PathBuf;
 pub use wuffagent_core::agents::config::AgentConfig;
 #[cfg(test)]
 pub use wuffagent_core::memory::skills::SkillStore;
-use std::path::PathBuf;
-use std::time::SystemTime;
 
 /// A pending suggestion in the review panel (UI-level wrapper around the core
 /// `ImprovementSuggestion`).
@@ -128,16 +130,18 @@ impl From<&wuffagent_core::memory::ImprovementSuggestion> for PendingImprovement
     }
 }
 
-/// A cached [`AgentManager::list_agents`] result plus the fingerprint of
-/// the directories that produced it (each dir's path + mtime).
+/// A cached [`AgentManager::list_agents`] result plus the fingerprint that
+/// produced it: the scanned directory set + the process-wide agent
+/// mutation counter (bumped by every add/edit/remove/revert/reload,
+/// including tool-driven ones like `edit_agent_profile`).
 ///
 /// The panel used to call `list_agents()` on EVERY frame — a full disk
 /// re-scan that re-reads and re-logs every agent profile, flooding the log
 /// while tokens streamed (egui redraws on each streamed token). The list is
-/// now refreshed only when a scanned dir's mtime changes (an agent file was
-/// saved or edited) or the dir set changed.
+/// now refreshed only when an agent config was actually mutated or the dir
+/// set changed (the per-frame check is a string compare — no I/O).
 struct AgentListCache {
-    fingerprint: Vec<(PathBuf, SystemTime)>,
+    fingerprint: String,
     agents: Vec<AgentConfig>,
 }
 
@@ -176,33 +180,38 @@ impl ImprovementsPanel {
         }
     }
 
-    /// Re-fetch the cached agent list, but only when the scanned agent dirs
-    /// actually changed (a dir's mtime or the dir set itself differs from
-    /// the cache fingerprint). Cheap per-frame: just `stat`s the dirs.
+    /// Re-fetch the cached agent list, but only when the fingerprint
+    /// changed: a different dir set, or a bumped mutation counter (an agent
+    /// config was added/edited/removed/reverted, via the UI or a tool).
+    /// Cheap per-frame: no I/O, just a counter read + string compare.
     fn refresh_agent_cache(&mut self, manager: &AgentManager) {
         // The same dir set `list_agents()` scans: primary first, search
         // dirs after (skipping duplicates of the primary).
         let primary = manager.agents_dir().clone();
-        let dirs: Vec<PathBuf> = std::iter::once(primary.clone())
-            .chain(manager.search_dirs().iter().filter(|d| *d != &primary).cloned())
-            .collect();
-        let fingerprint: Vec<(PathBuf, SystemTime)> = dirs
-            .iter()
-            .map(|d| {
-                let mtime = std::fs::metadata(d)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                (d.clone(), mtime)
-            })
-            .collect();
+        let fingerprint = format!(
+            "{}\0mut={}",
+            std::iter::once(primary.to_string_lossy().into_owned())
+                .chain(
+                    manager
+                        .search_dirs()
+                        .iter()
+                        .filter(|d| *d != &primary)
+                        .map(|d| d.to_string_lossy().into_owned())
+                )
+                .collect::<Vec<_>>()
+                .join("\0"),
+            wuffagent_core::agents::manager::agents_mutation_counter()
+        );
         let fresh = self
             .agent_cache
             .as_ref()
             .is_some_and(|c| c.fingerprint == fingerprint);
         if !fresh {
             let agents = manager.list_agents().unwrap_or_default();
-            self.agent_cache = Some(AgentListCache { fingerprint, agents });
+            self.agent_cache = Some(AgentListCache {
+                fingerprint,
+                agents,
+            });
         }
     }
 
@@ -357,9 +366,15 @@ impl crate::ui::state::ChatApp {
         // the AppEvent channel to send back the result of the check it spawns.
         let memory_arc = self.core.memory_manager.clone();
         let events = self.relay.pending_tx.clone();
-        self.dialogs
-            .improvements_panel
-            .draw(ctx, &agent_manager, &agents_dirs, &theme, &self.core.memory_manager, memory_arc, events);
+        self.dialogs.improvements_panel.draw(
+            ctx,
+            &agent_manager,
+            &agents_dirs,
+            &theme,
+            &self.core.memory_manager,
+            memory_arc,
+            events,
+        );
     }
 }
 

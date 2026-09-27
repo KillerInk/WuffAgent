@@ -17,7 +17,12 @@ impl ChatApp {
     /// Live streaming row shown while a response is in flight.
     /// Mirrors the committed message layout (avatar + AI bubble) so the text
     /// doesn't jump when the message is committed.
-    pub(super) fn draw_streaming_line(&mut self, ui: &mut egui::Ui, theme: &Theme, streaming: &(String, String)) {
+    pub(super) fn draw_streaming_line(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        streaming: &(String, String),
+    ) {
         let (current_thinking, stream_buffer) = streaming;
         ui.add_space(14.0);
         ui.horizontal(|ui| {
@@ -35,10 +40,12 @@ impl ChatApp {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(egui::RichText::new("Thinking…")
-                                        .color(theme.text_dim)
-                                        .italics()
-                                        .size(11.0));
+                                    ui.label(
+                                        egui::RichText::new("Thinking…")
+                                            .color(theme.text_dim)
+                                            .italics()
+                                            .size(11.0),
+                                    );
                                     ui.spinner();
                                 });
                                 ui.add_space(4.0);
@@ -88,7 +95,10 @@ impl ChatApp {
                                         alpha,
                                     );
                                     ui.painter().circle_filled(
-                                        base + egui::vec2(k as f32 * (dot + gap) + dot / 2.0, dot / 2.0),
+                                        base + egui::vec2(
+                                            k as f32 * (dot + gap) + dot / 2.0,
+                                            dot / 2.0,
+                                        ),
                                         dot / 2.0,
                                         color,
                                     );
@@ -108,7 +118,12 @@ impl ChatApp {
     /// of the output so long commands are visible while they run. The card
     /// carries the same indent as a committed tool card, so the transcript
     /// doesn't jump when the live card is replaced by the persisted result.
-    pub(super) fn draw_active_tool_card(&mut self, ui: &mut egui::Ui, tool: &wuffagent_core::sessions::ActiveTool, theme: &Theme) {
+    pub(super) fn draw_active_tool_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        tool: &wuffagent_core::sessions::ActiveTool,
+        theme: &Theme,
+    ) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             // Same indent as a committed tool card (28px avatar + 8px gap).
@@ -135,10 +150,16 @@ impl ChatApp {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             ui.spinner();
                             ui.add_space(2.0);
-                            ui.label(egui::RichText::new(format!("{} {}", Self::tool_icon(&tool.tool_name), tool.tool_name))
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} {}",
+                                    Self::tool_icon(&tool.tool_name),
+                                    tool.tool_name
+                                ))
                                 .color(theme.accent)
                                 .strong()
-                                .size(11.5));
+                                .size(11.5),
+                            );
                             if !tool.args_preview.is_empty() {
                                 ui.add(Self::breaking_label(
                                     &tool.args_preview,
@@ -148,11 +169,19 @@ impl ChatApp {
                                 ));
                             }
                             let elapsed = tool.started_at.elapsed();
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new(format!("running · {}", Self::format_duration(elapsed.as_millis() as u64)))
-                                    .color(theme.text_dim)
-                                    .size(9.5));
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "running · {}",
+                                            Self::format_duration(elapsed.as_millis() as u64)
+                                        ))
+                                        .color(theme.text_dim)
+                                        .size(9.5),
+                                    );
+                                },
+                            );
                         });
                         // Live output tail (shell). Latest lines only.
                         if !tool.live_output.is_empty() {
@@ -193,9 +222,18 @@ impl ChatApp {
         theme: &Theme,
     ) {
         let is_user = message.role == "user";
-        let is_editing = self.sessions.selected_session_id.as_ref().map(|sid| {
-            self.sessions.session_store.get(sid).map(|r| r.chat_state.editing_message_index == Some(index)).unwrap_or(false)
-        }).unwrap_or(false);
+        let is_editing = self
+            .sessions
+            .selected_session_id
+            .as_ref()
+            .map(|sid| {
+                self.sessions
+                    .session_store
+                    .get(sid)
+                    .map(|r| r.chat_state.editing_message_index == Some(index))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
 
         // Tool messages render as a compact collapsible card (result hidden
         // by default, expandable on click) instead of a full bubble.
@@ -211,7 +249,11 @@ impl ChatApp {
         } else {
             theme.ai_bg
         };
-        let text_color = if is_user { egui::Color32::WHITE } else { theme.text_primary };
+        let text_color = if is_user {
+            egui::Color32::WHITE
+        } else {
+            theme.text_primary
+        };
 
         // Gap between messages.
         ui.add_space(14.0);
@@ -246,7 +288,8 @@ impl ChatApp {
                             if let Some(sid) = &self.sessions.selected_session_id {
                                 if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                                     runtime.chat_state.editing_message_index = Some(index);
-                                    runtime.chat_state.editing_message_content = message.content.clone();
+                                    runtime.chat_state.editing_message_content =
+                                        message.content.clone();
                                 }
                             }
                         }
@@ -255,7 +298,7 @@ impl ChatApp {
                         }
                     });
                 }
-                
+
                 ui.vertical(|ui| {
                     let inner = egui::Frame::NONE
                         .fill(bubble_bg)
@@ -264,24 +307,37 @@ impl ChatApp {
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
                             if layout_dbg_enabled() {
-                                eprintln!("[ldbg] msg {:>3} frame avail_w={:.1}", index, ui.available_width());
+                                eprintln!(
+                                    "[ldbg] msg {:>3} frame avail_w={:.1}",
+                                    index,
+                                    ui.available_width()
+                                );
                             }
                             if is_editing {
                                 if let Some(sid) = &self.sessions.selected_session_id {
-                                    if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
+                                    if let Some(runtime) = self.sessions.session_store.get_mut(sid)
+                                    {
                                         ui.add_sized(
                                             egui::vec2(ui.available_width().max(160.0), 80.0),
-                                            egui::TextEdit::multiline(&mut runtime.chat_state.editing_message_content),
+                                            egui::TextEdit::multiline(
+                                                &mut runtime.chat_state.editing_message_content,
+                                            ),
                                         );
                                     }
                                 }
                             } else {
                                 // Display image if present
                                 if let Some(ref img_data) = message.image {
-                                    if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, img_data) {
+                                    if let Ok(decoded) = base64::Engine::decode(
+                                        &base64::engine::general_purpose::STANDARD,
+                                        img_data,
+                                    ) {
                                         // Per-message id so multiple images don't
                                         // share one texture slot.
-                                        let img = egui::Image::from_bytes(format!("chat_image_{}", index), decoded);
+                                        let img = egui::Image::from_bytes(
+                                            format!("chat_image_{}", index),
+                                            decoded,
+                                        );
                                         let max_img_width = (ui.available_width() - 10.0).max(50.0);
                                         ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
                                     }
@@ -299,7 +355,9 @@ impl ChatApp {
                                     ));
                                 } else {
                                     // Normal message — strip any legacy <think> tags
-                                    let display_content = if message.content.contains("<think>") || message.content.contains("</think>") {
+                                    let display_content = if message.content.contains("<think>")
+                                        || message.content.contains("</think>")
+                                    {
                                         Self::strip_thinking_tags(&message.content)
                                     } else {
                                         message.content.clone()
@@ -314,65 +372,65 @@ impl ChatApp {
                             }
                         });
 
-                        if layout_dbg_enabled() {
-                            eprintln!(
-                                "[ldbg] msg {:>3} bubble_w={:.1} bubble_rect={:?}",
-                                index,
-                                inner.response.rect.width(),
-                                inner.response.rect
-                            );
-                        }
+                    if layout_dbg_enabled() {
+                        eprintln!(
+                            "[ldbg] msg {:>3} bubble_w={:.1} bubble_rect={:?}",
+                            index,
+                            inner.response.rect.width(),
+                            inner.response.rect
+                        );
+                    }
 
-                        // Timestamp — always visible, part of the layout flow.
-                        let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
-                        if !ts.is_empty() {
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(ts).color(theme.text_dim).size(9.5),
-                            ));
-                        }
+                    // Timestamp — always visible, part of the layout flow.
+                    let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
+                    if !ts.is_empty() {
+                        ui.add(egui::Label::new(
+                            egui::RichText::new(ts).color(theme.text_dim).size(9.5),
+                        ));
+                    }
 
-                        // S2: feedback (👍/👎) under assistant answers only.
-                        if !is_user && !is_editing && message.kind == MessageKind::Normal {
-                            self.draw_feedback_row(ui, index, theme);
-                        }
+                    // S2: feedback (👍/👎) under assistant answers only.
+                    if !is_user && !is_editing && message.kind == MessageKind::Normal {
+                        self.draw_feedback_row(ui, index, theme);
+                    }
 
-                        // Hover reveal: copy button in the top-right corner.
-                        // Placed (not laid out) so it never shifts the message flow.
-                        //
-                        // Gate visibility on the raw pointer position, NOT on
-                        // `inner.response.hovered()`: the button is placed on top
-                        // of the bubble, and while the pointer is over it, the
-                        // bubble frame (a hover-only widget) stops reporting
-                        // `hovered` because the click-sensitive button covers it.
-                        // Gating on the frame's hover made the button vanish the
-                        // instant the pointer touched it — a per-frame show/hide
-                        // flicker — and egui drops the pending click when the
-                        // widget disappears, so the click never registered and
-                        // nothing was copied. The button rect lies inside the
-                        // frame rect, so "pointer over the bubble" covers both.
-                        if !is_editing
-                            && ui
-                                .ctx()
-                                .pointer_hover_pos()
-                                .is_some_and(|pos| inner.response.rect.contains(pos))
-                        {
-                            let btn_size = egui::vec2(16.0, 16.0);
-                            let btn_rect = egui::Rect::from_min_size(
-                                inner.response.rect.right_top() - egui::vec2(btn_size.x + 3.0, 3.0),
-                                btn_size,
-                            );
-                            let copy_resp = ui.put(
-                                btn_rect,
-                                egui::Button::new(
-                                    egui::RichText::new("⧉").color(theme.text_dim).size(11.0),
-                                )
-                                .fill(theme.hover_bg)
-                                .corner_radius(4),
-                            );
-                            if copy_resp.clicked() {
-                                ui.ctx().copy_text(message.content.clone());
-                            }
+                    // Hover reveal: copy button in the top-right corner.
+                    // Placed (not laid out) so it never shifts the message flow.
+                    //
+                    // Gate visibility on the raw pointer position, NOT on
+                    // `inner.response.hovered()`: the button is placed on top
+                    // of the bubble, and while the pointer is over it, the
+                    // bubble frame (a hover-only widget) stops reporting
+                    // `hovered` because the click-sensitive button covers it.
+                    // Gating on the frame's hover made the button vanish the
+                    // instant the pointer touched it — a per-frame show/hide
+                    // flicker — and egui drops the pending click when the
+                    // widget disappears, so the click never registered and
+                    // nothing was copied. The button rect lies inside the
+                    // frame rect, so "pointer over the bubble" covers both.
+                    if !is_editing
+                        && ui
+                            .ctx()
+                            .pointer_hover_pos()
+                            .is_some_and(|pos| inner.response.rect.contains(pos))
+                    {
+                        let btn_size = egui::vec2(16.0, 16.0);
+                        let btn_rect = egui::Rect::from_min_size(
+                            inner.response.rect.right_top() - egui::vec2(btn_size.x + 3.0, 3.0),
+                            btn_size,
+                        );
+                        let copy_resp = ui.put(
+                            btn_rect,
+                            egui::Button::new(
+                                egui::RichText::new("⧉").color(theme.text_dim).size(11.0),
+                            )
+                            .fill(theme.hover_bg)
+                            .corner_radius(4),
+                        );
+                        if copy_resp.clicked() {
+                            ui.ctx().copy_text(message.content.clone());
                         }
+                    }
                 });
             });
         });
@@ -397,16 +455,18 @@ impl ChatApp {
 
     pub(super) fn commit_message_edit(&mut self, index: usize) {
         let new_content = match &self.sessions.selected_session_id {
-            Some(sid) => {
-                self.sessions.session_store.get(sid).map(|r| r.chat_state.editing_message_content.clone())
-            }
+            Some(sid) => self
+                .sessions
+                .session_store
+                .get(sid)
+                .map(|r| r.chat_state.editing_message_content.clone()),
             None => return,
         };
         let new_content = match new_content {
             Some(c) => c,
             None => return,
         };
-        
+
         // Update chat_display
         if let Some(sid) = &self.sessions.selected_session_id {
             if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
@@ -415,7 +475,7 @@ impl ChatApp {
                 }
             }
         }
-        
+
         // Update the underlying client conversation, then persist via the
         // single save path.
         if let Some(sid) = self.sessions.selected_session_id.clone() {
@@ -441,7 +501,7 @@ impl ChatApp {
                 tracing::warn!(error = %e, "Failed to save session after edit");
             }
         }
-        
+
         // Clear edit state
         if let Some(sid) = &self.sessions.selected_session_id {
             if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
@@ -461,10 +521,11 @@ impl ChatApp {
                     runtime.chat_state.messages.remove(index);
                     // S2: keep the feedback state index-aligned after deletion
                     // (keys below stay, the deleted one drops, higher ones shift).
-                    runtime.chat_state.message_ratings = std::mem::take(&mut runtime.chat_state.message_ratings)
-                        .into_iter()
-                        .map(|(k, v)| (if k > index { k - 1 } else { k }, v))
-                        .collect();
+                    runtime.chat_state.message_ratings =
+                        std::mem::take(&mut runtime.chat_state.message_ratings)
+                            .into_iter()
+                            .map(|(k, v)| (if k > index { k - 1 } else { k }, v))
+                            .collect();
                     runtime.chat_state.feedback_comment_for =
                         match runtime.chat_state.feedback_comment_for {
                             Some(f) if f == index => None,

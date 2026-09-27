@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui_plot::{GridMark, Line, Legend, Plot};
+use egui_plot::{GridMark, Legend, Line, Plot};
 
 use super::theme::Theme;
 use wuffagent_core::usage::recorder::UsageRecorder;
@@ -14,8 +14,11 @@ enum Range {
 }
 
 impl Range {
-    const OPTIONS: [(&'static str, Self); 3] =
-        [("Hour", Self::Hour), ("Day", Self::Day), ("Week", Self::Week)];
+    const OPTIONS: [(&'static str, Self); 3] = [
+        ("Hour", Self::Hour),
+        ("Day", Self::Day),
+        ("Week", Self::Week),
+    ];
 
     fn granularity(self) -> Granularity {
         match self {

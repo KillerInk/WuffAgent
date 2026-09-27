@@ -14,9 +14,10 @@ pub fn emoji_fonts() -> egui::FontDefinitions {
     #[cfg(target_os = "windows")]
     {
         if let Ok(data) = std::fs::read("C:\\Windows\\Fonts\\seguiemj.ttf") {
-            font_data
-                .font_data
-                .insert("emoji".to_string(), Arc::new(egui::FontData::from_owned(data)));
+            font_data.font_data.insert(
+                "emoji".to_string(),
+                Arc::new(egui::FontData::from_owned(data)),
+            );
             font_data
                 .families
                 .get_mut(&egui::FontFamily::Proportional)
@@ -28,9 +29,10 @@ pub fn emoji_fonts() -> egui::FontDefinitions {
     #[cfg(target_os = "macos")]
     {
         if let Ok(data) = std::fs::read("/System/Library/Fonts/Apple Color Emoji.ttc") {
-            font_data
-                .font_data
-                .insert("emoji".to_string(), Arc::new(egui::FontData::from_owned(data)));
+            font_data.font_data.insert(
+                "emoji".to_string(),
+                Arc::new(egui::FontData::from_owned(data)),
+            );
             font_data
                 .families
                 .get_mut(&egui::FontFamily::Proportional)

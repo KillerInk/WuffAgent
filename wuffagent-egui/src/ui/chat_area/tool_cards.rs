@@ -31,7 +31,13 @@ impl ChatApp {
     /// opens the delete menu). The card is indented to sit under the AI
     /// message column and has no avatar, keeping tool chatter visually quiet
     /// compared to normal messages.
-    pub(super) fn draw_tool_card(&mut self, ui: &mut egui::Ui, message: &ChatMessage, index: usize, theme: &Theme) {
+    pub(super) fn draw_tool_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        message: &ChatMessage,
+        index: usize,
+        theme: &Theme,
+    ) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             // Indent under the AI bubble (28px avatar + 8px gap).
@@ -43,9 +49,18 @@ impl ChatApp {
             // and the expanded content is squeezed into a ~0px sliver, wrapping
             // one character per line. Force a vertical layout for the card body.
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                let is_expanded = self.sessions.selected_session_id.as_ref().map(|sid| {
-                    self.sessions.session_store.get(sid).map(|r| r.chat_state.expanded_messages.contains(&index)).unwrap_or(false)
-                }).unwrap_or(false);
+                let is_expanded = self
+                    .sessions
+                    .selected_session_id
+                    .as_ref()
+                    .map(|sid| {
+                        self.sessions
+                            .session_store
+                            .get(sid)
+                            .map(|r| r.chat_state.expanded_messages.contains(&index))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
 
                 // Content is "header||call_id||result[||duration_ms]" — or a
                 // bare result for messages loaded from older sessions.
@@ -72,12 +87,22 @@ impl ChatApp {
                         let row = ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             let chev = if is_expanded { "▾" } else { "▸" };
-                            ui.label(egui::RichText::new(chev)
-                                .color(theme.text_dim).size(9.0).monospace());
-                            ui.label(egui::RichText::new(format!("{} {}", Self::tool_icon(&name), name))
-                                .color(if is_error { theme.warning } else { theme.accent })
-                                .strong()
-                                .size(11.5));
+                            ui.label(
+                                egui::RichText::new(chev)
+                                    .color(theme.text_dim)
+                                    .size(9.0)
+                                    .monospace(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("{} {}", Self::tool_icon(&name), name))
+                                    .color(if is_error {
+                                        theme.warning
+                                    } else {
+                                        theme.accent
+                                    })
+                                    .strong()
+                                    .size(11.5),
+                            );
                             // What the call did (new-format calls); legacy calls
                             // have no args preview and just show the summary.
                             // A wrapping label in a horizontal row claims all
@@ -96,24 +121,41 @@ impl ChatApp {
                                     ));
                                 });
                             }
-                            let summary_color = if is_error { theme.warning } else { theme.text_dim };
-                            ui.label(egui::RichText::new(if is_error && !summary.is_empty() {
-                                format!("✗ {}", summary)
+                            let summary_color = if is_error {
+                                theme.warning
                             } else {
-                                summary.clone()
-                            })
-                            .color(summary_color).size(10.5));
+                                theme.text_dim
+                            };
+                            ui.label(
+                                egui::RichText::new(if is_error && !summary.is_empty() {
+                                    format!("✗ {}", summary)
+                                } else {
+                                    summary.clone()
+                                })
+                                .color(summary_color)
+                                .size(10.5),
+                            );
                             // Right cluster: duration chip + timestamp.
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if let Some(ms) = duration_ms {
-                                    ui.label(egui::RichText::new(format!("· {}", Self::format_duration(ms)))
-                                        .color(theme.text_dim).size(9.5));
-                                }
-                                if !ts.is_empty() {
-                                    ui.label(egui::RichText::new(ts)
-                                        .color(theme.text_dim).size(9.5));
-                                }
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if let Some(ms) = duration_ms {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "· {}",
+                                                Self::format_duration(ms)
+                                            ))
+                                            .color(theme.text_dim)
+                                            .size(9.5),
+                                        );
+                                    }
+                                    if !ts.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(ts).color(theme.text_dim).size(9.5),
+                                        );
+                                    }
+                                },
+                            );
                         });
                         // The layout's own response only tracks hover, so
                         // register an explicit click interaction over the row.
@@ -136,7 +178,10 @@ impl ChatApp {
                             if let Some(sid) = &self.sessions.selected_session_id {
                                 if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                                     if is_expanded {
-                                        runtime.chat_state.expanded_messages.retain(|&i| i != index);
+                                        runtime
+                                            .chat_state
+                                            .expanded_messages
+                                            .retain(|&i| i != index);
                                     } else {
                                         runtime.chat_state.expanded_messages.push(index);
                                     }
@@ -169,9 +214,15 @@ impl ChatApp {
                         }
                         if is_expanded {
                             if raw_result.trim().is_empty() {
-                                ui.label(egui::RichText::new("(no output)")
-                                    .color(theme.text_dim).italics().size(11.0));
-                            } else if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw_result.as_str()) {
+                                ui.label(
+                                    egui::RichText::new("(no output)")
+                                        .color(theme.text_dim)
+                                        .italics()
+                                        .size(11.0),
+                                );
+                            } else if let Ok(json) =
+                                serde_json::from_str::<serde_json::Value>(raw_result.as_str())
+                            {
                                 self.draw_tool_json_result(ui, &json, raw_result.as_str(), theme);
                             } else {
                                 self.draw_tool_plain_result(ui, raw_result.as_str(), theme);
@@ -293,7 +344,11 @@ impl ChatApp {
         }
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
             // Image result (show_image): name/caption + dimensions, not "N chars".
-            if json.get("data_uri").and_then(|v| v.as_str()).is_some_and(|d| d.starts_with("data:image/")) {
+            if json
+                .get("data_uri")
+                .and_then(|v| v.as_str())
+                .is_some_and(|d| d.starts_with("data:image/"))
+            {
                 let label = json
                     .get("caption")
                     .and_then(|v| v.as_str())
@@ -307,11 +362,19 @@ impl ChatApp {
             // Shell output: exit status + output volume.
             if let Some(code) = json.get("exit_code").and_then(|v| v.as_u64()) {
                 let lines_part = |key: &str| -> Option<String> {
-                    let n = json.get(key).and_then(|v| v.as_str()).map(|s| s.lines().count())?;
+                    let n = json
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.lines().count())?;
                     if n == 0 {
                         None
                     } else {
-                        Some(format!("{} {} line{}", n, key, if n == 1 { "" } else { "s" }))
+                        Some(format!(
+                            "{} {} line{}",
+                            n,
+                            key,
+                            if n == 1 { "" } else { "s" }
+                        ))
                     }
                 };
                 let mut detail = lines_part("stdout");
@@ -394,13 +457,15 @@ impl ChatApp {
             path.to_string()
         };
         // Path as a clickable chip
-        let path_btn = egui::Button::new(egui::RichText::new(display)
-            .color(theme.badge_text)
-            .size(10.0)
-            .monospace())
-            .fill(theme.badge_bg)
-            .corner_radius(5)
-            .min_size(egui::vec2(0.0, 18.0));
+        let path_btn = egui::Button::new(
+            egui::RichText::new(display)
+                .color(theme.badge_text)
+                .size(10.0)
+                .monospace(),
+        )
+        .fill(theme.badge_bg)
+        .corner_radius(5)
+        .min_size(egui::vec2(0.0, 18.0));
         if ui.add(path_btn).clicked() {
             // Open parent directory in explorer
             if let Some(parent) = std::path::Path::new(path).parent() {
@@ -439,12 +504,19 @@ impl ChatApp {
     /// The decoded bytes are hashed into the texture URI because egui's bytes
     /// loader keeps the FIRST payload stored per URI (a fixed URI would show
     /// a stale image — same reasoning as the chat-input attach flow).
-    pub(super) fn draw_data_uri_image(ui: &mut egui::Ui, uri: &str, max_height: f32, theme: &Theme) {
+    pub(super) fn draw_data_uri_image(
+        ui: &mut egui::Ui,
+        uri: &str,
+        max_height: f32,
+        theme: &Theme,
+    ) {
         let Some(bytes) = Self::data_uri_to_bytes(uri) else {
-            ui.label(egui::RichText::new("(could not decode image)")
-                .color(theme.text_dim)
-                .size(10.5)
-                .italics());
+            ui.label(
+                egui::RichText::new("(could not decode image)")
+                    .color(theme.text_dim)
+                    .size(10.5)
+                    .italics(),
+            );
             return;
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -462,11 +534,17 @@ impl ChatApp {
         if !meta.to_ascii_lowercase().ends_with(";base64") {
             return None;
         }
-        base64::engine::general_purpose::STANDARD.decode(payload).ok()
+        base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()
     }
 
     /// Themed code block: theme background, 1px border, uniform padding.
-    pub(super) fn code_block(ui: &mut egui::Ui, theme: &Theme, add_contents: impl FnOnce(&mut egui::Ui)) {
+    pub(super) fn code_block(
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        add_contents: impl FnOnce(&mut egui::Ui),
+    ) {
         egui::Frame::NONE
             .fill(theme.code_bg)
             .stroke(egui::Stroke::new(1.0, theme.code_border))

@@ -273,7 +273,16 @@ impl ImprovementsPanel {
                 let mut to_dismiss: Vec<usize> = Vec::new();
 
                 for (i, imp) in self.pending.iter_mut().enumerate() {
-                    ui.collapsing(format!("Agent: {}", imp.agent_name), |ui| {
+                    // F2 can stack several items for the SAME agent (different
+                    // rationales) — a label-derived widget id would then be
+                    // used at two positions in one frame (egui id-clash
+                    // warning: "First/Second use of widget ID"). Push an
+                    // item-scoped id derived from the same (agent, rationale)
+                    // identity the dedupe in `handle_improvement_suggested`
+                    // uses, so every item's header id (and every child
+                    // widget's, via the parent chain) is unique.
+                    ui.push_id((imp.agent_name.as_str(), imp.rationale.as_str()), |ui| {
+                        ui.collapsing(format!("Agent: {}", imp.agent_name), |ui| {
                         ui.label(egui::RichText::new(format!("Rationale: {}", imp.rationale)).weak());
                         ui.add_space(4.0);
 
@@ -616,6 +625,7 @@ impl ImprovementsPanel {
                             });
                         }
                         ui.separator();
+                        });
                     });
                 }
 
@@ -780,9 +790,7 @@ fn panel_title(pending: usize) -> String {
 /// "Loop: last check 12:41:05 (3m ago) · new evidence: yes · lessons: 5 · auto_improve: on
 /// · min interval: off".
 /// Read from the same 2a state snapshot the `list_improvement_status` tool uses.
-fn loop_status_header_line(
-    status: &wuffagent_core::memory::ImprovementStatus,
-) -> String {
+fn loop_status_header_line(status: &wuffagent_core::memory::ImprovementStatus) -> String {
     let min_interval = if status.improvement_min_interval_hours == 0 {
         "off".to_string()
     } else {
@@ -819,7 +827,9 @@ fn most_recent_check(
 fn format_last_check(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
     match ts {
         Some(ts) => {
-            let secs = chrono::Utc::now().timestamp().saturating_sub(ts.timestamp());
+            let secs = chrono::Utc::now()
+                .timestamp()
+                .saturating_sub(ts.timestamp());
             let ago = if secs < 3_600 {
                 format!("{}m ago", secs / 60)
             } else if secs < 86_400 {

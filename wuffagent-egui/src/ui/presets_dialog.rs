@@ -1,4 +1,4 @@
-﻿use eframe::egui;
+use eframe::egui;
 use std::sync::{Arc, Mutex};
 
 use wuffagent_core::config::{Config, LocalPreset, Preset, PresetStore, RemotePreset};
@@ -79,9 +79,7 @@ impl PresetsDialog {
                     } else {
                         egui::Color32::GREEN
                     };
-                    ui.label(
-                        egui::RichText::new(msg).color(color).size(12.0),
-                    );
+                    ui.label(egui::RichText::new(msg).color(color).size(12.0));
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -120,37 +118,39 @@ impl PresetsDialog {
             return;
         }
 
-        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-            for (i, preset) in self.store.presets.iter().enumerate() {
-                let name = preset.name();
-                let ptype = preset.preset_type();
-                let label = format!("{} ({})", name, ptype);
-                let selected = self.selected_index == Some(i);
-                if ui
-                    .add(
-                        egui::Button::new(label)
-                            .fill(if selected {
-                                ui.style().visuals.selection.bg_fill
-                            } else {
-                                ui.style().visuals.widgets.noninteractive.weak_bg_fill
-                            }),
-                    )
-                    .clicked()
-                {
-                    if selected {
-                        self.selected_index = None;
-                    } else {
-                        self.selected_index = Some(i);
+        egui::ScrollArea::vertical()
+            .max_height(160.0)
+            .show(ui, |ui| {
+                for (i, preset) in self.store.presets.iter().enumerate() {
+                    let name = preset.name();
+                    let ptype = preset.preset_type();
+                    let label = format!("{} ({})", name, ptype);
+                    let selected = self.selected_index == Some(i);
+                    if ui
+                        .add(egui::Button::new(label).fill(if selected {
+                            ui.style().visuals.selection.bg_fill
+                        } else {
+                            ui.style().visuals.widgets.noninteractive.weak_bg_fill
+                        }))
+                        .clicked()
+                    {
+                        if selected {
+                            self.selected_index = None;
+                        } else {
+                            self.selected_index = Some(i);
+                        }
                     }
                 }
-            }
-        });
+            });
     }
 
     fn draw_actions(&mut self, ui: &mut egui::Ui, config: Arc<Mutex<Config>>) {
         ui.horizontal(|ui| {
             let has_selection = self.selected_index.is_some();
-            if ui.add_enabled(has_selection, egui::Button::new("Load")).clicked() {
+            if ui
+                .add_enabled(has_selection, egui::Button::new("Load"))
+                .clicked()
+            {
                 if let Some(i) = self.selected_index {
                     let name = self.store.presets[i].name().to_string();
                     let mut cfg = config.lock().unwrap();
@@ -165,7 +165,10 @@ impl PresetsDialog {
                     }
                 }
             }
-            if ui.add_enabled(has_selection, egui::Button::new("Delete")).clicked() {
+            if ui
+                .add_enabled(has_selection, egui::Button::new("Delete"))
+                .clicked()
+            {
                 if let Some(i) = self.selected_index {
                     let name = self.store.presets[i].name().to_string();
                     if let Err(e) = self.store.remove(&name) {

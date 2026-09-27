@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use wuffagent_core::config::Config;
 use wuffagent_core::server::ServerManager;
 use wuffagent_core::tools::ToolManager;
@@ -108,7 +108,8 @@ impl ChatApp {
         auto_resume_failed: Option<(String, String)>,
     ) -> Self {
         // Build the sessions sidebar widget, pre-selecting the active session.
-        let mut panel = super::sessions_panel::SessionsPanel::new(&Arc::new(Mutex::new(config.clone())));
+        let mut panel =
+            super::sessions_panel::SessionsPanel::new(&Arc::new(Mutex::new(config.clone())));
         if let Some(id) = &selected_session_id {
             panel.select_session(id);
         }
@@ -199,12 +200,14 @@ impl ChatApp {
             meta.selected_agent = runtime.selected_agent.clone();
             meta.reasoning_mode = runtime.reasoning_mode;
             runtime.client.set_session_meta(meta);
-            runtime.client.set_reasoning_effort(match runtime.reasoning_mode {
-                wuffagent_core::types::ReasoningMode::Auto => {
-                    wuffagent_core::types::ReasoningEffort::Off
-                }
-                wuffagent_core::types::ReasoningMode::Explicit(e) => e,
-            });
+            runtime
+                .client
+                .set_reasoning_effort(match runtime.reasoning_mode {
+                    wuffagent_core::types::ReasoningMode::Auto => {
+                        wuffagent_core::types::ReasoningEffort::Off
+                    }
+                    wuffagent_core::types::ReasoningMode::Explicit(e) => e,
+                });
         }
     }
 
@@ -233,17 +236,15 @@ impl ChatApp {
     /// Thin shim delegating to `sessions_actions::apply_sessions_action` (U2);
     /// the free fn there holds `&mut ChatApp` so this method keeps the single
     /// mutable borrow of `self.sessions_panel`.
-    pub fn apply_sessions_action(
-        &mut self,
-        action: super::sessions_actions::PanelAction,
-    ) {
+    pub fn apply_sessions_action(&mut self, action: super::sessions_actions::PanelAction) {
         super::sessions_actions::apply_sessions_action(self, action);
     }
 
     /// The session currently displayed in the chat area: the active sub-
     /// session tab if one is open, otherwise the selected (main) session.
     pub fn displayed_session_id(&self) -> Option<&str> {
-        self.sessions.active_tab
+        self.sessions
+            .active_tab
             .as_deref()
             .or(self.sessions.selected_session_id.as_deref())
     }
@@ -257,7 +258,8 @@ impl ChatApp {
 
     /// Get the selected session's chat area state (immutable view).
     pub fn selected_chat_state(&self) -> Option<&wuffagent_core::sessions::ChatAreaState> {
-        self.sessions.selected_session_id
+        self.sessions
+            .selected_session_id
             .as_ref()
             .and_then(|id| self.sessions.session_store.get(id))
             .map(|r| &r.chat_state)
@@ -265,7 +267,8 @@ impl ChatApp {
 
     /// Get the client for the selected session (if any).
     pub fn active_client(&self) -> Option<&wuffagent_core::client::ChatClient> {
-        self.sessions.selected_session_id
+        self.sessions
+            .selected_session_id
             .as_ref()
             .and_then(|id| self.sessions.session_store.get(id))
             .map(|r| &r.client)
@@ -275,7 +278,11 @@ impl ChatApp {
     /// the current session) and spawn the (optionally newly built) executable with
     /// the current CLI args. Sets `pending_restart` so the window closes next frame.
     pub fn perform_restart(&mut self, reason: String, exe_path: Option<String>) {
-        let session_id = self.sessions.selected_session_id.clone().unwrap_or_default();
+        let session_id = self
+            .sessions
+            .selected_session_id
+            .clone()
+            .unwrap_or_default();
         let marker_path = wuffagent_core::config::get_restart_marker_path();
         let marker = wuffagent_core::config::RestartMarker { session_id, reason };
         match serde_json::to_string_pretty(&marker) {
@@ -303,9 +310,7 @@ impl ChatApp {
         // the new binary crashes on startup. Best-effort: a copy failure
         // (e.g. permissions) is logged, never fatal.
         if let Ok(current) = std::env::current_exe() {
-            let same = current
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&exe);
+            let same = current.to_string_lossy().eq_ignore_ascii_case(&exe);
             if !same {
                 let prev = current.with_file_name(format!(
                     "{}.prev",
@@ -315,8 +320,12 @@ impl ChatApp {
                         .unwrap_or_default()
                 ));
                 match std::fs::copy(&current, &prev) {
-                    Ok(_) => tracing::info!(backup = %prev.display(), "Backed up running exe before restart"),
-                    Err(e) => tracing::warn!(backup = %prev.display(), error = %e, "Could not back up running exe before restart (continuing)"),
+                    Ok(_) => {
+                        tracing::info!(backup = %prev.display(), "Backed up running exe before restart")
+                    }
+                    Err(e) => {
+                        tracing::warn!(backup = %prev.display(), error = %e, "Could not back up running exe before restart (continuing)")
+                    }
                 }
             }
         }

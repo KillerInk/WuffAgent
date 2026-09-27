@@ -31,7 +31,10 @@ async fn main() -> eframe::Result {
         match wuffagent_core::config::consume_restart_marker() {
             Some(m) => {
                 ctx.config.session_id = Some(m.session_id.clone());
-                tracing::info!("Restart marker found; auto-resuming session {}", m.session_id);
+                tracing::info!(
+                    "Restart marker found; auto-resuming session {}",
+                    m.session_id
+                );
                 (Some(m.reason), Some(m.session_id))
             }
             None => (None, None),
@@ -59,8 +62,12 @@ async fn main() -> eframe::Result {
     );
 
     // Initialize session store with the configured session
-    let (session_store, selected_session_id) =
-        bootstrap::initial_session_store(&ctx.config, &ctx.connection, &ctx.agent_engine, &ctx.event_tx);
+    let (session_store, selected_session_id) = bootstrap::initial_session_store(
+        &ctx.config,
+        &ctx.connection,
+        &ctx.agent_engine,
+        &ctx.event_tx,
+    );
 
     // (T4) A restart marker pointing at a session that did not load means the
     // auto-resume cannot happen — surface it to the UI as a one-shot banner
@@ -89,7 +96,8 @@ async fn main() -> eframe::Result {
             // `ImageSource::Bytes` (pasted/attached images, chat-bubble
             // images) renders instead of the red "no image loaders are
             // loaded" error texture.
-            cc.egui_ctx.add_image_loader(Arc::new(image_loader::ImageBytesLoader));
+            cc.egui_ctx
+                .add_image_loader(Arc::new(image_loader::ImageBytesLoader));
             let bootstrap::AppContext {
                 config,
                 server,
@@ -102,10 +110,20 @@ async fn main() -> eframe::Result {
                 event_rx,
             } = ctx;
             Ok(Box::new(ui::state::ChatApp::new(
-                config, server, tool_manager, agent_engine, connection,
-                session_store, selected_session_id, event_tx, event_rx,
-                memory_manager, memory_runtime, mcp_manager,
-                auto_resume_reason, auto_resume_failed,
+                config,
+                server,
+                tool_manager,
+                agent_engine,
+                connection,
+                session_store,
+                selected_session_id,
+                event_tx,
+                event_rx,
+                memory_manager,
+                memory_runtime,
+                mcp_manager,
+                auto_resume_reason,
+                auto_resume_failed,
             )))
         }),
     )

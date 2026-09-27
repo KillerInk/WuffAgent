@@ -1,8 +1,8 @@
 use eframe::egui;
 
 use super::state::ChatApp;
-use wuffagent_core::types::AppStatus;
 use super::theme::Theme;
+use wuffagent_core::types::AppStatus;
 
 impl ChatApp {
     pub(super) fn draw_status_bar(&self, ui: &mut egui::Ui) {
@@ -14,7 +14,7 @@ impl ChatApp {
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-             
+
             // Status indicator with colored dot
             let status_color = match &chat.status {
                 AppStatus::Stopped => theme.text_secondary,
@@ -30,10 +30,18 @@ impl ChatApp {
                 AppStatus::Generating => "● Generating...",
                 AppStatus::Error(_) => return,
             };
-            ui.label(egui::RichText::new(status_text).color(status_color).size(11.0));
+            ui.label(
+                egui::RichText::new(status_text)
+                    .color(status_color)
+                    .size(11.0),
+            );
 
             if chat.is_generating {
-                ui.label(egui::RichText::new("Streaming").color(theme.accent).size(11.0));
+                ui.label(
+                    egui::RichText::new("Streaming")
+                        .color(theme.accent)
+                        .size(11.0),
+                );
             }
 
             // Tools executing right now (live cards are in the chat area; this
@@ -55,25 +63,33 @@ impl ChatApp {
                 )
                 .on_hover_text(names.join("\n"));
             }
-             
+
             ui.separator();
-            ui.label(egui::RichText::new(format!("Messages: {}", chat.messages.len())).color(theme.text_secondary).size(11.0));
+            ui.label(
+                egui::RichText::new(format!("Messages: {}", chat.messages.len()))
+                    .color(theme.text_secondary)
+                    .size(11.0),
+            );
 
             // Memory count indicator with a tooltip listing project + threshold.
             let mem_count = self.core.memory_manager.count();
             let mconfig = self.core.memory_manager.config();
-            ui.label(egui::RichText::new(format!("🧠 {}", mem_count)).color(theme.text_secondary).size(11.0))
-                .on_hover_text(format!(
-                    "{} active memories (project '{}', max {})\nMaintenance: {}",
-                    mem_count,
-                    mconfig.project,
-                    mconfig.max_entries,
-                    if mconfig.memory_maintenance {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
-                ));
+            ui.label(
+                egui::RichText::new(format!("🧠 {}", mem_count))
+                    .color(theme.text_secondary)
+                    .size(11.0),
+            )
+            .on_hover_text(format!(
+                "{} active memories (project '{}', max {})\nMaintenance: {}",
+                mem_count,
+                mconfig.project,
+                mconfig.max_entries,
+                if mconfig.memory_maintenance {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            ));
 
             // MCP indicator: connected / total servers.
             let mcp_servers = self.core.mcp_manager.snapshot();

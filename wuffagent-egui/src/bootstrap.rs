@@ -86,8 +86,13 @@ pub fn bootstrap() -> AppContext {
     // UI reloads config.json (session_id=None: app-level registration, the
     // run-specific session is resolved by the UI when the event arrives).
     let mcp_event_tx = Arc::new(Mutex::new(event_tx.clone()));
-    builtin::register_mcp_tools(&tooling.registry, tooling.mcp_manager.clone(), Some(mcp_event_tx), None)
-        .expect("Failed to register MCP management tools");
+    builtin::register_mcp_tools(
+        &tooling.registry,
+        tooling.mcp_manager.clone(),
+        Some(mcp_event_tx),
+        None,
+    )
+    .expect("Failed to register MCP management tools");
 
     let server = ServerManager::new(
         &config.server_path,
@@ -105,10 +110,16 @@ pub fn bootstrap() -> AppContext {
         clients.memory_llm_client.clone(),
     )
     .unwrap_or_else(|e| {
-        tracing::warn!("Failed to initialize memory manager with LLM: {}, falling back", e);
+        tracing::warn!(
+            "Failed to initialize memory manager with LLM: {}, falling back",
+            e
+        );
         wuffagent_core::memory::MemoryManager::new(wuffagent_core::memory::MemoryConfig::default())
             .unwrap_or_else(|_| {
-                wuffagent_core::memory::MemoryManager::new(wuffagent_core::memory::MemoryConfig::default()).unwrap()
+                wuffagent_core::memory::MemoryManager::new(
+                    wuffagent_core::memory::MemoryConfig::default(),
+                )
+                .unwrap()
             })
     });
     let memory_manager = Arc::new(memory_manager);
@@ -120,7 +131,8 @@ pub fn bootstrap() -> AppContext {
     // K1: skill (procedural memory) tools — backed by `<wuffagent_home>/skills/`.
     // Shared-registry tools; per-profile visibility is gated by `allowed_tools`.
     let skill_store = Arc::new(wuffagent_core::memory::skills::SkillStore::default());
-    builtin::register_skill_tools(&tooling.registry, skill_store).expect("Failed to register skill tools");
+    builtin::register_skill_tools(&tooling.registry, skill_store)
+        .expect("Failed to register skill tools");
 
     // Agents directory (the `agents/` subdirectory next to the config file) —
     // the chat path resolves `handoff` targets from here (same directory the
@@ -151,7 +163,8 @@ pub fn bootstrap() -> AppContext {
     // tools; per-profile visibility is gated by `allowed_tools` like any
     // other tool.
     {
-        let mut agent_manager = wuffagent_core::agents::manager::AgentManager::new(agents_dir.clone());
+        let mut agent_manager =
+            wuffagent_core::agents::manager::AgentManager::new(agents_dir.clone());
         for dir in &agents_search_dirs {
             agent_manager.add_search_dir(dir.clone());
         }
@@ -211,7 +224,10 @@ fn load_config() -> Config {
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to load config, using defaults");
-            Config { file_path: config_path.clone(), ..Default::default() }
+            Config {
+                file_path: config_path.clone(),
+                ..Default::default()
+            }
         }
     };
 
@@ -303,7 +319,8 @@ fn build_tooling(config: &Config) -> Tooling {
 
     let registry = Arc::new(ToolRegistry::new(discovery_paths, logger));
 
-    builtin::register_builtins(&registry, &config.search_config).expect("Failed to register built-in tools");
+    builtin::register_builtins(&registry, &config.search_config)
+        .expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
         tracing::warn!(error = %e, "Failed to discover plugins");
     }

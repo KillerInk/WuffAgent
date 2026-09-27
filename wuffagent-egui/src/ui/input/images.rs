@@ -165,5 +165,6 @@ pub(super) fn image_source_data_uri(source: &egui::ImageSource<'static>) -> Opti
 /// (`ChatMessage.image`). Returns `None` for non-`data:image/png;base64,`
 /// URIs.
 pub(super) fn data_uri_b64(uri: Option<&str>) -> Option<String> {
-    uri.and_then(|u| u.strip_prefix("data:image/png;base64,")).map(str::to_string)
+    uri.and_then(|u| u.strip_prefix("data:image/png;base64,"))
+        .map(str::to_string)
 }

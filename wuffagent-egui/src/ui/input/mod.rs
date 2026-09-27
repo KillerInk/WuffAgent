@@ -26,26 +26,29 @@ impl ChatApp {
             .as_deref()
             .and_then(|sid| self.sessions.pending_images.get(sid))
             .cloned();
-        let (has_session, is_generating, has_history, selected_agent) =
-            target
-                .as_deref()
-                .and_then(|sid| self.sessions.session_store.get(sid))
-                .map(|r| {
-                    (
-                        true,
-                        r.chat_state.is_generating,
-                        !r.chat_state.messages.is_empty(),
-                        r.selected_agent.clone(),
-                    )
-                })
-                .unwrap_or((false, false, false, None));
+        let (has_session, is_generating, has_history, selected_agent) = target
+            .as_deref()
+            .and_then(|sid| self.sessions.session_store.get(sid))
+            .map(|r| {
+                (
+                    true,
+                    r.chat_state.is_generating,
+                    !r.chat_state.messages.is_empty(),
+                    r.selected_agent.clone(),
+                )
+            })
+            .unwrap_or((false, false, false, None));
 
         if has_session {
             // Image preview: the image that will be attached to the next
             // message (pasted with Ctrl/Cmd+V, or added via the attach button).
             if let Some(img) = pending_image.clone() {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Image attached:").size(11.0).color(theme.text_secondary));
+                    ui.label(
+                        egui::RichText::new("Image attached:")
+                            .size(11.0)
+                            .color(theme.text_secondary),
+                    );
                     ui.add(egui::Image::new(img).max_size(egui::Vec2::new(56.0, 56.0)));
                     if ui
                         .add(egui::Button::new("x").min_size(egui::vec2(18.0, 18.0)))
@@ -130,9 +133,8 @@ impl ChatApp {
                     // Per-session agent selector (bound to the current session's
                     // SessionRuntime.selected_agent, not a global index).
                     let agent_names = self.get_agent_names();
-                    let selected_label = selected_agent
-                        .clone()
-                        .unwrap_or_else(|| "Auto".to_string());
+                    let selected_label =
+                        selected_agent.clone().unwrap_or_else(|| "Auto".to_string());
                     let mut next_agent: Option<String> = selected_agent.clone();
                     egui::ComboBox::from_id_salt("agent_selector")
                         .width(120.0)
@@ -143,7 +145,11 @@ impl ChatApp {
                                 ui.selectable_value(&mut next_agent, Some(name.clone()), name);
                             }
                             if agent_names.is_empty() {
-                                ui.label(egui::RichText::new("No agents found").size(10.0).color(theme.text_secondary));
+                                ui.label(
+                                    egui::RichText::new("No agents found")
+                                        .size(10.0)
+                                        .color(theme.text_secondary),
+                                );
                             }
                         });
                     if let Some(next) = next_agent {
@@ -195,13 +201,14 @@ impl ChatApp {
                     // `next_mode` only changes when the user picked a new entry:
                     // apply it to the session runtime + client immediately.
                     if let Some(sid) = target.clone() {
-                        let changed = if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
-                            let changed = runtime.reasoning_mode != next_mode;
-                            runtime.reasoning_mode = next_mode;
-                            changed
-                        } else {
-                            false
-                        };
+                        let changed =
+                            if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
+                                let changed = runtime.reasoning_mode != next_mode;
+                                runtime.reasoning_mode = next_mode;
+                                changed
+                            } else {
+                                false
+                            };
                         if changed {
                             tracing::info!(
                                 "Reasoning mode changed to {:?} for session {}",
@@ -231,12 +238,11 @@ impl ChatApp {
 
                     // Send is always available: while the AI is working it queues
                     // the message for the next turn, otherwise it starts a run.
-                    let send_btn = egui::Button::new(
-                        egui::RichText::new("Send").color(egui::Color32::WHITE),
-                    )
-                    .fill(theme.primary)
-                    .corner_radius(8)
-                    .min_size(egui::vec2(60.0, 28.0));
+                    let send_btn =
+                        egui::Button::new(egui::RichText::new("Send").color(egui::Color32::WHITE))
+                            .fill(theme.primary)
+                            .corner_radius(8)
+                            .min_size(egui::vec2(60.0, 28.0));
                     if ui.add(send_btn).clicked() {
                         let input = self.input_text_snapshot().trim().to_string();
                         if !input.is_empty() && self.handle_send_input(&input) {
@@ -276,7 +282,11 @@ impl ChatApp {
         } else {
             // No session selected — show empty input
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Select or create a session to start chatting").size(12.0).color(theme.text_secondary));
+                ui.label(
+                    egui::RichText::new("Select or create a session to start chatting")
+                        .size(12.0)
+                        .color(theme.text_secondary),
+                );
             });
         }
 
@@ -321,7 +331,9 @@ impl ChatApp {
                 // Attached image (if any): the UI keeps the egui source in
                 // `pending_images`; core receives the `data:` URI form.
                 let image_source = self.sessions.pending_images.remove(&sid);
-                let image = image_source.as_ref().and_then(images::image_source_data_uri);
+                let image = image_source
+                    .as_ref()
+                    .and_then(images::image_source_data_uri);
                 let queued = wuffagent_core::sessions::QueuedMessage {
                     text: input.to_string(),
                     image,
@@ -349,18 +361,22 @@ impl ChatApp {
         text: &str,
         image_b64: Option<String>,
     ) {
-        let injected = self.sessions.session_store
+        let injected = self
+            .sessions
+            .session_store
             .get(sid)
             .map(|rt| rt.pipeline.inject(queued.clone()))
             .unwrap_or(false);
         if let Some(cs) = self.sessions.session_store.get_mut(sid) {
-            cs.chat_state.messages.push(wuffagent_core::types::ChatMessage {
-                kind: MessageKind::Normal,
-                role: "user".to_string(),
-                content: text.to_string(),
-                timestamp: wuffagent_core::types::format_timestamp(),
-                image: image_b64,
-            });
+            cs.chat_state
+                .messages
+                .push(wuffagent_core::types::ChatMessage {
+                    kind: MessageKind::Normal,
+                    role: "user".to_string(),
+                    content: text.to_string(),
+                    timestamp: wuffagent_core::types::format_timestamp(),
+                    image: image_b64,
+                });
             cs.chat_state.input_text.clear();
             if injected {
                 cs.chat_state.show_notification(
@@ -370,7 +386,10 @@ impl ChatApp {
             } else {
                 cs.chat_state.queued_messages.push(queued);
                 cs.chat_state.show_notification(
-                    &format!("Queued - will run after the current task ({} waiting)", cs.chat_state.queued_messages.len()),
+                    &format!(
+                        "Queued - will run after the current task ({} waiting)",
+                        cs.chat_state.queued_messages.len()
+                    ),
                     true,
                 );
             }
@@ -405,7 +424,9 @@ impl ChatApp {
                 return;
             }
         }
-        let agent = self.sessions.session_store
+        let agent = self
+            .sessions
+            .session_store
             .get(&sid)
             .and_then(|r| r.selected_agent.clone())
             .unwrap_or_default();
@@ -431,7 +452,10 @@ impl ChatApp {
 
     pub(super) fn send_message_to_session(&mut self, sid: &str) {
         let (input, agent) = match self.sessions.session_store.get(sid) {
-            Some(r) => (r.chat_state.input_text.trim().to_string(), r.selected_agent.clone().unwrap_or_default()),
+            Some(r) => (
+                r.chat_state.input_text.trim().to_string(),
+                r.selected_agent.clone().unwrap_or_default(),
+            ),
             None => return,
         };
         if let Err(e) = self.validate_input(&input) {
@@ -443,7 +467,9 @@ impl ChatApp {
 
         // Attached image (if any): convert the egui source to the `data:`
         // URI form core expects.
-        let image = self.sessions.pending_images
+        let image = self
+            .sessions
+            .pending_images
             .remove(sid)
             .as_ref()
             .and_then(images::image_source_data_uri);
@@ -453,8 +479,19 @@ impl ChatApp {
     }
 
     /// Start a fresh pipeline run for `text` in the given session.
-    pub(super) fn start_pipeline_for_session(&mut self, sid: &str, text: &str, image: Option<String>, agent_prompt: String, tool_policy: wuffagent_core::types::ChatToolPolicy, already_displayed: bool) {
-        tracing::info!("[CHAT PATH] start_pipeline_for_session called with: {}", text);
+    pub(super) fn start_pipeline_for_session(
+        &mut self,
+        sid: &str,
+        text: &str,
+        image: Option<String>,
+        agent_prompt: String,
+        tool_policy: wuffagent_core::types::ChatToolPolicy,
+        already_displayed: bool,
+    ) {
+        tracing::info!(
+            "[CHAT PATH] start_pipeline_for_session called with: {}",
+            text
+        );
 
         // `image` arrives as a `data:` URI (the egui layer converted the
         // attached `ImageSource`); derive the raw base64 for the chat
@@ -472,13 +509,16 @@ impl ChatApp {
         // Add the user message to the chat display
         if !already_displayed {
             if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
-                runtime.chat_state.messages.push(wuffagent_core::types::ChatMessage {
-                    kind: MessageKind::Normal,
-                    role: "user".to_string(),
-                    content: text.to_string(),
-                    timestamp: wuffagent_core::types::format_timestamp(),
-                    image: image_b64.clone(),
-                });
+                runtime
+                    .chat_state
+                    .messages
+                    .push(wuffagent_core::types::ChatMessage {
+                        kind: MessageKind::Normal,
+                        role: "user".to_string(),
+                        content: text.to_string(),
+                        timestamp: wuffagent_core::types::format_timestamp(),
+                        image: image_b64.clone(),
+                    });
             }
         }
 
@@ -517,7 +557,9 @@ impl ChatApp {
             );
             runtime.pipeline = pipeline;
             // Start the chat (with the attached image as a data: URI, if any)
-            runtime.pipeline.start(text, &agent_prompt, &tool_policy, image_data_uri.as_deref());
+            runtime
+                .pipeline
+                .start(text, &agent_prompt, &tool_policy, image_data_uri.as_deref());
         }
     }
 
@@ -536,10 +578,7 @@ impl ChatApp {
             None => return,
         };
 
-        tracing::info!(
-            "[QUEUE] Starting next queued message: {}",
-            next.text
-        );
+        tracing::info!("[QUEUE] Starting next queued message: {}", next.text);
         // The message is already displayed in the chat (pushed at queue time);
         // start_pipeline_for_session won't push it again. Remove it from the queue
         // and hand off — `start_pipeline_for_session` re-borrows the store, so the
@@ -547,7 +586,14 @@ impl ChatApp {
         if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             runtime.chat_state.queued_messages.remove(0);
         }
-        self.start_pipeline_for_session(sid, &next.text, next.image, next.agent_prompt, next.tool_policy, true);
+        self.start_pipeline_for_session(
+            sid,
+            &next.text,
+            next.image,
+            next.agent_prompt,
+            next.tool_policy,
+            true,
+        );
     }
 
     /// Defensive sweep (called each frame after event processing): for any
@@ -562,7 +608,9 @@ impl ChatApp {
     pub(super) fn sweep_finished_pipelines(&mut self) {
         // Collect the ids that need finalizing (we can't mutate the store while
         // iterating it).
-        let stuck: Vec<String> = self.sessions.session_store
+        let stuck: Vec<String> = self
+            .sessions
+            .session_store
             .iter()
             .filter(|(_, rt)| rt.chat_state.is_generating && rt.pipeline.task_done())
             .map(|(id, _)| id.clone())

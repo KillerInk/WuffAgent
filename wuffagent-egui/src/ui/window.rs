@@ -1,8 +1,8 @@
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use wuffagent_core::config::{get_presets_path, PresetStore};
 pub use crate::ui::state::ChatApp;
+use wuffagent_core::config::{get_presets_path, PresetStore};
 
 impl ChatApp {
     /// Shared config handle used by the settings/presets dialogs. Created when
@@ -10,10 +10,16 @@ impl ChatApp {
     /// when it closes. Each frame the app syncs `self.core.config` from it so that
     /// Save (settings) and Load (presets) take effect in the running app.
     fn active_config_handle(&self) -> Option<Arc<Mutex<wuffagent_core::config::Config>>> {
-        self.dialogs.settings_dialog
+        self.dialogs
+            .settings_dialog
             .as_ref()
             .map(|d| d.config.clone())
-            .or_else(|| self.dialogs.presets_dialog.as_ref().map(|d| d.config.clone()))
+            .or_else(|| {
+                self.dialogs
+                    .presets_dialog
+                    .as_ref()
+                    .map(|d| d.config.clone())
+            })
     }
 
     pub fn show_settings_dialog(&mut self, ctx: &egui::Context) {
@@ -21,12 +27,15 @@ impl ChatApp {
             let show_presets = Arc::new(Mutex::new(false));
             // Reuse the presets dialog's shared config if one is already open,
             // so both dialogs and the app stay in sync.
-            let shared = self.dialogs.presets_dialog
+            let shared = self
+                .dialogs
+                .presets_dialog
                 .as_ref()
                 .map(|d| d.config.clone())
                 .unwrap_or_else(|| Arc::new(Mutex::new(self.core.config.clone())));
-            self.dialogs.settings_dialog =
-                Some(super::settings::SettingsDialog::new_with_presets_flag(&shared, show_presets));
+            self.dialogs.settings_dialog = Some(
+                super::settings::SettingsDialog::new_with_presets_flag(&shared, show_presets),
+            );
         }
         if let Some(dialog) = self.dialogs.settings_dialog.as_mut() {
             let closed = dialog.show(ctx);
@@ -51,10 +60,8 @@ impl ChatApp {
                             // Share the settings dialog's config handle so
                             // "Load" in presets and the app stay in sync.
                             let shared = sd.config.clone();
-                            self.dialogs.presets_dialog = Some(super::presets_dialog::PresetsDialog::new(
-                                store,
-                                &shared,
-                            ));
+                            self.dialogs.presets_dialog =
+                                Some(super::presets_dialog::PresetsDialog::new(store, &shared));
                         }
                     }
                 }
@@ -98,17 +105,23 @@ impl ChatApp {
         if new_url == self.core.last_synced_base_url {
             return;
         }
-        self.core.connection
+        self.core
+            .connection
             .update(&new_url, self.core.config.remote_api_key.as_deref());
         self.core.last_synced_base_url = new_url;
     }
 
     pub fn show_agent_config_dialog(&mut self, ctx: &egui::Context) {
-        let agents_dir = self.core.config.file_path.parent()
+        let agents_dir = self
+            .core
+            .config
+            .file_path
+            .parent()
             .map(|p| p.join("agents"))
             .unwrap_or_else(|| PathBuf::from("agents"));
         if self.dialogs.show_agent_config && self.dialogs.agent_config_dialog.is_none() {
-            let mut agent_manager = wuffagent_core::agents::config::AgentManager::new(agents_dir.clone());
+            let mut agent_manager =
+                wuffagent_core::agents::config::AgentManager::new(agents_dir.clone());
             // Scan project-level agents dirs for discovery (same as get_agent_names)
             if let Ok(cwd) = std::env::current_dir() {
                 agent_manager.add_search_dir(cwd.join("agents"));
@@ -118,11 +131,14 @@ impl ChatApp {
                     agent_manager.add_search_dir(exe_dir.join("agents"));
                 }
             }
-            self.dialogs.agent_config_dialog =
-                Some(super::agent_config::AgentConfigDialog::new(Arc::new(Mutex::new(agent_manager)), &self.core.tool_manager));
+            self.dialogs.agent_config_dialog = Some(super::agent_config::AgentConfigDialog::new(
+                Arc::new(Mutex::new(agent_manager)),
+                &self.core.tool_manager,
+            ));
         }
         if let Some(dialog) = self.dialogs.agent_config_dialog.as_mut() {
-            let mut agent_manager = wuffagent_core::agents::config::AgentManager::new(agents_dir.clone());
+            let mut agent_manager =
+                wuffagent_core::agents::config::AgentManager::new(agents_dir.clone());
             if let Ok(cwd) = std::env::current_dir() {
                 agent_manager.add_search_dir(cwd.join("agents"));
             }
@@ -232,7 +248,13 @@ impl ChatApp {
             wuffagent_core::sessions::load_session(&sessions_dir, id)
                 .map(|s| s.name)
                 .unwrap_or_else(|| format!("Session {}", id)),
-            self.relay.pending_tx.as_ref().unwrap().lock().unwrap().clone(),
+            self.relay
+                .pending_tx
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .clone(),
         );
 
         self.sessions.session_store.insert(id.to_string(), runtime);
@@ -258,7 +280,11 @@ impl eframe::App for ChatApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx();
         // Request repaint during streaming for real-time updates
-        if self.selected_chat_state().map(|c| c.is_generating).unwrap_or(false) {
+        if self
+            .selected_chat_state()
+            .map(|c| c.is_generating)
+            .unwrap_or(false)
+        {
             ctx.request_repaint();
         }
 
@@ -301,19 +327,21 @@ impl eframe::App for ChatApp {
                                 None
                             } else {
                                 match resp.text().await {
-                                    Ok(text) => match wuffagent_core::client::parse_props_n_ctx(&text) {
-                                        Some(n_ctx) => {
-                                            tracing::info!("Server n_ctx: {}", n_ctx);
-                                            Some(n_ctx)
-                                        }
-                                        None => {
-                                            tracing::warn!(
+                                    Ok(text) => {
+                                        match wuffagent_core::client::parse_props_n_ctx(&text) {
+                                            Some(n_ctx) => {
+                                                tracing::info!("Server n_ctx: {}", n_ctx);
+                                                Some(n_ctx)
+                                            }
+                                            None => {
+                                                tracing::warn!(
                                                 "props response has no n_ctx (tried default_generation_settings.n_ctx and top-level n_ctx); body (first 500 chars): {}",
                                                 &text.chars().take(500).collect::<String>()
                                             );
-                                            None
+                                                None
+                                            }
                                         }
-                                    },
+                                    }
                                     Err(e) => {
                                         tracing::warn!("props body read failed: {}", e);
                                         None

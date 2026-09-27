@@ -89,15 +89,22 @@ impl McpPanel {
                     // Enable/disable (server-level; connects/disconnects to
                     // match, so it runs as a blocking job).
                     let mut enabled = snap.enabled;
-                    if ui.add(egui::Checkbox::new(&mut enabled, "enabled")).changed() {
+                    if ui
+                        .add(egui::Checkbox::new(&mut enabled, "enabled"))
+                        .changed()
+                    {
                         self.start_job(mcp, McpOp::SetEnabled(name.clone(), enabled));
                         if enabled {
-                            if let Some(slot) = config.mcp_servers.iter_mut().find(|c| c.name == name) {
+                            if let Some(slot) =
+                                config.mcp_servers.iter_mut().find(|c| c.name == name)
+                            {
                                 slot.enabled = true;
                             }
                             self.persist(config, format!("✓ {name} enabled"));
                         } else {
-                            if let Some(slot) = config.mcp_servers.iter_mut().find(|c| c.name == name) {
+                            if let Some(slot) =
+                                config.mcp_servers.iter_mut().find(|c| c.name == name)
+                            {
                                 slot.enabled = false;
                             }
                             self.persist(config, format!("✓ {name} disabled"));
@@ -107,13 +114,19 @@ impl McpPanel {
                     match snap.status {
                         McpServerStatus::Connected { .. } => {
                             if ui
-                                .add_enabled(!busy, egui::Button::new("Disconnect").fill(theme.surface_light))
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new("Disconnect").fill(theme.surface_light),
+                                )
                                 .clicked()
                             {
                                 self.start_job(mcp, McpOp::Disconnect(name.clone()));
                             }
                             if ui
-                                .add_enabled(!busy, egui::Button::new("↻ Refresh tools").fill(theme.surface_light))
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new("↻ Refresh tools").fill(theme.surface_light),
+                                )
                                 .clicked()
                             {
                                 self.start_job(mcp, McpOp::Refresh(name.clone()));
@@ -122,7 +135,10 @@ impl McpPanel {
                         McpServerStatus::Connecting => {}
                         McpServerStatus::Configured | McpServerStatus::Error(_) => {
                             if ui
-                                .add_enabled(!busy, egui::Button::new("Connect").fill(theme.primary))
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new("Connect").fill(theme.primary),
+                                )
                                 .clicked()
                             {
                                 self.start_job(mcp, McpOp::Connect(name.clone()));
@@ -156,7 +172,11 @@ impl McpPanel {
                 // Expanded tool list
                 if is_expanded {
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Tools").color(theme.text_secondary).strong());
+                    ui.label(
+                        egui::RichText::new("Tools")
+                            .color(theme.text_secondary)
+                            .strong(),
+                    );
                     if snap.tools.is_empty() {
                         ui.label(
                             egui::RichText::new("No tools discovered (connect, then refresh).")
@@ -190,7 +210,10 @@ impl McpPanel {
                         if ui.button("Cancel").clicked() {
                             self.pending_delete = None;
                         }
-                        if ui.add(egui::Button::new("Delete").fill(theme.error)).clicked() {
+                        if ui
+                            .add(egui::Button::new("Delete").fill(theme.error))
+                            .clicked()
+                        {
                             confirmed = true;
                         }
                     });
@@ -234,7 +257,13 @@ impl McpPanel {
     }
 
     /// Apply a tool enable/disable toggle (fast, non-blocking state change).
-    pub(super) fn on_tool_toggled(&mut self, server: &str, tool: &str, enabled: bool, mcp: &McpManager) {
+    pub(super) fn on_tool_toggled(
+        &mut self,
+        server: &str,
+        tool: &str,
+        enabled: bool,
+        mcp: &McpManager,
+    ) {
         if mcp.set_tool_enabled(server, tool, enabled).is_ok() {
             self.message = Some(format!(
                 "✓ tool '{}' {} on '{}'",

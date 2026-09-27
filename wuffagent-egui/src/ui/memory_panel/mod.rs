@@ -1,11 +1,13 @@
-﻿use eframe::egui;
+use eframe::egui;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use wuffagent_core::config::Config;
-use wuffagent_core::memory::{MaintenanceProgress, MaintenanceReport, MemoryConfig, MemoryEntry, MemoryManager};
 use super::theme::Theme;
+use wuffagent_core::config::Config;
+use wuffagent_core::memory::{
+    MaintenanceProgress, MaintenanceReport, MemoryConfig, MemoryEntry, MemoryManager,
+};
 
 mod editor;
 
@@ -121,13 +123,15 @@ impl MemoryPanel {
                 let mconfig = memory.config();
 
                 ui.heading("Memory");
-                ui.label(egui::RichText::new(format!(
-                    "{} active memories · project '{}' · max {}",
-                    memory.count(),
-                    mconfig.project,
-                    mconfig.max_entries
-                ))
-                .color(theme.text_secondary));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} active memories · project '{}' · max {}",
+                        memory.count(),
+                        mconfig.project,
+                        mconfig.max_entries
+                    ))
+                    .color(theme.text_secondary),
+                );
                 ui.separator();
 
                 // Settings section (edits the live memory config).
@@ -136,7 +140,11 @@ impl MemoryPanel {
 
                 // Status / result message
                 if let Some(msg) = &self.message {
-                    let color = if msg.starts_with("✓") { theme.success } else { theme.warning };
+                    let color = if msg.starts_with("✓") {
+                        theme.success
+                    } else {
+                        theme.warning
+                    };
                     ui.add(egui::Label::new(egui::RichText::new(msg).color(color)).wrap());
                     ui.separator();
                 }
@@ -149,9 +157,7 @@ impl MemoryPanel {
                             .hint_text("filter by keyword")
                             .desired_width(280.0),
                     );
-                    if !self.search.trim().is_empty()
-                        && ui.small_button("✕ Clear").clicked()
-                    {
+                    if !self.search.trim().is_empty() && ui.small_button("✕ Clear").clicked() {
                         self.search.clear();
                     }
                 });
@@ -176,13 +182,16 @@ impl MemoryPanel {
                 // area would otherwise request the full content height (dozens
                 // of entries => thousands of px) and stretch the window to the
                 // screen height.
-                egui::ScrollArea::vertical()
-                    .max_height(280.0)
-                    .show_rows(ui, 46.0, entries.len(), |ui, range| {
+                egui::ScrollArea::vertical().max_height(280.0).show_rows(
+                    ui,
+                    46.0,
+                    entries.len(),
+                    |ui, range| {
                         for entry in &entries[range.clone()] {
                             self.draw_entry_row(ui, &theme, entry, memory);
                         }
-                    });
+                    },
+                );
 
                 ui.separator();
 
@@ -252,10 +261,16 @@ impl MemoryPanel {
                 });
 
                 // Truncated id
-                ui.label(egui::RichText::new(short_id(&entry.id)).color(theme.text_dim).monospace());
+                ui.label(
+                    egui::RichText::new(short_id(&entry.id))
+                        .color(theme.text_dim)
+                        .monospace(),
+                );
 
                 // Content preview
-                ui.add(egui::Label::new(egui::RichText::new(preview).color(theme.text_primary)).wrap());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(preview).color(theme.text_primary)).wrap(),
+                );
 
                 ui.horizontal(|ui| {
                     let (content, tags) = (entry.content.clone(), entry.tags.join(", "));
@@ -275,7 +290,10 @@ impl MemoryPanel {
                         // into view on the next frame (see `draw_editor`).
                         self.scroll_to_editor = true;
                     }
-                    if ui.add(egui::Button::new("Delete").fill(theme.surface_light)).clicked() {
+                    if ui
+                        .add(egui::Button::new("Delete").fill(theme.surface_light))
+                        .clicked()
+                    {
                         self.pending_delete = Some(entry.id.clone());
                     }
                 });
@@ -300,16 +318,21 @@ impl MemoryPanel {
                         if ui.button("Cancel").clicked() {
                             self.pending_delete = None;
                         }
-                        if ui.add(egui::Button::new("Delete").fill(theme.error)).clicked() {
+                        if ui
+                            .add(egui::Button::new("Delete").fill(theme.error))
+                            .clicked()
+                        {
                             match memory.delete(&entry_id) {
                                 Ok(Some(_)) => {
-                                    self.message = Some(format!("✓ Deleted {}", short_id(&entry_id)));
+                                    self.message =
+                                        Some(format!("✓ Deleted {}", short_id(&entry_id)));
                                     if self.selected_id.as_deref() == Some(&entry_id) {
                                         self.selected_id = None;
                                     }
                                 }
                                 Ok(None) => {
-                                    self.message = Some(format!("Entry {} not found", short_id(&entry_id)));
+                                    self.message =
+                                        Some(format!("Entry {} not found", short_id(&entry_id)));
                                 }
                                 Err(e) => {
                                     self.message = Some(format!("✗ Delete failed: {}", e));
@@ -343,6 +366,11 @@ pub(super) fn short_id(id: &str) -> String {
 fn format_age(entry: &MemoryEntry) -> usize {
     entry
         .timestamp
-        .map(|ts| chrono::Utc::now().signed_duration_since(ts).num_days().max(0) as usize)
+        .map(|ts| {
+            chrono::Utc::now()
+                .signed_duration_since(ts)
+                .num_days()
+                .max(0) as usize
+        })
         .unwrap_or(0)
 }

@@ -1,11 +1,11 @@
-﻿use eframe::egui;
+use eframe::egui;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use wuffagent_core::agents::config::{AgentConfig, AgentManager};
-use wuffagent_core::tools::ToolManager;
 use super::agent_history;
 use super::theme::Theme;
+use wuffagent_core::agents::config::{AgentConfig, AgentManager};
+use wuffagent_core::tools::ToolManager;
 
 /// UI dialog for adding/editing/removing agent configurations.
 pub struct AgentConfigDialog {
@@ -272,8 +272,10 @@ impl AgentConfigDialog {
             // No agent selected - show info
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new("Select an agent from the list, or click \"+ Add Agent\" to create one.")
-                        .strong(),
+                    egui::RichText::new(
+                        "Select an agent from the list, or click \"+ Add Agent\" to create one.",
+                    )
+                    .strong(),
                 );
             });
         }
@@ -312,11 +314,11 @@ impl AgentConfigDialog {
             });
             ui.horizontal(|ui| {
                 ui.label("Timeout (ms):");
-                ui.add(
-                    egui::DragValue::new(&mut self.shell_timeout_ms).range(1000..=600_000),
-                );
+                ui.add(egui::DragValue::new(&mut self.shell_timeout_ms).range(1000..=600_000));
             });
-            ui.label("Allowed commands (comma-separated patterns; empty = allow all non-dangerous):");
+            ui.label(
+                "Allowed commands (comma-separated patterns; empty = allow all non-dangerous):",
+            );
             ui.text_edit_singleline(&mut self.shell_allowed_commands);
         });
     }
@@ -438,7 +440,10 @@ impl AgentConfigDialog {
         theme: &Theme,
     ) {
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new("Save").fill(theme.success)).clicked() {
+            if ui
+                .add(egui::Button::new("Save").fill(theme.success))
+                .clicked()
+            {
                 if self.save(agent_manager) {
                     self.clear_form();
                 }
@@ -447,10 +452,7 @@ impl AgentConfigDialog {
 
         if let Some(msg) = &self.message {
             if msg.contains("Error") {
-                ui.label(
-                    egui::RichText::new(msg)
-                        .color(egui::Color32::from_rgb(0xCC, 0x33, 0x33)),
-                );
+                ui.label(egui::RichText::new(msg).color(egui::Color32::from_rgb(0xCC, 0x33, 0x33)));
             } else {
                 ui.label(egui::RichText::new(msg).color(theme.success));
             }
@@ -547,7 +549,9 @@ impl AgentConfigDialog {
             agent_manager.lock().map(|m| m.add_agent(&config))
         } else if let Some(idx) = self.selected_index() {
             let old_name = self.agents[idx].name.clone();
-            agent_manager.lock().map(|m| m.edit_agent(&old_name, &config))
+            agent_manager
+                .lock()
+                .map(|m| m.edit_agent(&old_name, &config))
         } else {
             return false;
         };

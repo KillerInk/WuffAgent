@@ -400,3 +400,67 @@ fn test_rename_snapshots_old_file() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `list_agents` has NO result cache (always re-reads the dirs — a
+/// process-global cache would hide hand-edited agent files and leak state
+/// between manager instances and test threads). The log flood is instead
+/// stopped at the one per-frame caller (the UI improvements panel caches its
+/// own copy, keyed on the process-wide mutation counter). This test pins the
+/// two invariants that design relies on:
+/// 1. an in-place file rewrite (no mutation method) is picked up on the very
+///    next `list_agents` call;
+/// 2. every mutation method bumps the process-wide counter (the panel's
+///    refetch signal).
+#[test]
+fn test_list_agents_fresh_and_mutation_counter_bumps() {
+    let dir = std::env::temp_dir().join("wuffagent_test_mgr_fresh");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = AgentManager::new(dir.clone());
+    let config = AgentConfig {
+        name: "fresh_test".to_string(),
+        description: "Freshness test".to_string(),
+        system_prompt: "You are a freshness test.".to_string(),
+        allowed_tools: vec!["file_io".to_string()],
+        enabled: true,
+        ..Default::default()
+    };
+    mgr.add_agent(&config).unwrap();
+
+    let first = mgr.list_agents().unwrap();
+    assert_eq!(first.len(), 1);
+
+    // In-place rewrite WITHOUT a mutation method -> the very next
+    // list_agents must see it (no cache to go stale).
+    let mut changed = config.clone();
+    changed.system_prompt = "changed on disk".to_string();
+    changed.save_to_file(&dir.join("fresh_test.json")).unwrap();
+    let fresh = mgr.list_agents().unwrap();
+    assert_eq!(fresh[0].system_prompt, "changed on disk");
+
+    // Every mutation method bumps the process-wide counter. Other tests run
+    // in parallel in this process and may bump it too, so assert monotonic
+    // increase, not exact deltas.
+    let before = agents_mutation_counter();
+    mgr.edit_agent("fresh_test", &changed).unwrap();
+    assert!(
+        agents_mutation_counter() > before,
+        "edit_agent must bump the mutation counter"
+    );
+
+    let before = agents_mutation_counter();
+    mgr.remove_agent("fresh_test").unwrap();
+    assert!(
+        agents_mutation_counter() > before,
+        "remove_agent must bump the mutation counter"
+    );
+
+    let before = agents_mutation_counter();
+    mgr.reload().unwrap();
+    assert!(
+        agents_mutation_counter() > before,
+        "reload must bump the mutation counter"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

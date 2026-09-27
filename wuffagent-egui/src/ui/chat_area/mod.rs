@@ -93,7 +93,10 @@ impl ChatApp {
             .filter(|r| r.chat_state.is_generating)
             .map(|r| {
                 (
-                    (r.chat_state.current_thinking.clone(), r.chat_state.stream_buffer.clone()),
+                    (
+                        r.chat_state.current_thinking.clone(),
+                        r.chat_state.stream_buffer.clone(),
+                    ),
                     true,
                 )
             })
@@ -112,12 +115,26 @@ impl ChatApp {
             .id_salt("chat_scroll")
             .auto_shrink([false, true])
             .stick_to_bottom(
-                selected.as_deref().map(|sid| {
-                    self.sessions.session_store.get(sid).map(|r| r.chat_state.scroll_to_bottom_requested).unwrap_or(false)
-                }).unwrap_or(false) ||
-                selected.as_deref().map(|sid| {
-                    self.sessions.session_store.get(sid).map(|r| r.chat_state.at_bottom).unwrap_or(false)
-                }).unwrap_or(false)
+                selected
+                    .as_deref()
+                    .map(|sid| {
+                        self.sessions
+                            .session_store
+                            .get(sid)
+                            .map(|r| r.chat_state.scroll_to_bottom_requested)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+                    || selected
+                        .as_deref()
+                        .map(|sid| {
+                            self.sessions
+                                .session_store
+                                .get(sid)
+                                .map(|r| r.chat_state.at_bottom)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false),
             )
             .show(ui, |ui| {
                 // Centered content column with a max width so very wide
@@ -129,7 +146,11 @@ impl ChatApp {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                             if layout_dbg_enabled() {
-                                eprintln!("[ldbg] list avail_w={:.1} max_rect={:?}", ui.available_width(), ui.max_rect());
+                                eprintln!(
+                                    "[ldbg] list avail_w={:.1} max_rect={:?}",
+                                    ui.available_width(),
+                                    ui.max_rect()
+                                );
                             }
                             if messages.is_empty() && !is_streaming {
                                 Self::draw_empty_state(ui, &theme);
@@ -137,7 +158,9 @@ impl ChatApp {
                             }
                             let mut prev_day: Option<&str> = None;
                             for (i, msg) in messages.iter().enumerate() {
-                                if let Some(day) = wuffagent_core::types::timestamp_day(&msg.timestamp) {
+                                if let Some(day) =
+                                    wuffagent_core::types::timestamp_day(&msg.timestamp)
+                                {
                                     if prev_day != Some(day) {
                                         if prev_day.is_some() {
                                             Self::draw_date_separator(ui, day, &theme);
@@ -170,16 +193,18 @@ impl ChatApp {
             if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.scroll_to_bottom_requested = false;
                 runtime.chat_state.at_bottom = at_bottom;
-                
+
                 // Update button visibility and opacity
                 if runtime.chat_state.at_bottom {
-                    runtime.chat_state.button_opacity = (runtime.chat_state.button_opacity * 0.85).max(0.0);
+                    runtime.chat_state.button_opacity =
+                        (runtime.chat_state.button_opacity * 0.85).max(0.0);
                     if runtime.chat_state.button_opacity < 0.01 {
                         runtime.chat_state.button_visible = false;
                     }
                 } else {
                     runtime.chat_state.button_visible = true;
-                    runtime.chat_state.button_opacity = (runtime.chat_state.button_opacity + 0.12).min(1.0);
+                    runtime.chat_state.button_opacity =
+                        (runtime.chat_state.button_opacity + 0.12).min(1.0);
                 }
             }
         }
@@ -206,7 +231,9 @@ impl ChatApp {
             ui.spacing_mut().item_spacing.x = 4.0;
             ui.set_min_height(30.0);
             // Main tab (the currently selected session)
-            let main_name = self.sessions.selected_session_id
+            let main_name = self
+                .sessions
+                .selected_session_id
                 .as_ref()
                 .and_then(|sid| self.sessions.session_store.get(sid))
                 .map(|r| r.name.clone())
@@ -215,7 +242,11 @@ impl ChatApp {
             if ui
                 .selectable_label(
                     main_active,
-                    egui::RichText::new(main_name).color(if main_active { theme.text_primary } else { theme.text_dim }),
+                    egui::RichText::new(main_name).color(if main_active {
+                        theme.text_primary
+                    } else {
+                        theme.text_dim
+                    }),
                 )
                 .clicked()
             {
@@ -223,7 +254,9 @@ impl ChatApp {
             }
             // One tab per open sub-session
             for sub_id in self.sessions.sub_session_tabs.clone() {
-                let (label, generating) = self.sessions.session_store
+                let (label, generating) = self
+                    .sessions
+                    .session_store
                     .get(&sub_id)
                     .map(|r| (r.name.clone(), r.chat_state.is_generating))
                     .unwrap_or_else(|| (sub_id.clone(), false));
@@ -235,7 +268,11 @@ impl ChatApp {
                 if ui
                     .selectable_label(
                         active,
-                        egui::RichText::new(text).color(if active { theme.text_primary } else { theme.text_dim }),
+                        egui::RichText::new(text).color(if active {
+                            theme.text_primary
+                        } else {
+                            theme.text_dim
+                        }),
                     )
                     .clicked()
                 {
@@ -243,9 +280,11 @@ impl ChatApp {
                 }
                 let close = ui
                     .add(
-                        egui::Button::new(egui::RichText::new("×").size(12.0).color(theme.text_dim))
-                            .min_size(egui::vec2(18.0, 18.0))
-                            .fill(egui::Color32::TRANSPARENT),
+                        egui::Button::new(
+                            egui::RichText::new("×").size(12.0).color(theme.text_dim),
+                        )
+                        .min_size(egui::vec2(18.0, 18.0))
+                        .fill(egui::Color32::TRANSPARENT),
                     )
                     .on_hover_text("Close tab (the session stays in the session list)");
                 if close.clicked() {
@@ -270,14 +309,18 @@ impl ChatApp {
         ui.vertical_centered(|ui| {
             ui.label(egui::RichText::new("🐾").size(36.0));
             ui.add_space(14.0);
-            ui.label(egui::RichText::new("Start a conversation")
-                .color(theme.text_primary)
-                .strong()
-                .size(16.0));
+            ui.label(
+                egui::RichText::new("Start a conversation")
+                    .color(theme.text_primary)
+                    .strong()
+                    .size(16.0),
+            );
             ui.add_space(6.0);
-            ui.label(egui::RichText::new("Ask a question or give the agent a task.")
-                .color(theme.text_dim)
-                .size(12.0));
+            ui.label(
+                egui::RichText::new("Ask a question or give the agent a task.")
+                    .color(theme.text_dim)
+                    .size(12.0),
+            );
         });
     }
 
@@ -286,16 +329,34 @@ impl ChatApp {
     fn draw_date_separator(ui: &mut egui::Ui, day: &str, theme: &Theme) {
         let label = Self::day_label(day);
         ui.add_space(10.0);
-        let (row_rect, _resp) = ui
-            .allocate_exact_size(egui::vec2(ui.available_width().max(0.0), 16.0), egui::Sense::hover());
+        let (row_rect, _resp) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(0.0), 16.0),
+            egui::Sense::hover(),
+        );
         let font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
-        let galley = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme.text_dim));
+        let galley = ui
+            .ctx()
+            .fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme.text_dim));
         let half_gap = galley.rect.width() / 2.0 + 12.0;
         let line_y = row_rect.center().y;
         let stroke = egui::Stroke::new(1.0, theme.divider);
-        ui.painter().hline(row_rect.left()..=(row_rect.center().x - half_gap), line_y, stroke);
-        ui.painter().hline((row_rect.center().x + half_gap)..=row_rect.right(), line_y, stroke);
-        ui.painter().text(row_rect.center(), egui::Align2::CENTER_CENTER, label, font, theme.text_dim);
+        ui.painter().hline(
+            row_rect.left()..=(row_rect.center().x - half_gap),
+            line_y,
+            stroke,
+        );
+        ui.painter().hline(
+            (row_rect.center().x + half_gap)..=row_rect.right(),
+            line_y,
+            stroke,
+        );
+        ui.painter().text(
+            row_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            font,
+            theme.text_dim,
+        );
         ui.add_space(6.0);
     }
 
@@ -303,7 +364,9 @@ impl ChatApp {
     fn day_label(day: &str) -> String {
         let now = chrono::Local::now();
         let today = now.format("%Y-%m-%d").to_string();
-        let yesterday = (now - chrono::TimeDelta::days(1)).format("%Y-%m-%d").to_string();
+        let yesterday = (now - chrono::TimeDelta::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
         if day == today {
             "Today".to_string()
         } else if day == yesterday {
@@ -321,7 +384,13 @@ impl ChatApp {
         let color = if is_user { theme.primary } else { theme.accent };
         let label = if is_user { "U" } else { "AI" };
         let font_size = if is_user { size * 0.42 } else { size * 0.34 };
-        ui.painter().rect(rect, 7.0, color, egui::Stroke::NONE, egui::StrokeKind::Middle);
+        ui.painter().rect(
+            rect,
+            7.0,
+            color,
+            egui::Stroke::NONE,
+            egui::StrokeKind::Middle,
+        );
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -332,7 +401,12 @@ impl ChatApp {
         ui.allocate_space(egui::vec2(size, size));
     }
 
-    fn draw_scroll_to_bottom_button(&mut self, ui: &mut egui::Ui, theme: &Theme, button_opacity: f32) {
+    fn draw_scroll_to_bottom_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        button_opacity: f32,
+    ) {
         let button_size = egui::vec2(36.0, 36.0);
         let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 16.0, 16.0);
         let button_rect = egui::Rect::from_min_size(button_pos, button_size);
@@ -345,16 +419,18 @@ impl ChatApp {
                 theme.surface_light.r(),
                 theme.surface_light.g(),
                 theme.surface_light.b(),
-                alpha
+                alpha,
             );
             let border_color = egui::Color32::from_rgba_premultiplied(
                 theme.border.r(),
                 theme.border.g(),
                 theme.border.b(),
-                alpha
+                alpha,
             );
             let scroll_btn = egui::Button::new(
-                egui::RichText::new("↓").color(theme.text_primary).size(15.0),
+                egui::RichText::new("↓")
+                    .color(theme.text_primary)
+                    .size(15.0),
             )
             .fill(fill_color)
             .stroke(egui::Stroke::new(1.0, border_color))
@@ -384,8 +460,11 @@ impl ChatApp {
             "show_image" => "🖼️",
             "calculation" => "🧮",
             "time" => "🕐",
-            "save_memory" | "update_memory" | "search_memory"
-            | "consolidate_memories" | "delete_memory" => "🧠",
+            "save_memory"
+            | "update_memory"
+            | "search_memory"
+            | "consolidate_memories"
+            | "delete_memory" => "🧠",
             "handoff" => "🔀",
             "restart" => "🔁",
             _ => "🔧",
@@ -406,15 +485,18 @@ impl ChatApp {
     }
 
     /// Check if the scroll area is at the bottom using ScrollAreaOutput after render.
-    fn is_at_bottom_from_output(&self, output: &egui::containers::scroll_area::ScrollAreaOutput<()>) -> bool {
+    fn is_at_bottom_from_output(
+        &self,
+        output: &egui::containers::scroll_area::ScrollAreaOutput<()>,
+    ) -> bool {
         let content_height = output.content_size.y;
         let viewport_height = output.inner_rect.height();
-        
+
         // If content fits in viewport, no scrolling needed - at bottom
         if content_height <= viewport_height {
             return true;
         }
-        
+
         let max_offset = content_height - viewport_height;
         let current_offset = output.state.offset.y;
         current_offset >= max_offset - Self::SCROLL_BOTTOM_THRESHOLD
@@ -440,19 +522,18 @@ impl ChatApp {
         egui::Label::new(job).wrap()
     }
 
-
     /// Pixel width of a single glyph in the given font.
     /// egui memoizes layout results, so this stays cheap across frames.
     fn char_width(ui: &egui::Ui, font_id: &egui::FontId) -> f32 {
         const SAMPLE: &str = "0123456789";
         let width = ui.ctx().fonts_mut(|fonts| {
-            fonts.layout_no_wrap(SAMPLE.to_string(), font_id.clone(), egui::Color32::WHITE)
+            fonts
+                .layout_no_wrap(SAMPLE.to_string(), font_id.clone(), egui::Color32::WHITE)
                 .rect
                 .width()
         });
         (width / SAMPLE.len() as f32).max(1.0)
     }
-
 
     /// S2: 👍/👎 feedback row under an assistant answer.
     ///
@@ -486,9 +567,17 @@ impl ChatApp {
             if ui
                 .add_enabled(
                     rated.is_none(),
-                    egui::Button::new(egui::RichText::new("👍").size(if is_good { 13.0 } else { 11.0 }))
-                        .fill(if is_good { theme.primary } else { theme.hover_bg })
-                        .corner_radius(4),
+                    egui::Button::new(egui::RichText::new("👍").size(if is_good {
+                        13.0
+                    } else {
+                        11.0
+                    }))
+                    .fill(if is_good {
+                        theme.primary
+                    } else {
+                        theme.hover_bg
+                    })
+                    .corner_radius(4),
                 )
                 .clicked()
             {
@@ -497,9 +586,17 @@ impl ChatApp {
             if ui
                 .add_enabled(
                     rated.is_none(),
-                    egui::Button::new(egui::RichText::new("👎").size(if is_bad { 13.0 } else { 11.0 }))
-                        .fill(if is_bad { theme.primary } else { theme.hover_bg })
-                        .corner_radius(4),
+                    egui::Button::new(egui::RichText::new("👎").size(if is_bad {
+                        13.0
+                    } else {
+                        11.0
+                    }))
+                    .fill(if is_bad {
+                        theme.primary
+                    } else {
+                        theme.hover_bg
+                    })
+                    .corner_radius(4),
                 )
                 .clicked()
             {
@@ -516,9 +613,11 @@ impl ChatApp {
                 );
                 if ui
                     .add(
-                        egui::Button::new(egui::RichText::new("✓").color(theme.text_dim).size(11.0))
-                            .fill(theme.success)
-                            .corner_radius(4),
+                        egui::Button::new(
+                            egui::RichText::new("✓").color(theme.text_dim).size(11.0),
+                        )
+                        .fill(theme.success)
+                        .corner_radius(4),
                     )
                     .clicked()
                 {
@@ -526,9 +625,11 @@ impl ChatApp {
                 }
                 if ui
                     .add(
-                        egui::Button::new(egui::RichText::new("✕").color(theme.text_dim).size(11.0))
-                            .fill(theme.hover_bg)
-                            .corner_radius(4),
+                        egui::Button::new(
+                            egui::RichText::new("✕").color(theme.text_dim).size(11.0),
+                        )
+                        .fill(theme.hover_bg)
+                        .corner_radius(4),
                     )
                     .clicked()
                 {
@@ -564,5 +665,4 @@ impl ChatApp {
             }
         }
     }
-
 }

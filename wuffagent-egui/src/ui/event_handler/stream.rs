@@ -13,7 +13,11 @@ impl ChatApp {
     }
 
     /// StreamPromptProgress arm of `handle_event`.
-    pub(crate) fn handle_stream_prompt_progress(&mut self, progress: wuffagent_core::types::PromptProgress, sid: &str) {
+    pub(crate) fn handle_stream_prompt_progress(
+        &mut self,
+        progress: wuffagent_core::types::PromptProgress,
+        sid: &str,
+    ) {
         if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             // Live PP progress + speed while the server processes the
             // prompt (llama.cpp `prompt_progress`; counts only
@@ -27,7 +31,12 @@ impl ChatApp {
     }
 
     /// StreamRoundComplete arm of `handle_event`.
-    pub(crate) fn handle_stream_round_complete(&mut self, usage: Option<&Usage>, sid: &str, n_ctx: u32) {
+    pub(crate) fn handle_stream_round_complete(
+        &mut self,
+        usage: Option<&Usage>,
+        sid: &str,
+        n_ctx: u32,
+    ) {
         // Intermediate tool round: commit the round's text, keep generating
         // so the next round's chunks keep rendering live.
         if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
@@ -58,7 +67,13 @@ impl ChatApp {
     }
 
     /// StreamComplete arm of `handle_event`.
-    pub(crate) fn handle_stream_complete(&mut self, content: &str, usage: Option<Usage>, sid: &str, n_ctx: u32) {
+    pub(crate) fn handle_stream_complete(
+        &mut self,
+        content: &str,
+        usage: Option<Usage>,
+        sid: &str,
+        n_ctx: u32,
+    ) {
         let is_selected = self.sessions.selected_session_id.as_deref() == Some(sid);
         if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             // Fallback for backends that never sent StreamChunks
@@ -80,7 +95,8 @@ impl ChatApp {
             if let Some(usage) = usage {
                 runtime.chat_state.token_count = usage.total_tokens as usize;
                 if n_ctx > 0 {
-                    runtime.chat_state.context_used = usage.total_tokens as f32 / n_ctx as f32 * 100.0;
+                    runtime.chat_state.context_used =
+                        usage.total_tokens as f32 / n_ctx as f32 * 100.0;
                 }
                 // Server speeds (llama.cpp `timings`); None when the
                 // backend doesn't report them.
@@ -106,7 +122,9 @@ impl ChatApp {
         let cancelled = error == "Cancelled";
         let is_selected = self.sessions.selected_session_id.as_deref() == Some(sid);
         if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
-            runtime.chat_state.stream_chunk(&format!("\n\nStream error: {}", error));
+            runtime
+                .chat_state
+                .stream_chunk(&format!("\n\nStream error: {}", error));
             runtime.chat_state.commit_stream();
             runtime.chat_state.prompt_progress = None;
             runtime.chat_state.is_generating = false;
@@ -137,7 +155,10 @@ impl ChatApp {
 
     /// StreamThinkingChunk arm of `handle_event`.
     pub(crate) fn handle_thinking_chunk(&mut self, content: &str, sid: &str, n_ctx: u32) {
-        tracing::trace!("UI: StreamThinkingChunk received, content_len={}", content.len());
+        tracing::trace!(
+            "UI: StreamThinkingChunk received, content_len={}",
+            content.len()
+        );
         // Live display + status-bar estimates: thinking tokens are
         // generated tokens, so TG speed and the token gauge must
         // track them too (before this, TG froze for the whole
@@ -150,8 +171,14 @@ impl ChatApp {
 
     /// StreamThinkingComplete arm of `handle_event`.
     pub(crate) fn handle_thinking_complete(&mut self, sid: &str) {
-        tracing::trace!("UI: StreamThinkingComplete received, current_thinking_len={}",
-            self.sessions.session_store.get(sid).map(|r| r.chat_state.current_thinking.len()).unwrap_or(0));
+        tracing::trace!(
+            "UI: StreamThinkingComplete received, current_thinking_len={}",
+            self.sessions
+                .session_store
+                .get(sid)
+                .map(|r| r.chat_state.current_thinking.len())
+                .unwrap_or(0)
+        );
         // Commit the thinking as a typed message, then clear live state.
         // Note: do NOT commit_stream() here — the round's text stays in
         // stream_buffer and is committed by RoundComplete/StreamComplete,
@@ -160,7 +187,9 @@ impl ChatApp {
         if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
             let thinking_text = std::mem::take(&mut runtime.chat_state.current_thinking);
             if !thinking_text.is_empty() {
-                runtime.chat_state.push_message(MessageKind::Thinking, "assistant", &thinking_text);
+                runtime
+                    .chat_state
+                    .push_message(MessageKind::Thinking, "assistant", &thinking_text);
             }
         }
     }

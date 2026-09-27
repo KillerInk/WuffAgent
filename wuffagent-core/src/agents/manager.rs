@@ -6,10 +6,36 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing;
 
 use super::config::{AgentConfig, WorkerConfig};
+
+/// Process-wide count of agent-config mutations (add/edit/remove/revert/
+/// reload). Every mutation bumps it, so a component caching the agent list
+/// (the UI's improvements panel, which is the only per-frame `list_agents`
+/// caller) can tell a rescan is needed without any I/O.
+///
+/// Deliberately a COUNTER, not a cached result: caching the `list_agents`
+/// output process-globally would (a) make hand-edited agent files invisible
+/// until the next mutation and (b) leak state between `AgentManager`
+/// instances and test threads. The per-scan logging stays at `debug`, so a
+/// fresh read is cheap to observe but never floods.
+static AGENT_MUTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Record a mutation of the agent config set (invalidates the UI panel's
+/// cached agent list).
+fn bump_mutation_counter() {
+    AGENT_MUTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Current value of the process-wide agent mutation counter. The UI uses it
+/// in its per-frame cache fingerprint so tool-driven edits (e.g.
+/// `edit_agent_profile`) refresh the panel without a dir-mtime change.
+pub fn agents_mutation_counter() -> u64 {
+    AGENT_MUTATION_COUNTER.load(Ordering::Relaxed)
+}
 
 /// Manages the lifecycle of agent configurations: load, add, edit, remove, reload.
 ///
@@ -76,9 +102,9 @@ impl AgentManager {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(config) = serde_json::from_str::<AgentConfig>(&content) {
                         if seen.insert(config.name.clone(), ()).is_none() {
-                            // debug (not info): list_agents() re-scans the dirs on
-                            // every UI frame / get_agent() call, so info-level
-                            // per-agent lines flooded the log.
+                            // debug (not info): every list_agents() scan re-reads
+                            // and re-logs all profiles, so info-level per-agent
+                            // lines flooded the log (per-token redraws).
                             tracing::debug!(
                                 "Discovered agent: {} from {:?} (tools={:?})",
                                 config.name,
@@ -115,7 +141,8 @@ impl AgentManager {
                             session_note_enabled: true,
                         };
                         if seen.insert(config.name.clone(), ()).is_none() {
-                            // debug (not info): see the note on the non-legacy path.
+                            // debug (not info): see the note on the non-legacy
+                            // path.
                             tracing::debug!(
                                 "Discovered legacy agent: {} from {:?} (tools={:?})",
                                 config.name,
@@ -140,24 +167,26 @@ impl AgentManager {
 
     /// Load all agent configs from agents_dir plus any search_dirs.
     /// Agents from agents_dir take priority (loaded first, deduplication keeps first).
+    ///
+    /// Always re-reads the dirs (no result cache), so hand-edited agent files
+    /// show up on the next call. The per-frame caller (the improvements
+    /// panel) avoids this cost by caching its own copy and only calling this
+    /// when [`agents_mutation_counter`] changed — which is what stops the
+    /// per-token discovery log flood.
     pub fn list_agents(&self) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
+        // Scan order: primary first (dedup priority), search dirs after.
+        let dirs: Vec<&PathBuf> = std::iter::once(&self.agents_dir)
+            .chain(self.search_dirs.iter().filter(|d| *d != &self.agents_dir))
+            .collect();
+
         let mut agents = Vec::new();
         let mut seen = HashMap::new();
-
-        // Primary directory first
-        agents.extend(self.load_from_dir(&self.agents_dir, &mut seen)?);
-
-        // Additional search directories
-        for dir in &self.search_dirs {
-            if dir != &self.agents_dir {
-                agents.extend(self.load_from_dir(dir, &mut seen)?);
-            }
+        for dir in &dirs {
+            agents.extend(self.load_from_dir(dir, &mut seen)?);
         }
-
         agents.sort_by(|a, b| a.name.cmp(&b.name));
-        // debug: list_agents() is called on hot paths (UI frames, get_agent),
-        // so an info-level summary per scan would flood the log. Deliberate
-        // reloads still log via reload() below.
+        // debug: scans now only happen on demand (panel cache miss, dialog
+        // open, tool call), but keep it out of the info-level log anyway.
         tracing::debug!(
             "list_agents: scanned {:?} + {} search dir(s), found {} agent(s)",
             self.agents_dir,
@@ -180,6 +209,7 @@ impl AgentManager {
     pub fn add_agent(&self, config: &AgentConfig) -> Result<(), crate::agents::AgentError> {
         let path = self.agents_dir.join(format!("{}.json", config.name));
         config.save_to_file(&path)?;
+        bump_mutation_counter();
         tracing::info!("Added agent config: {}", config.name);
         Ok(())
     }
@@ -207,6 +237,7 @@ impl AgentManager {
         // Snapshot the current file before it is overwritten.
         self.snapshot_agent(&config.name);
         config.save_to_file(&path)?;
+        bump_mutation_counter();
         tracing::info!("Edited agent config: {}", config.name);
         Ok(())
     }
@@ -221,6 +252,7 @@ impl AgentManager {
                     path, e
                 ))
             })?;
+            bump_mutation_counter();
             tracing::info!("Removed agent config: {}", name);
         }
         Ok(())
@@ -557,6 +589,7 @@ impl AgentManager {
         })?;
         let mut config: AgentConfig = Self::load_agent_file(&dst)?;
         config.agents_dir = self.agents_dir.clone();
+        bump_mutation_counter();
         tracing::info!("Reverted agent '{}' from snapshot {:?}", name, snapshot);
         Ok(config)
     }
@@ -605,7 +638,11 @@ impl AgentManager {
     }
 
     /// Reload all agent configs from disk (use after add/edit/remove).
+    /// Bumps the mutation counter so the UI panel's cached agent list is
+    /// re-fetched even when no mutation method ran (e.g. the user edited a
+    /// file externally).
     pub fn reload(&self) -> Result<Vec<AgentConfig>, crate::agents::AgentError> {
+        bump_mutation_counter();
         let agents = self.list_agents();
         tracing::info!(
             "Reloaded {} agent config(s) from {:?}",

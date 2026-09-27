@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use eframe::egui::{self, ColorImage, Context, SizeHint};
 use eframe::egui::load::{BytesPoll, ImageLoadResult, ImagePoll, LoadError};
+use eframe::egui::{self, ColorImage, Context, SizeHint};
 
 /// Decodes image bytes (png/jpg/jpeg/gif/bmp/webp) with the `image` crate.
 pub struct ImageBytesLoader;
