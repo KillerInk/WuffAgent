@@ -45,13 +45,13 @@ impl Tool for SessionNoteTool {
     }
 
     fn description(&self) -> &str {
-        "Pin a short state note (≤400 chars) to this session so it survives \
+        "Pin a short state note (≤2000 chars; keep it one line) to this \
          context compaction and session reloads. Use it when you reach a \
          significant state that a future (possibly re-anchored) you must not \
          lose: a decision, an invariant, the next step, or where work stands. \
          The note is anchored right after the system prompt in every later \
          LLM call. Your turn CONTINUES after you call it (unlike handoff). \
-         At most 3 notes are kept; older ones are folded into the session \
+         At most 3 notes are kept; the oldest is folded (capped at 400 chars) into the session \
          brief."
     }
 
@@ -67,7 +67,7 @@ impl Tool for SessionNoteTool {
                         "note".to_string(),
                         FieldSchema {
                             type_name: "string".to_string(),
-                            description: "The state to pin (one line, ≤400 chars): a decision, an invariant, the next step, or where work stands".to_string(),
+                            description: "The state to pin (one line, ≤2000 chars): a decision, an invariant, the next step, or where work stands".to_string(),
                             nullable: false,
                         },
                     );
