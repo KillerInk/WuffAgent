@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::{ToolEntry, ToolRegistry};
 use crate::tools::types::{
-    ToolError, ToolLogger, ToolOutput, ToolParams, ToolProgress, ToolResult, TracingToolLogger,
+    JsonSchema, Tool, ToolError, ToolLogger, ToolMetadata, ToolOutput, ToolParams, ToolProgress,
+    ToolResult, TracingToolLogger,
 };
 use crate::types::Message;
 
@@ -67,25 +69,48 @@ pub fn repair_truncated_tool_calls(message: &mut Message) -> Vec<String> {
     repaired
 }
 
+/// Per-run view over the shared registry: tool replacements (a per-agent
+/// shell, per-execution handoff/restart/hand_back/session_note) and removals.
+/// Shares the registry — no copying of entries.
+///
+/// Invariant: a name is in at most one of `replaced`/`removed` —
+/// [`ToolManager::with_override`] moves it between the two, never adds it to both.
+#[derive(Clone, Default)]
+pub struct ToolOverrides {
+    /// Entries replacing the registry's tool of the same name (keyed by `metadata.name`).
+    replaced: Vec<ToolEntry>,
+    /// Names hidden from the view (absent from the registry AND from `replaced`).
+    removed: Vec<String>,
+}
+
+impl ToolOverrides {
+    /// The replacement entry for a tool name, if any.
+    fn replaced(&self, name: &str) -> Option<&ToolEntry> {
+        self.replaced.iter().find(|e| e.metadata.name == name)
+    }
+
+    /// Whether a tool name is removed from the view.
+    fn is_removed(&self, name: &str) -> bool {
+        self.removed.iter().any(|r| r == name)
+    }
+}
+
 /// High-level orchestrator that exposes tool execution to the rest of the application.
 pub struct ToolManager {
     registry: Arc<ToolRegistry>,
     logger: Arc<dyn ToolLogger>,
     allowlist: Option<Vec<String>>,
-    /// Discovery paths the ORIGINAL registry scans (T3b). Shared with every
-    /// manager built from this one so a rebuilt registry keeps scanning the
-    /// same plugin directories.
+    /// Discovery paths the shared registry scans (T3b). Shared with every
+    /// manager built from this one so `add_discovery_path` reaches them all.
     discovery_paths: Arc<Mutex<Vec<PathBuf>>>,
+    /// Per-run tool overrides (replacements/removals) layered on the registry.
+    overrides: ToolOverrides,
 }
 
 impl Clone for ToolManager {
     fn clone(&self) -> Self {
-        Self {
-            registry: self.registry.clone(),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        // `derive` clones every field (all state is shared through Arcs).
+        self.derive()
     }
 }
 
@@ -97,6 +122,7 @@ impl ToolManager {
             logger: Arc::new(TracingToolLogger),
             allowlist: None,
             discovery_paths,
+            overrides: ToolOverrides::default(),
         }
     }
 
@@ -108,64 +134,82 @@ impl ToolManager {
             logger: Arc::new(TracingToolLogger),
             allowlist: None,
             discovery_paths: Arc::new(Mutex::new(Vec::new())),
+            overrides: ToolOverrides::default(),
+        }
+    }
+
+    /// A shallow copy of this manager (all state shared) — the base for the
+    /// `with_*` variants below.
+    fn derive(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            logger: self.logger.clone(),
+            allowlist: self.allowlist.clone(),
+            discovery_paths: self.discovery_paths.clone(),
+            overrides: self.overrides.clone(),
         }
     }
 
     /// Create a new ToolManager that shares the same registry but restricts tools to the given allowlist.
     pub fn with_allowlist(&self, names: &[String]) -> Self {
-        Self {
-            registry: self.registry.clone(),
-            logger: self.logger.clone(),
-            allowlist: Some(names.to_vec()),
-            discovery_paths: self.discovery_paths.clone(),
+        let mut s = self.derive();
+        s.allowlist = Some(names.to_vec());
+        s
+    }
+
+    /// Apply one per-run override: `Some(entry)` replaces the tool with that
+    /// name (re-adding it if an earlier step removed it), `None` removes the
+    /// name (including any earlier per-run replacement). Shares the registry.
+    fn with_override(&self, name: &str, entry: Option<ToolEntry>) -> Self {
+        let replaced = entry.is_some();
+        let mut s = self.derive();
+        match entry {
+            Some(e) => {
+                s.overrides.replaced.retain(|r| r.metadata.name != name);
+                s.overrides.removed.retain(|r| r != name);
+                s.overrides.replaced.push(e);
+            }
+            None => {
+                s.overrides.replaced.retain(|r| r.metadata.name != name);
+                if !s.overrides.removed.iter().any(|r| r == name) {
+                    s.overrides.removed.push(name.to_string());
+                }
+            }
         }
-    }
-
-    /// The shared discovery-path list (a copy).
-    fn discovery_paths(&self) -> Vec<PathBuf> {
-        self.discovery_paths.lock().unwrap().clone()
-    }
-
-    /// Rebuild a registry from the current one, swapping the shared `shell` tool
-    /// for a `ShellTool` built from the given per-agent config. Pass `None` to
-    /// keep the shared shell unchanged.
-    fn rebuild_registry(
-        &self,
-        shell_cfg: Option<crate::agents::config::ShellConfig>,
-    ) -> Arc<ToolRegistry> {
-        let mut entries = self.registry.list();
         tracing::debug!(
-            entries = entries.len(),
-            per_agent_shell = shell_cfg.is_some(),
-            "Rebuilding per-agent tool registry"
+            name,
+            replaced,
+            override_count = s.overrides.replaced.len() + s.overrides.removed.len(),
+            "Applying per-run tool override"
         );
-        if let Some(cfg) = shell_cfg {
-            let new_shell = crate::tools::builtin::shell::ShellTool::new(
-                crate::tools::builtin::shell::ShellConfig::from(cfg),
-            );
-            let meta = entries
-                .iter()
-                .find(|e| e.metadata.name == "shell")
-                .map(|e| e.metadata.clone())
-                .unwrap_or_else(|| crate::tools::types::ToolMetadata {
-                    name: "shell".to_string(),
-                    version: "1.0.0".to_string(),
-                    description: "Execute shell commands on the local system".to_string(),
-                    dependencies: vec![],
-                });
-            entries.retain(|e| e.metadata.name != "shell");
-            entries.push(crate::tools::registry::ToolEntry {
-                tool: std::sync::Arc::new(new_shell),
-                metadata: meta,
-                loaded_at: std::time::Instant::now(),
-                plugin: None,
-            });
+        s
+    }
+
+    /// The metadata in effect for a tool name in this manager's view: a
+    /// per-run replacement (including one applied by an ancestor manager in
+    /// the chain), then the shared registry, then a synthesized default.
+    fn effective_metadata(&self, name: &str, default_description: &str) -> ToolMetadata {
+        self.overrides
+            .replaced(name)
+            .map(|e| e.metadata.clone())
+            .or_else(|| self.registry.metadata_for(name))
+            .unwrap_or_else(|| ToolMetadata {
+                name: name.to_string(),
+                version: "1.0.0".to_string(),
+                description: default_description.to_string(),
+                dependencies: vec![],
+            })
+    }
+
+    /// Build the override entry for a per-execution tool (metadata from
+    /// [`Self::effective_metadata`], so chained `with_*` calls keep it stable).
+    fn override_entry<T: Tool + 'static>(&self, name: &str, tool: T, default_description: &str) -> ToolEntry {
+        ToolEntry {
+            tool: Arc::new(tool),
+            metadata: self.effective_metadata(name, default_description),
+            loaded_at: Instant::now(),
+            plugin: None,
         }
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
-        }
-        Arc::new(registry)
     }
 
     /// Create a new ToolManager whose `shell` tool honors the given per-agent
@@ -173,250 +217,119 @@ impl ToolManager {
     /// allowlist are preserved. This is how an agent gets a shell restricted to
     /// its own allowed commands instead of the shared allow-all shell.
     pub fn with_shell_config(&self, cfg: crate::agents::config::ShellConfig) -> Self {
-        Self {
-            registry: self.rebuild_registry(Some(cfg)),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        let shell = crate::tools::builtin::shell::ShellTool::new(
+            crate::tools::builtin::shell::ShellConfig::from(cfg),
+        );
+        self.with_override(
+            "shell",
+            Some(self.override_entry(
+                "shell",
+                shell,
+                "Execute shell commands on the local system",
+            )),
+        )
     }
 
-    /// Create a new ToolManager whose `handoff` entry is replaced by the
-    /// provided per-execution tool (same rebuild pattern as
-    /// [`Self::with_shell_config`]). Used by `Agent::builder` to give
-    /// `handoff_enabled` agents a handoff tool wired to their own mailbox,
-    /// agents dir, and target allowlist.
+    /// Create a new ToolManager whose `handoff` entry is the provided
+    /// per-execution tool (wired to this agent's mailbox, agents dir, and
+    /// target allowlist). Same override mechanism as [`Self::with_shell_config`].
     pub fn with_handoff_tool(&self, tool: crate::tools::builtin::handoff::HandoffTool) -> Self {
-        let mut entries = self.registry.list();
-        tracing::debug!(
-            entries = entries.len(),
-            "Rebuilding per-agent tool registry (with per-execution handoff tool)"
-        );
-        let meta = entries
-            .iter()
-            .find(|e| e.metadata.name == "handoff")
-            .map(|e| e.metadata.clone())
-            .unwrap_or_else(|| crate::tools::types::ToolMetadata {
-                name: "handoff".to_string(),
-                version: "1.0.0".to_string(),
-                description: "Hand off the session to another agent".to_string(),
-                dependencies: vec![],
-            });
-        entries.retain(|e| e.metadata.name != "handoff");
-        entries.push(crate::tools::registry::ToolEntry {
-            tool: std::sync::Arc::new(tool),
-            metadata: meta,
-            loaded_at: std::time::Instant::now(),
-            plugin: None,
-        });
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
-        }
-        Self {
-            registry: std::sync::Arc::new(registry),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        self.with_override(
+            "handoff",
+            Some(self.override_entry(
+                "handoff",
+                tool,
+                "Hand off the session to another agent",
+            )),
+        )
     }
 
-    /// Create a new ToolManager whose `restart` entry is replaced by the
-    /// provided per-execution tool (same rebuild pattern as
-    /// [`Self::with_handoff_tool`]). Used by `Agent::builder` to give
-    /// `restart_enabled` agents a restart tool wired to their own mailbox.
+    /// Create a new ToolManager whose `restart` entry is the provided
+    /// per-execution tool (wired to this agent's mailbox).
     pub fn with_restart_tool(&self, tool: crate::tools::builtin::restart::RestartTool) -> Self {
-        let mut entries = self.registry.list();
-        tracing::debug!(
-            entries = entries.len(),
-            "Rebuilding per-agent tool registry (with per-execution restart tool)"
-        );
-        let meta = entries
-            .iter()
-            .find(|e| e.metadata.name == "restart")
-            .map(|e| e.metadata.clone())
-            .unwrap_or_else(|| crate::tools::types::ToolMetadata {
-                name: "restart".to_string(),
-                version: "1.0.0".to_string(),
-                description: "Restart WuffAgent (optionally after a build) and resume the session"
-                    .to_string(),
-                dependencies: vec![],
-            });
-        entries.retain(|e| e.metadata.name != "restart");
-        entries.push(crate::tools::registry::ToolEntry {
-            tool: std::sync::Arc::new(tool),
-            metadata: meta,
-            loaded_at: std::time::Instant::now(),
-            plugin: None,
-        });
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
-        }
-        Self {
-            registry: std::sync::Arc::new(registry),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        self.with_override(
+            "restart",
+            Some(self.override_entry(
+                "restart",
+                tool,
+                "Restart WuffAgent (optionally after a build) and resume the session",
+            )),
+        )
     }
 
-    /// Create a new ToolManager whose `hand_back` entry is replaced by the
-    /// provided per-execution tool (same rebuild pattern as
-    /// [`Self::with_handoff_tool`]). Used by `Agent::builder` to give sub-session
-    /// agents (sessions whose meta carries a `parent_session_id`) a hand-back
-    /// tool wired to their own mailbox.
+    /// Create a new ToolManager whose `hand_back` entry is the provided
+    /// per-execution tool (wired to this agent's mailbox; only sub-session
+    /// agents get one).
     pub fn with_hand_back_tool(&self, tool: crate::tools::builtin::hand_back::HandBackTool) -> Self {
-        let mut entries = self.registry.list();
-        tracing::debug!(
-            entries = entries.len(),
-            "Rebuilding per-agent tool registry (with per-execution hand_back tool)"
-        );
-        let meta = entries
-            .iter()
-            .find(|e| e.metadata.name == "hand_back")
-            .map(|e| e.metadata.clone())
-            .unwrap_or_else(|| crate::tools::types::ToolMetadata {
-                name: "hand_back".to_string(),
-                version: "1.0.0".to_string(),
-                description: "Return this sub-session to its parent session".to_string(),
-                dependencies: vec![],
-            });
-        entries.retain(|e| e.metadata.name != "hand_back");
-        entries.push(crate::tools::registry::ToolEntry {
-            tool: std::sync::Arc::new(tool),
-            metadata: meta,
-            loaded_at: std::time::Instant::now(),
-            plugin: None,
-        });
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
-        }
-        Self {
-            registry: std::sync::Arc::new(registry),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        self.with_override(
+            "hand_back",
+            Some(self.override_entry(
+                "hand_back",
+                tool,
+                "Return this sub-session to its parent session",
+            )),
+        )
     }
 
-    /// Create a new ToolManager whose `session_note` entry is replaced by the
-    /// provided per-execution tool (same rebuild pattern as
-    /// [`Self::with_hand_back_tool`]). Used by `Agent::builder` to give EVERY
-    /// agent (S4a) a pinned-note tool wired to its own mailbox; the note is
-    /// inserted as an anchored user message by `run_llm_loop` before the next
-    /// LLM round.
+    /// Create a new ToolManager whose `session_note` entry is the provided
+    /// per-execution tool (wired to this agent's mailbox; `run_llm_loop`
+    /// inserts the pinned note before the next LLM round).
     pub fn with_session_note_tool(
         &self,
         tool: crate::tools::builtin::session_note::SessionNoteTool,
     ) -> Self {
-        let mut entries = self.registry.list();
-        tracing::debug!(
-            entries = entries.len(),
-            "Rebuilding per-agent tool registry (with per-execution session_note tool)"
-        );
-        let meta = entries
-            .iter()
-            .find(|e| e.metadata.name == "session_note")
-            .map(|e| e.metadata.clone())
-            .unwrap_or_else(|| crate::tools::types::ToolMetadata {
-                name: "session_note".to_string(),
-                version: "1.0.0".to_string(),
-                description: "Pin a short session state note (survives trims and reloads)"
-                    .to_string(),
-                dependencies: vec![],
-            });
-        entries.retain(|e| e.metadata.name != "session_note");
-        entries.push(crate::tools::registry::ToolEntry {
-            tool: std::sync::Arc::new(tool),
-            metadata: meta,
-            loaded_at: std::time::Instant::now(),
-            plugin: None,
-        });
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
-        }
-        Self {
-            registry: std::sync::Arc::new(registry),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        self.with_override(
+            "session_note",
+            Some(self.override_entry(
+                "session_note",
+                tool,
+                "Pin a short session state note (survives trims and reloads)",
+            )),
+        )
     }
 
-    /// Create a new ToolManager where the `handoff` tool is removed from the
-    /// schema entirely. Used for agents whose `handoff_enabled` is false —
-    /// including target agents in a handoff chain built on top of a manager
-    /// that already carries a per-execution handoff tool.
+    /// Remove the `handoff` tool from the schema (agents with `handoff_enabled` false).
     pub fn without_handoff(&self) -> Self {
-        let mut entries = self.registry.list();
-        entries.retain(|e| e.metadata.name != "handoff");
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
-        }
-        Self {
-            registry: std::sync::Arc::new(registry),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        self.with_override("handoff", None)
     }
 
-    /// Create a new ToolManager where the `hand_back` tool is removed from the
-    /// schema entirely. Used for agents without a sub-session parent link —
-    /// including in-turn handoff targets built on top of a manager that
-    /// already carries a per-execution hand_back tool.
+    /// Remove the `hand_back` tool from the schema (agents without a sub-session parent link).
     pub fn without_hand_back(&self) -> Self {
-        let mut entries = self.registry.list();
-        entries.retain(|e| e.metadata.name != "hand_back");
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
-        }
-        Self {
-            registry: std::sync::Arc::new(registry),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        self.with_override("hand_back", None)
     }
 
-    /// Create a new ToolManager where the `restart` tool is removed from the
-    /// schema entirely. Used for agents whose `restart_enabled` is false.
+    /// Remove the `restart` tool from the schema (agents with `restart_enabled` false).
     pub fn without_restart(&self) -> Self {
-        let mut entries = self.registry.list();
-        entries.retain(|e| e.metadata.name != "restart");
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
-        }
-        Self {
-            registry: std::sync::Arc::new(registry),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
-        }
+        self.with_override("restart", None)
     }
 
-    /// Create a new ToolManager where the `shell` tool is removed from the
-    /// schema entirely. Used for agents whose `shell_enabled` is false, so
-    /// the model never sees a shell tool whose calls would always fail.
+    /// Remove the `shell` tool from the schema (agents with `shell_enabled` false).
     pub fn without_shell(&self) -> Self {
-        let mut entries = self.registry.list();
-        entries.retain(|e| e.metadata.name != "shell");
-        let registry = ToolRegistry::new(self.discovery_paths(), self.logger.clone());
-        for entry in entries {
-            let _ = registry.register(entry);
+        self.with_override("shell", None)
+    }
+
+    /// Resolve a tool by name in this manager's view: a per-run replacement
+    /// first, then the shared registry (skipping removed names).
+    fn resolve_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if let Some(e) = self.overrides.replaced(name) {
+            return Some(e.tool.clone());
         }
-        Self {
-            registry: std::sync::Arc::new(registry),
-            logger: self.logger.clone(),
-            allowlist: self.allowlist.clone(),
-            discovery_paths: self.discovery_paths.clone(),
+        if self.overrides.is_removed(name) {
+            return None;
         }
+        self.registry.get(name)
+    }
+
+    /// The input schema in effect for a tool name (a replacement's schema
+    /// shadows the registry's; a removed or unknown name has none).
+    fn schema_for(&self, name: &str) -> Option<JsonSchema> {
+        if let Some(e) = self.overrides.replaced(name) {
+            return e.tool.parameters_schema().input_type;
+        }
+        if self.overrides.is_removed(name) {
+            return None;
+        }
+        self.registry.schema_for(name)
     }
 
     /// Execute a tool by name with the given parameters.
@@ -442,10 +355,9 @@ impl ToolManager {
             }
         }
 
-        // Get the tool and execute it atomically
+        // Get the tool and execute it atomically (per-run overrides first).
         let tool = self
-            .registry
-            .get(tool_name)
+            .resolve_tool(tool_name)
             .ok_or_else(|| ToolError::NotFound(tool_name.to_string()))?;
 
         // (T5/M2) Validate the parameters against the tool's declared schema
@@ -481,7 +393,7 @@ impl ToolManager {
     /// the LLM can self-correct. Tools that declare no input schema are always
     /// valid — their own argument parsing is the final authority.
     pub fn validate(&self, tool_name: &str, params: &ToolParams) -> ToolResult<()> {
-        let Some(schema) = self.registry.schema_for(tool_name) else {
+        let Some(schema) = self.schema_for(tool_name) else {
             return Ok(());
         };
         let problems = crate::tools::validation::validate_params(&schema, params);
@@ -493,9 +405,23 @@ impl ToolManager {
     }
 
     /// Get all tool definitions in OpenAI-compatible format for function calling.
-    /// Filters by allowlist when present.
+    /// Merges per-run overrides over the registry, then filters by allowlist
+    /// when present (the filter applies after the merge, as before).
     pub fn get_tool_definitions(&self) -> Vec<crate::tools::types::ToolDefinition> {
         let mut defs = self.registry.to_tool_definitions();
+        // Remove entries that a per-run override removed.
+        if !self.overrides.removed.is_empty() {
+            defs.retain(|d| !self.overrides.is_removed(&d.function.name));
+        }
+        // Replace (or add) entries for per-run replacements.
+        for e in &self.overrides.replaced {
+            let def = ToolRegistry::definition_for(&e.tool);
+            if let Some(slot) = defs.iter_mut().find(|d| d.function.name == e.metadata.name) {
+                *slot = def;
+            } else {
+                defs.push(def);
+            }
+        }
         if let Some(ref allowlist) = self.allowlist {
             defs.retain(|d| allowlist.contains(&d.function.name));
         }
@@ -503,15 +429,21 @@ impl ToolManager {
     }
 
     /// Get the list of allowed tool names, if an allowlist is set.
+    /// Without an allowlist: the registry's names with per-run overrides applied.
     pub fn get_allowed_tools(&self) -> Vec<String> {
         if let Some(ref allowlist) = self.allowlist {
             allowlist.clone()
         } else {
-            self.registry
-                .list()
-                .iter()
-                .map(|e| e.metadata.name.clone())
-                .collect()
+            let mut names = self.registry.names();
+            if !self.overrides.removed.is_empty() {
+                names.retain(|n| !self.overrides.is_removed(n));
+            }
+            for e in &self.overrides.replaced {
+                if !names.contains(&e.metadata.name) {
+                    names.push(e.metadata.name.clone());
+                }
+            }
+            names
         }
     }
 

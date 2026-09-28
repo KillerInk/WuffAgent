@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use crate::tools::dynamic::PluginHandle;
-use crate::tools::types::{Tool, ToolError, ToolLogger, ToolMetadata, ToolSchema};
+use crate::tools::types::{
+    JsonSchema, Tool, ToolDefinition, ToolError, ToolFunctionSpec, ToolLogger, ToolMetadata,
+    ToolSchema,
+};
 
 /// Outcome of one plugin file during a discovery scan (T3b). The scan itself
 /// never fails on a single bad file — this is how the agent (via the
@@ -123,6 +126,16 @@ impl ToolRegistry {
         self.tools.read().unwrap().get(name).map(|e| e.tool.clone())
     }
 
+    /// The metadata of a registered tool (a copy), or `None` if unregistered.
+    pub fn metadata_for(&self, name: &str) -> Option<ToolMetadata> {
+        self.tools.read().unwrap().get(name).map(|e| e.metadata.clone())
+    }
+
+    /// The names of all registered tools (a copy of the keys only).
+    pub fn names(&self) -> Vec<String> {
+        self.tools.read().unwrap().keys().cloned().collect()
+    }
+
     /// The input schema the tool declares (T5/M2), if any — used to validate
     /// parameters against what the tool actually expects.
     pub fn schema_for(&self, name: &str) -> Option<crate::tools::types::JsonSchema> {
@@ -148,29 +161,32 @@ impl ToolRegistry {
     }
 
     /// Return tool definitions in OpenAI-compatible format.
-    pub fn to_tool_definitions(&self) -> Vec<crate::tools::types::ToolDefinition> {
+    pub fn to_tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .read()
             .unwrap()
             .values()
-            .map(|e| {
-                let schema = e.tool.parameters_schema();
-                crate::tools::types::ToolDefinition {
-                    type_name: "function".to_string(),
-                    function: crate::tools::types::ToolFunctionSpec {
-                        name: e.tool.name().to_string(),
-                        description: e.tool.description().to_string(),
-                        parameters: schema
-                            .input_type
-                            .unwrap_or(crate::tools::types::JsonSchema {
-                                type_name: "object".to_string(),
-                                properties: None,
-                                required: vec![],
-                            }),
-                    },
-                }
-            })
+            .map(|e| Self::definition_for(&e.tool))
             .collect()
+    }
+
+    /// Build an OpenAI-compatible definition for one tool (shared with
+    /// [`crate::tools::manager::ToolManager`], which needs definitions for
+    /// its per-run override entries too).
+    pub fn definition_for(tool: &Arc<dyn Tool>) -> ToolDefinition {
+        let schema = tool.parameters_schema();
+        ToolDefinition {
+            type_name: "function".to_string(),
+            function: ToolFunctionSpec {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters: schema.input_type.unwrap_or(JsonSchema {
+                    type_name: "object".to_string(),
+                    properties: None,
+                    required: vec![],
+                }),
+            },
+        }
     }
 
     /// Scan all discovery paths for plugin files (.dll / .so) and load them.
