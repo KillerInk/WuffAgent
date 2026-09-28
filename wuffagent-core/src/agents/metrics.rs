@@ -296,6 +296,16 @@ pub fn agent_file_name(agent: &str) -> String {
     }
 }
 
+/// The timestamp of a metrics line (all variants carry one).
+fn line_ts(line: &MetricsLine) -> &DateTime<Utc> {
+    match line {
+        MetricsLine::Run { ts, .. }
+        | MetricsLine::Feedback { ts, .. }
+        | MetricsLine::SkillUse { ts, .. }
+        | MetricsLine::Trim { ts, .. } => ts,
+    }
+}
+
 /// Test override for the default metrics directory (the improver's tests
 /// must not read the real `~/.wuffagent/metrics`). Same process-global
 /// pattern as `config::set_config_path_for_testing`; tests that use it
@@ -550,6 +560,26 @@ impl MetricsLog {
     /// (`None` = all time).
     pub fn summary_since(&self, agent: &str, since: Option<DateTime<Utc>>) -> MetricsSummary {
         self.summary_between(agent, since, None)
+    }
+
+    /// All lines for `agent` with `ts >= since` (`None` = all time), oldest
+    /// first — the raw-line twin of `summary_since` (the same window, no
+    /// aggregation). The improvement-status views use it to show what
+    /// actually happened since an agent's last check / last applied change.
+    pub fn lines_since(&self, agent: &str, since: Option<DateTime<Utc>>) -> Vec<MetricsLine> {
+        let mut lines: Vec<MetricsLine> = match since {
+            Some(s) => self
+                .read_all(agent)
+                .into_iter()
+                .filter(|l| *line_ts(l) >= s)
+                .collect(),
+            None => self.read_all(agent),
+        };
+        // `read_all` is newest-first (display order); the documented
+        // oldest-first order is re-sorted here — the status views render
+        // chronological histories.
+        lines.sort_by_key(|l| *line_ts(l));
+        lines
     }
 
     /// Aggregate counts for `agent` over lines with `start <= ts < end`

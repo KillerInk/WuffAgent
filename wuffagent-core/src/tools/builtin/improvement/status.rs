@@ -10,17 +10,43 @@
 
 use std::sync::Arc;
 
+use chrono::{Duration, Utc};
+use crate::agents::metrics::MetricsLog;
 use crate::memory::MemoryManager;
 use crate::tools::types::{Tool, ToolOutput, ToolParams, ToolSchema};
+
+/// Fleet-view window when `days` is omitted.
+const DEFAULT_DAYS: u64 = 7;
+/// Hard ceiling for `days` (same guard as `read_metrics`).
+const MAX_DAYS: u64 = 30;
+/// Cap on the recent lines shown in the per-agent view.
+const MAX_RECENT_LINES: usize = 5;
 
 /// Tool reporting the improvement-loop state (read-only, no LLM call).
 pub struct ListImprovementStatusTool {
     memory: Arc<MemoryManager>,
+    /// Explicit metrics root (tests); `None` = `MetricsLog::default()`.
+    log: Option<MetricsLog>,
 }
 
 impl ListImprovementStatusTool {
     pub fn new(memory: Arc<MemoryManager>) -> Self {
-        Self { memory }
+        Self { memory, log: None }
+    }
+
+    /// Use an explicit metrics root instead of the default location (tests).
+    pub fn with_log(mut self, log: MetricsLog) -> Self {
+        self.log = Some(log);
+        self
+    }
+
+    /// The metrics log for this call (construction is side-effect free, so
+    /// rebuilding per call is cheap — same pattern as `read_metrics`).
+    fn log(&self) -> MetricsLog {
+        match &self.log {
+            Some(l) => MetricsLog::new(l.dir().to_path_buf()),
+            None => MetricsLog::default(),
+        }
     }
 }
 
@@ -34,7 +60,10 @@ impl Tool for ListImprovementStatusTool {
          whether new lesson evidence has arrived since, the cooldown/auto_improve settings, \
          and the lesson count. Use it to understand why (no) improvement suggestions appear. \
          Params: agent (optional, profile name) — per-agent state (tasks since its last check, \
-         no-op streak/backoff, its evidence gate, last effect verdict)."
+         no-op streak/backoff, its evidence gate, last effect verdict) plus that agent's metrics \
+         since its last check and its most recent run lines; fleet mode (no agent) adds a Loop \
+         status section with per-agent windowed metrics and recent lines. days (optional, \
+         fleet mode only) — window in days, default 7, max 30."
     }
 
     fn parameters_schema(&self) -> ToolSchema {
@@ -43,17 +72,29 @@ impl Tool for ListImprovementStatusTool {
             description: self.description().to_string(),
             input_type: Some(crate::tools::types::JsonSchema {
                 type_name: "object".to_string(),
-                properties: Some(std::collections::HashMap::from([(
-                    "agent".to_string(),
-                    crate::tools::types::FieldSchema {
-                        type_name: "string".to_string(),
-                        description: "Optional: show the per-agent improvement-loop state \
-                                      (cooldown counter, no-op streak, evidence, effect verdict) \
-                                      for this profile"
-                            .to_string(),
-                        nullable: true,
-                    },
-                )])),
+                properties: Some(std::collections::HashMap::from([
+                    (
+                        "agent".to_string(),
+                        crate::tools::types::FieldSchema {
+                            type_name: "string".to_string(),
+                            description: "Optional: show the per-agent improvement-loop state \
+                                          (cooldown counter, no-op streak, evidence, effect verdict, \
+                                          metrics since last check) for this profile"
+                                .to_string(),
+                            nullable: true,
+                        },
+                    ),
+                    (
+                        "days".to_string(),
+                        crate::tools::types::FieldSchema {
+                            type_name: "integer".to_string(),
+                            description: format!(
+                                "Fleet view only: window in days for the Loop status section (default {DEFAULT_DAYS}, max {MAX_DAYS})"
+                            ),
+                            nullable: true,
+                        },
+                    ),
+                ])),
                 required: vec![],
             }),
         }
@@ -65,6 +106,15 @@ impl Tool for ListImprovementStatusTool {
         let agent = params
             .get::<String>("agent")
             .filter(|a| !a.is_empty());
+        let days = match params.get::<u64>("days") {
+            None => DEFAULT_DAYS,
+            Some(d) if (1..=MAX_DAYS).contains(&d) => d,
+            Some(d) => {
+                return Ok(ToolOutput::error(format!(
+                    "days must be between 1 and {MAX_DAYS} (got {d})"
+                )));
+            }
+        };
 
         // 2a: per-agent detail when a profile is named.
         if let Some(name) = &agent {
@@ -76,7 +126,7 @@ impl Tool for ListImprovementStatusTool {
             let mult =
                 crate::agents::improvement::no_op_backoff_multiplier(state.no_op_streak.max(1));
             let min_interval = min_interval_label(status.improvement_min_interval_hours);
-            return Ok(ToolOutput::success(format!(
+            let mut out = format!(
                 "Improvement loop for '{name}': auto_improve={}; last check: {}; \
                  tasks since last check: {} (cooldown base {} task(s), backoff x{} = {}, min interval: {}); \
                  no-op streak: {}; new evidence since last check: {}; last effect verdict: {}; \
@@ -108,7 +158,31 @@ impl Tool for ListImprovementStatusTool {
                     " (no per-agent check recorded yet — state shown as default)"
                         .to_string()
                 }
-            )));
+            );
+            // The metrics window: what actually happened since this agent's
+            // last check (or all-time when it was never checked) + its most
+            // recent lines — the loop state joined to real activity.
+            let log = self.log();
+            let since = state.last_check;
+            let label = if since.is_some() {
+                "since last check"
+            } else {
+                "all-time (never checked)"
+            };
+            let window = log.summary_since(name, since).format_labeled(label);
+            out.push_str(&format!(
+                "\n  metrics {label}: {}",
+                if window.is_empty() { "(no data)" } else { &window }
+            ));
+            let recent = log
+                .lines_since(name, since)
+                .into_iter()
+                .rev()
+                .take(MAX_RECENT_LINES);
+            for line in recent {
+                out.push_str(&format!("\n    {}", line.describe()));
+            }
+            return Ok(ToolOutput::success(out));
         }
 
         // Global view (legacy v1 semantics) + a compact per-agent listing.
@@ -138,12 +212,49 @@ impl Tool for ListImprovementStatusTool {
                 ));
             }
         }
+        // Loop status section: per-agent windowed metrics + each agent's
+        // most recent line (what actually happened since the window started),
+        // so the loop state is joinable to real activity without a second
+        // read_metrics call.
+        let log = self.log();
+        let window_since = Utc::now() - Duration::days(days as i64);
+        out.push_str(&format!("\nLoop status ({days} day window):"));
+        let names = log.agent_names();
+        if names.is_empty() {
+            out.push_str("\n  (no agents have metrics files yet)");
+        } else {
+            out.push_str("\n  per-agent metrics (window) + most recent line:");
+            for name in &names {
+                let label =
+                    log.summary_between(name, Some(window_since), None).format_labeled(name);
+                match log.lines_since(name, Some(window_since)).pop() {
+                    Some(line) => out.push_str(&format!(
+                        "\n    {} [last: {}]",
+                        if label.is_empty() {
+                            format!("{name}: no activity in window")
+                        } else {
+                            label
+                        },
+                        line.describe()
+                    )),
+                    None => out.push_str(&format!(
+                        "\n    {}",
+                        if label.is_empty() {
+                            format!("{name}: no activity in window")
+                        } else {
+                            label
+                        }
+                    )),
+                }
+            }
+        }
         Ok(ToolOutput::success(out))
     }
 }
 
 /// 2f: render the wall-clock floor: "off" for 0 (disabled), else "Nh".
-fn min_interval_label(hours: u32) -> String {
+/// `pub(super)`: shared with the `read_metrics` loop-status view.
+pub(super) fn min_interval_label(hours: u32) -> String {
     if hours == 0 {
         "off".to_string()
     } else {
@@ -152,7 +263,8 @@ fn min_interval_label(hours: u32) -> String {
 }
 
 /// Render a timestamp as "YYYY-MM-DD HH:MM:SS UTC (~N ago)" or "never".
-fn format_ago(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
+/// `pub(super)`: shared with the `read_metrics` loop-status view.
+pub(super) fn format_ago(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
     match ts {
         Some(ts) => {
             let secs = chrono::Utc::now().timestamp().saturating_sub(ts.timestamp());
@@ -194,6 +306,22 @@ mod tests {
         let out = tool
             .execute(ToolParams {
                 values: std::collections::HashMap::new(),
+            })
+            .expect("status tool must not error");
+        match out {
+            ToolOutput::Success(v) => v.as_str().unwrap_or("").to_string(),
+            ToolOutput::Error(e) => panic!("expected success, got error: {e}"),
+        }
+    }
+
+    /// Run with a `days` param (fleet view window).
+    fn run_days(tool: &ListImprovementStatusTool, days: u64) -> String {
+        let out = tool
+            .execute(ToolParams {
+                values: std::collections::HashMap::from([(
+                    "days".to_string(),
+                    serde_json::json!(days),
+                )]),
             })
             .expect("status tool must not error");
         match out {
@@ -334,5 +462,110 @@ mod tests {
             run_with_agent(&tool, "coder").contains("min interval: 12h"),
             "12h → 12h (per-agent)"
         );
+    }
+
+    /// The per-agent view joins the loop state to real activity: metrics for
+    /// the window since the agent's last check + its most recent lines.
+    #[test]
+    fn per_agent_view_shows_metrics_since_last_check() {
+        let (_dir, manager) = fresh_manager();
+        manager.record_agent_improvement_check("coder", false);
+        manager.record_agent_task_completed("coder"); // 1 task since the check
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = crate::agents::metrics::MetricsLog::new(dir.path());
+        log.log_run("coder", 3, 1, 0, 7_000, crate::agents::metrics::RunOutcome::Verified, 11, 4);
+        log.log_run(
+            "coder",
+            2,
+            0,
+            0,
+            9_000,
+            crate::agents::metrics::RunOutcome::GaveUp,
+            0,
+            0,
+        );
+        log.log_feedback("coder", false);
+
+        let tool = ListImprovementStatusTool::new(manager).with_log(log);
+        let out = run_with_agent(&tool, "coder");
+        assert!(out.contains("metrics since last check:"), "got: {out}");
+        assert!(
+            out.contains("metrics since last check: since last check (2 run(s), 5 tool call(s) with 1 errors"),
+            "got: {out}"
+        );
+        assert!(out.contains("outcome: gave_up"), "got: {out}");
+        assert!(out.contains("feedback: down"), "got: {out}");
+    }
+
+    /// The fleet view's Loop status section honors `days`, lists each agent
+    /// with its most recent line, and still surfaces skill usage.
+    #[test]
+    fn fleet_loop_status_section_honors_days_window() {
+        let (_dir, manager) = fresh_manager();
+        manager.record_agent_improvement_check("coder", false);
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = crate::agents::metrics::MetricsLog::new(dir.path());
+        log.log_run("coder", 5, 0, 1, 10_000, crate::agents::metrics::RunOutcome::Verified, 0, 0);
+
+        let tool = ListImprovementStatusTool::new(manager).with_log(log);
+        let out = run_days(&tool, 2);
+        assert!(out.contains("Loop status (2 day window):"), "got: {out}");
+        assert!(out.contains("per-agent metrics (window) + most recent line:"), "got: {out}");
+        assert!(
+            out.contains("coder (1 run(s), 5 tool call(s) with 0 errors (0.0%)"),
+            "got: {out}"
+        );
+        // The agent's most recent line is joined in, not just the aggregates.
+        assert!(out.contains("[last: "), "got: {out}");
+        assert!(out.contains("outcome: verified"), "got: {out}");
+    }
+
+    /// `days` is out-of-range (or fleet-only) → the per-agent view ignores
+    /// it (the window there is anchored to the agent's last check, not
+    /// a wall-clock window).
+    #[test]
+    fn days_param_ignored_in_agent_mode_and_bounded() {
+        let (_dir, manager) = fresh_manager();
+        manager.record_agent_improvement_check("coder", false);
+        let dir = tempfile::tempdir().unwrap();
+        let log = crate::agents::metrics::MetricsLog::new(dir.path());
+        log.log_run("coder", 1, 0, 0, 1_000, crate::agents::metrics::RunOutcome::Verified, 0, 0);
+
+        let tool = ListImprovementStatusTool::new(manager).with_log(log);
+        // In agent mode a VALID `days` must not change the report (the window
+        // there is anchored to the agent's last check, not a wall-clock
+        // window): with/without the param the output is identical.
+        let plain = run_with_agent(&tool, "coder");
+        let with_days = tool
+            .execute(ToolParams {
+                values: std::collections::HashMap::from([
+                    ("agent".to_string(), serde_json::json!("coder")),
+                    ("days".to_string(), serde_json::json!(2)),
+                ]),
+            })
+            .expect("agent mode must not error on a valid days");
+        let text = match with_days {
+            ToolOutput::Success(v) => v.as_str().unwrap_or("").to_string(),
+            ToolOutput::Error(e) => panic!("expected success, got error: {e}"),
+        };
+        assert_eq!(plain, text, "agent mode must ignore `days`");
+        assert!(text.contains("metrics since last check:"), "got: {text}");
+        assert!(!text.contains("day window"), "got: {text}");
+
+        // Fleet mode enforces the bounds.
+        for bad in [0u64, 31u64] {
+            match tool.execute(ToolParams {
+                values: std::collections::HashMap::from([(
+                    "days".to_string(),
+                    serde_json::json!(bad),
+                )]),
+            }) {
+                Ok(ToolOutput::Error(e)) => assert!(e.contains("between 1 and 30"), "got: {e}"),
+                Ok(other) => panic!("expected days error, got: {:?}", other),
+                Err(e) => panic!("unexpected ToolError: {e}"),
+            }
+        }
     }
 }

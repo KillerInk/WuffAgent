@@ -48,14 +48,16 @@ pub fn register_improvement_tools(
             Arc::new(ListImprovementStatusTool::new(memory.clone())) as Arc<dyn Tool>,
         ),
         (
+            "read_metrics",
+            "Read the run-metrics store: windowed aggregates + recent lines for an agent, or a fleet overview (status=true → fleet loop status)",
+            Arc::new(ReadMetricsTool::new()
+                .with_memory(memory.clone())
+                .with_default_days(window_days)) as Arc<dyn Tool>,
+        ),
+        (
             "run_self_improvement",
             "Run an on-demand self-improvement check for an agent (bypasses the cooldown)",
             Arc::new(RunSelfImprovementTool::new(memory, agents, events)) as Arc<dyn Tool>,
-        ),
-        (
-            "read_metrics",
-            "Read the run-metrics store: windowed aggregates + recent lines for an agent, or a fleet overview",
-            Arc::new(ReadMetricsTool::new().with_default_days(window_days)) as Arc<dyn Tool>,
         ),
     ] {
         super::register_tool(registry, name, desc, tool)?;

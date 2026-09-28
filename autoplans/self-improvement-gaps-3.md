@@ -23,6 +23,18 @@ this plan) and `loop-gap-plan.md` (superseded, all items done).
   purely **lesson/feedback-driven**, so metric-only degradation (error rate
   doubling with no saved lesson) never re-arms the check.
 
+## Groundwork already in (2026-09-28, done before Phase 1)
+- **Fleet loop-status view** — `list_improvement_status` and `read_metrics`
+  now JOIN the improvement-loop state to real run-metrics instead of showing
+  them separately: the per-agent view adds "metrics since last check" + the
+  agent's most recent run lines; fleet mode (no `agent`) adds a
+  `days`-windowed "Loop status" section (per-agent windowed metrics + most
+  recent line; `days` default 7 / max 30, fleet-only). Backed by a new
+  `MetricsLog::lines_since(agent, since)` primitive (oldest-first, the
+  raw-line twin of `summary_since`). This is the observability foundation
+  for Phase 4 (fleet intelligence) and makes the verification targets
+  inspectable; it is NOT one of the numbered gap items above.
+
 ## Gaps (ordered by impact)
 
 ### A. The loop only wakes up for *textual* evidence (HIGH)

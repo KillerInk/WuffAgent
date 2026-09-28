@@ -11,6 +11,11 @@
 //! - `agent` given → that agent's window.
 //! - `agent` omitted → fleet overview: one summary line per agent that has
 //!   a metrics file, plus the skills used in the window (cross-agent file).
+//!   With `status: true` (fleet mode only) the overview becomes a
+//!   LOOP-STATUS view: the improvement loop's per-agent state (last check,
+//!   tasks since, no-op streak, last effect verdict) joined with each
+//!   agent's windowed metrics + its most recent metric line, plus the
+//!   fleet's token spend over the window (the loop-cost line).
 //!
 //! Read-only and LLM-free: it just parses JSONL lines. Note the data model
 //! has no per-tool error attribution (only per-run counts), so "worst
@@ -18,9 +23,11 @@
 //! counts for manual digging.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use crate::agents::metrics::{MetricsLine, MetricsLog};
+use crate::memory::MemoryManager;
 use crate::tools::types::{
     FieldSchema, JsonSchema, Tool, ToolOutput, ToolParams, ToolSchema, ToolResult,
 };
@@ -44,6 +51,10 @@ const OUTSIDE_WINDOW_LINES: usize = 3;
 pub struct ReadMetricsTool {
     /// Explicit log root (tests); `None` = `MetricsLog::default()`.
     log: Option<MetricsLog>,
+    /// The memory manager (the improvement loop's per-agent state) — the
+    /// fleet loop-status view (`status: true`) reads it; `None` (standalone
+    /// constructor / tests) degrades to metrics-only.
+    memory: Option<Arc<MemoryManager>>,
     /// 2e: window (days) used when `days` is omitted — wired to config
     /// `improvement_metrics_window_days` at registration; `DEFAULT_DAYS` for
     /// the standalone constructor.
@@ -52,12 +63,18 @@ pub struct ReadMetricsTool {
 
 impl ReadMetricsTool {
     pub fn new() -> Self {
-        Self { log: None, default_days: DEFAULT_DAYS }
+        Self { log: None, memory: None, default_days: DEFAULT_DAYS }
     }
 
     /// Use an explicit metrics root instead of the default location (tests).
     pub fn with_log(log: MetricsLog) -> Self {
-        Self { log: Some(log), default_days: DEFAULT_DAYS }
+        Self { log: Some(log), memory: None, default_days: DEFAULT_DAYS }
+    }
+
+    /// Wire the memory manager for the fleet loop-status view.
+    pub fn with_memory(mut self, memory: Arc<MemoryManager>) -> Self {
+        self.memory = Some(memory);
+        self
     }
 
     /// 2e: override the default window (config `improvement_metrics_window_days`).
@@ -181,6 +198,102 @@ impl ReadMetricsTool {
         }
         ToolOutput::success(out)
     }
+
+    /// Fleet-mode loop status (`status: true`): the improvement loop's
+    /// per-agent state (last check, tasks since, no-op streak, last effect
+    /// verdict — from the memory manager's improvement state) joined with
+    /// each agent's windowed metrics and its most recent metric line (what
+    /// actually happened since), plus the fleet's token spend over the
+    /// window (the loop-cost line: the run budget the loop improves on).
+    fn fleet_status_report(&self, days: u64) -> ToolOutput {
+        let log = self.log();
+        let since = Utc::now() - Duration::days(days as i64);
+        let mut out = format!("Loop status — window: last {days} day(s):");
+
+        // The loop half: per-agent improvement state (the memory manager is
+        // optional — standalone tests degrade to metrics only).
+        if let Some(memory) = &self.memory {
+            let st = memory.improvement_status();
+            out.push_str(&format!(
+                "\n  loop: auto_improve {}; cooldown 1 check / {} task(s), min interval {}; \\\
+                 lessons in store: {}",
+                if st.auto_improve { "on" } else { "off" },
+                st.improvement_cooldown_tasks,
+                super::status::min_interval_label(st.improvement_min_interval_hours),
+                st.lesson_count,
+            ));
+            out.push_str(&format!(
+                "\n  last check (global/legacy): {}",
+                super::status::format_ago(st.last_check)
+            ));
+            if st.agents.is_empty() {
+                out.push_str("\n  per-agent loop state: none recorded yet");
+            } else {
+                out.push_str(
+                    "\n  per-agent loop state (last check · tasks since · no-op streak · verdict):",
+                );
+                for (name, a) in &st.agents {
+                    out.push_str(&format!(
+                        "\n    {}: last check {}; {} task(s) since; no-op streak {}; verdict {}",
+                        name,
+                        super::status::format_ago(a.last_check),
+                        a.runs_since_check,
+                        a.no_op_streak,
+                        a.last_effect_verdict
+                            .clone()
+                            .unwrap_or_else(|| "-".to_string()),
+                    ));
+                }
+            }
+        } else {
+            out.push_str("\n  loop state: (no memory manager wired — metrics only)");
+        }
+
+        // The metrics half: windowed per-agent summary + the agent's most
+        // recent line in the window (what actually happened).
+        let names = log.agent_names();
+        if names.is_empty() {
+            out.push_str(
+                "\n  per-agent metrics: no agents have metrics files yet (the store is \
+                 created on the first recorded run)",
+            );
+        } else {
+            out.push_str("\n  per-agent metrics (window) + most recent line:");
+        }
+        let (mut tok_in, mut tok_out, mut runs) = (0u64, 0u64, 0u32);
+        for name in &names {
+            let summary = log.summary_between(name, Some(since), None);
+            tok_in += summary.tokens_in;
+            tok_out += summary.tokens_out;
+            runs += summary.runs;
+            let label = match summary.format_labeled(name) {
+                s if s.is_empty() => format!("{name}: no activity in window"),
+                s => s,
+            };
+            let last = log.lines_since(name, Some(since)).pop();
+            match last {
+                Some(l) => out.push_str(&format!("\n    {label} [last: {}]", l.describe())),
+                None => out.push_str(&format!("\n    {label}")),
+            }
+        }
+
+        // The loop-cost line: fleet token spend over the window (from the
+        // metrics store — the runs the loop improves, not the improvement
+        // checks' own LLM calls).
+        if runs > 0 || tok_in > 0 || tok_out > 0 {
+            out.push_str(&format!(
+                "\n  token spend (window): {tok_in} in / {tok_out} out over {runs} run(s)",
+            ));
+            if runs > 0 {
+                out.push_str(&format!(
+                    " (avg {:.0} in / {:.0} out per run)",
+                    tok_in as f64 / runs as f64,
+                    tok_out as f64 / runs as f64
+                ));
+            }
+        }
+        ToolOutput::success(out)
+    }
 }
 
 /// The timestamp of any metrics line (all variants carry one).
@@ -203,8 +316,11 @@ impl Tool for ReadMetricsTool {
          aggregates over a time window (runs, verification outcomes, tool error rate, average/ \
          max duration, user feedback) plus the most recent raw lines. Params: agent (optional \
          profile name; omit for a fleet-wide one-line-per-agent overview), days (optional \
-         window in days, default 7, max 30). Use it for regression analysis of your own (or \
-         another agent's) performance."
+         window in days, default 7, max 30), status (optional, fleet mode only: report the \
+         improvement-LOOP state instead of the plain metrics overview — per-agent last check, \
+         no-op streak/backoff, last effect verdict, most recent activity, and fleet token spend). \
+         Use it for regression analysis of your own (or another agent's) performance, or with \
+         status=true to see the self-improvement loop's fleet-wide state."
     }
 
     fn parameters_schema(&self) -> ToolSchema {
@@ -235,6 +351,18 @@ impl Tool for ReadMetricsTool {
                             nullable: true,
                         },
                     ),
+                    (
+                        "status".to_string(),
+                        FieldSchema {
+                            type_name: "boolean".to_string(),
+                            description: "Fleet mode only (omit `agent`): report the \
+                                          improvement-loop state (per-agent last check, no-op \
+                                          streak, effect verdict, recent activity, token spend) \
+                                          instead of the plain metrics overview"
+                                .to_string(),
+                            nullable: true,
+                        },
+                    ),
                 ])),
                 required: vec![],
             }),
@@ -255,8 +383,12 @@ impl Tool for ReadMetricsTool {
         let agent = params
             .get::<String>("agent")
             .filter(|a| !a.is_empty());
+        let status = params.get::<bool>("status").unwrap_or(false);
         Ok(match agent {
             Some(name) => self.agent_report(&name, days),
+            // `status` only changes the FLEET view; in agent mode the report
+            // already shows the agent's own window in full.
+            None if status => self.fleet_status_report(days),
             None => self.fleet_report(days),
         })
     }
@@ -290,6 +422,18 @@ mod tests {
         match out {
             ToolOutput::Success(v) => v.as_str().unwrap_or("").to_string(),
             ToolOutput::Error(e) => panic!("expected success, got error: {e}"),
+        }
+    }
+
+    fn call_status(tool: &ReadMetricsTool, days: Option<u64>) -> ToolOutput {
+        let mut values = HashMap::new();
+        values.insert("status".to_string(), serde_json::json!(true));
+        if let Some(d) = days {
+            values.insert("days".to_string(), serde_json::json!(d));
+        }
+        match tool.execute(ToolParams { values }) {
+            Ok(out) => out,
+            Err(e) => panic!("unexpected ToolError: {e}"),
         }
     }
 
@@ -463,5 +607,90 @@ mod tests {
         })
         .unwrap();
         assert_eq!(up["kind"], "feedback");
+    }
+
+    /// Fleet loop status (`status: true`) joins the improvement loop's
+    /// per-agent state (from the memory manager) with each agent's windowed
+    /// metrics + its most recent line, plus the loop-cost line (fleet token
+    /// spend over the window).
+    #[test]
+    fn fleet_status_view_joins_loop_state_and_metrics() {
+        use crate::memory::{MemoryConfig, MemoryManager};
+
+        let mem_dir = tempfile::tempdir().unwrap();
+        let config = MemoryConfig {
+            memories_dir: Some(mem_dir.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        let memory = std::sync::Arc::new(MemoryManager::new(config).unwrap());
+        memory.record_agent_improvement_check("coder", false);
+        memory.record_effect_verdict("coder", "regressed");
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        record_run(&log, "coder", 10, 2, 20_000);
+        log.log_run("coder", 4, 0, 0, 60_000, RunOutcome::GaveUp, 50, 10);
+        record_run(&log, "generalist", 3, 0, 5_000);
+
+        let tool = tool_in(dir.path()).with_memory(memory);
+        let out = text(call_status(&tool, None));
+        assert!(out.contains("Loop status — window: last 7 day(s):"), "got: {out}");
+        assert!(out.contains("loop: auto_improve on"), "got: {out}");
+        assert!(out.contains("per-agent loop state"), "got: {out}");
+        assert!(out.contains("verdict regressed"), "got: {out}");
+        // metrics half: windowed aggregates + the agent's most recent line
+        assert!(
+            out.contains("per-agent metrics (window) + most recent line:"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("[last: ") && out.contains("outcome: gave_up"),
+            "most recent line must render: {out}"
+        );
+        // generalist has metrics but no loop-state entry — still listed here
+        assert!(out.contains("generalist (1 run(s)"), "got: {out}");
+        // the loop-cost line: fleet token spend over the window + per-run avg
+        assert!(out.contains("token spend (window): 50 in / 10 out"), "got: {out}");
+        assert!(out.contains("over 3 run(s)"), "got: {out}");
+        assert!(out.contains("per run"), "got: {out}");
+    }
+
+    /// No memory manager wired (standalone constructor): the view degrades to
+    /// metrics only and says so.
+    #[test]
+    fn fleet_status_without_memory_degrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        record_run(&log, "coder", 1, 0, 1_000);
+
+        let tool = tool_in(dir.path());
+        let out = text(call_status(&tool, None));
+        assert!(
+            out.contains("loop state: (no memory manager wired — metrics only)"),
+            "got: {out}"
+        );
+        assert!(out.contains("coder (1 run(s)"), "got: {out}");
+    }
+
+    /// `status` only changes the FLEET view — in agent mode it is ignored.
+    #[test]
+    fn status_flag_ignored_in_agent_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        record_run(&log, "coder", 2, 0, 3_000);
+
+        let tool = tool_in(dir.path());
+        let plain = text(call(&tool, Some("coder"), None));
+        let with_status = text({
+            let mut values = HashMap::new();
+            values.insert("agent".to_string(), serde_json::json!("coder"));
+            values.insert("status".to_string(), serde_json::json!(true));
+            match tool.execute(ToolParams { values }) {
+                Ok(out) => out,
+                Err(e) => panic!("unexpected ToolError: {e}"),
+            }
+        });
+        assert_eq!(plain, with_status);
+        assert!(!plain.contains("Loop status"), "got: {plain}");
     }
 }

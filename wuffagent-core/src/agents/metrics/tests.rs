@@ -224,6 +224,71 @@ fn test_summary_between_windows() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The raw-line twin of `summary_since`: same window semantics (inclusive
+/// `since`, `None` = all time), but the un-aggregated lines, oldest first,
+/// across line kinds.
+#[test]
+fn test_lines_since_window() {
+    let dir = tmp_dir("lines_since");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+
+    let mut f = std::fs::File::create(log.agent_path("coder")).unwrap();
+    use std::io::Write;
+    // Runs on days 20 and 22, a feedback line on day 21 (mixed kinds).
+    for day in [20, 22] {
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&MetricsLine::Run {
+                ts: ts(day, 10),
+                tool_calls: 2,
+                tool_errors: 0,
+                verification_attempts: 1,
+                duration_ms: 5_000,
+                outcome: RunOutcome::Verified,
+                tokens_in: 0,
+                tokens_out: 0,
+            })
+            .unwrap()
+        )
+        .unwrap();
+    }
+    writeln!(
+        f,
+        "{}",
+        serde_json::to_string(&MetricsLine::Feedback {
+            ts: ts(21, 9),
+            feedback: FeedbackKind::Up,
+        })
+        .unwrap()
+    )
+    .unwrap();
+    drop(f);
+
+    // None = everything, oldest first (runs 20, 22 + feedback 21 as stored).
+    let all = log.lines_since("coder", None);
+    assert_eq!(all.len(), 3);
+
+    // since day 21 → the feedback (21,9) and the day-22 run; the day-20 run
+    // is strictly before. Oldest first.
+    let mid = log.lines_since("coder", Some(ts(21, 0)));
+    assert_eq!(mid.len(), 2);
+    assert!(matches!(&mid[0], MetricsLine::Feedback { .. }), "{mid:?}");
+    assert!(matches!(&mid[1], MetricsLine::Run { .. }), "{mid:?}");
+
+    // Inclusive boundary: since exactly the day-22 run's ts keeps it.
+    let edge = log.lines_since("coder", Some(ts(22, 10)));
+    assert_eq!(edge.len(), 1);
+    assert!(matches!(&edge[0], MetricsLine::Run { .. }), "{edge:?}");
+
+    // A future `since` yields nothing; an unknown agent too.
+    assert!(log.lines_since("coder", Some(ts(30, 0))).is_empty());
+    assert!(log.lines_since("ghost", None).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn test_agent_file_name() {
     assert_eq!(agent_file_name("coder"), "coder");
