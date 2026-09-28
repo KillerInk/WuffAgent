@@ -132,6 +132,33 @@ pub enum MetricsLine {
         /// Frequent `true` means the estimator/trigger is miscalibrated.
         overflow: bool,
     },
+    /// 1c: one self-improvement check (the loop's OWN cost — an improver LLM
+    /// call). The line is stored in the reviewed profile's file (scope
+    /// "agent") or the reserved `fleet.jsonl` (scope "fleet"), so `agent`
+    /// mirrors the file stem and keeps `describe()` self-contained.
+    Check {
+        /// UTC timestamp of the check's end.
+        ts: DateTime<Utc>,
+        /// Profile reviewed ("fleet" for a fleet-wide check) — mirrors the
+        /// file the line is stored in.
+        agent: String,
+        /// Check scope: "agent" (single-profile review) or "fleet".
+        scope: String,
+        /// Prompt tokens consumed by the check's LLM call (0 when the server
+        /// reports none).
+        #[serde(default)]
+        tokens_in: u64,
+        /// Completion tokens produced by the check's LLM call (0 when the
+        /// server reports none).
+        #[serde(default)]
+        tokens_out: u64,
+        /// Suggestions the check produced (0 = nothing to improve).
+        #[serde(default)]
+        suggestions: usize,
+        /// Wall-clock duration of the check's LLM call, in milliseconds.
+        #[serde(default)]
+        duration_ms: u64,
+    },
 }
 
 impl MetricsLine {
@@ -183,6 +210,20 @@ impl MetricsLine {
                 chars_after,
                 if *brief_updated { ", brief updated" } else { "" },
             ),
+            MetricsLine::Check {
+                ts,
+                agent,
+                scope,
+                tokens_in,
+                tokens_out,
+                suggestions,
+                duration_ms,
+            } => format!(
+                "{} improvement check ({scope}, {agent}): {tokens_in} tok in / {tokens_out} out, \
+                 {suggestions} suggestion(s), {:.1}s",
+                ts.format("%Y-%m-%d %H:%M"),
+                *duration_ms as f64 / 1000.0,
+            ),
         }
     }
 }
@@ -211,6 +252,14 @@ pub struct MetricsSummary {
     /// Context trims applied to the counted agent's runs (context-rot
     /// signal: how often the model was forced to drop its own history).
     pub trims: u32,
+    /// 1c: self-improvement checks in the window (the loop's own cost).
+    pub checks: u32,
+    /// 1c: prompt tokens consumed by the counted checks (the loop's cost).
+    pub check_tokens_in: u64,
+    /// 1c: completion tokens produced by the counted checks.
+    pub check_tokens_out: u64,
+    /// 1c: total suggestions produced by the counted checks.
+    pub check_suggestions: u32,
 }
 
 impl MetricsSummary {
@@ -302,7 +351,8 @@ fn line_ts(line: &MetricsLine) -> &DateTime<Utc> {
         MetricsLine::Run { ts, .. }
         | MetricsLine::Feedback { ts, .. }
         | MetricsLine::SkillUse { ts, .. }
-        | MetricsLine::Trim { ts, .. } => ts,
+        | MetricsLine::Trim { ts, .. }
+        | MetricsLine::Check { ts, .. } => ts,
     }
 }
 
@@ -344,6 +394,12 @@ fn test_process_dir() -> PathBuf {
 /// lines — skills are shared across agents and the read_skill tool has no
 /// per-agent context, so usage is recorded fleet-wide.
 pub const SKILLS_FILE_STEM: &str = "skills";
+
+/// Reserved file (without the `.jsonl` suffix) for fleet-wide `check` lines
+/// (the self-improvement loop's own cost when reviewing the whole fleet at
+/// once). Like the skills file, it is not an agent, so `agent_names()` skips
+/// it.
+pub const FLEET_FILE_STEM: &str = "fleet";
 
 /// Per-agent metrics log (append-only JSONL, one file per agent).
 ///
@@ -503,6 +559,33 @@ impl MetricsLog {
         );
     }
 
+    /// Append a self-improvement-check line (the loop's own cost, 1c). The
+    /// line is written to `agent`'s file — for scope "agent" that is the
+    /// reviewed profile's file, for scope "fleet" the caller passes the
+    /// reserved "fleet" stem (so it lands in `fleet.jsonl`).
+    pub fn log_check(
+        &self,
+        agent: &str,
+        scope: &str,
+        tokens_in: u64,
+        tokens_out: u64,
+        suggestions: usize,
+        duration_ms: u64,
+    ) {
+        self.append(
+            agent,
+            &MetricsLine::Check {
+                ts: Utc::now(),
+                agent: agent.to_string(),
+                scope: scope.to_string(),
+                tokens_in,
+                tokens_out,
+                suggestions,
+                duration_ms,
+            },
+        );
+    }
+
     /// Read all lines for `agent` (oldest first), skipping corrupt lines.
     /// Returns an empty vec when the file does not exist.
     pub fn read_all(&self, agent: &str) -> Vec<MetricsLine> {
@@ -546,7 +629,7 @@ impl MetricsLog {
                 .to_str()
                 .and_then(|n| n.strip_suffix(".jsonl"))
             {
-                if stem == SKILLS_FILE_STEM {
+                if stem == SKILLS_FILE_STEM || stem == FLEET_FILE_STEM {
                     continue; // reserved cross-agent file, not an agent
                 }
                 names.push(stem.to_string());
@@ -604,6 +687,7 @@ impl MetricsLog {
                 MetricsLine::Feedback { ts, .. } => ts,
                 MetricsLine::SkillUse { ts, .. } => ts,
                 MetricsLine::Trim { ts, .. } => ts,
+                MetricsLine::Check { ts, .. } => ts,
             };
             if let Some(start) = start {
                 if *ts < start {
@@ -649,6 +733,17 @@ impl MetricsLog {
                     // Not counted in the per-agent summary (the skills file
                     // is fleet-wide); the ts filter above still applies.
                 }
+                MetricsLine::Check {
+                    tokens_in,
+                    tokens_out,
+                    suggestions,
+                    ..
+                } => {
+                    s.checks += 1;
+                    s.check_tokens_in += tokens_in;
+                    s.check_tokens_out += tokens_out;
+                    s.check_suggestions += *suggestions as u32;
+                }
             }
         }
         s
@@ -672,6 +767,37 @@ impl MetricsLog {
             }
         }
         seen
+    }
+
+    /// 1c: the self-improvement loop's own cost over `ts >= since`:
+    /// `(checks, tokens_in, tokens_out, suggestions)`. `agent` names one
+    /// profile's file; `None` = fleet-wide (every agent file + the reserved
+    /// fleet file).
+    pub fn loop_cost_since(
+        &self,
+        agent: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> (u32, u64, u64, u32) {
+        let names: Vec<String> = match agent {
+            Some(a) => vec![a.to_string()],
+            None => {
+                let mut n = self.agent_names();
+                n.push(FLEET_FILE_STEM.to_string());
+                n
+            }
+        };
+        let mut checks = 0u32;
+        let mut tokens_in = 0u64;
+        let mut tokens_out = 0u64;
+        let mut suggestions = 0u32;
+        for name in names {
+            let s = self.summary_since(&name, Some(since));
+            checks += s.checks;
+            tokens_in += s.check_tokens_in;
+            tokens_out += s.check_tokens_out;
+            suggestions += s.check_suggestions;
+        }
+        (checks, tokens_in, tokens_out, suggestions)
     }
 
     fn report_failure(&self, msg: &str) {
@@ -737,6 +863,28 @@ pub fn record_feedback(agent: &str, up: bool) {
 /// read_skill tool). Best-effort — usage is a signal, never load-bearing.
 pub fn record_skill_use(skill: &str) {
     MetricsLog::default().log_skill_use(skill);
+}
+
+/// Record a self-improvement check (the loop's own cost) in the DEFAULT
+/// metrics log (writer hook for the improver). `scope` is "agent" (written
+/// to `agent`'s file) or "fleet" (written to the reserved `fleet.jsonl`).
+/// Best-effort — the cost line must never fail the check.
+pub fn record_check(
+    agent: &str,
+    scope: &str,
+    tokens_in: u64,
+    tokens_out: u64,
+    suggestions: usize,
+    duration_ms: u64,
+) {
+    MetricsLog::default().log_check(
+        agent,
+        scope,
+        tokens_in,
+        tokens_out,
+        suggestions,
+        duration_ms,
+    );
 }
 
 #[cfg(test)]

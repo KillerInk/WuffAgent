@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::client::ChatClient;
-use crate::types::Message;
+use crate::types::{Message, Usage};
 
 /// Lightweight LLM client interface for agents.
 /// Simpler than `ChatClientLike` — no session management, just request/response.
@@ -15,6 +15,18 @@ use crate::types::Message;
 pub trait LlmClient: Send + Sync {
     /// Send a non-streaming request and return the full response.
     async fn complete(&self, messages: &[Message]) -> Result<String, String>;
+
+    /// Send a non-streaming request and return the full response plus the
+    /// server-reported token usage (`None` when the server reports none, or
+    /// for implementations that don't expose it — the default just calls
+    /// [`Self::complete`] with no usage). 1c: the self-improvement loop uses
+    /// this to cost its own checks.
+    async fn complete_with_usage(
+        &self,
+        messages: &[Message],
+    ) -> Result<(String, Option<Usage>), String> {
+        Ok((self.complete(messages).await?, None))
+    }
 
     /// Send a streaming request, yielding chunks via the callback and returning the accumulated response.
     async fn stream(
@@ -46,6 +58,17 @@ impl LlmClient for ChatClientAdapter {
         let client = self.client.clone();
         match client.complete_messages(messages, None).await {
             Ok((response, _)) => Ok(response),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    async fn complete_with_usage(
+        &self,
+        messages: &[Message],
+    ) -> Result<(String, Option<Usage>), String> {
+        let client = self.client.clone();
+        match client.complete_messages(messages, None).await {
+            Ok((response, usage)) => Ok((response, usage)),
             Err(e) => Err(e.to_string()),
         }
     }

@@ -195,6 +195,12 @@ impl Tool for ListImprovementStatusTool {
             for line in recent {
                 out.push_str(&format!("\n    {}", line.describe()));
             }
+            // 1c: the loop's own cost for this agent over the last 7 days.
+            let (checks, ci, co, sugg) =
+                log.loop_cost_since(Some(name), Utc::now() - Duration::days(7));
+            out.push_str(&format!(
+                "\n  loop cost (7d): {checks} check(s), {ci} tok in / {co} tok out, {sugg} suggestion(s)"
+            ));
             return Ok(ToolOutput::success(out));
         }
 
@@ -261,6 +267,12 @@ impl Tool for ListImprovementStatusTool {
                 }
             }
         }
+        // 1c: the loop's own cost fleet-wide over the same window (every
+        // agent file + the reserved fleet file).
+        let (checks, ci, co, sugg) = log.loop_cost_since(None, window_since);
+        out.push_str(&format!(
+            "\n  loop cost ({days}d, all agents): {checks} check(s), {ci} tok in / {co} tok out, {sugg} suggestion(s)"
+        ));
         Ok(ToolOutput::success(out))
     }
 }
@@ -580,5 +592,50 @@ mod tests {
                 Err(e) => panic!("unexpected ToolError: {e}"),
             }
         }
+    }
+
+    /// 1c: both views report the loop's own cost (check count + tokens +
+    /// suggestions) from the metrics log — the per-agent view over a fixed
+    /// 7-day window (only that agent's file), the fleet view over the `days`
+    /// window (every agent file + the reserved fleet file).
+    #[test]
+    fn views_report_loop_cost() {
+        let (_dir, manager) = fresh_manager();
+
+        // Seed a fresh metrics dir with one agent check (coder) and one
+        // fleet check, returning the log.
+        let seed = |dir: &std::path::Path| {
+            let log = crate::agents::metrics::MetricsLog::new(dir);
+            log.log_check("coder", "agent", 120, 40, 2, 1_234);
+            log.log_check(
+                crate::agents::metrics::FLEET_FILE_STEM,
+                "fleet",
+                500,
+                120,
+                5,
+                5_000,
+            );
+            log
+        };
+
+        // Per-agent view: fixed 7-day window, only "coder"'s own file.
+        let dir1 = tempfile::tempdir().unwrap();
+        let tool1 = ListImprovementStatusTool::new(manager.clone()).with_log(seed(dir1.path()));
+        let out = run_with_agent(&tool1, "coder");
+        assert!(
+            out.contains("loop cost (7d): 1 check(s), 120 tok in / 40 tok out, 2 suggestion(s)"),
+            "got: {out}"
+        );
+
+        // Fleet view: window = the `days` param (2), all agents + fleet file.
+        let dir2 = tempfile::tempdir().unwrap();
+        let tool2 = ListImprovementStatusTool::new(manager).with_log(seed(dir2.path()));
+        let out = run_days(&tool2, 2);
+        assert!(
+            out.contains(
+                "loop cost (2d, all agents): 2 check(s), 620 tok in / 160 tok out, 7 suggestion(s)"
+            ),
+            "got: {out}"
+        );
     }
 }

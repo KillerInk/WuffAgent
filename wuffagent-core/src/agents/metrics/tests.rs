@@ -440,3 +440,128 @@ fn test_trim_only_summary_is_not_empty() {
     assert!(!s.format_line().is_empty(), "trim-only summary must not be empty");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 1c: check lines (the loop's own cost) round-trip through the JSONL store —
+/// an agent-scoped check lands in the reviewed profile's file, a fleet-scoped
+/// one in the reserved `fleet.jsonl`; the reserved file is not reported as an
+/// agent; describe() renders the line.
+#[test]
+fn test_check_line_roundtrip_and_reserved_fleet_file() {
+    let dir = tmp_dir("check-line");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+    // Agent-scoped check → the reviewed profile's file.
+    log.log_check("coder", "agent", 120, 40, 2, 1_234);
+    // Fleet-scoped check → the reserved fleet.jsonl (FLEET_FILE_STEM).
+    log.log_check(FLEET_FILE_STEM, "fleet", 500, 120, 5, 5_000);
+
+    // Agent-scoped check lives in coder.jsonl and round-trips its fields.
+    let coder = log.read_all("coder");
+    assert_eq!(coder.len(), 1, "got: {coder:?}");
+    match &coder[0] {
+        MetricsLine::Check {
+            agent,
+            scope,
+            tokens_in,
+            tokens_out,
+            suggestions,
+            duration_ms,
+            ..
+        } => {
+            assert_eq!(agent, "coder");
+            assert_eq!(scope, "agent");
+            assert_eq!(*tokens_in, 120);
+            assert_eq!(*tokens_out, 40);
+            assert_eq!(*suggestions, 2);
+            assert_eq!(*duration_ms, 1_234);
+        }
+        other => panic!("expected check line, got {other:?}"),
+    }
+
+    // Fleet-scoped check lives in the reserved fleet.jsonl.
+    let fleet = log.read_all(FLEET_FILE_STEM);
+    assert_eq!(fleet.len(), 1, "got: {fleet:?}");
+    assert!(matches!(
+        &fleet[0],
+        MetricsLine::Check { scope, .. } if scope == "fleet"
+    ));
+
+    // The reserved fleet file must not show up as an agent.
+    let names = log.agent_names();
+    assert_eq!(names, vec!["coder".to_string()], "got: {names:?}");
+
+    // describe() renders the line for raw-line lists.
+    let d = coder[0].describe();
+    assert!(d.contains("2 suggestion"), "got: {d}");
+    assert!(d.contains("120 tok in"), "got: {d}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 1c: check lines aggregate in the per-agent summary and the
+/// `loop_cost_since` helper (per-agent and fleet-wide) reports the loop's own
+/// cost.
+#[test]
+fn test_check_summary_and_loop_cost() {
+    let dir = tmp_dir("check-summary");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+    // A run (not counted as loop cost) + two agent checks for "coder".
+    log.log_run("coder", 4, 1, 1, 5_000, RunOutcome::Verified, 10, 5);
+    log.log_check("coder", "agent", 100, 20, 2, 1_000);
+    log.log_check("coder", "agent", 300, 60, 3, 2_000);
+    // A fleet check + a check for a second agent.
+    log.log_check(FLEET_FILE_STEM, "fleet", 500, 100, 5, 4_000);
+    log.log_check("researcher", "agent", 50, 10, 1, 300);
+
+    // Per-agent summary counts the checks (and still reports the run).
+    let s = log.summary_since("coder", None);
+    assert_eq!(s.runs, 1);
+    assert_eq!(s.checks, 2);
+    assert_eq!(s.check_tokens_in, 400);
+    assert_eq!(s.check_tokens_out, 80);
+    assert_eq!(s.check_suggestions, 5);
+
+    // Per-agent loop cost (7-day window covers all the `now()`-stamped lines).
+    let (c, ti, to, sg) =
+        log.loop_cost_since(Some("coder"), Utc::now() - chrono::Duration::days(7));
+    assert_eq!((c, ti, to, sg), (2, 400, 80, 5));
+
+    // Fleet-wide loop cost sums every agent file + the reserved fleet file.
+    let (c, ti, to, sg) =
+        log.loop_cost_since(None, Utc::now() - chrono::Duration::days(7));
+    assert_eq!((c, ti, to, sg), (4, 950, 190, 11), "got: ({c}, {ti}, {to}, {sg})");
+
+    // A window in the future reports zero cost.
+    let (c, ti, to, sg) =
+        log.loop_cost_since(None, Utc::now() + chrono::Duration::days(1));
+    assert_eq!((c, ti, to, sg), (0, 0, 0, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 1c: the `record_check` free hook (the writer the improver actually calls)
+/// lands in the DEFAULT log, honoring the process-global test override — so a
+/// scope "agent" check goes to the profile file and a scope "fleet" check to
+/// `fleet.jsonl`.
+#[test]
+fn test_record_check_writes_default_log() {
+    let override_dir = tmp_dir("record-check");
+    let _ = std::fs::remove_dir_all(&override_dir);
+    set_metrics_dir_for_testing(Some(override_dir.clone()));
+    record_check("coder", "agent", 11, 3, 1, 500);
+    record_check(FLEET_FILE_STEM, "fleet", 22, 6, 2, 700);
+    let log = MetricsLog::default();
+    let coder = log.read_all("coder");
+    assert_eq!(coder.len(), 1, "got: {coder:?}");
+    assert!(matches!(
+        &coder[0],
+        MetricsLine::Check { scope, .. } if scope == "agent"
+    ));
+    let fleet = log.read_all(FLEET_FILE_STEM);
+    assert_eq!(fleet.len(), 1, "got: {fleet:?}");
+    assert!(matches!(
+        &fleet[0],
+        MetricsLine::Check { scope, .. } if scope == "fleet"
+    ));
+    set_metrics_dir_for_testing(None);
+    let _ = std::fs::remove_dir_all(&override_dir);
+}

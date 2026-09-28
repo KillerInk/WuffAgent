@@ -567,7 +567,13 @@ pub async fn suggest_improvements(
         image: None,
     }];
 
-    let response = llm_client.complete(&messages).await?;
+    let check_start = std::time::Instant::now();
+    let (response, check_usage) = llm_client.complete_with_usage(&messages).await?;
+    let check_duration_ms = check_start.elapsed().as_millis() as u64;
+    let (check_tokens_in, check_tokens_out) = check_usage
+        .as_ref()
+        .map(|u| (u.prompt_tokens as u64, u.completion_tokens as u64))
+        .unwrap_or((0, 0));
 
     // Parse JSON response
     let trimmed = response.trim();
@@ -582,6 +588,17 @@ pub async fn suggest_improvements(
         serde_json::from_str::<Vec<ImprovementSuggestion>>(json)
             .map_err(|e| format!("Failed to parse improvement suggestions: {}", e))?
     };
+
+    // 1c: record the loop's own cost for this check (best-effort — never
+    // fails the check).
+    crate::agents::metrics::record_check(
+        &agent_config.name,
+        "agent",
+        check_tokens_in,
+        check_tokens_out,
+        suggestions.len(),
+        check_duration_ms,
+    );
 
     // I3: attach the evidence the improver actually saw (deterministic —
     // not the LLM's echo of it) so the review panel can show why.
@@ -1058,7 +1075,13 @@ pub async fn suggest_fleet_improvements(
         image: None,
     }];
 
-    let response = llm_client.complete(&messages).await?;
+    let check_start = std::time::Instant::now();
+    let (response, check_usage) = llm_client.complete_with_usage(&messages).await?;
+    let check_duration_ms = check_start.elapsed().as_millis() as u64;
+    let (check_tokens_in, check_tokens_out) = check_usage
+        .as_ref()
+        .map(|u| (u.prompt_tokens as u64, u.completion_tokens as u64))
+        .unwrap_or((0, 0));
 
     // Parse (same tolerant JSON extraction as the per-agent path).
     let trimmed = response.trim();
@@ -1072,6 +1095,17 @@ pub async fn suggest_fleet_improvements(
         serde_json::from_str::<Vec<ImprovementSuggestion>>(json)
             .map_err(|e| format!("Failed to parse fleet improvement suggestions: {}", e))?
     };
+
+    // 1c: record the loop's own cost for this fleet-wide check (best-effort —
+    // never fails the check).
+    crate::agents::metrics::record_check(
+        crate::agents::metrics::FLEET_FILE_STEM,
+        "fleet",
+        check_tokens_in,
+        check_tokens_out,
+        suggestions.len(),
+        check_duration_ms,
+    );
 
     // I3-style: attach the deterministic evidence (the fleet block itself,
     // display-truncated) so the panel shows WHY each suggestion was made.
