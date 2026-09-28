@@ -1,9 +1,11 @@
 # WuffAgent Statistics Improvement Plan (2026-09-29)
 
-**Status:** OPEN (wuffagent). Companion to `self-improvement-gaps-3.md` (the
-improvement *loop* over these metrics — this plan is the metrics/statistics
-side: what is recorded, what can be computed, and what the user/agents can
-see).
+**Status:** IMPLEMENTATION-READY (wuffagent). The plan body below is code-level
+(file / struct / call-site anchors verified against the tree on 2026-09-29;
+line numbers are current at writing time — re-grep the symbol per item).
+Companion to `self-improvement-gaps-3.md` (the improvement *loop* over these
+metrics — this plan is the metrics/statistics side: what is recorded, what can
+be computed, and what the user/agents can see).
 
 ## Current state (verified in code, 2026-09-29)
 
@@ -131,139 +133,339 @@ trends, no costs, no joins.**
   for lesson-driven; the metric-delta line should always render when that
   path fired).
 
-## Plan
+## Implementation plan
 
-### Phase 1 — record what's missing (writers only; all serde-tolerant; ~1 day)
-- **1a. Per-tool histogram on run lines (A1).** New field
-  `tools: Vec<ToolStat { name, calls, errors, duration_ms }>` (or `#[serde(
-  default)]` map) on `MetricsLine::Run`, filled by the same
-  `&mut RunStats` path that fixed commit 1827079 (per-tool increments in
-  `run_native_tool_calls`/`run_text_embedded_calls` — the call site already
-  knows the tool name and can time each call). Cap the vec (e.g. top-32 by
-  calls, rest folded into `"__other__"`) so a 1000-tool run stays one
-  compact line. `MetricsSummary` gains `tool_stats` accumulation;
-  `describe()` unchanged (the UI/tool reads the field).
-- **1b. Model + cost on run lines (A3, A5).** Add `model: String` (from the
-  server-reported model of the run's calls; `""` when unknown) and
-  `cost_usd: f64` to `Run` (and `Check`/`Eval`): a small price table in
-  `config/` (`model_prices: Vec<(model, per_1M_in, per_1M_out)>`,
-  serde-defaulted, user-editable, fallback 0.0 = "recorded but unpriced").
-  Cost is computed at write time (stable history even if prices change).
-- **1c. Eval score (A4).** The `score` field exists on `MetricsLine::Eval`
-  but `log_eval` hard-codes `None` — and the verification judge
-  (`verify_tool_outputs`, verified in `run_eval.rs`) returns
-  `verified: bool` + `judge_reason: String` with **no score today**. So this
-  needs a real change, not a wire-up: extend the judge prompt (the `expect`
-  grading call in `run_eval`) to also emit a `0.0–1.0` score line and parse
-  it into the verdict struct (fallback: 1.0 pass / 0.0 fail, labeled
-  "derived"). One extra line in the prompt, not a second LLM call.
-- **1d. Duration split (A6).** `Run` gains `llm_ms` and `tools_ms`
-  (verification LLM time folds into `llm_ms` or a third field
-  `verify_ms` — pick during impl, keep `duration_ms` as the total for
-  backward compat).
-- **1e. run_id + session_id (A2, the join key).** `Run` (and `Trim`, and the
-  new per-run feedback) gain `run_id: String` (uuid or
-  `ts-agent-counter`); `session_id: String` where the run has one. The usage
-  recorder gets the same `run_id` (it's called per LLM round inside the
-  loop — thread the id through). This is the enabler for B4/A7; cheap now,
-  expensive to backfill later.
-- Gate: `cargo test --workspace` green; no warnings; one commit per item;
-  restart (core changed). All new fields `#[serde(default)]` (established
-  pattern — old lines stay readable).
+### Conventions (apply to every item)
+- **Serde tolerance:** every new field is `#[serde(default)]`; every reader
+  treats a missing value as *unknown*, never as zero (a 50% unknown-model
+  share is a real signal, not noise to drop).
+- **Commits:** one commit per item, message `stats(<id>): <what>`, made
+  immediately after `cargo test --workspace` is green with no new warnings
+  (M: drive — never leave artifacts untracked).
+- **Test seams (existing, reuse — never the real `~/.wuffagent`):**
+  - metrics: `MetricsLog::new(tempdir)` / `set_metrics_dir_for_testing`
+    (process-global lock, like `CONFIG_PATH_LOCK`);
+  - usage: `ChatClient::set_usage_recorder` + a mock SSE server
+    (pattern: the tests in `run_eval.rs` — `spawn_mock_sse`/`mock_client`).
+- **Restart:** core-crate changes require a WuffAgent restart — done
+  **after each phase** (dual-target self-restart: omit `build_cmd`/
+  `exe_path`), then verify the live build path (the running exe may be the
+  other, stale target build).
+- **Mechanical fallout — handle in the SAME commit that triggers it:**
+  - `RunStats` (agents/types.rs:85) is currently `Copy`. Items 1a/1d add a
+    `Vec` → drop `Copy` (keep `Debug, Clone, Default, PartialEq`); grep
+    `RunStats` for implicit-copy uses (improver code, `agent.run_stats()`
+    call sites in run_eval.rs / mod.rs — a clone is fine there).
+  - Exhaustive `MetricsLine::Run { … }` constructions that must gain the new
+    fields when the variant changes: `log_run` (metrics.rs:555),
+    agents/metrics/tests.rs:40/131/178/244,
+    tools/builtin/improvement/metrics.rs:492 (+ its `record_run` helper at
+    :442). Re-grep `MetricsLine::Run {` per item — line numbers drift.
 
-### Phase 2 — compute what's new + make reads cheap (~1 day)
-- **2a. Incremental metrics reader (D1).** Port the `UsageLogReader` pattern
-  (byte offset, torn-line buffer, shrink-rescan) to `MetricsLog` as
-  `MetricsLogReader`; cache parsed lines in the egui app keyed by
-  (file, offset) so the agent editor stops doing two full scans per frame.
-  Keep `read_all` for the tool path (one-shot) — or route it through the
-  reader too.
-- **2b. Trend bucketing for the metrics store (B2).** Reuse
-  `usage::stats::bucketize`'s `Granularity` (hour/day/week) — extract the
-  shared bucket math into a small `stats_core` (or make `usage::stats`
-  generic over a `Fold` trait) so runs/outcomes/error rate/tokens get the
-  same zero-filled windows. This kills the D3 duplication too.
-- **2c. Distribution + comparison primitives (B1, B3).** `MetricsSummary`
-  (or a new `MetricsReport`) gains p50/p95 duration+tokens and a
-  `compare_with_previous_window()` (same-length preceding window — the exact
-  before/after rule the I5 effect check uses, so the numbers match the
-  loop).
-- **2d. `read_metrics` v2 (E1, E2).** Add a per-tool table (from 1a:
-  top-5 by errors, with call counts + error % + avg ms), p50/p95 lines, and
-  a `compare: bool` param (renders current window vs previous window with
-  deltas — "error rate 12% → 34% (Δ+22pp)"). Surface the 1a evidence-gate
-  deltas verbatim in `list_improvement_status` when that path fired (E2).
-- Gate: workspace green; `read_metrics` on the live store returns the new
-  sections (dogfood: call it as an agent); commit per item.
+### Phase 1 — writers (5 commits, in this order: 1a → 1e → 1d → 1b → 1c)
+1d depends on 1a's `tools` vec (for `tools_ms`); the rest are independent.
 
-### Phase 3 — the user-facing surface (~2 days)
-- **3a. Fleet dashboard panel (C1).** New top-level egui panel: per-agent KPI
-  cards (runs, outcome %, error rate, tokens+cost, last activity — all
-  windowed, default 30d) + a trend chart reusing the usage panel's chart
-  code (dual-series: runs bar + error-rate line). The loop-status section
-  (from `read_metrics status=true`'s data, computed in core) renders as a
-  compact table. Data comes through the Phase-2 primitives, so the panel is
-  render-only.
-- **3b. Agent editor windowing (C2).** Replace the all-time block: 7d/30d/
-  all-time toggle, per-tool table (1a data), outcome mini-chart, and — once
-  A7 exists — per-run feedback. Backed by the cached reader (2a), so the
-  per-frame cost is the incremental tail only.
-- **3c. Usage panel filters + cost (C3).** Agent and model dropdown filters
-  (the fields exist per line) and a cost stat card (1b price table; "unpriced
-  tokens" noted when `cost_usd == 0`).
-- **3d. Per-run user feedback (A7, the 3c of gaps-3, done here because the
-  UI is already open).** 👍/👎 on the last N run lines in the agent editor →
-  `MetricsLine::Feedback { ts, run_id, … }` (serde-tolerant: legacy lines
-  have no `run_id` and still count as message-level). Summary counts them
-  separately (run-level sentiment vs message-level).
-- Gate: workspace green; restart; screenshot the dashboard on the live
-  store; commit per item.
+**1a. Per-tool histogram on run lines (A1)** — `stats(1a)`
+Files: `agents/types.rs`, `agents/agent/tool_calls.rs`, `agents/metrics.rs`.
+1. types.rs — new type + `RunStats` extension:
+```rust
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolStat {
+    pub name: String,      // tool name; "__other__" is the fold bucket
+    pub calls: u32,
+    pub errors: u32,       // "Error: ..." outputs
+    pub duration_ms: u64,
+}
+// RunStats: drop `Copy`; add `pub tools: Vec<ToolStat>`
+impl RunStats {
+    /// Aggregate one tool call. O(n) scan over ≤32 entries; allocates only
+    /// for first-seen names. >32 distinct names fold into "__other__".
+    pub fn bump_tool(&mut self, name: &str, error: bool, ms: u64) { /* … */ }
+}
+```
+2. tool_calls.rs — at the existing per-call sites where
+   `stats.tool_errors` is incremented (inside BOTH `run_native_tool_calls`
+   and `run_text_embedded_calls`): wrap the call in `let t = Instant::now();`
+   and after it add
+   `stats.bump_tool(tool_name, output.starts_with("Error:"), t.elapsed().as_millis() as u64);`
+3. metrics.rs — `MetricsLine::Run` gains `#[serde(default)] pub tools: Vec<ToolStat>`.
+   `log_run` (metrics.rs:542) changes its loose `tool_calls`/`tool_errors`/
+   `verification_attempts` params to `stats: &RunStats` (cleaner for 1d too);
+   the free writer hook `record_run` (metrics.rs:912) mirrors it. Update the
+   exhaustive-construction sites listed in Conventions.
+Tests: `bump_tool` aggregation (calls/errors/summed ms), `__other__` fold at
+33 distinct names; serde roundtrip with `tools`; a legacy line (no `tools`)
+deserializes to `tools.is_empty()`; existing metrics tests green after the
+`log_run` signature change.
 
-### Phase 4 — joins, lifecycle, export (~1 day)
-- **4a. Cross-store join views (B4, B5).** With `run_id` in both stores
-  (1e): "run detail" — given a run line, list its LLM rounds (model,
-  tokens, thinking_chars per round) and its per-tool stats; and the cheap
-  correlations (trim→gave_up share, retry trend) computed in core and shown
-  in the agent editor / `read_metrics`.
-- **4b. Rollup + rotation (D2).** Nightly (first app start after midnight,
-  best-effort) write `metrics/rollups/<agent>-YYYY-MM-DD.json` (one
-  day-summary per agent) and prune raw `run` lines older than
-  `metrics_retention_days` (new config, default 90; feedback/eval/trim/check
-  lines kept — they're the small, high-signal kinds). Readers check the
-  rollup for out-of-window history so pruning never loses aggregates.
-- **4c. Export (D4).** `read_metrics` gains `export: "csv"|"json"` (windowed
-  raw lines → temp file path in the output) — or a dedicated
-  `export_metrics` tool if the param sprawl bites; either way one file the
-  user can open for external analysis.
-- **4d. Schema version (D3).** `v: u32` (default 1) on all line kinds; the
-  tolerant-parse behavior is unchanged, the version is just the migration
-  anchor.
-- Gate: workspace green; restart; verify a day of live lines rolls up and
-  prunes correctly on a copy of the store (test override dir — never the
-  real one, per the metrics-pollution lesson).
+**1e. run_id + session_id join keys (A2)** — `stats(1e)`
+Files: `agents/metrics.rs`, `agents/agent/loop.rs`, `client/mod.rs`,
+`usage/recorder.rs`.
+1. metrics.rs — `Run` gains `#[serde(default)] pub run_id: String` and
+   `#[serde(default)] pub session_id: String`; `Trim` gains
+   `#[serde(default)] pub run_id: String`. The free `record_trim` hook gains
+   a `run_id: &str` param — its 3 call sites (loop.rs:299/460/634) are all
+   inside `run_llm_loop`, where the id is in scope.
+2. loop.rs — top of `run_llm_loop`:
+   `let run_id = format!("{}-{}", chrono::Utc::now().timestamp_millis(), self.config.name);`
+   (readable; no uuid call needed — the dep exists anyway). Thread into
+   `record_run(…, run_id, session_id)` (`session_id` from
+   `self.session_id().unwrap_or_default()`) and into `record_trim`.
+3. client/mod.rs + usage/recorder.rs — `UsageEntry` gains
+   `#[serde(default)] pub run_id: String`. `ChatClient` gains
+   `run_id: Arc<Mutex<Option<String>>>` + `pub fn set_run_id(&self, id: Option<&str>)`
+   — same stamping pattern as `set_agent_name` (client/mod.rs:287); the loop
+   stamps it at run start and clears (`None`) at run end. `record_usage`
+   (client/mod.rs:318) stamps
+   `run_id: self.run_id.lock().unwrap().clone().unwrap_or_default()`.
+Tests: mock SSE + injected recorder → the written `UsageEntry` carries the
+stamped `run_id`/`session_id`; metrics roundtrip with/without ids; legacy
+`Trim` line → `run_id == ""`.
 
-## Explicit out of scope
-- Sentiment/quality analysis of actual task content (needs the session
-  store, own plan).
-- Changing the improvement *loop* itself (gaps-3 territory; this plan only
-  feeds it better data — 1a/1e make its 1a evidence gate strictly more
-  precise, which is a free win, not a change).
-- Multi-user / remote aggregation (single-machine app).
-- GPU/egui perf work beyond the reader cache (2a).
+**1d. Duration split (A6)** — `stats(1d)`
+Files: `agents/types.rs`, `agents/agent/loop.rs`, `agents/agent/verify.rs`,
+`agents/metrics.rs`.
+1. types.rs — `RunStats` gains `pub llm_ms: u64` (main rounds only).
+2. loop.rs — wrap each round's LLM streaming await in `run_llm_loop` with an
+   `Instant`; after the round: `stats.llm_ms += t.elapsed().as_millis() as u64;`
+3. verify.rs — the judge call already measures `judge_started`
+   (verify.rs:184). `VerificationState` gains `pub judge_ms: u64`,
+   accumulated at verify.rs:194-198 from that same `Instant`.
+4. metrics.rs — `Run` gains `#[serde(default)] pub llm_ms: u64` and
+   `#[serde(default)] pub tools_ms: u64`. At the write site (the
+   `record_run` hook): `llm_ms = stats.llm_ms + verification_state.judge_ms`
+   (both in scope there) and
+   `tools_ms = stats.tools.iter().map(|t| t.duration_ms).sum()`.
+   `duration_ms` stays the wall-clock total (backward compat).
+Tests: crafted `RunStats` + `judge_ms` → `log_run` writes the right split;
+legacy line deserializes to `0/0`; assert `llm_ms + tools_ms ≤ duration_ms`
+on a fixture.
+
+**1b. model + cost_usd on run/eval lines (A3, A5)** — `stats(1b)`
+Files: `config/mod.rs`, new `usage/cost.rs`, `client/mod.rs`,
+`agents/metrics.rs`, `agents/agent` (builder + run-completion hook),
+`tools/builtin/improvement/run_eval.rs`.
+1. config/mod.rs:
+```rust
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPrice {
+    pub model: String,
+    pub per_1M_in_usd: f64,
+    pub per_1M_out_usd: f64,
+}
+// Config gains:
+#[serde(default)] pub model_prices: Vec<ModelPrice>,  // empty = unpriced
+```
+   (user-editable in config.json; ships empty — no guessed prices).
+2. New `usage/cost.rs`:
+   `pub fn cost_usd(prices: &[ModelPrice], model: &str, prompt_tokens: u64, completion_tokens: u64) -> f64`
+   — case-insensitive exact model match; `0.0` when the model is unknown or
+   the table is empty (0.0 = "recorded but unpriced").
+3. client/mod.rs — `ChatClient` gains `last_model: Arc<Mutex<Option<String>>>`;
+   `record_usage` (where `model` is already a param, client/mod.rs:335)
+   stamps it; `pub fn last_model(&self) -> String` ("" when unknown).
+   Safe today: clients are per-session and agents run sequentially per
+   session (same assumption as `set_agent_name`); evals use `fresh()`
+   (isolated). Note the assumption in a comment.
+4. metrics.rs — `Run` gains `#[serde(default)] pub model: String` and
+   `#[serde(default)] pub cost_usd: f64`; `record_run` (metrics.rs:912)
+   gains `model: &str, prices: &[ModelPrice]`; the agent's run-completion
+   hook passes `&self.client.last_model()` and `&self.model_prices`.
+   `AgentBuilder` gains `.model_prices(Vec<ModelPrice>)` → `Agent` field
+   (the app's pipeline build site passes `config.model_prices.clone()` —
+   grep the `AgentBuilder::new` call sites outside tests). `Eval` gains
+   `model`/`cost_usd` too; `log_eval` (metrics.rs:647) gains
+   `model: &str, cost_usd: f64` params.
+5. run_eval.rs — `RunEvalTool` gains a `model_prices: Vec<ModelPrice>`
+   field (extend its single `RunEvalTool::new` construction site in the app);
+   `EvalOnce` gains `model: String` (from `client.last_model()` next to the
+   existing `agent.run_tokens()` at run_eval.rs:122); the three `log_eval`
+   call sites (:323/:355/:367) pass `model` +
+   `cost_usd(&self.model_prices, &r.model, r.tokens_in, r.tokens_out)`
+   (error/timeout paths: `""` / `0.0`).
+Tests: `cost_usd` table (match, case-insensitivity, unknown model, empty
+table, arithmetic); `log_run` writes model+cost (tempdir); the existing
+`run_eval` mock test extended: the Eval line carries a model + `0.0` cost
+(no prices configured).
+
+**1c. Eval score via judge-prompt extension (A4)** — `stats(1c)`
+Files: `agents/agent/verify.rs`, `agents/metrics.rs`,
+`tools/builtin/improvement/run_eval.rs`.
+1. verify.rs — extend `VERIFICATION_SYSTEM_PROMPT` (verify.rs:75) with one
+   final sentence: *on the LAST line, respond with `SCORE: <x>` where x is a
+   decimal 0.0–1.0 for how well the response satisfies the request.*
+   (The NEEDS_FIX/VERIFIED detection is substring-based; a score line cannot
+   flip it — the score contains no verdict tokens.) New pure fn
+   `parse_judge_score(text: &str) -> Option<f64>`: case-insensitive find of
+   `SCORE:`, parse the following float, clamp to `0..=1`, `None` when
+   absent/malformed. `VerificationVerdict` gains `pub score: Option<f64>`;
+   `verify_tool_outputs` sets it from the parsed response on BOTH outcome
+   branches; the no-tool-outputs shortcut returns `Some(1.0)` (derived).
+2. metrics.rs — `log_eval` (metrics.rs:647) gains `score: Option<f64>`
+   (the `score` field already exists on `MetricsLine::Eval` — writer only).
+3. run_eval.rs — `EvalOnce` gains `score: Option<f64>` (from
+   `verdict.score`); all three `log_eval` call sites pass it
+   (error/timeout → `None`); the test `MockLlm` response gains a
+   `SCORE: 0.9` line and the table test asserts the Eval line stored
+   `Some(0.9)`.
+Tests: `parse_judge_score` table (valid, `>1` clamp, negative, missing,
+garbage after colon, lowercase); eval line stores the score end-to-end.
+
+### Phase 2 — analysis + cheap reads (4 commits)
+
+**2a. Incremental metrics reader + egui cache (D1)** — `stats(2a)`
+- New `MetricsLogReader` in `agents/metrics.rs` (or `agents/metrics/reader.rs`):
+  port the `UsageLogReader` pattern (grep it in `usage/`): byte-offset poll,
+  torn-line buffer, shrink/rotate → full rescan.
+- egui: the agent editor (agent_config.rs:521 block) does
+  `summary_since(name, None)` + `recent(5)` = two full scans **per frame**.
+  Add to the egui app struct:
+  `metrics_cache: Mutex<HashMap<String /*agent*/, (u64 /*len*/, SystemTime, Vec<MetricsLine>)>>`
+  with a helper that re-reads only when (len, mtime) changed. Add
+  `MetricsSummary::from_lines(&[MetricsLine])` so the cache path and the
+  file path share one computation; the editor builds its block from the
+  cached vec.
+- `ReadMetricsTool` keeps `read_all` (one-shot, agent-facing).
+Tests: append → poll returns exactly the new line; half-written line buffers
+and completes next poll; file truncated → rescan; `from_lines` matches
+`summary_since` on the same fixture.
+
+**2b. Shared bucketing for the metrics store (B2, part of D3)** — `stats(2b)`
+- New module `wuffagent-core/src/stats/bucket.rs`: move the `Granularity`
+  enum + zero-filled window math out of `usage/stats.rs` (usage re-exports
+  so its call sites/tests stay green).
+- metrics.rs:
+  `pub fn bucket_summary(&self, agent: &str, granularity: Granularity, since: Option<DateTime<Utc>>) -> Vec<BucketSummary>`
+  with `BucketSummary { start, runs, tool_errors, gave_up, verified_after_retry, tokens_in, tokens_out, duration_ms_sum }`
+  — one `read_all` + the shared bucket fn.
+Tests: zero-filled windows on a sparse fixture (mirror the usage bucket
+tests), DST-safe boundary case ported from `usage/stats.rs`.
+
+**2c. Percentiles + comparison window (B1, B3)** — `stats(2c)`
+- Pure `fn percentile(sorted: &[f64], p: f64) -> Option<f64>` (linear
+  interpolation; unit-tested incl. empty/1-element).
+- New `MetricsReport` (metrics.rs) = everything `MetricsSummary` has, plus:
+  `p50_duration_ms, p95_duration_ms, p50_tokens, p95_tokens`
+  (`tools_ms`-free: per-run `tokens_in+tokens_out`),
+  `tool_stats: Vec<ToolStat-like {name, calls, errors, avg_ms}>` (from
+  `Run.tools`), `model_mix: Vec<(String model, u32 runs)>`.
+  `pub fn report(&self, agent: &str, since: Option<…>, end: Option<…>) -> MetricsReport`.
+- `pub fn compare(&self, agent: &str, days: u32) -> (MetricsReport /*current*/, MetricsReport /*previous*/)`
+  — current `[now-days, now)` vs the same-length preceding window, both via
+  the same windowed reader (`summary_between`/`report`) so the numbers
+  match what the I5 effect check computes.
+Tests: percentile edges; `compare` on the 4-day fixture (metrics/tests.rs:178
+shape) → correct window split at the boundary.
+
+**2d. `read_metrics` v2 (E1, E2)** — `stats(2d)`
+- `tools/builtin/improvement/metrics.rs` (`ReadMetricsTool`): new optional
+  param `compare: bool` (default false). Per-agent output gains:
+  - `Tools (top by errors):` — top-5 from `report.tool_stats`
+    (`name, calls, err%, avg ms`);
+  - `Percentiles: p50/p95 duration, p50/p95 tokens`;
+  - when `compare=true`: `Window: Nd vs previous Nd` — runs, error rate
+    (Δ in pp), gave_up, tokens, cost (when priced).
+- `list_improvement_status` (grep the tool file): when the evidence gate
+  fired via the metric-delta path, render the actual deltas — recomputed
+  with the SAME `MetricsLog::compare` primitive the gate uses (share the
+  fn, so the two can't diverge).
+Dogfood gate: call `read_metrics(agent=…, compare=true)` live and confirm
+the new sections render from the real store.
+
+### Phase 3 — user-facing surface (4 commits)
+
+**3a. Fleet dashboard panel (C1)** — `stats(3a)`
+- New `wuffagent-egui/src/ui/dashboard.rs`: window toggle (7d/30d, default
+  30d); per-agent KPI card row (runs, outcome %, error rate, tokens + $,
+  last activity — all from `report`/`compare`); 30-day trend chart (runs
+  bars + error-rate line; reuse the usage panel's chart drawing — extract a
+  shared draw fn into `ui/charts.rs` if the coupling is awkward); a compact
+  loop-status table. The core fn behind `read_metrics status=true` is
+  currently tool-local in improvement/metrics.rs — extract it to core so
+  UI and tool share one implementation.
+- Register the panel next to the usage panel mount (grep `usage_panel` in
+  the egui layout code).
+**3b. Agent editor windowing (C2)** — `stats(3b)`
+- agent_config.rs:521 block: 7d/30d/all-time toggle; per-tool table
+  (`report.tool_stats`); outcome mini-chart; all backed by 2a's cached vec
+  (no full scan per frame).
+**3c. Usage panel filters + cost (C3)** — `stats(3c)`
+- usage_panel.rs: agent + model dropdown filters (filter the loaded
+  in-memory lines — both fields exist per line; distinct values feed the
+  dropdowns); a cost card summing `cost_usd(config.model_prices, line.model,
+  prompt, completion)` over the window, with an "unpriced tokens: N" note
+  for lines whose model is missing from the table.
+**3d. Per-run user feedback (A7 — gaps-3's 3c, done here: UI already open)**
+— `stats(3d)`
+- metrics.rs: `Feedback` gains `#[serde(default)] pub run_id: Option<String>`
+  (legacy lines → `None` = message-level); new `log_feedback_run(agent,
+  run_id, up)`. Agent editor (3b's run table): 👍/👎 buttons per recent run
+  row → writes the line. `MetricsReport` counts run-level vs message-level
+  separately.
+
+### Phase 4 — joins, lifecycle, export (4 commits)
+
+**4a. Cross-store join views (B4, B5)** — `stats(4a)`
+- Core fn `run_detail(agent: &str, run_id: &str) -> Option<RunDetail>` with
+  `RunDetail { run, rounds: Vec<UsageEntry>, feedback: Vec<FeedbackLine> }`:
+  `usage.jsonl` filtered by `run_id` (one read; on-demand only) + the run's
+  own tool stats + any run-level feedback.
+- Surface: agent editor (a run row expands to its rounds: model, tokens,
+  thinking_chars per round) and a `read_metrics` param `run_id: Option<String>`.
+- Correlations into `MetricsReport` (cheap, from existing fields):
+  gave_up share of runs with ≥1 trim vs without; retry-rate (per-bucket,
+  from `bucket_summary`).
+**4b. Rollup + rotation (D2)** — `stats(4b)`
+- Config: `#[serde(default = "default_retention")] pub metrics_retention_days: u32`
+  (default 90).
+- App startup (egui main, once per calendar day, marker file
+  `metrics/.rollup-state`): for each agent file, for each fully-elapsed day
+  older than retention that has no rollup yet: write
+  `metrics/rollups/<agent>-YYYY-MM-DD.json` (day summary in
+  `MetricsReport` shape incl. tool + model maps), then prune raw `run` lines
+  older than retention (feedback/skill_use/trim/check/eval lines are kept —
+  small, high-signal).
+- `report`/`summary_between` consult the rollup files for days before the
+  raw file's min ts, so pruning never loses an aggregate the dashboards or
+  the loop read.
+Tests: temp store with synthetic old lines (test-override dir — never the
+real `~/.wuffagent`, per the metrics-pollution lesson): day rolls up once,
+raw run lines prune, out-of-window aggregates still answer.
+**4c. Export (D4)** — `stats(4c)`
+- `ReadMetricsTool` gains `export: Option<String>` (`"csv"|"json"`): windowed
+  raw lines (all kinds, `agent` column added for fleet) →
+  `~/.wuffagent/exports/metrics-<agent|fleet>-<N>d-<ts>.<ext>`; the output
+  reports the file path. JSON = array of raw lines; CSV = flattened with a
+  `kind` column + ISO8601 `ts`.
+**4d. Schema version (D3)** — `stats(4d)`
+- `#[serde(default)] pub v: u32` on all 7 `MetricsLine` variants and on
+  `UsageEntry`; writers set `v: 1`. Purely the migration anchor — tolerant
+  parsing behavior unchanged.
+
+### Resolved decisions (no open questions)
+- Verification time folds into `llm_ms` (as `judge_ms`); no third field.
+- `tools_ms` is a STORED field (= sum of the `tools` vec) so summaries never
+  re-parse the vec.
+- Price table ships EMPTY (cost 0 = unpriced); wrong hardcoded prices
+  mislead more than no price.
+- `run_id` format: `<timestamp_millis>-<agent>` (readable in the log).
+- Eval score: extend the existing judge prompt (one LLM call, not a second);
+  the no-tool shortcut derives `Some(1.0)`.
+- Phase-1 order: 1a → 1e → 1d → 1b → 1c (only 1d needs 1a).
 
 ## Order & gates
 Phase 1 → 2 → 3 → 4 (2 needs 1's fields; 3 needs 2's primitives; 4 needs 1e).
-Each phase: `cargo test -p wuffagent-core` + `-p wuffagent-egui` + workspace
-build green, no warnings, one commit per item, restart WuffAgent after core
-changes (dual-target self-restart; verify which build is live afterwards).
-Commit this plan immediately after writing (M: drive drops untracked files).
+Per item: `cargo test --workspace` green, no new warnings, one commit.
+After each phase: restart WuffAgent (core changed — dual-target self-restart,
+omit `build_cmd`/`exe_path`) and verify the live build path; commit any
+follow-ups immediately (M: drive drops untracked files).
 
 ## Verification targets (definition of done for the round)
 - `read_metrics` answers "which tool fails most for agent X, and did it get
   worse this week?" — per-tool table + comparison window, from real data.
 - The fleet dashboard renders per-agent KPIs + 30-day trends; the agent
-  editor shows windowed stats without a full-file scan per frame (measurable
-  in a release build or by code inspection of the cached reader).
+  editor shows windowed stats without a full-file scan per frame (verifiable
+  by code inspection of the cached reader).
 - Token spend shows a USD figure wherever it shows tokens (priced models),
   and eval lines carry real scores.
 - A `gave_up` run can be traced to its individual LLM rounds via `run_id`.
@@ -271,18 +473,21 @@ Commit this plan immediately after writing (M: drive drops untracked files).
   aggregate the dashboards or the loop read.
 
 ## Notes / hazards
-- **Metrics pollution:** all writer changes get tests under
-  `set_metrics_dir_for_testing` (process-global lock, like `CONFIG_PATH_LOCK`
-  — the lesson from the 1827079 era). The run-writer lives in the hot path;
-  the per-tool histogram must stay a cheap increment (no allocation per
-  call — reuse the existing `RunStats` slot).
-- **Back-compat:** every field added in Phase 1 must be `#[serde(default)]`
-  and every reader must tolerate lines missing it (the 4c/1c/2b pattern
-  already in `metrics.rs`). Old lines get `model=""`, `cost_usd=0.0`,
-  empty tool lists — summaries must treat those as "unknown", not zero
-  (a 50% unknown-model share is a real signal, not noise to drop).
-- **Cost table cold start:** ship with an empty default table (cost = 0 =
-  unpriced) rather than guessing prices; the user adds their provider's
-  rates. Wrong hardcoded prices would mislead more than no price.
-- **M: drive:** mtimes lie, untracked files vanish — commit each phase's
+- **Metrics pollution:** all writer changes get tests under the temp-dir /
+  test-override seams listed in Conventions. The run-writer is in the hot
+  path; the per-tool histogram must stay a cheap increment (linear scan over
+  ≤32 entries, no per-call allocation except first-seen names).
+- **Back-compat:** every Phase-1 field is `#[serde(default)]` and every
+  reader tolerates its absence (the 4c/1c/2b pattern already in metrics.rs).
+  Old lines get `model=""`, `cost_usd=0.0`, `run_id=""`, empty tool lists —
+  summaries treat those as "unknown", not zero.
+- **`RunStats` loses `Copy`:** grep every use before/after 1a; clone is the
+  expected replacement (the struct stays small).
+- **Judge prompt side effect (1c):** the LIVE loop's judge will also start
+  emitting a `SCORE:` line in its reason text — harmless (reasons are
+  truncated in logs/lessons), but verify NEEDS_FIX detection in a test.
+- **`last_model` stamping (1b):** only safe because clients are per-session
+  and runs are sequential per session (same invariant as `set_agent_name`);
+  document it on the field.
+- **M: drive:** mtimes lie, untracked files vanish — commit each item's
   artifacts; verify file existence with shell, not `list_dir` freshness.
