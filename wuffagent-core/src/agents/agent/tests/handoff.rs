@@ -30,7 +30,7 @@ fn make_agent_with_handoff(
     config.agents_dir = dir.clone();
     let llm_client = Arc::new(NoopLlm);
     let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
-    let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+    let tool_manager = Arc::new(ToolManager::new(tool_registry));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
     let agent = Agent::builder(config, llm_client, client)
         .tool_manager(tool_manager)
@@ -41,7 +41,7 @@ fn make_agent_with_handoff(
 #[test]
 fn test_handoff_tool_injected_when_enabled() {
     let (agent, dir) = make_agent_with_handoff(true, vec!["coder".to_string()], "inject_on");
-    let defs = agent.tool_manager.lock().unwrap().get_tool_definitions();
+    let defs = agent.tool_manager.get_tool_definitions();
     let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
     assert!(
         names.contains(&"handoff".to_string()),
@@ -58,7 +58,7 @@ fn test_handoff_tool_injected_when_enabled() {
 #[test]
 fn test_handoff_tool_absent_when_disabled() {
     let (agent, dir) = make_agent_with_handoff(false, vec!["coder".to_string()], "inject_off");
-    let defs = agent.tool_manager.lock().unwrap().get_tool_definitions();
+    let defs = agent.tool_manager.get_tool_definitions();
     let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
     assert!(
         !names.contains(&"handoff".to_string()),
@@ -90,7 +90,7 @@ async fn test_take_pending_handoff() {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect(),
     };
-    let tm = agent.tool_manager.lock().unwrap();
+    let tm = &agent.tool_manager;
     let result = tm.execute("handoff", params).await;
     assert!(
         result.is_ok(),
@@ -139,9 +139,8 @@ async fn test_handoff_tool_sub_session_param() {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect(),
     };
-    let tm = agent.tool_manager.lock().unwrap();
+    let tm = &agent.tool_manager;
     let result = tm.execute("handoff", params).await;
-    drop(tm);
     assert!(result.is_ok(), "handoff tool call should succeed: {:?}", result.err());
     let req = agent
         .take_pending_handoff()
@@ -162,9 +161,8 @@ async fn test_handoff_tool_sub_session_param() {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect(),
     };
-    let tm = agent2.tool_manager.lock().unwrap();
+    let tm = &agent2.tool_manager;
     let result = tm.execute("handoff", params).await;
-    drop(tm);
     assert!(result.is_ok(), "handoff tool call should succeed: {:?}", result.err());
     let req2 = agent2
         .take_pending_handoff()
@@ -196,7 +194,7 @@ async fn test_execute_sub_session_handoff_forks_without_chaining() {
     let (tx, rx) = std::sync::mpsc::channel::<AppEvent>();
     let llm = Arc::new(NoopLlm);
     let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
-    let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+    let tool_manager = Arc::new(ToolManager::new(tool_registry));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
     let mut agent = Agent::builder(config, llm, client)
         .tool_manager(tool_manager)

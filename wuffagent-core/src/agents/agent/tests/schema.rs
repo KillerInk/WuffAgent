@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn test_disabled_shell_removed_from_agent_schema() {
     let agent = make_agent_with_shell(false);
-    let defs = agent.tool_manager.lock().unwrap().get_tool_definitions();
+    let defs = agent.tool_manager.get_tool_definitions();
     let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
     assert!(
         !names.contains(&"shell".to_string()),
@@ -15,7 +15,7 @@ fn test_disabled_shell_removed_from_agent_schema() {
 #[test]
 fn test_enabled_shell_present_in_agent_schema() {
     let agent = make_agent_with_shell(true);
-    let defs = agent.tool_manager.lock().unwrap().get_tool_definitions();
+    let defs = agent.tool_manager.get_tool_definitions();
     let names: Vec<String> = defs.iter().map(|d| d.function.name.clone()).collect();
     assert!(
         names.contains(&"shell".to_string()),
@@ -35,7 +35,7 @@ fn test_agent_creation() {
 fn test_agent_per_agent_reasoning_effort() {
     let llm_client = Arc::new(NoopLlm);
     let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
-    let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+    let tool_manager = Arc::new(ToolManager::new(tool_registry));
     // Global client set to Medium.
     let global_client = Arc::new({
         let mut c = ChatClient::new("http://localhost:1");

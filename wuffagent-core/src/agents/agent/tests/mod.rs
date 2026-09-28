@@ -28,7 +28,7 @@ fn make_agent(name: &str) -> Agent {
     };
     let llm_client = Arc::new(NoopLlm);
     let tool_registry = Arc::new(ToolRegistry::new(vec![], Arc::new(TracingToolLogger)));
-    let tool_manager = Arc::new(Mutex::new(ToolManager::new(tool_registry)));
+    let tool_manager = Arc::new(ToolManager::new(tool_registry));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
     Agent::builder(config, llm_client, client)
         .tool_manager(tool_manager)
@@ -63,7 +63,7 @@ fn make_agent_with_shell(shell_enabled: bool) -> Agent {
             plugin: None,
         })
         .unwrap();
-    let tool_manager = Arc::new(Mutex::new(ToolManager::new(Arc::new(registry))));
+    let tool_manager = Arc::new(ToolManager::new(Arc::new(registry)));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
     Agent::builder(config, llm_client, client)
         .tool_manager(tool_manager)
@@ -137,7 +137,7 @@ fn agent_with_llm(llm: std::sync::Arc<dyn LlmClient>) -> Agent {
         llm,
         std::sync::Arc::new(ChatClient::new("http://localhost:1")),
     )
-    .tool_manager(std::sync::Arc::new(Mutex::new(ToolManager::new(registry))))
+    .tool_manager(std::sync::Arc::new(ToolManager::new(registry)))
     .build()
 }
 

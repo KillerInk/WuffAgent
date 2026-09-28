@@ -15,7 +15,7 @@ use crate::types::AppEvent;
 #[derive(Clone)]
 pub struct AgentEngine {
     pub(super) llm_client: Arc<dyn LlmClient>,
-    pub(super) tool_manager: Arc<Mutex<ToolManager>>,
+    pub(super) tool_manager: Arc<ToolManager>,
     pub(super) event_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     pub(super) client: Arc<crate::client::ChatClient>,
     pub(super) memory: Option<Arc<crate::memory::MemoryManager>>,
@@ -52,7 +52,7 @@ impl AgentEngine {
     /// Create a new AgentEngine.
     pub fn new(
         llm_client: Arc<dyn LlmClient>,
-        tool_manager: Arc<Mutex<ToolManager>>,
+        tool_manager: Arc<ToolManager>,
         client: Arc<crate::client::ChatClient>,
     ) -> Self {
         Self {

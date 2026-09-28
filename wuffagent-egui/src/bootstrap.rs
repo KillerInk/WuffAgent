@@ -183,7 +183,7 @@ pub fn bootstrap() -> AppContext {
             Some(Arc::new(Mutex::new(event_tx.clone()))),
             clients.llm_client.clone(),
             clients.session_client.clone(),
-            Arc::new(Mutex::new((*tooling.tool_manager).clone())),
+            tooling.tool_manager.clone(),
         )
         .expect("Failed to register self-improvement tools");
     }
@@ -198,7 +198,7 @@ pub fn bootstrap() -> AppContext {
 
     let agent_engine = AgentEngine::new(
         clients.llm_client,
-        Arc::new(Mutex::new((*tooling.tool_manager).clone())),
+        tooling.tool_manager.clone(),
         clients.session_client,
     )
     .with_memory(memory_manager.clone())

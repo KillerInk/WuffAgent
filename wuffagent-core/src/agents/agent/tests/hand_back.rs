@@ -22,7 +22,7 @@ fn agent_with_meta(parent: Option<&str>, hand_back_enabled: bool, sid: &str) -> 
     };
     config.hand_back_enabled = hand_back_enabled;
     Agent::builder(config, Arc::new(NoopLlm), Arc::new(client))
-        .tool_manager(Arc::new(Mutex::new(ToolManager::new(registry))))
+        .tool_manager(Arc::new(ToolManager::new(registry)))
         .agent_session_id(Some(sid.to_string()))
         .build()
 }
@@ -30,8 +30,6 @@ fn agent_with_meta(parent: Option<&str>, hand_back_enabled: bool, sid: &str) -> 
 fn advertised(agent: &Agent) -> Vec<String> {
     agent
         .tool_manager
-        .lock()
-        .unwrap()
         .get_tool_definitions()
         .iter()
         .map(|d| d.function.name.clone())
@@ -113,7 +111,7 @@ async fn test_execute_hand_back_marker_and_event() {
         Arc::new(NoopLlm),
         Arc::new(client),
     )
-    .tool_manager(Arc::new(Mutex::new(ToolManager::new(registry))))
+    .tool_manager(Arc::new(ToolManager::new(registry)))
     .event_tx(Some(Arc::new(Mutex::new(tx))))
     .agent_session_id(Some("sub-sid".to_string()))
     .build();

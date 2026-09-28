@@ -46,7 +46,7 @@ pub fn register_improvement_tools(
     events: Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
     llm_client: Arc<dyn LlmClient>,
     session_client: Arc<ChatClient>,
-    tool_manager: Arc<Mutex<ToolManager>>,
+    tool_manager: Arc<ToolManager>,
 ) -> ToolResult<()> {
     // 2e: read_metrics' default window follows the config knob.
     let window_days = memory.config().improvement_metrics_window_days.max(1) as u64;

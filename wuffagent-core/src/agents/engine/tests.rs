@@ -14,7 +14,7 @@ async fn test_post_task_improvement_llm_called_only_on_boundary() {
     use crate::tools::{ToolManager, ToolRegistry, TracingToolLogger};
     use crate::types::Message;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     /// LLM that counts how often it is asked for anything.
     struct CountingLlm(Arc<AtomicUsize>);
@@ -57,10 +57,10 @@ async fn test_post_task_improvement_llm_called_only_on_boundary() {
         .unwrap();
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let tool_manager = Arc::new(Mutex::new(ToolManager::new(Arc::new(ToolRegistry::new(
+    let tool_manager = Arc::new(ToolManager::new(Arc::new(ToolRegistry::new(
         vec![],
         Arc::new(TracingToolLogger),
-    )))));
+    ))));
     let engine = AgentEngine::new(
         Arc::new(CountingLlm(calls.clone())),
         tool_manager,

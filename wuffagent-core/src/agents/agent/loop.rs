@@ -88,7 +88,7 @@ impl Agent {
         // model and the execution of its tool calls, so the model can only
         // ever see and run tools it is authorized for.
         let tool_manager: crate::tools::ToolManager = {
-            let manager = self.tool_manager.lock().unwrap();
+            let manager = self.tool_manager.as_ref();
             if self.config.allowed_tools.is_empty() {
                 manager.clone()
             } else {

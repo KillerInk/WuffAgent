@@ -31,7 +31,7 @@ fn make_agent_with_calc() -> Agent {
             plugin: None,
         })
         .unwrap();
-    let tool_manager = Arc::new(Mutex::new(ToolManager::new(Arc::new(registry))));
+    let tool_manager = Arc::new(ToolManager::new(Arc::new(registry)));
     let client = Arc::new(ChatClient::new("http://localhost:1"));
     Agent::builder(config, Arc::new(NoopLlm), client)
         .tool_manager(tool_manager)
@@ -52,7 +52,7 @@ fn calc_call(id: &str, expression: &str) -> crate::types::ToolCall {
 #[tokio::test]
 async fn test_native_tool_calls_accumulate_run_counters() {
     let agent = make_agent_with_calc();
-    let tm = agent.tool_manager.lock().unwrap().clone();
+    let tm = agent.tool_manager.as_ref().clone();
     let pending = super::tool_exec::PendingToolRuns::new(
         super::tool_exec::EventSink::new(None, "test".to_string()),
         tm.clone(),
@@ -89,7 +89,7 @@ async fn test_native_tool_calls_accumulate_run_counters() {
 #[tokio::test]
 async fn test_text_embedded_calls_accumulate_run_counters() {
     let agent = make_agent_with_calc();
-    let tm = agent.tool_manager.lock().unwrap().clone();
+    let tm = agent.tool_manager.as_ref().clone();
     let pending = super::tool_exec::PendingToolRuns::new(
         super::tool_exec::EventSink::new(None, "test".to_string()),
         tm.clone(),

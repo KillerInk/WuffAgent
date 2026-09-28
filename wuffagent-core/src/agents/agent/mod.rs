@@ -45,7 +45,7 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 pub struct Agent {
     config: AgentConfig,
     llm_client: Arc<dyn LlmClient>,
-    tool_manager: Arc<Mutex<ToolManager>>,
+    tool_manager: Arc<ToolManager>,
     event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
     /// Chat client used for streaming (native tool-call) requests.
     client: Arc<ChatClient>,
@@ -108,7 +108,7 @@ pub struct AgentBuilder {
     config: AgentConfig,
     llm_client: Arc<dyn LlmClient>,
     client: Arc<ChatClient>,
-    tool_manager: Option<Arc<Mutex<ToolManager>>>,
+    tool_manager: Option<Arc<ToolManager>>,
     event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
     memory: Option<Arc<crate::memory::MemoryManager>>,
     agent_session_id: Option<String>,
@@ -133,7 +133,7 @@ impl AgentBuilder {
     }
 
     /// Use this tool manager (defaults to an empty registry).
-    pub fn tool_manager(mut self, tool_manager: Arc<Mutex<ToolManager>>) -> Self {
+    pub fn tool_manager(mut self, tool_manager: Arc<ToolManager>) -> Self {
         self.tool_manager = Some(tool_manager);
         self
     }
@@ -214,14 +214,14 @@ impl AgentBuilder {
             session_note_mailbox,
         ) = {
             let tool_manager_arc = tool_manager.unwrap_or_else(|| {
-                Arc::new(Mutex::new(ToolManager::new(Arc::new(
+                Arc::new(ToolManager::new(Arc::new(
                     crate::tools::registry::ToolRegistry::new(
                         vec![],
                         Arc::new(crate::tools::types::TracingToolLogger),
                     ),
-                ))))
+                )))
             });
-            let shared = tool_manager_arc.lock().unwrap();
+            let shared = tool_manager_arc.as_ref();
             let tm = if config.get_shell_config().shell_enabled {
                 shared.with_shell_config(config.get_shell_config())
             } else {
@@ -264,7 +264,7 @@ impl AgentBuilder {
                 tm = tm.with_session_note_tool(tool);
             }
             (
-                Arc::new(Mutex::new(tm)),
+                Arc::new(tm),
                 handoff_mailbox,
                 restart_mailbox,
                 hand_back_mailbox,

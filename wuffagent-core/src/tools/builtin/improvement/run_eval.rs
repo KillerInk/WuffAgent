@@ -9,7 +9,7 @@
 //! - the shared `LlmClient` transport does the LLM calls;
 //! - the shared `ToolManager` gives the eval agent the same tools a live turn
 //!   has (`AgentBuilder::build` derives a per-agent view, so the eval agent
-//!   locks its own tool-manager mutex, not the app's);
+//!   works on its own manager clone, not the app's);
 //! - `metrics_enabled = false` keeps the synthetic run out of the profile's
 //!   real-run metrics — instead an `Eval` line (pass/fail + cost) is written.
 //!
@@ -18,7 +18,7 @@
 //! bounds a wedged run; the outcome is reported as a pass/fail table.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -81,7 +81,7 @@ async fn run_eval_once(
     config: AgentConfig,
     llm_client: Arc<dyn LlmClient>,
     client: Arc<ChatClient>,
-    tool_manager: Arc<Mutex<ToolManager>>,
+    tool_manager: Arc<ToolManager>,
     task: &str,
     expect: &str,
 ) -> Result<EvalOnce, String> {
@@ -151,7 +151,7 @@ pub struct RunEvalTool {
     /// an isolated conversation store per eval run.
     session_client: Arc<ChatClient>,
     /// The app's tool manager (a per-agent view is derived at build time).
-    tool_manager: Arc<Mutex<ToolManager>>,
+    tool_manager: Arc<ToolManager>,
 }
 
 impl RunEvalTool {
@@ -160,7 +160,7 @@ impl RunEvalTool {
         agents: Arc<AgentManager>,
         llm_client: Arc<dyn LlmClient>,
         session_client: Arc<ChatClient>,
-        tool_manager: Arc<Mutex<ToolManager>>,
+        tool_manager: Arc<ToolManager>,
     ) -> Self {
         Self {
             evals,
@@ -493,11 +493,11 @@ mod tests {
         (Arc::new(ChatClient::from_settings(settings)), handle)
     }
 
-    fn empty_tool_manager() -> Arc<Mutex<ToolManager>> {
-        Arc::new(Mutex::new(ToolManager::new(Arc::new(ToolRegistry::new(
+    fn empty_tool_manager() -> Arc<ToolManager> {
+        Arc::new(ToolManager::new(Arc::new(ToolRegistry::new(
             vec![],
             Arc::new(TracingToolLogger),
-        )))))
+        ))))
     }
 
     fn outcome(res: ToolResult<ToolOutput>) -> (bool, String) {

@@ -171,9 +171,9 @@ async fn test_truncated_tool_call_repaired_before_storing() {
         Arc::new(NoopLlm),
         client,
     )
-    .tool_manager(Arc::new(Mutex::new(ToolManager::new(Arc::new(
+    .tool_manager(Arc::new(ToolManager::new(Arc::new(
         ToolRegistry::new(vec![], Arc::new(TracingToolLogger)),
-    )))))
+    ))))
     .build();
     let mut messages = agent.build_initial_messages("write the file");
     let outcome = agent

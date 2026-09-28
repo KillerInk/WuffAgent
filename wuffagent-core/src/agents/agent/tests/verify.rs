@@ -146,7 +146,7 @@ fn test_store_stays_bounded_after_trim_reconciliation() {
         Arc::new(NoopLlm),
         client,
     )
-    .tool_manager(Arc::new(Mutex::new(ToolManager::new(registry))))
+    .tool_manager(Arc::new(ToolManager::new(registry)))
     .build();
 
     // Fill the store with 30 turns of large replies, then the current
