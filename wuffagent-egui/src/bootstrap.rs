@@ -277,7 +277,7 @@ fn build_clients(config: &Config, connection: &ConnectionSettings) -> ClientSet 
 
     // Non-streaming LlmClient for agents: configure request options BEFORE
     // wrapping in the adapter (the adapter only holds the client handle).
-    let mut non_streaming = ChatClient::from_settings(connection.clone());
+    let non_streaming = ChatClient::from_settings(connection.clone());
     non_streaming.set_reasoning_effort(config.reasoning_effort);
     non_streaming.set_n_ctx(config.n_ctx);
     let llm_client = Arc::new(ChatClientAdapter::new(non_streaming));
@@ -296,7 +296,7 @@ fn build_clients(config: &Config, connection: &ConnectionSettings) -> ClientSet 
     // client timeout (= the config's maximum) is only a safety net against a
     // hung server, so the configured value is always the effective bound.
     const MEMORY_LLM_TIMEOUT_SECS: u64 = 3600;
-    let mut memory_llm =
+    let memory_llm =
         ChatClient::from_settings_with_timeout(connection.clone(), MEMORY_LLM_TIMEOUT_SECS);
     memory_llm.set_reasoning_effort(config.reasoning_effort);
     memory_llm.set_n_ctx(config.n_ctx);

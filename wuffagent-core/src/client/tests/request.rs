@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_build_request_reasoning_effort() {
-    let mut client = ChatClient::new("http://localhost:8080");
+    let client = ChatClient::new("http://localhost:8080");
 
     // Off: `reasoning_effort` omitted, thinking explicitly disabled via the
     // Qwen3 chat-template kwarg (Qwen3.x defaults to thinking ON at xhigh and

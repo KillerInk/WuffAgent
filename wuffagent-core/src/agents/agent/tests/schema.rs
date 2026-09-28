@@ -38,7 +38,7 @@ fn test_agent_per_agent_reasoning_effort() {
     let tool_manager = Arc::new(ToolManager::new(tool_registry));
     // Global client set to Medium.
     let global_client = Arc::new({
-        let mut c = ChatClient::new("http://localhost:1");
+        let c = ChatClient::new("http://localhost:1");
         c.set_reasoning_effort(crate::types::ReasoningEffort::Medium);
         c
     });

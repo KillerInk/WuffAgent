@@ -109,7 +109,6 @@ pub fn parse_context_overflow(err: &Error) -> Option<ContextOverflow> {
     crate::trimming::parse_context_overflow_msg(msg)
 }
 
-#[derive(Clone)]
 pub struct ChatClient {
     /// Connection settings (base URL + API key). All app-level clients share
     /// one `ConnectionSettings` instance, so a settings/preset change
@@ -118,7 +117,12 @@ pub struct ChatClient {
     settings: ConnectionSettings,
     /// Reasoning effort level for reasoning models (see `types::ReasoningEffort`
     /// for the wire mapping; Off disables Qwen3 thinking via `enable_thinking`).
-    reasoning_effort: crate::types::ReasoningEffort,
+    ///
+    /// Interior-mutable: the session's SHARED client is re-synced through an
+    /// `Arc` when the UI's mode changes (`sync_session_meta`). `ChatClient::clone`
+    /// still COPIES the value into a fresh mutex, so a per-run clone's forced
+    /// level stays isolated from the shared session client.
+    reasoning_effort: Mutex<crate::types::ReasoningEffort>,
     /// The per-session state (conversation buffer + session identity + save
     /// queue): a cheaply cloneable handle, so a cloned client shares the SAME
     /// conversation AND session identity (previously only the conversation
@@ -177,6 +181,30 @@ pub struct ChatClient {
     trim_pcts: Arc<Mutex<(u64, u64)>>,
 }
 
+impl Clone for ChatClient {
+    fn clone(&self) -> Self {
+        Self {
+            settings: self.settings.clone(),
+            // Copy the current value into a FRESH mutex (not an Arc clone):
+            // a per-run clone's forced level must stay isolated from the
+            // shared session client, while the conversation + session
+            // identity below remain the same shared store.
+            reasoning_effort: Mutex::new(self.reasoning_effort()),
+            session: self.session.clone(),
+            http_client: self.http_client.clone(),
+            stream_http_client: self.stream_http_client.clone(),
+            max_messages: self.max_messages,
+            n_ctx: self.n_ctx.clone(),
+            chars_per_token_x100: self.chars_per_token_x100.clone(),
+            last_prompt_chars: self.last_prompt_chars.clone(),
+            tool_event_tx: self.tool_event_tx.clone(),
+            usage_recorder: self.usage_recorder.clone(),
+            agent_name: self.agent_name.clone(),
+            trim_pcts: self.trim_pcts.clone(),
+        }
+    }
+}
+
 impl ChatClient {
     /// Default HTTP timeout of 5 minutes.
     const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -206,7 +234,7 @@ impl ChatClient {
         let d = std::time::Duration::from_secs(timeout_secs);
         Self {
             settings: ConnectionSettings::new(base_url, None),
-            reasoning_effort: crate::types::ReasoningEffort::default(),
+            reasoning_effort: Mutex::new(crate::types::ReasoningEffort::default()),
             session: SessionState::default(),
             http_client: Arc::new({
                 // Non-streaming calls: total request timeout is fine
@@ -395,12 +423,12 @@ impl ChatClient {
         self.session.system_prompt()
     }
 
-    pub fn set_reasoning_effort(&mut self, effort: crate::types::ReasoningEffort) {
-        self.reasoning_effort = effort;
+    pub fn set_reasoning_effort(&self, effort: crate::types::ReasoningEffort) {
+        *self.reasoning_effort.lock().unwrap() = effort;
     }
 
     pub fn reasoning_effort(&self) -> crate::types::ReasoningEffort {
-        self.reasoning_effort
+        *self.reasoning_effort.lock().unwrap()
     }
 
     /// Set the per-session UI selections persisted with the session file

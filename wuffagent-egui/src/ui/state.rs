@@ -271,7 +271,7 @@ impl ChatApp {
             .selected_session_id
             .as_ref()
             .and_then(|id| self.sessions.session_store.get(id))
-            .map(|r| &r.client)
+            .map(|r| &*r.client)
     }
 
     /// Relaunch WuffAgent: persist the restart marker (so the new process resumes

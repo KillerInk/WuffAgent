@@ -301,8 +301,11 @@ pub struct SessionRuntime {
     pub session_id: String,
     /// Session name (displayed in UI).
     pub name: String,
-    /// Per-session chat client with isolated conversation history.
-    pub client: crate::client::ChatClient,
+    /// Per-session chat client with isolated conversation history. Shared
+    /// with the per-session engine/pipeline as ONE `Arc<ChatClient>` — the
+    /// session, the engine and the pipeline all read/write the same
+    /// conversation store.
+    pub client: Arc<crate::client::ChatClient>,
     /// Per-session chat pipeline for running tasks.
     pub pipeline: ChatPipeline,
     /// Per-session agent engine, built from this session's own client so the
@@ -329,7 +332,7 @@ impl SessionRuntime {
     pub fn new(
         session_id: String,
         name: String,
-        client: crate::client::ChatClient,
+        client: Arc<crate::client::ChatClient>,
         pipeline: ChatPipeline,
         engine: AgentEngine,
         cancel_token: CancellationToken,
@@ -350,9 +353,10 @@ impl SessionRuntime {
     /// Build a full per-session runtime from the app-level config: a session
     /// client (request options, encryption, session binding, tool event
     /// routing; URL + API key come from the shared `connection` settings so
-    /// settings/preset changes reach it), a per-session engine cloned from
-    /// to this session's client (so each session's agent chat loop reads/writes
-    /// an isolated conversation store), a pipeline carrying the session ID for
+    /// settings/preset changes reach it), a per-session engine that shares
+    /// this session's client (so each session's agent chat loop reads/writes
+    /// an isolated conversation store, and the session + engine + pipeline
+    /// hold ONE `Arc<ChatClient>`), a pipeline carrying the session ID for
     /// event routing, and a fresh cancellation token.
     ///
     /// If the session file exists on disk it is loaded into the client and its
@@ -398,14 +402,13 @@ impl SessionRuntime {
         // Route tool-call events into the shared channel.
         client.set_tool_event_sender(event_tx.clone());
 
-        // Per-session engine: bound to this session's client so the agent
-        // chat loop reads/writes an isolated conversation store (the shared
-        // bootstrap engine's client would otherwise be mutated by every
-        // session in parallel — a cross-session data race).
-        let engine = template_engine
-            .clone()
-            .with_client(client.clone())
-            .with_session_id(session_id.clone());
+        // ONE client per session: the session, the engine and the pipeline
+        // all share this single `Arc<ChatClient>` (the engine no longer
+        // carries its own deep clone). It is still isolated from the
+        // bootstrap engine's app-level client, so no session's agent chat
+        // loop mutates another session's conversation.
+        let client = Arc::new(client);
+        let engine = template_engine.clone().with_client(client.clone());
         let pipeline = ChatPipeline::new(
             Arc::new(engine.clone()),
             event_tx,

@@ -183,7 +183,7 @@ impl AgentBuilder {
             agent_session_id,
         } = self;
         let client = if config.reasoning_effort != crate::types::ReasoningEffort::Off {
-            let mut c = (*client).clone();
+            let c = (*client).clone();
             c.set_reasoning_effort(config.reasoning_effort);
             Arc::new(c)
         } else {

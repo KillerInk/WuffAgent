@@ -18,8 +18,6 @@ pub struct AgentEngine {
     pub(super) tool_manager: Arc<ToolManager>,
     pub(super) client: Arc<crate::client::ChatClient>,
     pub(super) memory: Option<Arc<crate::memory::MemoryManager>>,
-    /// Session ID for this agent engine's persistent conversation.
-    pub(super) agent_session_id: Option<String>,
     /// Directory holding agent profile JSON files, so the chat path can
     /// resolve handoff targets (see `with_agents_dir`).
     pub(super) agents_dir: Option<std::path::PathBuf>,
@@ -71,7 +69,6 @@ impl AgentEngine {
             tool_manager,
             client,
             memory: None,
-            agent_session_id: None,
             agents_dir: None,
             agents_search_dirs: Vec::new(),
             tasks_completed: Arc::new(AtomicUsize::new(0)),
@@ -101,22 +98,13 @@ impl AgentEngine {
         self
     }
 
-    /// Return a clone of the engine with a new LLM client.
-    /// Used to create per-session engines with isolated conversation state.
-    pub fn with_client(mut self, client: crate::client::ChatClient) -> Self {
-        self.client = Arc::new(client);
+    /// Point the engine at a shared chat client. The per-session engine is
+    /// built once with the session's single `Arc<ChatClient>` — the session,
+    /// the engine and the pipeline all share that one client (the
+    /// conversation store is isolated per session, shared within it).
+    pub fn with_client(mut self, client: Arc<crate::client::ChatClient>) -> Self {
+        self.client = client;
         self
-    }
-
-    /// Set the session ID for this engine.
-    pub fn with_session_id(mut self, session_id: String) -> Self {
-        self.agent_session_id = Some(session_id);
-        self
-    }
-
-    /// Return the current agent session ID.
-    pub fn agent_session_id(&self) -> Option<&str> {
-        self.agent_session_id.as_deref()
     }
 
     /// Execute a chat request using the agent engine's tool pipeline with a
@@ -182,14 +170,14 @@ impl AgentEngine {
         // the session keeps in sync with the mode); Explicit(e) → e.
         let run_client: Arc<crate::client::ChatClient> = match params.reasoning {
             crate::types::ReasoningMode::Explicit(e) => {
-                let mut c = (*self.client).clone();
+                let c = (*self.client).clone();
                 c.set_reasoning_effort(e);
                 Arc::new(c)
             }
             crate::types::ReasoningMode::Auto
                 if tool_policy.reasoning_effort != crate::types::ReasoningEffort::Off =>
             {
-                let mut c = (*self.client).clone();
+                let c = (*self.client).clone();
                 c.set_reasoning_effort(tool_policy.reasoning_effort);
                 Arc::new(c)
             }
