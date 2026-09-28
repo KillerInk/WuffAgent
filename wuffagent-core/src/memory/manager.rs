@@ -444,11 +444,20 @@ impl MemoryManager {
         self.save_state_doc(&doc);
     }
 
-    /// 2a: per-agent evidence gate — whether NEW Lesson evidence exists
-    /// since THIS agent's last check. Relevant evidence = lessons tagged
-    /// `agent:<name>` plus agent-less (global) lessons; OTHER agents'
-    /// lessons do not re-arm this agent.
+    /// 2a/1a: per-agent evidence gate — whether NEW evidence exists since
+    /// THIS agent's last check: Lesson evidence (the fast path, OR-combined)
+    /// OR a significant metric delta (1a). This is the gate the per-task auto
+    /// check uses (`engine.rs`), so metric-only degradation now re-arms the
+    /// loop even when the agent saves no lesson.
     pub fn has_new_agent_improvement_evidence(&self, agent: &str) -> bool {
+        self.agent_lesson_evidence(agent) || self.agent_metric_evidence(agent).is_some()
+    }
+
+    /// 2a: the Lesson half of the per-agent evidence gate — whether a
+    /// relevant Lesson entry (tagged `agent:<name>`, or agent-less/global) is
+    /// newer than this agent's baseline. OTHER agents' lessons do not re-arm
+    /// this agent.
+    fn agent_lesson_evidence(&self, agent: &str) -> bool {
         let baseline = self.agent_improvement_state(agent).last_check;
         let agent_tag = format!("agent:{agent}");
         self.get_all_memories().iter().any(|e| {
@@ -468,6 +477,39 @@ impl MemoryManager {
                 None => true,
             }
         })
+    }
+
+    /// 1a: the metric half of the per-agent evidence gate — whether the
+    /// run-metrics SINCE this agent's last check show a significant regression
+    /// vs the matching preceding window (the same before-window rule as the
+    /// effect check). Returns `Some(reason)` with a human-readable delta
+    /// description (surfaced in `list_improvement_status`) when a re-arm is
+    /// warranted, `None` otherwise. Never-checked agents (no baseline, and no
+    /// v1 fallback) have no before/after to compare, so no metric delta — they
+    /// rely on the Lesson gate (and the Phase-4 rare-agent safety net).
+    pub fn agent_metric_evidence(&self, agent: &str) -> Option<String> {
+        let baseline = self.agent_improvement_state(agent).last_check?;
+        let metrics_log = crate::agents::metrics::MetricsLog::default();
+        let after = metrics_log.summary_since(agent, Some(baseline));
+        // Before = the immediately preceding period of the same length (min
+        // 1 day so a fresh baseline still gets a window, max 30 days so an old
+        // baseline doesn't sweep in months of history) — mirroring
+        // `effect_check_section`'s before-window rule.
+        let days = chrono::Utc::now()
+            .signed_duration_since(baseline)
+            .num_days()
+            .max(0);
+        let window_days = i64::from(days).clamp(1, 30);
+        let before = metrics_log.summary_between(
+            agent,
+            Some(baseline - chrono::Duration::days(window_days)),
+            Some(baseline),
+        );
+        metric_evidence_reason(
+            &before,
+            &after,
+            self.config().improvement_metric_evidence_runs,
+        )
     }
 
     /// Load the improvement-check state document, tolerating a missing or
@@ -892,6 +934,73 @@ struct AgentStateRec {
     no_op_streak: u32,
     #[serde(default)]
     last_effect_verdict: Option<String>,
+}
+
+/// 1a: metric-delta evidence thresholds (v1 constants — promoted to config
+/// knobs only if tuning asks; the run floor IS a knob:
+/// `MemoryConfig::improvement_metric_evidence_runs`).
+const METRIC_EVIDENCE_ERR_RATE_DELTA_PP: f64 = 5.0; // tool-error-rate jump (pp)
+const METRIC_EVIDENCE_GAVE_UP_DELTA_PP: f64 = 20.0; // gave-up share jump (pp)
+const METRIC_EVIDENCE_DURATION_DELTA_FRAC: f64 = 0.5; // avg-duration jump (×)
+
+/// 1a: pure helper for the metric evidence gate. Given the before/after
+/// windows (matching lengths, as `agent_metric_evidence` builds them) and the
+/// run floor, return `Some(reason)` when the after-window is judgeable
+/// (≥ floor runs) AND at least one metric regressed beyond its threshold:
+/// tool-error-rate delta ≥ 5pp, OR gave-up share delta ≥ 20pp, OR avg-duration
+/// delta ≥ +50%. `None` when the floor isn't met (too few runs) or nothing
+/// regressed — so 1–2 noisy runs can't re-arm the LLM.
+fn metric_evidence_reason(
+    before: &crate::agents::metrics::MetricsSummary,
+    after: &crate::agents::metrics::MetricsSummary,
+    run_floor: u32,
+) -> Option<String> {
+    // The run floor: 1–2 noisy after-runs must not re-arm an LLM call.
+    if after.runs < run_floor {
+        return None;
+    }
+    // A delta needs a real baseline: an empty before-window is not a 0%
+    // baseline — with nothing to compare against there is no "change".
+    if before.runs == 0 {
+        return None;
+    }
+    let mut reasons: Vec<String> = Vec::new();
+
+    // Tool-error-rate delta (percentage points), only when BOTH windows have
+    // enough tool calls for the rate to be stable (a 1-call window is noise).
+    // Fires on an INCREASE (degradation); an improvement is not a re-arm.
+    const MIN_CALLS: u32 = 10;
+    if before.tool_calls >= MIN_CALLS && after.tool_calls >= MIN_CALLS {
+        let err_before = 100.0 * before.tool_errors as f64 / before.tool_calls as f64;
+        let err_after = 100.0 * after.tool_errors as f64 / after.tool_calls as f64;
+        if err_after - err_before >= METRIC_EVIDENCE_ERR_RATE_DELTA_PP {
+            reasons.push(format!("tool-error rate {err_before:.0}% → {err_after:.0}%"));
+        }
+    }
+
+    // Gave-up share delta (percentage points of runs); fires on an increase.
+    // (`before.runs >= 1` is guaranteed by the empty-baseline guard above.)
+    let gu_before = 100.0 * before.gave_up as f64 / before.runs as f64;
+    let gu_after = 100.0 * after.gave_up as f64 / after.runs as f64;
+    if gu_after - gu_before >= METRIC_EVIDENCE_GAVE_UP_DELTA_PP {
+        reasons.push(format!("gave-up share {gu_before:.0}% → {gu_after:.0}%"));
+    }
+
+    // Average run-duration delta (fraction); fires on a ≥50% slowdown.
+    let avg_before = before.total_duration_ms as f64 / before.runs as f64;
+    let avg_after = after.total_duration_ms as f64 / after.runs as f64;
+    if avg_before > 0.0 && avg_after >= avg_before * (1.0 + METRIC_EVIDENCE_DURATION_DELTA_FRAC) {
+        reasons.push(format!(
+            "avg duration {:.1}s → {:.1}s",
+            avg_before / 1000.0,
+            avg_after / 1000.0
+        ));
+    }
+
+    match reasons.is_empty() {
+        true => None,
+        false => Some(reasons.join(", ")),
+    }
 }
 
 #[cfg(test)]

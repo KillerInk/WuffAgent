@@ -199,6 +199,13 @@ pub struct MemoryConfig {
     /// affected by this floor.
     #[serde(default = "default_improvement_min_interval_hours")]
     pub improvement_min_interval_hours: u32,
+    /// 1a: run floor for the METRIC evidence gate — the after-window (runs
+    /// since the agent's last check) needs at least this many runs before a
+    /// metric delta (tool-error rate / gave-up share / avg duration) can
+    /// re-arm the auto-improvement check. Keeps 1–2 noisy runs from burning
+    /// an LLM call; the Lesson gate stays the fast path (OR-combined).
+    #[serde(default = "default_improvement_metric_evidence_runs")]
+    pub improvement_metric_evidence_runs: u32,
     /// Whether the LLM memory-maintenance pass is enabled (opt-in).
     #[serde(default = "default_memory_maintenance")]
     pub memory_maintenance: bool,
@@ -301,6 +308,9 @@ fn default_improvement_min_samples() -> u32 {
 fn default_improvement_min_interval_hours() -> u32 {
     0
 }
+fn default_improvement_metric_evidence_runs() -> u32 {
+    3
+}
 fn default_memory_maintenance() -> bool {
     false
 }
@@ -331,6 +341,7 @@ impl Default for MemoryConfig {
             improvement_metrics_window_days: 7,
             improvement_min_samples: 3,
             improvement_min_interval_hours: 0,
+            improvement_metric_evidence_runs: 3,
             memory_maintenance: false,
             memory_maintenance_threshold: 40,
             memory_maintenance_timeout_secs: 600,

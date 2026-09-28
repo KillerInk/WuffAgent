@@ -146,6 +146,19 @@ impl Tool for ListImprovementStatusTool {
                         .clone()
                         .unwrap_or_else(|| "none (no applied change recorded yet)".to_string()),
                 };
+            // 1a: surface the METRIC trigger reason when the loop re-arms on
+            // data (not just a new lesson) — "yes (metric delta: err 12%→34%)"
+            // makes the auto-improvement loop explainable.
+            let evidence_label = match self.memory.agent_metric_evidence(name) {
+                Some(reason) => format!("yes (metric delta: {reason})"),
+                None => {
+                    if self.memory.has_new_agent_improvement_evidence(name) {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    }
+                }
+            };
             let mut out = format!(
                 "Improvement loop for '{name}': auto_improve={}; last check: {}; \
                  tasks since last check: {} (cooldown base {} task(s), backoff x{} = {}, min interval: {}); \
@@ -159,14 +172,7 @@ impl Tool for ListImprovementStatusTool {
                 status.improvement_cooldown_tasks.saturating_mul(mult as usize),
                 min_interval,
                 state.no_op_streak,
-                if self
-                    .memory
-                    .has_new_agent_improvement_evidence(name)
-                {
-                    "yes"
-                } else {
-                    "no"
-                },
+                evidence_label,
                 verdict_label,
                 status.lesson_count,
                 if known {

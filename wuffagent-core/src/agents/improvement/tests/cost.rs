@@ -146,6 +146,7 @@ fn test_improvement_state_corrupt_file_tolerated() {
 /// lessons re-arm both.
 #[test]
 fn test_per_agent_evidence_isolation() {
+    let _guard = MetricsDirGuard::new();
     let (manager, _dir) = fresh_manager();
     // Baseline: a check for each agent (so the gate starts closed).
     manager.record_agent_improvement_check("coder", false);
@@ -239,6 +240,7 @@ fn test_per_agent_cooldown_and_backoff() {
 /// per-agent fields must survive, not just the legacy global one).
 #[test]
 fn test_per_agent_state_persists_across_restart() {
+    let _guard = MetricsDirGuard::new();
     let dir = tempdir().unwrap();
     let make = || {
         let config = MemoryConfig {
@@ -272,6 +274,7 @@ fn test_per_agent_state_persists_across_restart() {
 /// baseline until the agent has a check of its own.
 #[test]
 fn test_v1_state_file_compat() {
+    let _guard = MetricsDirGuard::new();
     let dir = tempdir().unwrap();
     let ts = chrono::Utc::now() - chrono::Duration::hours(1);
     std::fs::write(
@@ -397,4 +400,190 @@ fn test_min_interval_uses_v1_fallback_baseline() {
     // Backdate the v1 baseline 3h → the floor has elapsed → due.
     backdate_check(dir.path(), None, 3);
     assert!(manager.agent_improvement_due("coder", 1), "v1 baseline past floor → due");
+}
+
+// ── 1a: metrics-driven evidence gate ──
+
+/// One JSON metrics `run` line backdated `hours_ago` hours (written directly —
+/// `MetricsLine`'s variant fields are not constructible outside the metrics
+/// module). `gave_up` picks the terminal outcome (vs `verified`); calls/errors
+/// set the error-rate; duration is fixed at 10s so flat/error/gave-up tests
+/// show no duration delta.
+fn run_line_hours(hours_ago: i64, calls: u32, errors: u32, gave_up: bool) -> String {
+    serde_json::json!({
+        "kind": "run",
+        "ts": (chrono::Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339(),
+        "tool_calls": calls,
+        "tool_errors": errors,
+        "verification_attempts": 1,
+        "duration_ms": 10_000,
+        "outcome": if gave_up { "gave_up" } else { "verified" },
+    })
+    .to_string()
+}
+
+/// Write raw-JSON run lines into the (temp) metrics log for an agent (the same
+/// direct-write pattern as the effect tests — `MetricsLine`'s variant fields
+/// are not constructible outside the metrics module).
+fn write_run_lines(
+    log: &crate::agents::metrics::MetricsLog,
+    agent: &str,
+    lines: &[String],
+) {
+    use std::io::Write;
+    // Append (not create/truncate) so the before- and after-line sets both
+    // land in the file when written in separate calls.
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log.agent_path(agent))
+        .unwrap();
+    for line in lines {
+        writeln!(f, "{line}").unwrap();
+    }
+}
+
+/// 1a test setup: a manager whose baseline (last check) is backdated 2 days,
+/// so `agent_metric_evidence` computes the after-window as [2d, now] and the
+/// before-window as [4d, 2d] (the same before-window rule as the effect check).
+/// Lines placed at ~3d ago land in the before-window; ~24h ago in the after.
+fn metric_gate_manager(dir: &std::path::Path) -> MemoryManager {
+    let config = MemoryConfig {
+        memories_dir: Some(dir.to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let manager = MemoryManager::new(config).unwrap();
+    manager.record_agent_improvement_check("coder", false);
+    // Backdate the baseline 2 days (unix ms in the per-agent state doc).
+    let path = dir.join("improvement_state.json");
+    let content = std::fs::read_to_string(&path).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&content).unwrap();
+    v["agents"]["coder"]["last_check"] =
+        serde_json::json!((chrono::Utc::now() - chrono::Duration::days(2)).timestamp_millis());
+    std::fs::write(&path, v.to_string()).unwrap();
+    manager
+}
+
+/// Build before/after line sets: `n_before` lines at ~3d ago (before-window)
+/// and `n_after` lines at ~24h ago (after-window), each side with its own
+/// (tool_calls, tool_errors, gave_up) profile.
+fn before_after_lines(
+    n_before: usize,
+    b: (u32, u32, bool),
+    n_after: usize,
+    a: (u32, u32, bool),
+) -> (Vec<String>, Vec<String>) {
+    let before = (0..n_before)
+        .map(|i| run_line_hours(72i64 - i as i64, b.0, b.1, b.2))
+        .collect();
+    let after = (0..n_after)
+        .map(|i| run_line_hours(25i64 - i as i64, a.0, a.1, a.2))
+        .collect();
+    (before, after)
+}
+
+/// 1a: FLAT metrics since the last check (run floor met, but no delta) must
+/// NOT re-arm the gate — the loop wakes only on data that actually changed.
+#[test]
+fn test_metric_evidence_flat_no_rearm() {
+    let _guard = MetricsDirGuard::new();
+    let dir = tempdir().unwrap();
+    let manager = metric_gate_manager(dir.path());
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    // Flat before and after: 10% tool errors, verified.
+    let (before, after) = before_after_lines(4, (10, 1, false), 4, (10, 1, false));
+    write_run_lines(&log, "coder", &before);
+    write_run_lines(&log, "coder", &after);
+    assert!(
+        manager.agent_metric_evidence("coder").is_none(),
+        "flat metrics (floor met, no delta) must not re-arm"
+    );
+    assert!(!manager.has_new_agent_improvement_evidence("coder"));
+}
+
+/// 1a: a tool-error-rate JUMP since the last check (floor met) re-arms the
+/// gate even with no new lesson — the loop wakes on data, not just complaints.
+#[test]
+fn test_metric_evidence_error_jump_rearms() {
+    let _guard = MetricsDirGuard::new();
+    let dir = tempdir().unwrap();
+    let manager = metric_gate_manager(dir.path());
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    // Jump after: 80% tool errors, still verified (isolates the error-rate
+    // path from the gave-up path).
+    let (before, after) = before_after_lines(4, (10, 1, false), 4, (10, 8, false));
+    write_run_lines(&log, "coder", &before);
+    write_run_lines(&log, "coder", &after);
+    let reason = manager.agent_metric_evidence("coder");
+    assert!(reason.is_some(), "error-rate jump must re-arm: {reason:?}");
+    assert!(manager.has_new_agent_improvement_evidence("coder"));
+    let reason = reason.expect("checked is_some above");
+    assert!(
+        reason.contains("tool-error rate"),
+        "reason names the delta: {reason}"
+    );
+}
+
+/// 1a: a gave-up-share JUMP (floor met) re-arms too — the second delta path,
+/// alongside error-rate and duration.
+#[test]
+fn test_metric_evidence_gave_up_jump_rearms() {
+    let _guard = MetricsDirGuard::new();
+    let dir = tempdir().unwrap();
+    let manager = metric_gate_manager(dir.path());
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    // Error-rate kept flat (1/10) so the gave-up share 0→100% is the only
+    // delta that fires.
+    let (before, after) = before_after_lines(4, (10, 1, false), 4, (10, 1, true));
+    write_run_lines(&log, "coder", &before);
+    write_run_lines(&log, "coder", &after);
+    let reason = manager.agent_metric_evidence("coder").unwrap();
+    assert!(
+        reason.contains("gave-up share"),
+        "reason names the gave-up delta: {reason}"
+    );
+}
+
+/// 1a: below the run floor, even a big delta must NOT re-arm — 1–2 noisy runs
+/// shouldn't burn an LLM call.
+#[test]
+fn test_metric_evidence_below_run_floor_no_rearm() {
+    let _guard = MetricsDirGuard::new();
+    let dir = tempdir().unwrap();
+    let manager = metric_gate_manager(dir.path());
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    // Jump after but only 2 runs (< default floor 3).
+    let (before, after) = before_after_lines(4, (10, 1, false), 2, (10, 8, false));
+    write_run_lines(&log, "coder", &before);
+    write_run_lines(&log, "coder", &after);
+    assert!(
+        manager.agent_metric_evidence("coder").is_none(),
+        "below run floor, no re-arm even with a big delta"
+    );
+    assert!(!manager.has_new_agent_improvement_evidence("coder"));
+}
+
+/// 1a: the Lesson gate stays the fast path — a new lesson re-arms the agent
+/// even when there are NO metrics at all (the metric half is None).
+#[test]
+fn test_metric_evidence_lessons_only_still_arms() {
+    let _guard = MetricsDirGuard::new();
+    let dir = tempdir().unwrap();
+    let manager = metric_gate_manager(dir.path());
+    assert!(
+        manager.agent_metric_evidence("coder").is_none(),
+        "no metrics -> no metric evidence"
+    );
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "A fresh coder lesson (no metrics involved)",
+            "test",
+            &["agent:coder"],
+        ))
+        .unwrap();
+    assert!(
+        manager.has_new_agent_improvement_evidence("coder"),
+        "lesson-only must still re-arm (fast path)"
+    );
 }
