@@ -12,6 +12,140 @@ use wuffagent_core::agents::metrics::MetricsLine;
 use wuffagent_core::tools::{ToolManager, ToolOutput, ToolParams};
 use wuffagent_core::types::AppEvent;
 
+/// A node in the grouped "Allowed Tools" tree: either a named group of
+/// children or a single tool (an index into `available_tools`, which stays
+/// the source of truth for checkbox state).
+#[derive(Clone, Debug)]
+enum ToolNode {
+    Group { title: String, children: Vec<ToolNode> },
+    Leaf(usize),
+}
+
+/// Builtin tool categories (display order; anything unlisted falls into
+/// "Other" so newly added tools never vanish from the list).
+const BUILTIN_CATEGORIES: &[(&str, &[&str])] = &[
+    (
+        "Files",
+        &[
+            "read_file", "write_file", "append_file", "apply_diff", "replace_lines", "file_info",
+            "list_dir", "mkdir", "copy", "move", "delete", "search_files", "search_content",
+        ],
+    ),
+    (
+        "Memory",
+        &["search_memory", "save_memory", "update_memory", "delete_memory", "consolidate_memories"],
+    ),
+    ("Skills", &["list_skills", "read_skill", "save_skill", "delete_skill"]),
+    ("Evals & Metrics", &["list_evals", "save_eval", "delete_eval", "run_eval", "read_metrics"]),
+    ("Improvement", &["run_self_improvement", "list_improvement_status"]),
+    (
+        "Agents",
+        &[
+            "list_agents", "edit_agent_profile", "handoff", "hand_back", "session_note", "restart",
+        ],
+    ),
+    (
+        "MCP servers",
+        &[
+            "mcp_list", "mcp_add_server", "mcp_connect", "mcp_disconnect", "mcp_remove_server",
+            "mcp_refresh_tools", "mcp_set_tool_enabled",
+        ],
+    ),
+    ("Plugins", &["add_plugin_path", "reload_plugins"]),
+    ("Web", &["web_search", "fetch_url"]),
+];
+
+/// Split an `mcp__<server>__<tool>` name into (server, tool). Server names
+/// may contain `__` (tool names don't), so the last `__`-segment is the tool
+/// and everything between the `mcp__` prefix and it is the server.
+fn mcp_server_tool(name: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = name.split("__").collect();
+    if parts.len() < 3 || parts[0] != "mcp" {
+        return None;
+    }
+    let server = parts[1..parts.len() - 1].join("__");
+    Some((server, parts[parts.len() - 1].to_string()))
+}
+
+/// Build the grouped tool tree: top-level "Builtin tools" (sorted per
+/// category) and "MCP tools" (one subgroup per server, sorted).
+fn build_tools_tree(tools: &[String]) -> Vec<ToolNode> {
+    let mut builtin: Vec<(String, Vec<usize>)> = BUILTIN_CATEGORIES
+        .iter()
+        .map(|(title, members)| {
+            let mut idx: Vec<usize> = tools
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| members.contains(&name.as_str()))
+                .map(|(i, _)| i)
+                .collect();
+            idx.sort_unstable();
+            (title.to_string(), idx)
+        })
+        .collect();
+    // Tools matching no category (e.g. plugin tools like `hello`) — last.
+    let mut other: Vec<usize> = (0..tools.len())
+        .filter(|i| {
+            let name = &tools[*i];
+            !name.starts_with("mcp__")
+                && !BUILTIN_CATEGORIES
+                    .iter()
+                    .any(|(_, members)| members.contains(&name.as_str()))
+        })
+        .collect();
+    other.sort_unstable();
+    if !other.is_empty() {
+        builtin.push(("Other".to_string(), other));
+    }
+    let builtin_group = ToolNode::Group {
+        title: "Builtin tools".to_string(),
+        children: builtin
+            .into_iter()
+            .filter(|(_, idx)| !idx.is_empty())
+            .map(|(title, idx)| {
+                ToolNode::Group {
+                    title,
+                    children: idx.into_iter().map(ToolNode::Leaf).collect(),
+                }
+            })
+            .collect(),
+    };
+
+    // MCP tools: one subgroup per server.
+    let mut servers: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+    for (i, name) in tools.iter().enumerate() {
+        if let Some((server, tool)) = mcp_server_tool(name) {
+            servers.entry(server).or_default().push((tool, i));
+        }
+    }
+    let mut server_names: Vec<String> = servers.keys().cloned().collect();
+    server_names.sort();
+    let mcp_children: Vec<ToolNode> = server_names
+        .into_iter()
+        .map(|server| {
+            let mut members = servers.get(&server).cloned().unwrap_or_default();
+            members.sort_by(|a, b| a.0.cmp(&b.0));
+            ToolNode::Group {
+                title: server,
+                children: members.into_iter().map(|(_, i)| ToolNode::Leaf(i)).collect(),
+            }
+        })
+        .collect();
+
+    let mut tree = Vec::new();
+    let builtin_empty = matches!(&builtin_group, ToolNode::Group { children, .. } if children.is_empty());
+    if !builtin_empty {
+        tree.push(builtin_group);
+    }
+    if !mcp_children.is_empty() {
+        tree.push(ToolNode::Group {
+            title: "MCP tools".to_string(),
+            children: mcp_children,
+        });
+    }
+    tree
+}
+
 /// UI dialog for adding/editing/removing agent configurations.
 pub struct AgentConfigDialog {
     /// Loaded agents from disk.
@@ -42,6 +176,9 @@ pub struct AgentConfigDialog {
     tool_checkboxes: Vec<bool>,
     /// Available tool names from the tool registry.
     available_tools: Vec<String>,
+    /// Grouped tree over `available_tools` (Builtin tools / MCP tools →
+    /// category or server subgroups) for the "Allowed Tools" section.
+    tools_tree: Vec<ToolNode>,
     /// Derived from tool_checkboxes at save time.
     allowed_tools: Vec<String>,
     /// Error/success messages.
@@ -81,6 +218,7 @@ impl AgentConfigDialog {
             .filter(|name| name != "shell")
             .collect();
         let tool_checkboxes = vec![false; available_tools.len()];
+        let tools_tree = build_tools_tree(&available_tools);
 
         Self {
             agents,
@@ -99,6 +237,7 @@ impl AgentConfigDialog {
             handoff_targets: String::new(),
             tool_checkboxes,
             available_tools,
+            tools_tree,
             allowed_tools: Vec::new(),
             message: None,
             open: true,
@@ -369,9 +508,14 @@ impl AgentConfigDialog {
     fn draw_tools_and_metrics(&mut self, ui: &mut egui::Ui, history_agent: Option<&str>) {
         ui.label("Allowed Tools:");
 
-        // Tool checkboxes
-        for (i, tool) in self.available_tools.iter().enumerate() {
-            ui.checkbox(&mut self.tool_checkboxes[i], tool);
+        // Tool checkboxes, grouped: Builtin tools (per category) and
+        // MCP tools (per server), each a collapsible group with a
+        // "select all" checkbox.
+        // Clone first: draw_tool_node takes &mut self, so we can't keep a
+        // borrow of self.tools_tree alive across the recursive calls.
+        let tree = self.tools_tree.clone();
+        for node in &tree {
+            self.draw_tool_node(ui, node);
         }
 
         // M1: read-only recent metrics for the selected EXISTING agent
@@ -825,5 +969,139 @@ impl AgentConfigDialog {
             .zip(&self.tool_checkboxes)
             .filter_map(|(name, checked)| if *checked { Some(name.clone()) } else { None })
             .collect();
+    }
+
+    /// Draw one node of the grouped tools tree. An empty-title group is a
+    /// plain (non-collapsing) container; named groups render as collapsing
+    /// headers with a "select all" checkbox for the whole group.
+    fn draw_tool_node(&mut self, ui: &mut egui::Ui, node: &ToolNode) {
+        match node {
+            ToolNode::Leaf(i) => {
+                let name = self.available_tools[*i].clone();
+                ui.checkbox(&mut self.tool_checkboxes[*i], name);
+            }
+            ToolNode::Group { title, children } => {
+                if title.is_empty() {
+                    for child in children {
+                        self.draw_tool_node(ui, child);
+                    }
+                    return;
+                }
+                let (checked, total) = self.group_stats(children);
+                ui.collapsing(
+                    egui::RichText::new(format!(
+                        "{} ({}/{})",
+                        title, checked, total
+                    ))
+                    .strong(),
+                    |ui| {
+                        let mut select_all = checked == total;
+                        ui.checkbox(&mut select_all, "Select all in this group");
+                        if select_all != (checked == total) {
+                            self.set_group_checked(children, select_all);
+                        }
+                        for child in children {
+                            self.draw_tool_node(ui, child);
+                        }
+                    },
+                );
+            }
+        }
+    }
+
+    /// Number of checked + total leaf tools under a group (recursive).
+    fn group_stats(&self, nodes: &[ToolNode]) -> (usize, usize) {
+        nodes
+            .iter()
+            .fold((0, 0), |(c, t), node| match node {
+                ToolNode::Leaf(i) => (c + self.tool_checkboxes[*i] as usize, t + 1),
+                ToolNode::Group { children, .. } => {
+                    let (cc, tt) = self.group_stats(children);
+                    (c + cc, t + tt)
+                }
+            })
+    }
+
+    /// Set every leaf checkbox under a group (recursive).
+    fn set_group_checked(&mut self, nodes: &[ToolNode], value: bool) {
+        for node in nodes {
+            match node {
+                ToolNode::Leaf(i) => self.tool_checkboxes[*i] = value,
+                ToolNode::Group { children, .. } => self.set_group_checked(children, value),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf_names(node: &ToolNode, tools: &[String]) -> Vec<String> {
+        match node {
+            ToolNode::Leaf(i) => vec![tools[*i].clone()],
+            ToolNode::Group { children, .. } => children.iter().flat_map(|c| leaf_names(c, tools)).collect(),
+        }
+    }
+
+    fn group_titles(node: &ToolNode) -> Vec<String> {
+        match node {
+            ToolNode::Leaf(_) => vec![],
+            ToolNode::Group { title, children } => {
+                let mut v = vec![title.clone()];
+                for c in children {
+                    v.extend(group_titles(c));
+                }
+                v
+            }
+        }
+    }
+
+    #[test]
+    fn tree_groups_builtin_and_mcp() {
+        let tools = vec![
+            "read_file".into(),
+            "mcp__hello__hello".into(),
+            "web_search".into(),
+            "hello".into(),
+            "save_memory".into(),
+        ];
+        let tree = build_tools_tree(&tools);
+        // Top level: Builtin tools + MCP tools.
+        assert_eq!(
+            group_titles(&tree[0])
+                .into_iter()
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()[0],
+            "Builtin tools"
+        );
+        assert_eq!(group_titles(&tree[1]).first().unwrap(), "MCP tools");
+
+        // Every input tool appears exactly once, in some leaf.
+        let mut all: Vec<String> = tree.iter().flat_map(|n| leaf_names(n, &tools)).collect();
+        all.sort();
+        let mut expected: Vec<String> = tools.clone();
+        expected.sort();
+        assert_eq!(all, expected);
+
+        // MCP server subgroup holds its tool.
+        let mcp_titles = group_titles(&tree[1]);
+        assert!(mcp_titles.contains(&"hello".to_string()));
+    }
+
+    #[test]
+    fn mcp_server_tool_parses_server_with_underscores() {
+        assert_eq!(
+            mcp_server_tool("mcp__hello__hello"),
+            Some(("hello".to_string(), "hello".to_string()))
+        );
+        // Ambiguous when BOTH sides contain `__`; convention: the last
+        // segment is the tool name (MCP tool names are [a-zA-Z0-9_-]).
+        assert_eq!(
+            mcp_server_tool("mcp__my__server__tool"),
+            Some(("my__server".to_string(), "tool".to_string()))
+        );
+        assert_eq!(mcp_server_tool("mcp__x"), None);
+        assert_eq!(mcp_server_tool("read_file"), None);
     }
 }
