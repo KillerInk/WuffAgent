@@ -223,17 +223,30 @@ impl Tool for ListImprovementStatusTool {
             if status.has_new_evidence { "yes" } else { "no" },
             status.lesson_count,
         );
+        let log = self.log();
         if !status.agents.is_empty() {
             out.push_str("\nPer-agent state (2a):");
             for (name, st) in &status.agents {
+                // 1b: surface "awaiting samples" in the fleet view too (not
+                // just the per-agent view), so a stale last_effect_verdict
+                // (e.g. a pre-1b "inconclusive (no runs after the change)")
+                // never reads as a settled result.
+                let verdict =
+                    match crate::agents::improvement::effect_check_awaiting_samples(
+                        &self.memory, name, &log,
+                    ) {
+                        Some((have, need)) => format!("awaiting samples ({have}/{need})"),
+                        None => st
+                            .last_effect_verdict
+                            .clone()
+                            .unwrap_or_else(|| "-".to_string()),
+                    };
                 out.push_str(&format!(
                     "\n  {name}: last check {}; {} task(s) since; no-op streak {}; verdict {}",
                     format_ago(st.last_check),
                     st.runs_since_check,
                     st.no_op_streak,
-                    st.last_effect_verdict
-                        .clone()
-                        .unwrap_or_else(|| "-".to_string()),
+                    verdict,
                 ));
             }
         }
@@ -241,7 +254,6 @@ impl Tool for ListImprovementStatusTool {
         // most recent line (what actually happened since the window started),
         // so the loop state is joinable to real activity without a second
         // read_metrics call.
-        let log = self.log();
         let window_since = Utc::now() - Duration::days(days as i64);
         out.push_str(&format!("\nLoop status ({days} day window):"));
         let names = log.agent_names();
@@ -462,6 +474,40 @@ mod tests {
         let out = run(&tool);
         assert!(out.contains("Per-agent state (2a):"), "got: {out}");
         assert!(out.contains("coder: last check"), "got: {out}");
+    }
+
+    /// 1b: the fleet view shows "awaiting samples (have/need)" for an agent
+    /// whose latest applied marker has fewer runs than the sample floor — it
+    /// must not display a stale `last_effect_verdict` (e.g. a pre-1b
+    /// "inconclusive (no runs after the change)") as if it were a result.
+    #[test]
+    fn fleet_view_shows_awaiting_samples_not_stale_verdict() {
+        let (_dir, manager) = fresh_manager();
+        manager.record_agent_improvement_check("coder", false); // coder into status.agents
+        // A stale verdict that the fleet view must NOT surface while awaiting.
+        manager.record_effect_verdict(
+            "coder",
+            "inconclusive (no runs after the change)",
+        );
+        // The latest applied marker, with no runs since it (awaiting samples).
+        manager
+            .add(MemoryEntry::new(
+                MemoryType::Fact,
+                "prompt changed via approved improvement",
+                "test",
+                &["improvement-applied", "agent:coder"],
+            ))
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = crate::agents::metrics::MetricsLog::new(dir.path());
+        let tool = ListImprovementStatusTool::new(manager).with_log(log);
+        let out = run(&tool); // fleet view (no agent param)
+        assert!(out.contains("awaiting samples (0/3)"), "got: {out}");
+        assert!(
+            !out.contains("inconclusive (no runs after the change)"),
+            "stale verdict leaked into the fleet view: {out}"
+        );
     }
 
     #[test]
