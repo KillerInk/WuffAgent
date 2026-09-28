@@ -12,10 +12,12 @@
 //!   store (windowed aggregates + recent lines; fleet mode when no agent is
 //!   named). Read-only, no LLM call.
 
+mod evals;
 mod metrics;
 mod run;
 mod status;
 
+pub use evals::{DeleteEvalTool, ListEvalsTool, SaveEvalTool};
 pub use metrics::ReadMetricsTool;
 pub use run::RunSelfImprovementTool;
 pub use status::ListImprovementStatusTool;
@@ -41,6 +43,8 @@ pub fn register_improvement_tools(
 ) -> ToolResult<()> {
     // 2e: read_metrics' default window follows the config knob.
     let window_days = memory.config().improvement_metrics_window_days.max(1) as u64;
+    // 2a: one shared default eval store for the eval tools.
+    let evals = Arc::new(crate::memory::evals::EvalStore::default());
     for (name, desc, tool) in [
         (
             "list_improvement_status",
@@ -58,6 +62,21 @@ pub fn register_improvement_tools(
             "run_self_improvement",
             "Run an on-demand self-improvement check for an agent (bypasses the cooldown)",
             Arc::new(RunSelfImprovementTool::new(memory, agents, events)) as Arc<dyn Tool>,
+        ),
+        (
+            "save_eval",
+            "Save (or upsert by id) a golden/regression eval for an agent (basis for run_eval)",
+            Arc::new(SaveEvalTool::new(evals.clone())) as Arc<dyn Tool>,
+        ),
+        (
+            "list_evals",
+            "List an agent's saved evals (id, task, verification criteria)",
+            Arc::new(ListEvalsTool::new(evals.clone())) as Arc<dyn Tool>,
+        ),
+        (
+            "delete_eval",
+            "Delete a saved eval by id for an agent",
+            Arc::new(DeleteEvalTool::new(evals)) as Arc<dyn Tool>,
         ),
     ] {
         super::register_tool(registry, name, desc, tool)?;

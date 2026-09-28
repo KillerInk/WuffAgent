@@ -9,6 +9,7 @@
 //! but `llm` does not depend on `memory`.
 
 pub mod context;
+pub mod evals;
 pub mod manager;
 pub mod maintenance;
 pub mod pending_store;
@@ -28,6 +29,7 @@ pub use pending_store::PendingStore;
 pub use skills::{
     build_skills_prompt_block, set_skills_dir_for_testing, Skill, SkillMeta, SkillStore,
 };
+pub use evals::{set_evals_dir_for_testing, Eval, EvalStore};
 pub use storage::{get_memories_path, load_memories, save_memories};
 pub use types::{
     AgentImprovementState, ImprovementStatus, InjectionMode, MemoryConfig, MemoryEntry,
