@@ -53,7 +53,7 @@ fn test_with_handoff_tool_swaps_entry() {
         "fresh manager has no handoff tool"
     );
 
-    let mailbox = Arc::new(std::sync::Mutex::new(None));
+    let mailbox = Arc::new(std::sync::Mutex::new(Vec::new()));
     let tool = HandoffTool::new(
         mailbox,
         std::path::PathBuf::from("does-not-matter"),

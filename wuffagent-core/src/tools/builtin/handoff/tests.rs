@@ -30,10 +30,22 @@ fn tool(
     dir: &PathBuf,
     search_dirs: Vec<PathBuf>,
     targets: Vec<String>,
-) -> (HandoffTool, Arc<Mutex<Option<HandoffRequest>>>) {
-    let mailbox = Arc::new(Mutex::new(None));
+) -> (HandoffTool, Arc<Mutex<Vec<ControlRequest>>>) {
+    let mailbox = Arc::new(Mutex::new(Vec::new()));
     let tool = HandoffTool::new(mailbox.clone(), dir.clone(), search_dirs, targets);
     (tool, mailbox)
+}
+
+/// Pull the queued handoff (if any) out of the shared control mailbox.
+fn take_handoff(mailbox: &Arc<Mutex<Vec<ControlRequest>>>) -> Option<HandoffRequest> {
+    let mut guard = mailbox.lock().unwrap();
+    guard
+        .iter()
+        .position(|r| matches!(r, ControlRequest::Handoff(_)))
+        .map(|i| match guard.remove(i) {
+            ControlRequest::Handoff(r) => r,
+            _ => unreachable!(),
+        })
 }
 
 fn params(agent: &str, task: &str) -> ToolParams {
@@ -59,7 +71,7 @@ fn test_handoff_resolves_target_and_writes_mailbox() {
     let result = t.execute(params("coder", "Implement the plan."));
     assert!(result.is_ok(), "unexpected error: {:?}", result);
 
-    let req = mailbox.lock().unwrap().take().expect("request written");
+    let req = take_handoff(&mailbox).expect("request written");
     assert_eq!(req.agent, "coder");
     assert_eq!(req.config.name, "coder");
     assert_eq!(req.task, "Implement the plan.");
@@ -83,7 +95,7 @@ fn test_handoff_unknown_agent_errors() {
         }
         other => panic!("expected InvalidParams, got {:?}", other),
     }
-    assert!(mailbox.lock().unwrap().is_none());
+    assert!(mailbox.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -94,7 +106,7 @@ fn test_handoff_disabled_target_errors() {
 
     let err = t.execute(params("ghost", "Task")).unwrap_err();
     assert!(matches!(err, ToolError::InvalidParams(_)));
-    assert!(mailbox.lock().unwrap().is_none());
+    assert!(mailbox.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -105,10 +117,10 @@ fn test_handoff_target_allowlist_enforced() {
     let (t, mailbox) = tool(&dir, vec![], vec!["coder".to_string()]);
 
     assert!(t.execute(params("coder", "Task")).is_ok());
-    assert!(mailbox.lock().unwrap().is_some());
+    assert!(!mailbox.lock().unwrap().is_empty());
 
     // Fresh mailbox: hand off to a profile outside the allowlist.
-    *mailbox.lock().unwrap() = None;
+    mailbox.lock().unwrap().clear();
     let (t2, mailbox2) = tool(&dir, vec![], vec!["coder".to_string()]);
     let err = t2.execute(params("planner", "Task")).unwrap_err();
     match err {
@@ -117,7 +129,7 @@ fn test_handoff_target_allowlist_enforced() {
         }
         other => panic!("expected InvalidParams, got {:?}", other),
     }
-    assert!(mailbox2.lock().unwrap().is_none());
+    assert!(mailbox2.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -129,7 +141,7 @@ fn test_handoff_rejects_second_pending() {
     assert!(t.execute(params("coder", "First")).is_ok());
     let err = t.execute(params("coder", "Second")).unwrap_err();
     assert!(matches!(err, ToolError::Execution(_)));
-    assert!(mailbox.lock().unwrap().is_some(), "original request kept");
+    assert!(!mailbox.lock().unwrap().is_empty(), "original request kept");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -181,7 +193,7 @@ fn test_handoff_finds_agent_in_search_dir() {
 
     t.execute(params("architect", "Implement the plan."))
         .unwrap();
-    let req = mailbox.lock().unwrap().take().expect("request written");
+    let req = take_handoff(&mailbox).expect("request written");
     assert_eq!(req.agent, "architect");
     // Anchored for chained handoffs: the found dir becomes the primary,
     // the rest stay as search dirs.
@@ -198,7 +210,7 @@ fn test_handoff_dedup_primary_wins() {
     let (t, mailbox) = tool(&primary, vec![search.clone()], vec![]);
 
     t.execute(params("coder", "Task")).unwrap();
-    let req = mailbox.lock().unwrap().take().unwrap();
+    let req = take_handoff(&mailbox).unwrap();
     assert_eq!(
         req.config.system_prompt, "Code things.",
         "the primary dir's profile must win dedup"

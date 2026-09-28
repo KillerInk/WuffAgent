@@ -2,8 +2,20 @@
 
 use super::*;
 
-fn mailbox() -> Arc<Mutex<Option<HandBackRequest>>> {
-    Arc::new(Mutex::new(None))
+fn mailbox() -> Arc<Mutex<Vec<ControlRequest>>> {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Pull the queued hand-back (if any) out of the shared control mailbox.
+fn take_hand_back(mailbox: &Arc<Mutex<Vec<ControlRequest>>>) -> Option<HandBackRequest> {
+    let mut guard = mailbox.lock().unwrap();
+    guard
+        .iter()
+        .position(|r| matches!(r, ControlRequest::HandBack(_)))
+        .map(|i| match guard.remove(i) {
+            ControlRequest::HandBack(r) => r,
+            _ => unreachable!(),
+        })
 }
 
 fn params(task: &str) -> ToolParams {
@@ -26,7 +38,7 @@ fn test_hand_back_writes_mailbox() {
     let result = tool.execute(params("Implement the plan."));
     assert!(result.is_ok(), "unexpected error: {:?}", result);
 
-    let req = mailbox.lock().unwrap().take().expect("request written");
+    let req = take_hand_back(&mailbox).expect("request written");
     assert_eq!(req.task, "Implement the plan.");
 }
 
@@ -40,7 +52,7 @@ fn test_hand_back_missing_task_errors() {
     };
     let err = tool.execute(p).unwrap_err();
     assert!(matches!(err, ToolError::InvalidParams(_)));
-    assert!(mailbox.lock().unwrap().is_none());
+    assert!(mailbox.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -50,7 +62,7 @@ fn test_hand_back_empty_task_errors() {
 
     let err = tool.execute(params("   ")).unwrap_err();
     assert!(matches!(err, ToolError::InvalidParams(_)));
-    assert!(mailbox.lock().unwrap().is_none());
+    assert!(mailbox.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -61,6 +73,6 @@ fn test_hand_back_rejects_second_pending() {
     assert!(tool.execute(params("First")).is_ok());
     let err = tool.execute(params("Second")).unwrap_err();
     assert!(matches!(err, ToolError::Execution(_)));
-    let req = mailbox.lock().unwrap().take().expect("original request kept");
+    let req = take_hand_back(&mailbox).expect("original request kept");
     assert_eq!(req.task, "First");
 }

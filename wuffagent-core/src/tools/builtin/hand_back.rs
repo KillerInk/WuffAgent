@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::agents::types::HandBackRequest;
+use crate::agents::types::{ControlRequest, HandBackRequest};
 use crate::tools::types::{
     FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema,
 };
@@ -10,24 +10,26 @@ use crate::tools::types::{
 ///
 /// Per-execution tool: each `Agent` running in a sub-session (its session
 /// meta carries a `parent_session_id`) with `hand_back_enabled` gets its own
-/// instance (its own mailbox), injected in `Agent::builder` exactly like the
-/// per-agent `shell`, `handoff`, and `restart` tools. It is NOT registered
-/// in `register_builtins` because it needs execution-specific state.
+/// instance (wired to the agent's shared control mailbox), injected in
+/// `Agent::builder` exactly like the per-agent `shell`, `handoff`, and
+/// `restart` tools. It is NOT registered in `register_builtins` because it
+/// needs execution-specific state.
 ///
-/// Calling it ends the current agent's turn: the tool writes a
-/// [`HandBackRequest`] to the per-execution mailbox, `Agent::run_llm_loop`
-/// picks it up before the next LLM round (`RunOutcome::HandBack`), and
+/// Calling it ends the current agent's turn: the tool queues a
+/// [`ControlRequest::HandBack`] in the shared control mailbox,
+/// `Agent::run_llm_loop` drains it before the next LLM round
+/// (`RunOutcome::HandBack`), and
 /// `Agent::execute` records a marker in the sub-session store, emits
 /// [`crate::types::AppEvent::AgentHandBack`] (carrying both session ids) and
 /// ends the turn. The UI then posts `task` into the parent session, where
 /// the original agent resumes with its full history.
 pub struct HandBackTool {
-    /// Per-execution mailbox consumed by `Agent::run_llm_loop`.
-    mailbox: Arc<Mutex<Option<HandBackRequest>>>,
+    /// Shared per-execution control mailbox drained by `Agent::run_llm_loop`.
+    mailbox: Arc<Mutex<Vec<ControlRequest>>>,
 }
 
 impl HandBackTool {
-    pub fn new(mailbox: Arc<Mutex<Option<HandBackRequest>>>) -> Self {
+    pub fn new(mailbox: Arc<Mutex<Vec<ControlRequest>>>) -> Self {
         Self { mailbox }
     }
 }
@@ -79,12 +81,12 @@ impl Tool for HandBackTool {
 
         {
             let mut guard = self.mailbox.lock().unwrap();
-            if guard.is_some() {
+            if guard.iter().any(|r| matches!(r, ControlRequest::HandBack(_))) {
                 return Err(ToolError::Execution(
                     "A hand-back is already pending".to_string(),
                 ));
             }
-            *guard = Some(HandBackRequest { task });
+            guard.push(ControlRequest::HandBack(HandBackRequest { task }));
         }
 
         Ok(ToolOutput::Success(serde_json::json!({

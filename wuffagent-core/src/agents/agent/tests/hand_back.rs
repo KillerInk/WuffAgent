@@ -2,7 +2,7 @@
 //! branch) — the tool-level tests live in tools/builtin/hand_back/tests.rs.
 
 use super::*;
-use crate::agents::types::HandBackRequest;
+use crate::agents::types::{ControlRequest, HandBackRequest};
 use crate::sessions::SessionMeta;
 use crate::types::{AppEvent, ReasoningMode};
 
@@ -40,50 +40,60 @@ fn advertised(agent: &Agent) -> Vec<String> {
 /// is a sub-session (meta carries a parent link).
 #[test]
 fn test_hand_back_injection_gating() {
-    // Sub-session + enabled → advertised, mailbox present.
+    // Sub-session + enabled → advertised, empty control mailbox.
     let agent = agent_with_meta(Some("parent-1"), true, "sub-1");
     assert!(
         advertised(&agent).contains(&"hand_back".to_string()),
         "sub-session agent must get hand_back"
     );
-    assert!(agent.hand_back_mailbox.is_some());
+    assert!(
+        agent.drain_control().is_empty(),
+        "nothing should be queued after build"
+    );
 
-    // Top-level session (no parent) → absent, no mailbox.
+    // Top-level session (no parent) → absent, nothing queued.
     let agent = agent_with_meta(None, true, "top-1");
     assert!(
         !advertised(&agent).contains(&"hand_back".to_string()),
         "top-level agents must not see hand_back"
     );
-    assert!(agent.hand_back_mailbox.is_none());
-    assert!(agent.take_pending_hand_back().is_none());
+    assert!(
+        agent.drain_control().is_empty(),
+        "a disabled hand_back should queue nothing"
+    );
 
-    // Sub-session but the profile opted out → absent, no mailbox.
+    // Sub-session but the profile opted out → absent, nothing queued.
     let agent = agent_with_meta(Some("parent-2"), false, "sub-2");
     assert!(
         !advertised(&agent).contains(&"hand_back".to_string()),
         "hand_back_enabled=false must suppress the tool"
     );
-    assert!(agent.hand_back_mailbox.is_none());
+    assert!(
+        agent.drain_control().is_empty(),
+        "an opted-out hand_back should queue nothing"
+    );
 }
 
-/// The mailbox is consumed exactly once by `take_pending_hand_back`.
+/// The mailbox is drained exactly once by `drain_control`.
 #[test]
 fn test_hand_back_mailbox_consumed_once() {
     let agent = agent_with_meta(Some("parent-3"), true, "sub-3");
-    let mailbox = agent
-        .hand_back_mailbox
-        .clone()
-        .expect("mailbox expected");
-    *mailbox.lock().unwrap() = Some(HandBackRequest {
-        task: "Resume the plan.".to_string(),
-    });
+    agent
+        .control_mailbox
+        .lock()
+        .unwrap()
+        .push(ControlRequest::HandBack(HandBackRequest {
+            task: "Resume the plan.".to_string(),
+        }));
 
     let req = agent
-        .take_pending_hand_back()
+        .drain_control()
+        .into_iter()
+        .find_map(|r| r.as_hand_back().cloned())
         .expect("pending hand-back expected");
     assert_eq!(req.task, "Resume the plan.");
     assert!(
-        agent.take_pending_hand_back().is_none(),
+        agent.drain_control().is_empty(),
         "mailbox is consumed exactly once"
     );
 }
@@ -116,10 +126,13 @@ async fn test_execute_hand_back_marker_and_event() {
     .agent_session_id(Some("sub-sid".to_string()))
     .build();
 
-    let mailbox = agent.hand_back_mailbox.clone().expect("mailbox expected");
-    *mailbox.lock().unwrap() = Some(HandBackRequest {
-        task: "Implement the plan.".to_string(),
-    });
+    agent
+        .control_mailbox
+        .lock()
+        .unwrap()
+        .push(ControlRequest::HandBack(HandBackRequest {
+            task: "Implement the plan.".to_string(),
+        }));
 
     let result = agent
         .execute("original request", None, &CancellationToken::new())

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::agents::config::{load_agent_from_dirs, AgentConfig};
-use crate::agents::types::HandoffRequest;
+use crate::agents::types::{ControlRequest, HandoffRequest};
 use crate::tools::types::{Tool, ToolError, ToolOutput, ToolParams, ToolSchema};
 
 /// A tool that hands the session over to another agent profile.
@@ -13,13 +13,14 @@ use crate::tools::types::{Tool, ToolError, ToolOutput, ToolParams, ToolSchema};
 /// `Agent::builder` exactly like the per-agent `shell` tool. It is NOT registered
 /// in `register_builtins` because it needs execution-specific state.
 ///
-/// Calling it ends the current agent's turn: the tool writes a
-/// [`HandoffRequest`] to the per-execution mailbox, `Agent::run_llm_loop`
-/// picks it up before the next LLM round, and `Agent::execute` switches to a
-/// fresh agent for the target profile on the same conversation store.
+/// Calling it ends the current agent's turn: the tool queues a
+/// [`ControlRequest::Handoff`] in the agent's shared control mailbox,
+/// `Agent::run_llm_loop` drains it before the next LLM round, and
+/// `Agent::execute` switches to a fresh agent for the target profile on the
+/// same conversation store.
 pub struct HandoffTool {
-    /// Per-execution mailbox consumed by `Agent::run_llm_loop`.
-    mailbox: Arc<Mutex<Option<HandoffRequest>>>,
+    /// Shared per-execution control mailbox drained by `Agent::run_llm_loop`.
+    mailbox: Arc<Mutex<Vec<ControlRequest>>>,
     /// Directory to resolve target agent profiles from (primary, first).
     agents_dir: PathBuf,
     /// Additional directories to scan after the primary one (first-seen name
@@ -34,7 +35,7 @@ pub struct HandoffTool {
 
 impl HandoffTool {
     pub fn new(
-        mailbox: Arc<Mutex<Option<HandoffRequest>>>,
+        mailbox: Arc<Mutex<Vec<ControlRequest>>>,
         agents_dir: PathBuf,
         search_dirs: Vec<PathBuf>,
         targets: Vec<String>,
@@ -211,17 +212,17 @@ impl Tool for HandoffTool {
 
         {
             let mut guard = self.mailbox.lock().unwrap();
-            if guard.is_some() {
+            if guard.iter().any(|r| matches!(r, ControlRequest::Handoff(_))) {
                 return Err(ToolError::Execution(
                     "A handoff is already pending".to_string(),
                 ));
             }
-            *guard = Some(HandoffRequest {
+            guard.push(ControlRequest::Handoff(HandoffRequest {
                 agent: config.name.clone(),
                 config,
                 task,
                 sub_session,
-            });
+            }));
         }
 
         Ok(ToolOutput::Success(serde_json::json!({

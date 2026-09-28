@@ -59,25 +59,13 @@ pub struct Agent {
     agent_session_id: Option<String>,
     /// Centralized trimming engine.
     trimming: ContextTrimming,
-    /// Per-execution handoff mailbox, present only when `handoff_enabled`.
-    /// The `handoff` tool writes a request here; `run_llm_loop` picks it up
-    /// before the next LLM round.
-    handoff_mailbox: Option<Arc<Mutex<Option<crate::agents::types::HandoffRequest>>>>,
-    /// Per-execution restart mailbox, present only when `restart_enabled`.
-    /// The `restart` tool writes a request here; `run_llm_loop` picks it up
-    /// before the next LLM round.
-    restart_mailbox: Option<Arc<Mutex<Option<crate::agents::types::RestartRequest>>>>,
-    /// Per-execution hand-back mailbox, present only when `hand_back_enabled`
-    /// AND the session is a sub-session (its meta carries a
-    /// `parent_session_id`). The `hand_back` tool writes a request here;
-    /// `run_llm_loop` picks it up before the next LLM round.
-    hand_back_mailbox: Option<Arc<Mutex<Option<crate::agents::types::HandBackRequest>>>>,
-    /// Per-execution session-note mailbox (S4a), present on EVERY agent. The
-    /// `session_note` tool writes a request here; `run_llm_loop` picks it up
-    /// before the next LLM round, inserts the note as an anchored user
-    /// message (right after the system prompt) and records it in the shared
-    /// store — so the note survives trims and session reloads.
-    session_note_mailbox: Arc<Mutex<Option<crate::agents::types::SessionNoteRequest>>>,
+    /// S2: the single per-execution control mailbox shared by the `handoff`,
+    /// `restart`, `hand_back` and `session_note` tools. Each enabled tool
+    /// pushes its own `ControlRequest` variant; `run_llm_loop` drains it once
+    /// per LLM round boundary (notes are applied and the run continues, a
+    /// pending handoff/restart/hand-back ends the run). Always present — when
+    /// none of the tools is injected, draining it is a no-op.
+    control_mailbox: Arc<Mutex<Vec<crate::agents::types::ControlRequest>>>,
     /// I1: trajectory stats of the last completed `run_llm_loop`.
     run_stats: RunStats,
     /// 2b: prompt tokens consumed by the last completed `run_llm_loop` (kept
@@ -101,8 +89,9 @@ pub struct Agent {
 /// a shared manager beforehand), `event_tx`, `memory`, `agent_session_id`.
 ///
 /// The per-agent policy (reasoning effort on a client clone, shell gating,
-/// and the handoff/restart/hand_back tool injection with per-execution
-/// mailboxes) lives in exactly one place: [`AgentBuilder::build`].
+/// and the handoff/restart/hand_back/session_note tool injection wired to
+/// the shared control mailbox) lives in exactly one place:
+/// [`AgentBuilder::build`].
 #[derive(Clone)]
 pub struct AgentBuilder {
     config: AgentConfig,
@@ -173,12 +162,16 @@ impl AgentBuilder {
     /// - the `handoff`/`restart`/`hand_back` tools are injected exactly when
     ///   their config flag is set (hand_back additionally requires a
     ///   sub-session, i.e. a `parent_session_id` in the client's session
-    ///   meta), each with its own per-execution mailbox; tools inherited from
-    ///   a previous agent in a handoff chain are dropped when the flag is off;
-    /// - the `session_note` tool (S4a) is injected for EVERY agent, with its
-    ///   own per-execution mailbox: `run_llm_loop` turns a queued note into an
-    ///   anchored user message (right after the system prompt) + a store
-    ///   record, so pinned state survives trims and session reloads.
+    ///   meta); tools inherited from a previous agent in a handoff chain are
+    ///   dropped when the flag is off;
+    /// - the `session_note` tool (S4a) is injected when `session_note_enabled`
+    ///   (default true): `run_llm_loop` turns a queued note into an anchored
+    ///   user message (right after the system prompt) + a store record, so
+    ///   pinned state survives trims and session reloads.
+    ///
+    /// All four tools share ONE per-execution control mailbox
+    /// (`Agent::control_mailbox`); `build` creates it up front and wires it
+    /// into whichever tools are enabled.
     pub fn build(self) -> Agent {
         let AgentBuilder {
             config,
@@ -206,13 +199,14 @@ impl AgentBuilder {
             config.trim_config.trim_trigger_pct as u64,
             config.trim_config.trim_target_pct as u64,
         );
-        let (
-            tool_manager,
-            handoff_mailbox,
-            restart_mailbox,
-            hand_back_mailbox,
-            session_note_mailbox,
+        let (tool_manager, control_mailbox): (
+            Arc<ToolManager>,
+            Arc<Mutex<Vec<crate::agents::types::ControlRequest>>>,
         ) = {
+            // S2: one control mailbox shared by the per-execution tools.
+            // Always created (the `run_llm_loop` drain is a no-op when none
+            // of the tools was injected).
+            let control_mailbox = Arc::new(Mutex::new(Vec::new()));
             let tool_manager_arc = tool_manager.unwrap_or_else(|| {
                 Arc::new(ToolManager::new(Arc::new(
                     crate::tools::registry::ToolRegistry::new(
@@ -227,49 +221,44 @@ impl AgentBuilder {
             } else {
                 shared.without_shell()
             };
-            let (tm, handoff_mailbox) = if config.handoff_enabled {
-                let mailbox = Arc::new(Mutex::new(None));
+            let tm = if config.handoff_enabled {
                 let tool = crate::tools::builtin::handoff::HandoffTool::new(
-                    mailbox.clone(),
+                    control_mailbox.clone(),
                     config.agents_dir.clone(),
                     config.agents_search_dirs.clone(),
                     config.handoff_targets.clone(),
                 );
-                (tm.with_handoff_tool(tool), Some(mailbox))
+                tm.with_handoff_tool(tool)
             } else {
-                (tm.without_handoff(), None)
+                tm.without_handoff()
             };
-            let (tm, restart_mailbox) = if config.restart_enabled {
-                let mailbox = Arc::new(Mutex::new(None));
-                let tool = crate::tools::builtin::restart::RestartTool::new(mailbox.clone());
-                (tm.with_restart_tool(tool), Some(mailbox))
+            let tm = if config.restart_enabled {
+                let tool = crate::tools::builtin::restart::RestartTool::new(control_mailbox.clone());
+                tm.with_restart_tool(tool)
             } else {
-                (tm.without_restart(), None)
+                tm.without_restart()
             };
-            let (mut tm, hand_back_mailbox) =
-                if config.hand_back_enabled && client.session_meta().parent_session_id.is_some() {
-                    let mailbox = Arc::new(Mutex::new(None));
-                    let tool = crate::tools::builtin::hand_back::HandBackTool::new(mailbox.clone());
-                    (tm.with_hand_back_tool(tool), Some(mailbox))
-                } else {
-                    (tm.without_hand_back(), None)
-                };
-            // S4a: agents with `session_note_enabled` (default true) get a
-            // pinned-note tool wired to their own mailbox. The mailbox is
-            // always created (the `run_llm_loop` drain is a no-op when the
-            // tool was never injected), so the Agent field stays a plain Arc.
-            let mailbox = Arc::new(Mutex::new(None));
-            if config.session_note_enabled {
-                let tool = crate::tools::builtin::session_note::SessionNoteTool::new(mailbox.clone());
-                tm = tm.with_session_note_tool(tool);
-            }
-            (
-                Arc::new(tm),
-                handoff_mailbox,
-                restart_mailbox,
-                hand_back_mailbox,
-                mailbox,
-            )
+            let tm = if config.hand_back_enabled && client.session_meta().parent_session_id.is_some()
+            {
+                let tool = crate::tools::builtin::hand_back::HandBackTool::new(
+                    control_mailbox.clone(),
+                );
+                tm.with_hand_back_tool(tool)
+            } else {
+                tm.without_hand_back()
+            };
+            // S4a: agents with `session_note_enabled` (default true) get the
+            // pinned-note tool, wired to the shared control mailbox.
+            let tm = if config.session_note_enabled {
+                let tool =
+                    crate::tools::builtin::session_note::SessionNoteTool::new(
+                        control_mailbox.clone(),
+                    );
+                tm.with_session_note_tool(tool)
+            } else {
+                tm
+            };
+            (Arc::new(tm), control_mailbox)
         };
         Agent {
             config,
@@ -282,10 +271,7 @@ impl AgentBuilder {
             messages: Vec::new(),
             agent_session_id,
             trimming: ContextTrimming::new(),
-            handoff_mailbox,
-            restart_mailbox,
-            hand_back_mailbox,
-            session_note_mailbox,
+            control_mailbox,
             run_stats: RunStats::default(),
             run_tokens_in: 0,
             run_tokens_out: 0,
@@ -406,26 +392,11 @@ impl Agent {
         self.agent_session_id.clone().unwrap_or_default()
     }
 
-    /// Take a pending handoff request written by the `handoff` tool (if any).
-    pub(crate) fn take_pending_handoff(&self) -> Option<crate::agents::types::HandoffRequest> {
-        self.handoff_mailbox
-            .as_ref()
-            .and_then(|m| m.lock().unwrap().take())
-    }
-
-    /// Take a pending restart request written by the `restart` tool (if any).
-    pub(crate) fn take_pending_restart(&self) -> Option<crate::agents::types::RestartRequest> {
-        self.restart_mailbox
-            .as_ref()
-            .and_then(|m| m.lock().unwrap().take())
-    }
-
-    /// Take a pending hand-back request written by the `hand_back` tool (if
-    /// any).
-    pub(crate) fn take_pending_hand_back(&self) -> Option<crate::agents::types::HandBackRequest> {
-        self.hand_back_mailbox
-            .as_ref()
-            .and_then(|m| m.lock().unwrap().take())
+    /// Drain the control requests (handoff / restart / hand_back / session
+    /// note) queued by the per-execution tools since the last LLM round.
+    /// Consumes the whole queue in one go (insertion order preserved).
+    pub(crate) fn drain_control(&self) -> Vec<crate::agents::types::ControlRequest> {
+        std::mem::take(&mut self.control_mailbox.lock().unwrap())
     }
 
     /// Get the messages from the last execution for memory extraction.

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::agents::types::RestartRequest;
+use crate::agents::types::{ControlRequest, RestartRequest};
 use crate::tools::types::{
     FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema,
 };
@@ -29,13 +29,14 @@ const WUFFAGENT_EXE_STEM: &str = "wuffagent-egui";
 /// build command) so a freshly built binary is loaded, then resume the session.
 ///
 /// Per-execution tool: each `Agent` with `restart_enabled` gets its own
-/// instance (its own mailbox), injected in `Agent::builder` exactly like the
-/// per-agent `shell` and `handoff` tools. It is NOT registered in
-/// `register_builtins` because it needs execution-specific state.
+/// instance (wired to the agent's shared control mailbox), injected in
+/// `Agent::builder` exactly like the per-agent `shell` and `handoff` tools.
+/// It is NOT registered in `register_builtins` because it needs
+/// execution-specific state.
 ///
 /// Calling it ends the current agent's turn: the tool (optionally) runs the
-/// build, writes a [`RestartRequest`] to the per-execution mailbox,
-/// `Agent::run_llm_loop` picks it up before the next LLM round, and
+/// build, queues a [`ControlRequest::Restart`] in the shared control
+/// mailbox, `Agent::run_llm_loop` drains it before the next LLM round, and
 /// `Agent::execute` emits [`crate::types::AppEvent::RestartRequested`]. The UI
 /// then saves the session, relaunches the binary, and closes the window; on
 /// startup the new process reads a marker file and continues the work.
@@ -46,12 +47,12 @@ const WUFFAGENT_EXE_STEM: &str = "wuffagent-egui";
 /// launching the OTHER of the two, since on Windows the running exe cannot be
 /// relinked in place.
 pub struct RestartTool {
-    /// Per-execution mailbox consumed by `Agent::run_llm_loop`.
-    mailbox: Arc<Mutex<Option<RestartRequest>>>,
+    /// Shared per-execution control mailbox drained by `Agent::run_llm_loop`.
+    mailbox: Arc<Mutex<Vec<ControlRequest>>>,
 }
 
 impl RestartTool {
-    pub fn new(mailbox: Arc<Mutex<Option<RestartRequest>>>) -> Self {
+    pub fn new(mailbox: Arc<Mutex<Vec<ControlRequest>>>) -> Self {
         Self { mailbox }
     }
 }
@@ -374,16 +375,16 @@ impl Tool for RestartTool {
 
         {
             let mut guard = self.mailbox.lock().unwrap();
-            if guard.is_some() {
+            if guard.iter().any(|r| matches!(r, ControlRequest::Restart(_))) {
                 return Err(ToolError::Execution(
                     "A restart is already pending".to_string(),
                 ));
             }
-            *guard = Some(RestartRequest {
+            guard.push(ControlRequest::Restart(RestartRequest {
                 reason,
                 build_cmd,
                 exe_path,
-            });
+            }));
         }
 
         Ok(ToolOutput::Success(response))

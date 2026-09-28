@@ -2,10 +2,22 @@
 
 use super::*;
 
-fn tool() -> (RestartTool, Arc<Mutex<Option<RestartRequest>>>) {
-    let mailbox = Arc::new(Mutex::new(None));
+fn tool() -> (RestartTool, Arc<Mutex<Vec<ControlRequest>>>) {
+    let mailbox = Arc::new(Mutex::new(Vec::new()));
     let t = RestartTool::new(mailbox.clone());
     (t, mailbox)
+}
+
+/// Pull the queued restart (if any) out of the shared control mailbox.
+fn take_restart(mailbox: &Arc<Mutex<Vec<ControlRequest>>>) -> Option<RestartRequest> {
+    let mut guard = mailbox.lock().unwrap();
+    guard
+        .iter()
+        .position(|r| matches!(r, ControlRequest::Restart(_)))
+        .map(|i| match guard.remove(i) {
+            ControlRequest::Restart(r) => r,
+            _ => unreachable!(),
+        })
 }
 
 fn params(json: serde_json::Value) -> ToolParams {
@@ -27,7 +39,7 @@ fn test_restart_writes_mailbox() {
     })));
     assert!(result.is_ok(), "unexpected error: {:?}", result);
 
-    let req = mailbox.lock().unwrap().take().expect("request written");
+    let req = take_restart(&mailbox).expect("request written");
     assert_eq!(req.reason, "added the restart feature");
     assert!(req.build_cmd.is_none());
     assert!(req.exe_path.is_none());
@@ -43,7 +55,7 @@ fn test_restart_carries_build_and_exe() {
     })))
     .unwrap();
 
-    let req = mailbox.lock().unwrap().take().expect("request written");
+    let req = take_restart(&mailbox).expect("request written");
     assert_eq!(req.build_cmd.as_deref(), Some("exit 0"));
     assert_eq!(
         req.exe_path.as_deref(),
@@ -58,7 +70,7 @@ fn test_restart_missing_reason_errors() {
         .execute(params(serde_json::json!({ "build_cmd": "exit 0" })))
         .unwrap_err();
     assert!(matches!(err, ToolError::InvalidParams(_)));
-    assert!(mailbox.lock().unwrap().is_none());
+    assert!(mailbox.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -68,7 +80,7 @@ fn test_restart_empty_reason_errors() {
         .execute(params(serde_json::json!({ "reason": "   " })))
         .unwrap_err();
     assert!(matches!(err, ToolError::InvalidParams(_)));
-    assert!(mailbox.lock().unwrap().is_none());
+    assert!(mailbox.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -82,7 +94,7 @@ fn test_restart_rejects_second_pending() {
         .unwrap_err();
     assert!(matches!(err, ToolError::Execution(_)));
     // Original request kept.
-    let req = mailbox.lock().unwrap().take().expect("original kept");
+    let req = take_restart(&mailbox).expect("original kept");
     assert_eq!(req.reason, "First");
 }
 
@@ -102,7 +114,7 @@ fn test_restart_build_failure_skips_mailbox() {
         out
     );
     assert!(
-        mailbox.lock().unwrap().is_none(),
+        mailbox.lock().unwrap().is_empty(),
         "a failed build must NOT queue a restart"
     );
 }
@@ -117,11 +129,7 @@ fn test_restart_build_success_queues_restart() {
         })))
         .expect("execute returns Ok");
     assert!(matches!(out, ToolOutput::Success(_)), "got {:?}", out);
-    let req = mailbox
-        .lock()
-        .unwrap()
-        .take()
-        .expect("request written after successful build");
+    let req = take_restart(&mailbox).expect("request written after successful build");
     assert_eq!(req.build_cmd.as_deref(), Some("exit 0"));
 }
 

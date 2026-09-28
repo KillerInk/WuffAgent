@@ -1,16 +1,30 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::agents::types::SessionNoteRequest;
+use crate::agents::types::{ControlRequest, SessionNoteRequest};
 use crate::tools::builtin::session_note::SessionNoteTool;
 use crate::tools::types::{Tool, ToolOutput, ToolParams};
 
-fn tool() -> (SessionNoteTool, Arc<Mutex<Option<SessionNoteRequest>>>) {
-    let mailbox = Arc::new(Mutex::new(None));
+fn tool() -> (SessionNoteTool, Arc<Mutex<Vec<ControlRequest>>>) {
+    let mailbox = Arc::new(Mutex::new(Vec::new()));
     (
         SessionNoteTool::new(mailbox.clone()),
         mailbox,
     )
+}
+
+/// Pull the queued note (if any) out of the shared control mailbox.
+fn take_session_note(
+    mailbox: &Arc<Mutex<Vec<ControlRequest>>>,
+) -> Option<SessionNoteRequest> {
+    let mut guard = mailbox.lock().unwrap();
+    guard
+        .iter()
+        .position(|r| matches!(r, ControlRequest::SessionNote(_)))
+        .map(|i| match guard.remove(i) {
+            ControlRequest::SessionNote(r) => r,
+            _ => unreachable!(),
+        })
 }
 
 fn params(value: serde_json::Value) -> ToolParams {
@@ -39,9 +53,9 @@ fn queues_note_in_mailbox() {
         .execute(params(serde_json::json!({"note": "decision: use AppEvent"})))
         .unwrap();
     assert!(is_queued(&out));
-    let req = mailbox.lock().unwrap().take().expect("note queued");
+    let req = take_session_note(&mailbox).expect("note queued");
     assert_eq!(req.note, "decision: use AppEvent");
-    assert!(mailbox.lock().unwrap().is_none(), "mailbox drained by take()");
+    assert!(mailbox.lock().unwrap().is_empty(), "mailbox drained by take()");
 }
 
 #[test]
@@ -51,17 +65,25 @@ fn trims_whitespace_and_rejects_empty() {
         t.execute(params(serde_json::json!({"note": "  "})))
             .is_err()
     );
-    assert!(mailbox.lock().unwrap().is_none());
+    assert!(mailbox.lock().unwrap().is_empty());
     t.execute(params(serde_json::json!({"note": "  pinned  "})))
         .unwrap();
-    assert_eq!(mailbox.lock().unwrap().as_ref().unwrap().note, "pinned");
+    let guard = mailbox.lock().unwrap();
+    let req = guard
+        .iter()
+        .find_map(|r| match r {
+            ControlRequest::SessionNote(r) => Some(r),
+            _ => None,
+        })
+        .expect("note queued");
+    assert_eq!(req.note, "pinned");
 }
 
 #[test]
 fn missing_note_is_invalid_params() {
     let (t, mailbox) = tool();
     assert!(t.execute(params(serde_json::json!({}))).is_err());
-    assert!(mailbox.lock().unwrap().is_none());
+    assert!(mailbox.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -74,7 +96,15 @@ fn second_note_while_one_pending_is_an_error() {
         .unwrap_err();
     assert!(err.to_string().contains("already pending"));
     // The first note is still the pending one.
-    assert_eq!(mailbox.lock().unwrap().as_ref().unwrap().note, "first");
+    let guard = mailbox.lock().unwrap();
+    let req = guard
+        .iter()
+        .find_map(|r| match r {
+            ControlRequest::SessionNote(r) => Some(r),
+            _ => None,
+        })
+        .expect("first note still pending");
+    assert_eq!(req.note, "first");
 }
 
 #[test]

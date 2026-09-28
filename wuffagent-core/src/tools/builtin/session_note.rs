@@ -1,40 +1,42 @@
 //! `session_note` — pin a short state note to the current session (S4a).
 //!
-//! Per-execution tool (own mailbox), injected in `Agent::builder` like the
-//! per-agent `shell`, `handoff`, `restart` and `hand_back` tools. Calling it
-//! does NOT end the turn: the note is inserted as an anchored user message
-//! (right after the system prompt) by `run_llm_loop` before the next LLM
-//! round and recorded in the shared store, so it survives trims and session
-//! reloads (re-anchored on every LLM call).
+//! Per-execution tool (wired to the agent's shared control mailbox),
+//! injected in `Agent::builder` like the per-agent `shell`, `handoff`,
+//! `restart` and `hand_back` tools. Calling it does NOT end the turn: the
+//! note is inserted as an anchored user message (right after the system
+//! prompt) by `run_llm_loop` before the next LLM round and recorded in the
+//! shared store, so it survives trims and session reloads (re-anchored on
+//! every LLM call).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::agents::types::SessionNoteRequest;
+use crate::agents::types::{ControlRequest, SessionNoteRequest};
 use crate::tools::types::{
     FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema,
 };
 
 /// A tool that pins a short state note to the current session.
 ///
-/// Per-execution tool: each `Agent` gets its own instance (its own mailbox),
-/// injected in `Agent::builder` exactly like the per-agent `shell`, `handoff`,
-/// `restart`, and `hand_back` tools. It is NOT registered in
-/// `register_builtins` because it needs execution-specific state.
+/// Per-execution tool: each `Agent` gets its own instance (wired to the
+/// agent's shared control mailbox), injected in `Agent::builder` exactly like
+/// the per-agent `shell`, `handoff`, `restart`, and `hand_back` tools. It is
+/// NOT registered in `register_builtins` because it needs execution-specific
+/// state.
 ///
-/// Calling it does not end the current agent's turn: the tool writes a
-/// [`SessionNoteRequest`] to the per-execution mailbox, and
-/// `Agent::run_llm_loop` picks it up before the next LLM round — inserting
-/// the note as an anchored user message (right after the system prompt) via
+/// Calling it does not end the current agent's turn: the tool queues a
+/// [`ControlRequest::SessionNote`] in the shared control mailbox, and
+/// `Agent::run_llm_loop` drains it before the next LLM round — inserting the
+/// note as an anchored user message (right after the system prompt) via
 /// `crate::trimming::brief::apply_note` and recording it in the shared store
 /// so the note survives trims and session reloads.
 pub struct SessionNoteTool {
-    /// Per-execution mailbox consumed by `Agent::run_llm_loop`.
-    mailbox: Arc<Mutex<Option<SessionNoteRequest>>>,
+    /// Shared per-execution control mailbox drained by `Agent::run_llm_loop`.
+    mailbox: Arc<Mutex<Vec<ControlRequest>>>,
 }
 
 impl SessionNoteTool {
-    pub fn new(mailbox: Arc<Mutex<Option<SessionNoteRequest>>>) -> Self {
+    pub fn new(mailbox: Arc<Mutex<Vec<ControlRequest>>>) -> Self {
         Self { mailbox }
     }
 }
@@ -89,14 +91,14 @@ impl Tool for SessionNoteTool {
 
         {
             let mut guard = self.mailbox.lock().unwrap();
-            if guard.is_some() {
+            if guard.iter().any(|r| matches!(r, ControlRequest::SessionNote(_))) {
                 return Err(ToolError::Execution(
                     "A session note is already pending for this round; it will be \
                      applied before the next LLM call (call it again after that)"
                         .to_string(),
                 ));
             }
-            *guard = Some(SessionNoteRequest { note });
+            guard.push(ControlRequest::SessionNote(SessionNoteRequest { note }));
         }
 
         Ok(ToolOutput::Success(serde_json::json!({

@@ -107,9 +107,9 @@ impl Agent {
                 if self.config.restart_enabled && !allowlist.iter().any(|t| t == "restart") {
                     allowlist.push("restart".to_string());
                 }
-                // S4a: the session-note tool is per-execution (own mailbox),
-                // so when it is injected it must survive the allowlist filter
-                // like handoff/restart.
+                // S4a: the session-note tool is per-execution (shared control
+                // mailbox), so when it is injected it must survive the
+                // allowlist filter like handoff/restart.
                 if self.config.session_note_enabled && !allowlist.iter().any(|t| t == "session_note")
                 {
                     allowlist.push("session_note".to_string());
@@ -180,7 +180,14 @@ impl Agent {
             // note that drifted (e.g. right after a session reload, where the
             // store's append order has the notes at the END of the list), so
             // they sit right after the system prompt in EVERY request.
-            if let Some(req) = self.session_note_mailbox.lock().unwrap().take() {
+            // S2: control requests (handoff / restart / hand_back / session
+            // note) arrive through ONE mailbox, drained once per round.
+            // Priority is the legacy drain order: the note is applied first
+            // (it never ends the run), then handoff > restart > hand_back —
+            // whichever is pending ends the run.
+            let control = self.drain_control();
+
+            if let Some(req) = control.iter().find_map(|r| r.as_session_note()) {
                 let note = truncate_note(&req.note);
                 if let Some(idx) = crate::trimming::brief::apply_note(messages, &note) {
                     self.record_in_store(&messages[idx]);
@@ -195,7 +202,7 @@ impl Agent {
 
             // A pending handoff (written by the `handoff` tool this turn)
             // ends this agent's run: `execute` switches to the target agent.
-            if let Some(req) = self.take_pending_handoff() {
+            if let Some(req) = control.iter().find_map(|r| r.as_handoff()) {
                 tracing::info!(
                     "[AGENT] Agent '{}' handoff requested via the handoff tool; ending this agent's turn (to='{}')",
                     self.config.name,
@@ -203,21 +210,21 @@ impl Agent {
                 );
                 // Break (not return) so the run-stats + metrics tail below
                 // still records this hop before the engine switches agents.
-                break RunOutcome::Handoff(req);
+                break RunOutcome::Handoff(req.clone());
             }
 
             // A pending restart (written by the `restart` tool this turn, its
             // build already finished) ends this agent's run: `execute` emits
             // RestartRequested so the UI can relaunch the (optionally newly
             // built) binary and resume the session automatically.
-            if let Some(req) = self.take_pending_restart() {
+            if let Some(req) = control.iter().find_map(|r| r.as_restart()) {
                 tracing::info!(
                     "[AGENT] Agent '{}' restart requested via the restart tool; ending this agent's turn (reason='{}')",
                     self.config.name,
                     req.reason
                 );
                 // Break (not return) so the metrics tail records this run.
-                break RunOutcome::Restart(req);
+                break RunOutcome::Restart(req.clone());
             }
 
             // A pending hand-back (written by the `hand_back` tool this turn;
@@ -225,14 +232,14 @@ impl Agent {
             // records a marker, emits AgentHandBack with the parent session
             // id, and ends the turn so the UI can post the task into the
             // parent session.
-            if let Some(req) = self.take_pending_hand_back() {
+            if let Some(req) = control.iter().find_map(|r| r.as_hand_back()) {
                 tracing::info!(
                     "[AGENT] Agent '{}' hand-back requested via the hand_back tool; ending this agent's turn (task='{}')",
                     self.config.name,
                     req.task
                 );
                 // Break (not return) so the metrics tail records this run.
-                break RunOutcome::HandBack(req);
+                break RunOutcome::HandBack(req.clone());
             }
 
             // Rate-limit LLM calls to avoid hitting API rate limits.

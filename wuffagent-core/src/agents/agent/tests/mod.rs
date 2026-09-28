@@ -1,6 +1,6 @@
 //! Unit tests for the agent module (see super), split by area:
 //! - schema.rs: agent creation, shell schema, per-agent reasoning effort
-//! - handoff.rs: handoff tool injection + take_pending_handoff
+//! - handoff.rs: handoff tool injection + control-mailbox drain
 //! - verify.rs: verify_or_complete (judge) + trim reconciliation + nudge capture
 //! - outcomes.rs: record_verification_outcome storage/dedup
 //! - context.rs: storable-nudge, request overhead, truncated tool-call repair

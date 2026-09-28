@@ -49,8 +49,8 @@ fn test_handoff_tool_injected_when_enabled() {
         names
     );
     assert!(
-        agent.handoff_mailbox.is_some(),
-        "an enabled handoff should create a mailbox"
+        agent.drain_control().is_empty(),
+        "an enabled handoff starts with an empty control mailbox"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -66,14 +66,14 @@ fn test_handoff_tool_absent_when_disabled() {
         names
     );
     assert!(
-        agent.handoff_mailbox.is_none(),
-        "a disabled handoff should not create a mailbox"
+        agent.drain_control().is_empty(),
+        "a disabled handoff should queue no control requests"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn test_take_pending_handoff() {
+async fn test_drain_control_handoff() {
     use crate::tools::types::ToolParams;
 
     let (agent, dir) = make_agent_with_handoff(true, vec!["coder".to_string()], "take_on");
@@ -99,23 +99,27 @@ async fn test_take_pending_handoff() {
     );
     drop(tm);
 
-    // First take: the request; second take: empty.
+    // First drain: the request; second drain: empty.
     let req = agent
-        .take_pending_handoff()
+        .drain_control()
+        .into_iter()
+        .find_map(|r| r.as_handoff().cloned())
         .expect("pending handoff expected");
     assert_eq!(req.agent, "coder");
     assert_eq!(req.config.name, "coder");
     assert_eq!(req.task, "Implement the plan.");
     assert!(
-        agent.take_pending_handoff().is_none(),
+        agent.drain_control().is_empty(),
         "mailbox is consumed exactly once"
     );
     let _ = std::fs::remove_dir_all(&dir);
 
-    // An agent without handoff never has a mailbox.
+    // An agent without handoff queues no control requests.
     let (agent2, dir2) = make_agent_with_handoff(false, Vec::new(), "take_off");
-    assert!(agent2.handoff_mailbox.is_none());
-    assert!(agent2.take_pending_handoff().is_none());
+    assert!(
+        agent2.drain_control().is_empty(),
+        "a disabled handoff should queue nothing"
+    );
     let _ = std::fs::remove_dir_all(&dir2);
 }
 
@@ -143,7 +147,9 @@ async fn test_handoff_tool_sub_session_param() {
     let result = tm.execute("handoff", params).await;
     assert!(result.is_ok(), "handoff tool call should succeed: {:?}", result.err());
     let req = agent
-        .take_pending_handoff()
+        .drain_control()
+        .into_iter()
+        .find_map(|r| r.as_handoff().cloned())
         .expect("pending handoff expected");
     assert!(req.sub_session, "sub_session: true must be carried into the request");
 
@@ -165,7 +171,9 @@ async fn test_handoff_tool_sub_session_param() {
     let result = tm.execute("handoff", params).await;
     assert!(result.is_ok(), "handoff tool call should succeed: {:?}", result.err());
     let req2 = agent2
-        .take_pending_handoff()
+        .drain_control()
+        .into_iter()
+        .find_map(|r| r.as_handoff().cloned())
         .expect("pending handoff expected");
     assert!(!req2.sub_session, "an absent sub_session must default to false");
     let _ = std::fs::remove_dir_all(&dir);
@@ -179,7 +187,7 @@ async fn test_handoff_tool_sub_session_param() {
 /// would otherwise complete the first hop immediately).
 #[tokio::test]
 async fn test_execute_sub_session_handoff_forks_without_chaining() {
-    use crate::agents::types::HandoffRequest;
+    use crate::agents::types::{ControlRequest, HandoffRequest};
     use crate::types::AppEvent;
 
     let dir = handoff_agents_dir("subsess_exec");
@@ -203,23 +211,20 @@ async fn test_execute_sub_session_handoff_forks_without_chaining() {
         .build();
 
     // Pre-write the request the `handoff` tool would have written during a
-    // tool round. The loop picks it up at the top of the first iteration —
+    // tool round. The loop drains it at the top of the first iteration —
     // no LLM call is made at all.
-    *agent
-        .handoff_mailbox
-        .as_ref()
-        .expect("handoff mailbox expected")
-        .lock()
-        .unwrap() = Some(HandoffRequest {
-        agent: "coder".to_string(),
-        config: AgentConfig {
-            name: "coder".to_string(),
-            system_prompt: "Code things.".to_string(),
-            ..Default::default()
+    agent.control_mailbox.lock().unwrap().push(ControlRequest::Handoff(
+        HandoffRequest {
+            agent: "coder".to_string(),
+            config: AgentConfig {
+                name: "coder".to_string(),
+                system_prompt: "Code things.".to_string(),
+                ..Default::default()
+            },
+            task: "Implement the plan.".to_string(),
+            sub_session: true,
         },
-        task: "Implement the plan.".to_string(),
-        sub_session: true,
-    });
+    ));
 
     let result = agent
         .execute("original request", None, &CancellationToken::new())

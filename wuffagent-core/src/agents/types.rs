@@ -79,6 +79,62 @@ pub struct RestartRequest {
     pub exe_path: Option<String>,
 }
 
+/// A control request queued by one of the per-execution tools (`handoff`,
+/// `restart`, `hand_back`, `session_note`) into the shared control mailbox
+/// (`Agent::drain_control`).
+///
+/// The four tools each push their own variant; `Agent::run_llm_loop` drains
+/// the mailbox once per LLM round boundary and processes the variants in the
+/// legacy priority order (notes first — they never end the round — then
+/// handoff > restart > hand_back, whichever is pending ends the run). Each
+/// tool rejects a second queued request of its own variant, so at most one
+/// of each variant is pending at a time.
+// `Handoff` carries a full `AgentConfig` while the other variants are small;
+// at most four requests are ever queued per session, so the padding is
+// immaterial.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug)]
+pub enum ControlRequest {
+    Handoff(HandoffRequest),
+    Restart(RestartRequest),
+    HandBack(HandBackRequest),
+    SessionNote(SessionNoteRequest),
+}
+
+impl ControlRequest {
+    /// The handoff request, if this is a handoff.
+    pub fn as_handoff(&self) -> Option<&HandoffRequest> {
+        match self {
+            Self::Handoff(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// The restart request, if this is a restart.
+    pub fn as_restart(&self) -> Option<&RestartRequest> {
+        match self {
+            Self::Restart(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// The hand-back request, if this is a hand-back.
+    pub fn as_hand_back(&self) -> Option<&HandBackRequest> {
+        match self {
+            Self::HandBack(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// The session-note request, if this is a session note.
+    pub fn as_session_note(&self) -> Option<&SessionNoteRequest> {
+        match self {
+            Self::SessionNote(r) => Some(r),
+            _ => None,
+        }
+    }
+}
+
 /// I1: tool-use trajectory stats for one agent run, fed to the improver so
 /// it can weigh HOW the agent worked (tool churn, errors, verification
 /// retries), not just the final text.
