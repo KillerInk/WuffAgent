@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::types::{AppEvent, ChatToolPolicy, QueuedMessage, ReasoningMode};
 
-use super::AgentEngine;
+use super::{AgentEngine, RunParams};
 
 /// Active-run state for the pipeline: the run's cancel token, the running
 /// task's handle (for abort and finish polling), and the shared receiver of
@@ -127,24 +127,24 @@ impl ChatPipeline {
         let tool_policy = tool_policy.clone();
         let image = image.map(str::to_string);
         let handle = tokio::spawn(async move {
-            // Wire the event tx into the engine so chain events reach the UI,
-            // apply the session's reasoning-effort mode (Auto = agent
-            // profile's own effort; Explicit = forced level), and attach the
+            // Run-scoped values ride on `RunParams` — the shared session
+            // engine serves this run directly (no per-run engine clone, no
+            // re-Arc): chain events reach the UI via `event_tx`, the
+            // session's reasoning-effort mode (Auto = agent profile's own
+            // effort; Explicit = forced level) is applied per run, and the
             // mid-run injection channel (user messages sent while this run is
-            // active are injected at the next LLM round boundary).
-            let inner_engine = (*agent_engine).clone();
-            let engine = Arc::new(
-                inner_engine
-                    .with_event_tx(Arc::new(Mutex::new(event_tx.clone())))
-                    .with_reasoning_mode(reasoning_mode)
-                    .with_session_id(session_id.clone())
-                    .with_injection_channel(Some(injection_holder)),
-            );
+            // active) is injected at the next LLM round boundary.
+            let params = RunParams {
+                event_tx: Some(Arc::new(Mutex::new(event_tx.clone()))),
+                session_id: Some(session_id.clone()),
+                reasoning: reasoning_mode,
+                injection: Some(injection_holder),
+            };
 
             tracing::info!("[CHAT PIPELINE] Starting chat with prompt: {}", prompt);
 
             let result = tokio::select! {
-                result = engine.execute_with_tools(&prompt, &system_prompt, &tool_policy, image.as_deref(), &task_token) => result,
+                result = agent_engine.execute_with_tools(&prompt, &system_prompt, &tool_policy, image.as_deref(), &task_token, &params) => result,
                 _ = task_token.cancelled() => {
                     Ok(String::from("[CANCELLED]"))
                 }

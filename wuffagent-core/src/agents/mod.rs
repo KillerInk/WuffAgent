@@ -23,7 +23,7 @@ pub use super::llm::{ChatClientAdapter, LlmClient};
 pub use agent::Agent;
 pub use chat_pipeline::ChatPipeline;
 pub use config::*;
-pub use engine::AgentEngine;
+pub use engine::{AgentEngine, RunParams};
 pub use improvement::suggest_improvements;
 pub use traits::*;
 pub use types::*;

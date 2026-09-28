@@ -16,7 +16,6 @@ use crate::types::AppEvent;
 pub struct AgentEngine {
     pub(super) llm_client: Arc<dyn LlmClient>,
     pub(super) tool_manager: Arc<ToolManager>,
-    pub(super) event_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
     pub(super) client: Arc<crate::client::ChatClient>,
     pub(super) memory: Option<Arc<crate::memory::MemoryManager>>,
     /// Session ID for this agent engine's persistent conversation.
@@ -30,16 +29,28 @@ pub struct AgentEngine {
     pub(super) agents_search_dirs: Vec<std::path::PathBuf>,
     /// Completed task count, shared across clones; throttles post-task work.
     tasks_completed: Arc<AtomicUsize>,
-    /// Mid-run injection channel for the current run (UI → agent loop), if a
-    /// per-run channel was attached via `with_injection_channel`. The agent
-    /// loop drains it at LLM round boundaries; `execute_with_tools` drains the
-    /// remainder after the loop ends.
-    injection_rx: Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
-    /// Reasoning-effort selection for the chat path (see
-    /// `with_reasoning_mode`): Auto follows the selected agent profile's own
-    /// effort; Explicit forces a level. The client's forced wire level is
-    /// kept in sync by `with_reasoning_mode`.
-    reasoning_mode: crate::types::ReasoningMode,
+}
+
+/// Run-scoped values for one `execute_with_tools` call, passed by the caller
+/// (the chat pipeline) instead of traveling on the engine.
+///
+/// Previously these rode on a per-run engine clone chain
+/// (`with_event_tx` → `with_reasoning_mode` → `with_session_id` →
+/// `with_injection_channel`); passing them per call lets the one shared
+/// engine serve every run in a session.
+#[derive(Default)]
+pub struct RunParams {
+    /// UI event channel for this run's chain events (None = headless).
+    pub event_tx: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
+    /// Session ID for event routing + the persisted conversation (None = none).
+    pub session_id: Option<String>,
+    /// Reasoning-effort selection for the run: Auto follows the selected
+    /// agent profile's own effort; Explicit forces a level.
+    pub reasoning: crate::types::ReasoningMode,
+    /// Mid-run injection channel (UI → agent loop), if one was created for
+    /// this run: the loop drains it at LLM round boundaries, and
+    /// `execute_with_tools` drains the remainder after the loop ends.
+    pub injection: Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
 }
 
 /// Run an LLM memory-maintenance step at most once every N completed tasks.
@@ -58,29 +69,13 @@ impl AgentEngine {
         Self {
             llm_client,
             tool_manager,
-            event_tx: None,
             client,
             memory: None,
             agent_session_id: None,
             agents_dir: None,
             agents_search_dirs: Vec::new(),
             tasks_completed: Arc::new(AtomicUsize::new(0)),
-            injection_rx: None,
-            reasoning_mode: crate::types::ReasoningMode::default(),
         }
-    }
-
-    /// Attach the current run's mid-run injection channel (the chat pipeline
-    /// creates one per `start()` and wires it in here). A user message sent
-    /// while the run is active is injected into the current turn at the next
-    /// LLM round boundary — the earliest point the model can see it — and any
-    /// remainder is handed back to the UI as the next turn.
-    pub fn with_injection_channel(
-        mut self,
-        rx: Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
-    ) -> Self {
-        self.injection_rx = rx;
-        self
     }
 
     /// Set the agents directory used by the chat path to resolve handoff
@@ -106,42 +101,11 @@ impl AgentEngine {
         self
     }
 
-    /// Set the event transmitter for agent chain events.
-    pub fn with_event_tx(mut self, tx: Arc<Mutex<mpsc::Sender<AppEvent>>>) -> Self {
-        self.event_tx = Some(tx);
-        self
-    }
-
     /// Return a clone of the engine with a new LLM client.
     /// Used to create per-session engines with isolated conversation state.
     pub fn with_client(mut self, client: crate::client::ChatClient) -> Self {
         self.client = Arc::new(client);
         self
-    }
-
-    /// Return a clone of the engine with the reasoning-effort mode applied:
-    /// the client's forced wire level is set to the explicit level (or `Off`
-    /// for Auto, so the profile's own effort — applied by `Agent::builder` — is
-    /// the only one in effect), and the mode is remembered so
-    /// `execute_with_tools` can resolve the chat agent's effort.
-    pub fn with_reasoning_mode(self, mode: crate::types::ReasoningMode) -> Self {
-        let mut client = (*self.client).clone();
-        client.set_reasoning_effort(match mode {
-            crate::types::ReasoningMode::Auto => crate::types::ReasoningEffort::Off,
-            crate::types::ReasoningMode::Explicit(e) => e,
-        });
-        Self {
-            client: Arc::new(client),
-            reasoning_mode: mode,
-            ..self
-        }
-    }
-
-    /// Return a clone of the engine with the LLM client's reasoning effort
-    /// updated (used so the agent tool loop honors the current UI setting).
-    /// Equivalent to `with_reasoning_mode(ReasoningMode::Explicit(effort))`.
-    pub fn with_reasoning_effort(self, effort: crate::types::ReasoningEffort) -> Self {
-        self.with_reasoning_mode(crate::types::ReasoningMode::Explicit(effort))
     }
 
     /// Set the session ID for this engine.
@@ -163,6 +127,10 @@ impl AgentEngine {
     /// `image` is an optional `data:` URI for a user-attached image (see
     /// [`Agent::execute`]); it is recorded on the user message so the model
     /// sees it on this turn and in later turns of the conversation.
+    ///
+    /// `params` carries the run-scoped values (event channel, session ID,
+    /// reasoning-effort mode, mid-run injection channel); callers without a
+    /// live UI or a per-run channel pass `&RunParams::default()`.
     pub async fn execute_with_tools(
         &self,
         request: &str,
@@ -170,6 +138,7 @@ impl AgentEngine {
         tool_policy: &crate::types::ChatToolPolicy,
         image: Option<&str>,
         cancel_token: &CancellationToken,
+        params: &RunParams,
     ) -> Result<String, String> {
         if cancel_token.is_cancelled() {
             return Err("Cancelled".to_string());
@@ -187,19 +156,11 @@ impl AgentEngine {
                                          // config lets a profile like "coder" restrict the shell to its allowlist.
         chat_config.allowed_tools = tool_policy.allowed_tools.clone();
         chat_config.shell_config = tool_policy.shell_config.clone();
-        // Trim config comes from the profile. Reasoning effort depends on the
-        // session's ReasoningMode (applied by the chat pipeline via
-        // `with_reasoning_mode`):
-        // - Auto: the SELECTED profile's own effort wins — the UI resolved it
-        //   into `tool_policy.reasoning_effort`, and `Agent::builder` applies it
-        //   (Off there = profile unset → inherit the client's, which the
-        //   pipeline reset to Off, so nothing leaks in).
-        // - Explicit: the pipeline already forced the level on the client, so
-        //   `Off` below makes the chat agent inherit it.
-        chat_config.reasoning_effort = match self.reasoning_mode {
-            crate::types::ReasoningMode::Auto => tool_policy.reasoning_effort,
-            crate::types::ReasoningMode::Explicit(_) => crate::types::ReasoningEffort::Off,
-        };
+        // Trim config comes from the profile. The run's wire level lives on
+        // the run client (see `run_client` below), so `Off` here makes
+        // `Agent::builder` reuse that client as-is — one client clone per
+        // run, not the old `with_reasoning_mode` clone + builder re-clone.
+        chat_config.reasoning_effort = crate::types::ReasoningEffort::Off;
         chat_config.trim_config = tool_policy.trim_config.clone();
         // Handoff: the profile's flag/targets gate the `handoff` tool, and the
         // agents dir is where target profiles are resolved from.
@@ -215,16 +176,36 @@ impl AgentEngine {
         // Keep a copy for the post-task improvement check (Agent::builder takes ownership).
         let maintenance_config = chat_config.clone();
 
-        let mut agent = Agent::builder(chat_config, self.llm_client.clone(), self.client.clone())
+        // Per-run client handle: at most ONE deep clone per run, carrying the
+        // run's final wire level — Auto → the selected profile's own effort
+        // (Off there = nothing forced: reuse the shared client, whose level
+        // the session keeps in sync with the mode); Explicit(e) → e.
+        let run_client: Arc<crate::client::ChatClient> = match params.reasoning {
+            crate::types::ReasoningMode::Explicit(e) => {
+                let mut c = (*self.client).clone();
+                c.set_reasoning_effort(e);
+                Arc::new(c)
+            }
+            crate::types::ReasoningMode::Auto
+                if tool_policy.reasoning_effort != crate::types::ReasoningEffort::Off =>
+            {
+                let mut c = (*self.client).clone();
+                c.set_reasoning_effort(tool_policy.reasoning_effort);
+                Arc::new(c)
+            }
+            crate::types::ReasoningMode::Auto => Arc::clone(&self.client),
+        };
+
+        let mut agent = Agent::builder(chat_config, self.llm_client.clone(), run_client)
             .tool_manager(self.tool_manager.clone())
-            .event_tx(self.event_tx.clone())
+            .event_tx(params.event_tx.clone())
             .memory(self.memory.clone())
-            .agent_session_id(self.agent_session_id.clone())
+            .agent_session_id(params.session_id.clone())
             .build();
         // Mid-run injection channel: the agent loop drains it at LLM round
         // boundaries (user messages sent while this run is active are
         // injected into the current turn as soon as the model can see them).
-        if let Some(rx) = &self.injection_rx {
+        if let Some(rx) = &params.injection {
             agent = agent.with_injection_channel(Arc::clone(rx));
         }
 
@@ -234,13 +215,13 @@ impl AgentEngine {
         // (e.g. during the final verification call) can no longer reach the
         // model this turn — hand them back to the UI to run as the next turn.
         // Runs BEFORE post-task maintenance so the UI is not kept waiting.
-        if let Some(rx) = &self.injection_rx {
+        if let Some(rx) = &params.injection {
             let rx = rx.lock().unwrap();
             while let Ok(message) = rx.try_recv() {
-                if let Some(tx) = &self.event_tx {
+                if let Some(tx) = &params.event_tx {
                     let _ = tx.lock().unwrap().send(AppEvent::UserMessageDrained {
                         message: Box::new(message),
-                        session_id: self.agent_session_id.clone().unwrap_or_default(),
+                        session_id: params.session_id.clone().unwrap_or_default(),
                     });
                 }
             }
@@ -248,8 +229,14 @@ impl AgentEngine {
 
         // Post-task: throttled LLM memory maintenance + optional self-improvement
         // suggestions. Both are opt-in via MemoryConfig and never fail the task.
-        self.post_task_maintenance(&maintenance_config, request, &result, agent.run_stats())
-            .await;
+        self.post_task_maintenance(
+            &maintenance_config,
+            request,
+            &result,
+            agent.run_stats(),
+            params,
+        )
+        .await;
 
         result
     }
@@ -264,6 +251,7 @@ impl AgentEngine {
         task: &str,
         result: &std::result::Result<String, String>,
         stats: crate::agents::RunStats,
+        params: &RunParams,
     ) {
         let memory = match &self.memory {
             Some(m) => m.clone(),
@@ -313,11 +301,11 @@ impl AgentEngine {
                     .await
                     {
                         Ok(suggestions) if !suggestions.is_empty() => {
-                            if let Some(tx) = &self.event_tx {
+                            if let Some(tx) = &params.event_tx {
                                 let _ = tx.lock().unwrap().send(AppEvent::ImprovementSuggested {
                                     agent_name: name.clone(),
                                     suggestions,
-                                    session_id: self.agent_session_id.clone().unwrap_or_default(),
+                                    session_id: params.session_id.clone().unwrap_or_default(),
                                 });
                             }
                             true
