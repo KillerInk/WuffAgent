@@ -137,6 +137,9 @@ impl ChatApp {
                 // 2d: the agent editor's "Run evals" button posts its result
                 // back over the core→UI event channel.
                 self.relay.pending_tx.clone(),
+                // Shared helper runtime for the eval worker (memory-editor
+                // pattern — no throwaway runtime per run).
+                self.core.memory_runtime.as_ref(),
             ));
         }
         if let Some(dialog) = self.dialogs.agent_config_dialog.as_mut() {

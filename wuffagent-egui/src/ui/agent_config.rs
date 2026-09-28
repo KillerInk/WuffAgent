@@ -192,6 +192,10 @@ pub struct AgentConfigDialog {
     /// 2d: the core→UI event channel (to post `EvalsRunFinished` when a manual
     /// eval run ends and refresh the button's status line).
     events: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
+    /// 2d: the shared helper runtime (bootstrap's `memory_runtime`) — the
+    /// "Run evals" worker `block_on`s the `run_eval` tool on it, mirroring
+    /// the memory-maintenance worker (no throwaway runtime per run).
+    runtime: Arc<tokio::runtime::Runtime>,
     /// 2d: a manual "Run evals" is in flight (disables the button).
     run_eval_running: bool,
     /// 2d: the last manual eval run's summary (or error), shown as a status line.
@@ -203,6 +207,7 @@ impl AgentConfigDialog {
         agent_manager: Arc<Mutex<AgentManager>>,
         tool_manager: &Arc<ToolManager>,
         events: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
+        runtime: &Arc<tokio::runtime::Runtime>,
     ) -> Self {
         let agents = agent_manager
             .lock()
@@ -245,6 +250,7 @@ impl AgentConfigDialog {
             events,
             run_eval_running: false,
             run_eval_status: None,
+            runtime: runtime.clone(),
         }
     }
 
@@ -635,18 +641,18 @@ impl AgentConfigDialog {
         self.run_eval_running = true;
         self.run_eval_status =
             Some(format!("Running evals for '{agent}'… (each runs headlessly, up to 180 s)"));
+        let runtime = self.runtime.clone();
         std::thread::spawn(move || {
             let mut values = HashMap::new();
             values.insert("agent".to_string(), serde_json::json!(&agent));
-            let summary =
-                match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                    Ok(rt) => match rt.block_on(tm.execute("run_eval", ToolParams { values })) {
-                        Ok(ToolOutput::Success(v)) => v.as_str().unwrap_or("").to_string(),
-                        Ok(ToolOutput::Error(e)) => format!("Error: {e}"),
-                        Err(e) => format!("Error: {e}"),
-                    },
-                    Err(e) => format!("Failed to build eval runtime: {e}"),
-                };
+            // Shared helper runtime (the memory-maintenance worker uses the
+            // same one): the UI thread is inside the main runtime, so the
+            // tool runs on this fresh OS thread where `block_on` is safe.
+            let summary = match runtime.block_on(tm.execute("run_eval", ToolParams { values })) {
+                Ok(ToolOutput::Success(v)) => v.as_str().unwrap_or("").to_string(),
+                Ok(ToolOutput::Error(e)) => format!("Error: {e}"),
+                Err(e) => format!("Error: {e}"),
+            };
             if let Ok(s) = events.lock() {
                 let _ = s.send(AppEvent::EvalsRunFinished {
                     agent_name: agent,
