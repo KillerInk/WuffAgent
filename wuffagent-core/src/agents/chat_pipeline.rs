@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -10,6 +9,20 @@ use crate::types::{AppEvent, ChatToolPolicy, QueuedMessage, ReasoningMode};
 
 use super::AgentEngine;
 
+/// Active-run state for the pipeline: the run's cancel token, the running
+/// task's handle (for abort and finish polling), and the shared receiver of
+/// the run's injection channel.
+///
+/// Everything is swapped under one `Mutex` with short critical sections
+/// (lock, clone, unlock — never held across an `.await`): token, handle and
+/// channel ends are all `Send`, so no raw pointers or manual `Send`/`Sync`
+/// impls are needed.
+struct RunState {
+    token: Option<CancellationToken>,
+    handle: Option<JoinHandle<()>>,
+    injection: Option<Arc<Mutex<mpsc::Receiver<QueuedMessage>>>>,
+}
+
 /// ChatPipeline routes chat requests through the AgentEngine's tool pipeline,
 /// using the selected agent's system prompt instead of routing through the
 /// agent registry.
@@ -18,12 +31,9 @@ use super::AgentEngine;
 /// same reasoning-content tracking, same cancellation model.
 pub struct ChatPipeline {
     agent_engine: Arc<AgentEngine>,
-    /// The active cancel token for the current request (or the last one if
-    /// the task has already finished). Stored as raw ptr so we can mutate
-    /// without interior mutability on the token itself.
-    current_token: AtomicPtr<CancellationToken>,
-    /// Handle to the running task (for abort).
-    task_handle: Mutex<Option<JoinHandle<()>>>,
+    /// The current run's state (cancel token, task handle, injection
+    /// receiver), swapped at `start()`/`cancel()` time.
+    run: Mutex<RunState>,
     /// Event sender for forwarding pipeline events to the UI.
     event_tx: mpsc::Sender<AppEvent>,
     /// Reasoning-effort selection for this session's runs: Auto (default)
@@ -36,20 +46,7 @@ pub struct ChatPipeline {
     /// hands user messages sent while this run is active to the running agent
     /// loop, which picks them up at the next LLM round boundary.
     injection_tx: Mutex<mpsc::Sender<QueuedMessage>>,
-    /// Receiver half of the CURRENT run's injection channel, shared with the
-    /// running task (the agent loop drains it at round boundaries; the engine
-    /// drains the remainder after the loop ends). `cancel()` drains it before
-    /// aborting the task so a late message is never lost. `None` between runs.
-    /// (The outer `Mutex` is touched only from the UI thread; the inner
-    /// `Mutex` serializes the task-side and cancel-side drains, so each
-    /// message is consumed exactly once.)
-    injection_rx: Mutex<Option<Arc<Mutex<mpsc::Receiver<QueuedMessage>>>>>,
 }
-
-// Safe: AtomicPtr+CancellationToken + std mpsc ends (all `Send`/`Sync`
-// through the `Mutex`es); the raw ptr is only swapped from the UI thread.
-unsafe impl Send for ChatPipeline {}
-unsafe impl Sync for ChatPipeline {}
 
 impl ChatPipeline {
     pub fn new(
@@ -66,13 +63,15 @@ impl ChatPipeline {
         drop(_injection_rx);
         Self {
             agent_engine,
-            current_token: AtomicPtr::new(Box::into_raw(Box::new(CancellationToken::new()))),
-            task_handle: Mutex::new(None),
+            run: Mutex::new(RunState {
+                token: None,
+                handle: None,
+                injection: None,
+            }),
             event_tx,
             reasoning_mode,
             session_id,
             injection_tx: Mutex::new(injection_tx),
-            injection_rx: Mutex::new(None),
         }
     }
 
@@ -104,20 +103,22 @@ impl ChatPipeline {
         // Cancel any existing task
         self.cancel();
 
-        // Create a fresh cancel token for this request
-        let cancel_token = CancellationToken::new();
-        let new_ptr = Box::into_raw(Box::new(cancel_token));
-        // Swap in the new token. The old one is no longer referenced by any
-        // live task (we just aborted it above and `cancel()` already signalled
-        // it), so free it now — otherwise each `start()` leaks a boxed
-        // CancellationToken.
-        let old_ptr = self.current_token.swap(new_ptr, Ordering::AcqRel);
-        if !old_ptr.is_null() {
-            unsafe { drop(Box::from_raw(old_ptr)) };
-        }
+        // Create a fresh cancel token and injection channel for this run:
+        // the UI can `inject()` user messages into it any time, and the
+        // running task wires the receiver into the agent (drained at LLM
+        // round boundaries). The shared clone also serves the cancel-time
+        // remainder drain in `cancel()`. The task gets its own clone of the
+        // token; the stored one is what `cancel()` signals.
+        let task_token = CancellationToken::new();
+        let (injection_tx, injection_rx) = mpsc::channel();
+        let injection_holder = Arc::new(Mutex::new(injection_rx));
+        let mut run = self.run.lock().unwrap();
+        run.token = Some(task_token.clone());
+        run.injection = Some(Arc::clone(&injection_holder));
+        drop(run);
+        *self.injection_tx.lock().unwrap() = injection_tx;
 
         let agent_engine = self.agent_engine.clone();
-        let cancel_token = unsafe { &*new_ptr };
         let event_tx = self.event_tx.clone();
         let reasoning_mode = self.reasoning_mode;
         let session_id = self.session_id.clone();
@@ -125,14 +126,6 @@ impl ChatPipeline {
         let system_prompt = system_prompt.to_string();
         let tool_policy = tool_policy.clone();
         let image = image.map(str::to_string);
-        // Fresh injection channel for this run: the UI can `inject()` user
-        // messages into it any time, and the running task wires the receiver
-        // into the agent (drained at LLM round boundaries). The shared clone
-        // also serves the cancel-time remainder drain in `cancel()`.
-        let (injection_tx, injection_rx) = mpsc::channel();
-        *self.injection_tx.lock().unwrap() = injection_tx;
-        let injection_holder = Arc::new(Mutex::new(injection_rx));
-        *self.injection_rx.lock().unwrap() = Some(Arc::clone(&injection_holder));
         let handle = tokio::spawn(async move {
             // Wire the event tx into the engine so chain events reach the UI,
             // apply the session's reasoning-effort mode (Auto = agent
@@ -151,8 +144,8 @@ impl ChatPipeline {
             tracing::info!("[CHAT PIPELINE] Starting chat with prompt: {}", prompt);
 
             let result = tokio::select! {
-                result = engine.execute_with_tools(&prompt, &system_prompt, &tool_policy, image.as_deref(), cancel_token) => result,
-                _ = cancel_token.cancelled() => {
+                result = engine.execute_with_tools(&prompt, &system_prompt, &tool_policy, image.as_deref(), &task_token) => result,
+                _ = task_token.cancelled() => {
                     Ok(String::from("[CANCELLED]"))
                 }
             };
@@ -175,7 +168,7 @@ impl ChatPipeline {
             }
         });
 
-        *self.task_handle.lock().unwrap() = Some(handle);
+        self.run.lock().unwrap().handle = Some(handle);
     }
 
     /// Returns true when the pipeline has no task, or the current task has
@@ -187,7 +180,7 @@ impl ChatPipeline {
     /// emit `StreamComplete`/`StreamError`), and the UI clears its generating
     /// state itself so the spinner cannot get stuck.
     pub fn task_done(&self) -> bool {
-        match self.task_handle.lock().unwrap().as_ref() {
+        match self.run.lock().unwrap().handle.as_ref() {
             Some(handle) => handle.is_finished(),
             None => true,
         }
@@ -195,15 +188,18 @@ impl ChatPipeline {
 
     /// Stop the current chat session.
     pub fn cancel(&self) {
-        // Cancel the active token
-        let ptr = self.current_token.load(Ordering::Acquire);
-        if !ptr.is_null() {
-            unsafe { (*ptr).cancel() };
+        // Cancel the active token, and drain any user messages that were
+        // injected but not yet consumed (the task is about to be aborted and
+        // would drop them): hand them back to the UI so they run as the next
+        // turn instead of being lost.
+        let (token, injection) = {
+            let run = self.run.lock().unwrap();
+            (run.token.clone(), run.injection.clone())
+        };
+        if let Some(token) = token {
+            token.cancel();
         }
-        // Drain any user messages that were injected but not yet consumed
-        // (the task is about to be aborted and would drop them): hand them
-        // back to the UI so they run as the next turn instead of being lost.
-        if let Some(holder) = self.injection_rx.lock().unwrap().as_ref() {
+        if let Some(holder) = injection {
             let rx = holder.lock().unwrap();
             while let Ok(message) = rx.try_recv() {
                 let _ = self.event_tx.send(AppEvent::UserMessageDrained {
@@ -212,20 +208,11 @@ impl ChatPipeline {
                 });
             }
         }
-        *self.injection_rx.lock().unwrap() = None;
-        // Abort the running task if any
-        if let Some(handle) = self.task_handle.lock().unwrap().take() {
+        // Clear this run's injection channel and abort the running task if any.
+        let mut run = self.run.lock().unwrap();
+        run.injection = None;
+        if let Some(handle) = run.handle.take() {
             handle.abort();
-        }
-    }
-}
-
-impl Drop for ChatPipeline {
-    fn drop(&mut self) {
-        // Drop the current token
-        let ptr = self.current_token.load(Ordering::Acquire);
-        if !ptr.is_null() {
-            unsafe { drop(Box::from_raw(ptr)) };
         }
     }
 }
