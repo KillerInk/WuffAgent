@@ -20,6 +20,18 @@ fn marker_for(agent: &str, days_ago: i64) -> MemoryEntry {
 
 #[tokio::test]
 async fn test_effect_check_includes_outcomes_since_marker() {
+    let _guard = MetricsDirGuard::new();
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    use std::io::Write;
+    // Marker is 3 days ago → after window [3,0]; give it 3 runs so the
+    // JUDGEABLE path renders (the "you may propose reverting" sentence is
+    // part of that path, not the deferred one-liner).
+    let mut f = std::fs::File::create(log.agent_path("coder")).unwrap();
+    writeln!(f, "{}", run_line(1, 4, 1)).unwrap();
+    writeln!(f, "{}", run_line(2, 4, 1)).unwrap();
+    writeln!(f, "{}", run_line(0, 4, 1)).unwrap();
+    drop(f);
+
     let dir = tempdir().unwrap();
     let (manager, prompts, _keep) = auto_improve_manager(dir.path());
 
@@ -219,7 +231,9 @@ async fn test_effect_check_before_after_metrics() {
     // Marker is 3 days ago → BEFORE window = [6, 3] days ago, AFTER = [3, 0].
     writeln!(f, "{}", run_line(4, 5, 1)).unwrap();
     writeln!(f, "{}", run_line(5, 5, 1)).unwrap(); // before: 2 runs, 10 calls, 2 errors → 20.0%
-    writeln!(f, "{}", run_line(1, 4, 1)).unwrap(); // after: 1 run, 4 calls, 1 error → 25.0%
+    writeln!(f, "{}", run_line(1, 4, 1)).unwrap(); // after: 3 runs, 12 calls, 3 errors → 25.0%
+    writeln!(f, "{}", run_line(0, 4, 1)).unwrap(); // (1b: ≥3 after-runs to be judgeable)
+    writeln!(f, "{}", run_line(2, 4, 1)).unwrap();
     drop(f);
 
     let dir = tempdir().unwrap();
@@ -266,7 +280,7 @@ async fn test_effect_check_before_after_metrics() {
         .unwrap_or_else(|| panic!("no after-metrics line in prompt:\n{prompt}"));
     assert!(before.contains("2 run(s)"), "{before}");
     assert!(before.contains("20.0%"), "{before}");
-    assert!(after.contains("1 run(s)"), "{after}");
+    assert!(after.contains("3 run(s)"), "{after}");
     assert!(after.contains("25.0%"), "{after}");
 
     // The evidence line reports the before/after run counts.
@@ -274,7 +288,7 @@ async fn test_effect_check_before_after_metrics() {
         suggestions[0]
             .evidence
             .iter()
-            .any(|e| e.starts_with("Effect check:") && e.contains("runs before vs after: 2 vs 1")),
+            .any(|e| e.starts_with("Effect check:") && e.contains("runs before vs after: 2 vs 3")),
         "evidence: {:?})",
         suggestions[0].evidence
     );
@@ -399,12 +413,20 @@ async fn test_effect_check_records_verdict() {
     );
 }
 
-/// 1a: with no metric lines in either window the effect check shows
-/// "(no data)" instead of omitting the windows (the LLM must be able to tell
-/// "no data" from "good data").
+/// 1a: a window with no metric lines shows "(no data)" instead of being
+/// omitted (the LLM must be able to tell "no data" from "good data"). The
+/// AFTER window is given enough runs to be judgeable (1b) so the full
+/// section renders; the BEFORE window stays empty.
 #[tokio::test]
 async fn test_effect_check_no_metrics_shows_no_data() {
-    let _guard = MetricsDirGuard::new(); // empty, guarded metrics dir
+    let _guard = MetricsDirGuard::new();
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("coder")).unwrap();
+    writeln!(f, "{}", run_line(1, 4, 1)).unwrap();
+    writeln!(f, "{}", run_line(2, 4, 1)).unwrap();
+    writeln!(f, "{}", run_line(0, 4, 1)).unwrap();
+    drop(f);
 
     let dir = tempdir().unwrap();
     let (manager, prompts, _keep) = auto_improve_manager(dir.path());
@@ -448,7 +470,8 @@ async fn test_effect_check_no_metrics_shows_no_data() {
         .find(|l| l.starts_with("metrics after the change"))
         .unwrap_or_else(|| panic!("no after-metrics line in prompt:\n{prompt}"));
     assert!(before.contains("(no data)"), "{before}");
-    assert!(after.contains("(no data)"), "{after}");
+    assert!(!after.contains("(no data)"), "{after}");
+    assert!(after.contains("3 run(s)"), "{after}");
 }
 
 #[tokio::test]
@@ -508,11 +531,12 @@ async fn test_effect_check_excludes_outcomes_older_than_marker() {
     assert!(prompt.contains("(none yet)"), "prompt: {}", prompt);
 }
 
-/// 4a: with fewer than 3 runs after the change the prompt carries a
-/// low-sample caveat; with 3 or more it does not (the after-window file is
-/// rewritten between the two passes of the same test).
+/// 1b: below the sample floor the effect check DEFERS — a short
+/// "not yet judgeable" section (no metrics block) and NO verdict recorded;
+/// at/above the floor it settles — full section and a persisted verdict
+/// (the after-window file is rewritten between the two passes of the test).
 #[tokio::test]
-async fn test_effect_check_low_sample_caveat() {
+async fn test_effect_check_low_sample_deferred() {
     let _guard = MetricsDirGuard::new();
     let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
     let path = log.agent_path("coder");
@@ -536,7 +560,7 @@ async fn test_effect_check_low_sample_caveat() {
         verification_attempts: 0,
     };
 
-    // Pass 1: one run after the change -> caveat present.
+    // Pass 1: one run after the change -> deferred (short section, no verdict).
     {
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "{}", run_line(1, 4, 1)).unwrap();
@@ -557,16 +581,21 @@ async fn test_effect_check_low_sample_caveat() {
     .unwrap();
     // Scope the lock: `let r = &prompts.lock().unwrap()[i]` extends the
     // MutexGuard to the whole function and would deadlock the second pass.
-    let (prompt, has_note) = {
+    let (prompt, deferred) = {
         let g = prompts.lock().unwrap();
         (
             g[0].clone(),
-            g[0].contains("treat the after-window as a preliminary sample"),
+            g[0].contains("not yet judgeable") && g[0].contains("only 1 run(s)"),
         )
     };
-    assert!(has_note, "expected low-sample caveat, prompt: {prompt}");
+    assert!(deferred, "expected deferred one-liner, prompt: {prompt}");
+    // 1b: below the floor NO verdict is recorded.
+    assert!(
+        manager.agent_improvement_state("coder").last_effect_verdict.is_none(),
+        "no verdict should be recorded below the sample floor"
+    );
 
-    // Pass 2: three runs after the change -> no caveat.
+    // Pass 2: three runs after the change -> settled (full section, verdict).
     {
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "{}", run_line(1, 4, 1)).unwrap();
@@ -587,9 +616,14 @@ async fn test_effect_check_low_sample_caveat() {
     )
     .await
     .unwrap();
-    let (prompt, has_note) = {
+    let (prompt, deferred) = {
         let g = prompts.lock().unwrap();
-        (g[1].clone(), g[1].contains("preliminary sample"))
+        (g[1].clone(), g[1].contains("not yet judgeable"))
     };
-    assert!(!has_note, "no caveat expected with 3 runs, prompt: {prompt}");
+    assert!(!deferred, "no defer expected with 3 runs, prompt: {prompt}");
+    // 1b: at/above the floor the first full check records a verdict.
+    assert!(
+        manager.agent_improvement_state("coder").last_effect_verdict.is_some(),
+        "verdict should be recorded at/above the sample floor"
+    );
 }

@@ -126,6 +126,26 @@ impl Tool for ListImprovementStatusTool {
             let mult =
                 crate::agents::improvement::no_op_backoff_multiplier(state.no_op_streak.max(1));
             let min_interval = min_interval_label(status.improvement_min_interval_hours);
+            // The metrics log (used for the awaiting-samples check below AND
+            // the metrics window after the main line).
+            let log = self.log();
+            // 1b: when the effect check is below its sample floor, surface
+            // "awaiting samples" in the verdict field itself, instead of
+            // leaving `last_effect_verdict` to read as None/stale.
+            let verdict_label =
+                match crate::agents::improvement::effect_check_awaiting_samples(
+                    &self.memory,
+                    name,
+                    &log,
+                ) {
+                    Some((have, need)) => format!(
+                        "awaiting samples ({have}/{need}) — not yet judgeable, no verdict recorded"
+                    ),
+                    None => state
+                        .last_effect_verdict
+                        .clone()
+                        .unwrap_or_else(|| "none (no applied change recorded yet)".to_string()),
+                };
             let mut out = format!(
                 "Improvement loop for '{name}': auto_improve={}; last check: {}; \
                  tasks since last check: {} (cooldown base {} task(s), backoff x{} = {}, min interval: {}); \
@@ -147,10 +167,7 @@ impl Tool for ListImprovementStatusTool {
                 } else {
                     "no"
                 },
-                state
-                    .last_effect_verdict
-                    .clone()
-                    .unwrap_or_else(|| "none (no applied change recorded yet)".to_string()),
+                verdict_label,
                 status.lesson_count,
                 if known {
                     String::new()
@@ -159,10 +176,6 @@ impl Tool for ListImprovementStatusTool {
                         .to_string()
                 }
             );
-            // The metrics window: what actually happened since this agent's
-            // last check (or all-time when it was never checked) + its most
-            // recent lines — the loop state joined to real activity.
-            let log = self.log();
             let since = state.last_check;
             let label = if since.is_some() {
                 "since last check"

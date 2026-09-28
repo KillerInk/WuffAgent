@@ -167,6 +167,26 @@ fn outcomes_since(
         .collect()
 }
 
+/// 1b: when the effect check is below its sample floor, return `(have, need)`
+/// so the status view can show "awaiting samples" instead of reading the
+/// (stale or `None`) `last_effect_verdict`. `None` means either no approved
+/// change has been recorded for this agent (no effect check to await) or
+/// enough runs have accumulated since it (the verdict path applies).
+///
+/// Takes the metrics log explicitly (rather than `MetricsLog::default()`) so
+/// the status tool can pass the same log it uses for its metrics join.
+pub fn effect_check_awaiting_samples(
+    manager: &MemoryManager,
+    agent_name: &str,
+    metrics: &crate::agents::metrics::MetricsLog,
+) -> Option<(u32, u32)> {
+    let marker = latest_applied_marker(manager, agent_name)?;
+    let since = marker.timestamp?;
+    let after = metrics.summary_between(agent_name, Some(since), None);
+    let need = manager.config().improvement_min_samples.max(1);
+    (after.runs < need).then_some((after.runs, need))
+}
+
 /// I5: the "effect check" section of the improver prompt — how long ago the
 /// last approved prompt change happened and which outcomes were recorded for
 /// this agent since it, so the improver can propose a revert when the change
@@ -211,6 +231,32 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
     let before_start = since - chrono::Duration::days(window_days);
     let before = metrics_log.summary_between(agent_name, Some(before_start), Some(since));
     let after = metrics_log.summary_between(agent_name, Some(since), None);
+    // 1b: sample floor — below this many runs after the change the metrics
+    // cannot be judged. Defer instead of settling: emit a short section
+    // (the before/after metrics block is omitted) and do NOT record a
+    // verdict, so `last_effect_verdict` stops flapping to "inconclusive" on
+    // every check and the status view can surface "awaiting samples
+    // (have/need)" instead of a pseudo-result. The qualitative outcomes list
+    // is still shown (it does not depend on the metrics sample).
+    let min_samples = manager.config().improvement_min_samples.max(1);
+    if after.runs < min_samples {
+        let section = format!(
+            "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}), but only {have} run(s) have been recorded since (need {min_samples}) — not yet judgeable; do not propose a revert based on the metrics.\nOutcomes recorded for this agent since that change:\n{list}",
+            have = after.runs
+        );
+        let evidence_line = format!(
+            "Effect check: change applied {days} day(s) ago ({date}); awaiting samples ({have}/{min_samples}); no verdict recorded",
+            have = after.runs
+        );
+        return Some((section, evidence_line));
+    }
+
+    // 1a: the quantitative half of the effect check (only reached with a
+    // judgeable after-window): per-agent metrics in two windows — AFTER =
+    // change → now, BEFORE = the immediately preceding period of the same
+    // length (min 1 day so a fresh change still gets a baseline, max 30 days
+    // so old markers don't sweep in months of history). The lesson list above
+    // stays as the qualitative half.
     let before_line = window_metrics_line(
         &format!(
             "metrics before the change ({} → {})",
@@ -224,21 +270,8 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
         &after,
     );
 
-    // 4a: low-sample caveat — with fewer than `improvement_min_samples` runs
-    // after the change (2e) the after-window is too noisy to base a revert
-    // decision on; tell the improver so it does not over-react to 1-2 runs.
-    let min_samples = manager.config().improvement_min_samples;
-    let sample_note = if after.runs < min_samples.max(1) {
-        format!(
-            " (only {n} run(s) recorded after the change so far — treat the after-window as a preliminary sample, not solid evidence)",
-            n = after.runs
-        )
-    } else {
-        String::new()
-    };
-
     let section = format!(
-        "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).\n{before_line}\n{after_line}{sample_note}\nOutcomes recorded for this agent since that change:\n{list}\nIf the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
+        "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).\n{before_line}\n{after_line}\nOutcomes recorded for this agent since that change:\n{list}\nIf the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
     );
     // 2a: deterministic effect verdict, persisted for the status view and
     // appended to the evidence line (best-effort write; the LLM still gets
