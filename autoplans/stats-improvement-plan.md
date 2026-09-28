@@ -149,11 +149,14 @@ trends, no costs, no joins.**
   `config/` (`model_prices: Vec<(model, per_1M_in, per_1M_out)>`,
   serde-defaulted, user-editable, fallback 0.0 = "recorded but unpriced").
   Cost is computed at write time (stable history even if prices change).
-- **1c. Eval score (A4).** Wire the existing verification judge's score (it
-  already grades against `expect` in `run_eval`) into `log_eval`'s
-  `score` field — the field exists, the writer just doesn't fill it. If the
-  judge currently emits pass/fail only, extend its verdict parse to a
-  0.0–1.0 score when present (fallback: 1.0 pass / 0.0 fail, labeled).
+- **1c. Eval score (A4).** The `score` field exists on `MetricsLine::Eval`
+  but `log_eval` hard-codes `None` — and the verification judge
+  (`verify_tool_outputs`, verified in `run_eval.rs`) returns
+  `verified: bool` + `judge_reason: String` with **no score today**. So this
+  needs a real change, not a wire-up: extend the judge prompt (the `expect`
+  grading call in `run_eval`) to also emit a `0.0–1.0` score line and parse
+  it into the verdict struct (fallback: 1.0 pass / 0.0 fail, labeled
+  "derived"). One extra line in the prompt, not a second LLM call.
 - **1d. Duration split (A6).** `Run` gains `llm_ms` and `tools_ms`
   (verification LLM time folds into `llm_ms` or a third field
   `verify_ms` — pick during impl, keep `duration_ms` as the total for
