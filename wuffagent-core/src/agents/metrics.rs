@@ -159,6 +159,35 @@ pub enum MetricsLine {
         #[serde(default)]
         duration_ms: u64,
     },
+    /// 2b: a golden/regression eval run (the eval harness's pass/fail record,
+    /// written by `run_eval`). `id` is the eval's id (per-eval tracking);
+    /// `passed` is the verification judge's verdict against the eval's
+    /// `expect`; `score` is an optional 0.0-1.0 quality score (2d).
+    Eval {
+        ts: DateTime<Utc>,
+        /// Profile that ran the eval — mirrors the file the line is stored in.
+        #[serde(default)]
+        agent: String,
+        /// The eval's id (per-eval tracking; empty for ad-hoc runs).
+        #[serde(default)]
+        id: String,
+        /// Whether the verification judge passed the response against the
+        /// eval's `expect`.
+        #[serde(default)]
+        passed: bool,
+        /// Optional 0.0-1.0 quality score (2d: LLM-graded; `None` = pass/fail only).
+        #[serde(default)]
+        score: Option<f64>,
+        /// Wall-clock duration of the eval run, in milliseconds.
+        #[serde(default)]
+        duration_ms: u64,
+        /// Prompt tokens consumed by the eval run (0 when the server reports none).
+        #[serde(default)]
+        tokens_in: u64,
+        /// Completion tokens produced by the eval run (0 when the server reports none).
+        #[serde(default)]
+        tokens_out: u64,
+    },
 }
 
 impl MetricsLine {
@@ -224,6 +253,24 @@ impl MetricsLine {
                 ts.format("%Y-%m-%d %H:%M"),
                 *duration_ms as f64 / 1000.0,
             ),
+            MetricsLine::Eval {
+                ts,
+                agent,
+                id,
+                passed,
+                score,
+                duration_ms,
+                tokens_in,
+                tokens_out,
+            } => format!(
+                "{} eval ({agent}, id={id}): {}{} {} tok in / {} out, {:.1}s",
+                ts.format("%Y-%m-%d %H:%M"),
+                if *passed { "PASS" } else { "FAIL" },
+                score.map(|s| format!(" (score {:.2})", s)).unwrap_or_default(),
+                tokens_in,
+                tokens_out,
+                *duration_ms as f64 / 1000.0,
+            ),
         }
     }
 }
@@ -260,6 +307,14 @@ pub struct MetricsSummary {
     pub check_tokens_out: u64,
     /// 1c: total suggestions produced by the counted checks.
     pub check_suggestions: u32,
+    /// 2b: evals run in the window (the eval harness's pass/fail records).
+    pub evals: u32,
+    /// 2b: evals that passed in the window.
+    pub evals_passed: u32,
+    /// 2b: prompt tokens consumed by the counted evals.
+    pub eval_tokens_in: u64,
+    /// 2b: completion tokens produced by the counted evals.
+    pub eval_tokens_out: u64,
 }
 
 impl MetricsSummary {
@@ -352,7 +407,8 @@ fn line_ts(line: &MetricsLine) -> &DateTime<Utc> {
         | MetricsLine::Feedback { ts, .. }
         | MetricsLine::SkillUse { ts, .. }
         | MetricsLine::Trim { ts, .. }
-        | MetricsLine::Check { ts, .. } => ts,
+        | MetricsLine::Check { ts, .. }
+        | MetricsLine::Eval { ts, .. } => ts,
     }
 }
 
@@ -586,6 +642,34 @@ impl MetricsLog {
         );
     }
 
+    /// 2b: append a golden/regression eval line (the eval harness's pass/fail
+    /// record). Written to `agent`'s file (the profile that ran the eval).
+    pub fn log_eval(
+        &self,
+        agent: &str,
+        id: &str,
+        passed: bool,
+        duration_ms: u64,
+        tokens_in: u64,
+        tokens_out: u64,
+    ) {
+        self.append(
+            agent,
+            &MetricsLine::Eval {
+                ts: Utc::now(),
+                agent: agent.to_string(),
+                id: id.to_string(),
+                passed,
+                // Score is not computed yet (2c adds it); the field stays for
+                // forward compatibility.
+                score: None,
+                duration_ms,
+                tokens_in,
+                tokens_out,
+            },
+        );
+    }
+
     /// Read all lines for `agent` (oldest first), skipping corrupt lines.
     /// Returns an empty vec when the file does not exist.
     pub fn read_all(&self, agent: &str) -> Vec<MetricsLine> {
@@ -688,6 +772,7 @@ impl MetricsLog {
                 MetricsLine::SkillUse { ts, .. } => ts,
                 MetricsLine::Trim { ts, .. } => ts,
                 MetricsLine::Check { ts, .. } => ts,
+                MetricsLine::Eval { ts, .. } => ts,
             };
             if let Some(start) = start {
                 if *ts < start {
@@ -743,6 +828,19 @@ impl MetricsLog {
                     s.check_tokens_in += tokens_in;
                     s.check_tokens_out += tokens_out;
                     s.check_suggestions += *suggestions as u32;
+                }
+                MetricsLine::Eval {
+                    passed,
+                    tokens_in,
+                    tokens_out,
+                    ..
+                } => {
+                    s.evals += 1;
+                    if *passed {
+                        s.evals_passed += 1;
+                    }
+                    s.eval_tokens_in += tokens_in;
+                    s.eval_tokens_out += tokens_out;
                 }
             }
         }

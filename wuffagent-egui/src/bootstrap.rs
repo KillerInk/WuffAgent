@@ -173,11 +173,17 @@ pub fn bootstrap() -> AppContext {
         let agent_manager = Arc::new(agent_manager);
         builtin::register_agent_tools(&tooling.registry, agent_manager.clone())
             .expect("Failed to register agent-profile tools");
+        // 2b: run_eval needs the LLM transport, the live session client
+        // (for `fresh()` isolated runs), and the app's tool manager (so the
+        // headless eval agent has the same tools a live turn does).
         builtin::register_improvement_tools(
             &tooling.registry,
             memory_manager.clone(),
             agent_manager,
             Some(Arc::new(Mutex::new(event_tx.clone()))),
+            clients.llm_client.clone(),
+            clients.session_client.clone(),
+            Arc::new(Mutex::new((*tooling.tool_manager).clone())),
         )
         .expect("Failed to register self-improvement tools");
     }

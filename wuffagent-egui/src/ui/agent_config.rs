@@ -535,6 +535,10 @@ impl AgentConfigDialog {
             // The agent editor has no session_note toggle yet; keep the
             // default (enabled) — S4a pinned notes are on for every agent.
             session_note_enabled: true,
+            // The agent editor has no metrics toggle; keep the default (enabled)
+            // so profile runs keep emitting run-metrics lines (the eval harness
+            // is the only place that disables it).
+            metrics_enabled: true,
         };
 
         // Ensure the directory exists before saving

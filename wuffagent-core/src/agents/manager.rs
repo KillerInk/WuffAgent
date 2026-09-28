@@ -139,6 +139,7 @@ impl AgentManager {
                             restart_enabled: true,
                             hand_back_enabled: true,
                             session_note_enabled: true,
+                            metrics_enabled: true,
                         };
                         if seen.insert(config.name.clone(), ()).is_none() {
                             // debug (not info): see the note on the non-legacy
@@ -634,6 +635,7 @@ impl AgentManager {
             restart_enabled: true,
             hand_back_enabled: true,
             session_note_enabled: true,
+            metrics_enabled: true,
         })
     }
 

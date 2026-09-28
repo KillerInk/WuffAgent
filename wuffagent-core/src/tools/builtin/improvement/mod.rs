@@ -15,19 +15,23 @@
 mod evals;
 mod metrics;
 mod run;
+mod run_eval;
 mod status;
 
 pub use evals::{DeleteEvalTool, ListEvalsTool, SaveEvalTool};
 pub use metrics::ReadMetricsTool;
 pub use run::RunSelfImprovementTool;
+pub use run_eval::RunEvalTool;
 pub use status::ListImprovementStatusTool;
 
 use std::sync::{Arc, Mutex};
 
-use crate::agents::AgentManager;
+use crate::agents::{AgentManager, LlmClient};
+use crate::client::ChatClient;
 use crate::memory::MemoryManager;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::types::{Tool, ToolResult};
+use crate::tools::ToolManager;
 use crate::types::AppEvent;
 
 /// 2a: register the self-improvement tools. Both are per-profile
@@ -40,6 +44,9 @@ pub fn register_improvement_tools(
     memory: Arc<MemoryManager>,
     agents: Arc<AgentManager>,
     events: Option<Arc<Mutex<std::sync::mpsc::Sender<AppEvent>>>>,
+    llm_client: Arc<dyn LlmClient>,
+    session_client: Arc<ChatClient>,
+    tool_manager: Arc<Mutex<ToolManager>>,
 ) -> ToolResult<()> {
     // 2e: read_metrics' default window follows the config knob.
     let window_days = memory.config().improvement_metrics_window_days.max(1) as u64;
@@ -61,7 +68,11 @@ pub fn register_improvement_tools(
         (
             "run_self_improvement",
             "Run an on-demand self-improvement check for an agent (bypasses the cooldown)",
-            Arc::new(RunSelfImprovementTool::new(memory, agents, events)) as Arc<dyn Tool>,
+            Arc::new(RunSelfImprovementTool::new(
+                memory,
+                agents.clone(),
+                events,
+            )) as Arc<dyn Tool>,
         ),
         (
             "save_eval",
@@ -76,7 +87,18 @@ pub fn register_improvement_tools(
         (
             "delete_eval",
             "Delete a saved eval by id for an agent",
-            Arc::new(DeleteEvalTool::new(evals)) as Arc<dyn Tool>,
+            Arc::new(DeleteEvalTool::new(evals.clone())) as Arc<dyn Tool>,
+        ),
+        (
+            "run_eval",
+            "Run a profile's saved evals headlessly and report a pass/fail table (recorded as Eval metrics lines)",
+            Arc::new(RunEvalTool::new(
+                evals,
+                agents.clone(),
+                llm_client,
+                session_client,
+                tool_manager,
+            )) as Arc<dyn Tool>,
         ),
     ] {
         super::register_tool(registry, name, desc, tool)?;

@@ -265,6 +265,18 @@ impl ChatClient {
         client
     }
 
+    /// 2b: a fresh client that shares this client's connection settings
+    /// (base URL / API key) and context window but starts an EMPTY
+    /// conversation (a new session id). The eval harness uses it so a
+    /// headless run's messages don't pollute the live session's
+    /// conversation. The `LlmClient` transport is separate — the caller
+    /// passes the shared one — so this only isolates the conversation store.
+    pub fn fresh(&self) -> ChatClient {
+        let mut client = Self::from_settings(self.settings.clone());
+        client.n_ctx = self.n_ctx.clone();
+        client
+    }
+
     pub fn set_tool_event_sender(&self, tx: mpsc::Sender<crate::types::AppEvent>) {
         *self.tool_event_tx.lock().unwrap() = Some(tx);
     }

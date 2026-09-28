@@ -238,6 +238,12 @@ pub struct AgentConfig {
     /// profile.
     #[serde(default = "default_true")]
     pub session_note_enabled: bool,
+    /// Whether this agent records a `Run` line to the run-metrics store at the
+    /// end of each run (gated so synthetic runs — the eval harness's headless
+    /// runs — don't pollute a profile's real-run metrics). 2b: defaults to
+    /// true so it can be turned off per profile / per run.
+    #[serde(default = "default_true")]
+    pub metrics_enabled: bool,
 }
 
 fn default_enabled_agent() -> bool {
@@ -276,6 +282,7 @@ impl Default for AgentConfig {
             restart_enabled: true,
             hand_back_enabled: true,
             session_note_enabled: true,
+            metrics_enabled: true,
         }
     }
 }
@@ -315,6 +322,7 @@ fn parse_agent_file(path: &Path) -> Option<AgentConfig> {
         restart_enabled: true,
         hand_back_enabled: true,
         session_note_enabled: true,
+        metrics_enabled: true,
     })
 }
 
@@ -542,6 +550,7 @@ impl AgentConfig {
                             restart_enabled: true,
                             hand_back_enabled: true,
                             session_note_enabled: true,
+                            metrics_enabled: true,
                         };
                         agents.push(config);
                     } else {

@@ -41,6 +41,7 @@ fn make_agent(name: &str, prompt: &str) -> AgentConfig {
         restart_enabled: false,
         hand_back_enabled: false,
         session_note_enabled: false,
+        metrics_enabled: true,
     }
 }
 

@@ -80,6 +80,12 @@ pub struct Agent {
     session_note_mailbox: Arc<Mutex<Option<crate::agents::types::SessionNoteRequest>>>,
     /// I1: trajectory stats of the last completed `run_llm_loop`.
     run_stats: RunStats,
+    /// 2b: prompt tokens consumed by the last completed `run_llm_loop` (kept
+    /// separate from `RunStats` so the existing `RunStats` literals stay
+    /// untouched; the eval harness reads this for its cost record).
+    run_tokens_in: u64,
+    /// 2b: completion tokens produced by the last completed `run_llm_loop`.
+    run_tokens_out: u64,
     /// Mid-run injection channel (UI → this run), if the chat pipeline
     /// attached one. The agent loop drains it at LLM round boundaries: a user
     /// message sent while the run is active is appended to the current turn
@@ -281,6 +287,8 @@ impl AgentBuilder {
             hand_back_mailbox,
             session_note_mailbox,
             run_stats: RunStats::default(),
+            run_tokens_in: 0,
+            run_tokens_out: 0,
             injection_rx: None,
         }
     }
@@ -429,6 +437,12 @@ impl Agent {
     /// of the last completed `run_llm_loop` — fed to the improver.
     pub fn run_stats(&self) -> RunStats {
         self.run_stats
+    }
+
+    /// 2b: prompt/completion tokens of the last completed `run_llm_loop`
+    /// (read by the eval harness for its cost record).
+    pub fn run_tokens(&self) -> (u64, u64) {
+        (self.run_tokens_in, self.run_tokens_out)
     }
 
 }

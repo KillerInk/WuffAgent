@@ -303,7 +303,8 @@ fn line_ts(line: &MetricsLine) -> chrono::DateTime<chrono::Utc> {
         | MetricsLine::Feedback { ts, .. }
         | MetricsLine::SkillUse { ts, .. }
         | MetricsLine::Trim { ts, .. }
-        | MetricsLine::Check { ts, .. } => *ts,
+        | MetricsLine::Check { ts, .. }
+        | MetricsLine::Eval { ts, .. } => *ts,
     }
 }
 

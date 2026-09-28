@@ -622,16 +622,26 @@ impl Agent {
         // fails the run.
         run_stats.verification_attempts = verify_state.attempts;
         self.run_stats = run_stats;
-        crate::agents::metrics::record_run(
-            &self.config.name,
-            run_stats.tool_calls as u32,
-            run_stats.tool_errors as u32,
-            verify_state.attempts,
-            start.elapsed().as_millis() as u64,
-            verify_state.final_outcome.unwrap_or(crate::agents::metrics::RunOutcome::None),
-            tokens_in,
-            tokens_out,
-        );
+        // 2b: expose this run's token usage (the eval harness reads it for the
+        // Eval line's cost record; tokens are loop-local, not in RunStats).
+        self.run_tokens_in = tokens_in;
+        self.run_tokens_out = tokens_out;
+        // 2b: synthetic runs (the eval harness's headless runs) set
+        // `metrics_enabled = false` so they don't pollute a profile's
+        // real-run metrics; they write an `Eval` line instead (see
+        // `run_eval`).
+        if self.config.metrics_enabled {
+            crate::agents::metrics::record_run(
+                &self.config.name,
+                run_stats.tool_calls as u32,
+                run_stats.tool_errors as u32,
+                verify_state.attempts,
+                start.elapsed().as_millis() as u64,
+                verify_state.final_outcome.unwrap_or(crate::agents::metrics::RunOutcome::None),
+                tokens_in,
+                tokens_out,
+            );
+        }
         Ok(outcome)
     }
 
