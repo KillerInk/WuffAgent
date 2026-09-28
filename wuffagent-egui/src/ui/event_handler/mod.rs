@@ -42,6 +42,9 @@ impl ChatApp {
             // 4b: manual "run check now" finished — not session-bound (the
             // improvements panel is global).
             AppEvent::ImprovementCheckFinished { .. } => String::new(),
+            // 2d: manual "Run evals" finished — not session-bound (the agent
+            // editor's eval panel is global).
+            AppEvent::EvalsRunFinished { .. } => String::new(),
         };
         match event {
             // Stream lifecycle arms: see `stream.rs`.
@@ -172,6 +175,17 @@ impl ChatApp {
                 self.dialogs
                     .improvements_panel
                     .mark_check_finished(&agent_name, produced);
+            }
+            // 2d: a manual "Run evals" finished — clear the running flag and
+            // show the pass/fail summary in the agent editor's eval panel.
+            AppEvent::EvalsRunFinished {
+                agent_name,
+                summary,
+            } => {
+                tracing::info!(%agent_name, "Manual eval run finished");
+                if let Some(d) = self.dialogs.agent_config_dialog.as_mut() {
+                    d.mark_evals_finished(&agent_name, &summary);
+                }
             }
             AppEvent::McpConfigChanged { .. } => {
                 // An MCP management tool rewrote config.json's mcp_servers

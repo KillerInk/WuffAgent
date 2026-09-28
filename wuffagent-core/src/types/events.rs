@@ -101,6 +101,14 @@ pub enum AppEvent {
         agent_name: String,
         produced: bool,
     },
+    /// 2d: a manual "Run evals" (the agent editor's button) finished.
+    /// `summary` is the run_eval tool's pass/fail table (or an error string).
+    /// No `session_id`: it is not session-bound — the agent editor shows it as
+    /// a status line. Mirrors `ImprovementCheckFinished`.
+    EvalsRunFinished {
+        agent_name: String,
+        summary: String,
+    },
     /// The running agent (in `parent_session_id`) called `handoff(...,
     /// sub_session: true)`: the parent turn ended, and the UI must fork a
     /// CLEAN sub-session for `agent` (fresh store: only the target's system

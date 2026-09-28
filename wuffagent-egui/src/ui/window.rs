@@ -134,6 +134,9 @@ impl ChatApp {
             self.dialogs.agent_config_dialog = Some(super::agent_config::AgentConfigDialog::new(
                 Arc::new(Mutex::new(agent_manager)),
                 &self.core.tool_manager,
+                // 2d: the agent editor's "Run evals" button posts its result
+                // back over the core→UI event channel.
+                self.relay.pending_tx.clone(),
             ));
         }
         if let Some(dialog) = self.dialogs.agent_config_dialog.as_mut() {
