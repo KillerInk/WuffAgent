@@ -220,6 +220,24 @@ fn run_line(days_ago: i64, calls: u32, errors: u32) -> String {
     .to_string()
 }
 
+/// One JSON metrics `eval` line backdated `days_ago` days (written directly —
+/// `MetricsLine`'s variant fields are not constructible outside the metrics
+/// module). 2c: the evals window test uses these to place pass/fail records in
+/// the before/after windows around a marker.
+fn eval_line(days_ago: i64, id: &str, passed: bool) -> String {
+    serde_json::json!({
+        "kind": "eval",
+        "ts": (chrono::Utc::now() - chrono::Duration::days(days_ago)).to_rfc3339(),
+        "agent": "coder",
+        "id": id,
+        "passed": passed,
+        "duration_ms": 500,
+        "tokens_in": 100,
+        "tokens_out": 50,
+    })
+    .to_string()
+}
+
 /// 1a: the effect check shows before/after per-agent METRICS windows (not
 /// just the lesson list), and the evidence line carries the run counts.
 #[tokio::test]
@@ -291,6 +309,82 @@ async fn test_effect_check_before_after_metrics() {
             .any(|e| e.starts_with("Effect check:") && e.contains("runs before vs after: 2 vs 3")),
         "evidence: {:?})",
         suggestions[0].evidence
+    );
+}
+
+/// 2c: the effect check gains a deterministic evals window — pass/fail in the
+/// same before/after windows as the run metrics (not LLM vibes) — and flags a
+/// pass-rate regression when the after-window evals do worse than before.
+#[tokio::test]
+async fn test_effect_check_evals_window() {
+    let _guard = MetricsDirGuard::new();
+    let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("coder")).unwrap();
+    // Marker 3 days ago → BEFORE = [6,3] days ago, AFTER = [3,0].
+    writeln!(f, "{}", eval_line(5, "a", true)).unwrap(); // before: 2 evals, 2 passed
+    writeln!(f, "{}", eval_line(4, "b", true)).unwrap();
+    writeln!(f, "{}", eval_line(1, "c", true)).unwrap(); // after: 2 evals, 1 passed, 1 failed
+    writeln!(f, "{}", eval_line(0, "d", false)).unwrap();
+    // ≥3 after-runs so the JUDGEABLE (full) path renders.
+    writeln!(f, "{}", run_line(1, 4, 1)).unwrap();
+    writeln!(f, "{}", run_line(0, 4, 1)).unwrap();
+    writeln!(f, "{}", run_line(2, 4, 1)).unwrap();
+    drop(f);
+
+    let dir = tempdir().unwrap();
+    let (manager, prompts, _keep) = auto_improve_manager(dir.path());
+    manager.add(marker_for("coder", 3)).unwrap();
+    manager
+        .add(MemoryEntry::new(
+            MemoryType::Lesson,
+            "Trigger lesson",
+            "agent",
+            &["agent:coder"],
+        ))
+        .unwrap();
+
+    let llm = Arc::new(CaptureLlm {
+        response: r#"[{"agent_name": "coder", "prompt_change": "p", "rationale": "r"}]"#.to_string(),
+        prompts: prompts.clone(),
+    });
+    let stats = RunStats {
+        tool_calls: 1,
+        tool_errors: 0,
+        verification_attempts: 0,
+    };
+    let _ = suggest_improvements(
+        &manager,
+        &test_agent_config(),
+        "task",
+        "result",
+        &stats,
+        llm.as_ref(),
+    )
+    .await
+    .unwrap();
+
+    let prompt = &prompts.lock().unwrap()[0];
+    let before_eval = prompt
+        .lines()
+        .find(|l| l.starts_with("Evals before the change"))
+        .unwrap_or_else(|| panic!("no before-evals line in prompt:\n{prompt}"));
+    let after_eval = prompt
+        .lines()
+        .find(|l| l.starts_with("Evals after the change"))
+        .unwrap_or_else(|| panic!("no after-evals line in prompt:\n{prompt}"));
+    assert!(
+        before_eval.contains("2 eval(s), 2 passed, 0 failed"),
+        "{before_eval}"
+    );
+    assert!(
+        after_eval.contains("2 eval(s), 1 passed, 1 failed"),
+        "{after_eval}"
+    );
+    // The pass-rate regression (100% → 50%) is flagged as a deterministic signal.
+    assert!(
+        prompt.contains("eval regression: pass rate dropped from 100% to 50%"),
+        "prompt: {prompt}"
     );
 }
 

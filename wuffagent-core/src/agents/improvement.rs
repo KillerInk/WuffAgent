@@ -227,10 +227,13 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
     // baseline, max 30 days so old markers don't sweep in months of
     // history). The lesson list above stays as the qualitative half.
     let metrics_log = crate::agents::metrics::MetricsLog::default();
-    let window_days = i64::from(days).clamp(1, 30);
+    let window_days = days.clamp(1, 30);
     let before_start = since - chrono::Duration::days(window_days);
     let before = metrics_log.summary_between(agent_name, Some(before_start), Some(since));
     let after = metrics_log.summary_between(agent_name, Some(since), None);
+    // 2c: the evals half of the effect check (deterministic pass/fail in the
+    // same windows) — computed once and folded into both return paths below.
+    let evals_block = evals_window_lines(before_start, since, &before, &after);
     // 1b: sample floor — below this many runs after the change the metrics
     // cannot be judged. Defer instead of settling: emit a short section
     // (the before/after metrics block is omitted) and do NOT record a
@@ -240,10 +243,13 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
     // is still shown (it does not depend on the metrics sample).
     let min_samples = manager.config().improvement_min_samples.max(1);
     if after.runs < min_samples {
-        let section = format!(
+        let mut section = format!(
             "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}), but only {have} run(s) have been recorded since (need {min_samples}) — not yet judgeable; do not propose a revert based on the metrics.\nOutcomes recorded for this agent since that change:\n{list}",
             have = after.runs
         );
+        if let Some(eb) = &evals_block {
+            section.push_str(&format!("\n{eb}"));
+        }
         let evidence_line = format!(
             "Effect check: change applied {days} day(s) ago ({date}); awaiting samples ({have}/{min_samples}); no verdict recorded",
             have = after.runs
@@ -270,9 +276,13 @@ fn effect_check_section(manager: &MemoryManager, agent_name: &str) -> Option<(St
         &after,
     );
 
-    let section = format!(
+    let mut section = format!(
         "The prompt for '{agent_name}' was last changed via an approved improvement {days} day(s) ago ({date}).\n{before_line}\n{after_line}\nOutcomes recorded for this agent since that change:\n{list}\nIf the after-change metrics or outcomes look worse than before, you may propose reverting the prompt (prompt_change set to the previous prompt text) — the user can always revert from history."
     );
+    // 2c: append the deterministic evals window (if any) to the full section.
+    if let Some(eb) = &evals_block {
+        section.push_str(&format!("\n{eb}"));
+    }
     // 2a: deterministic effect verdict, persisted for the status view and
     // appended to the evidence line (best-effort write; the LLM still gets
     // the raw windows above for its qualitative half).
@@ -297,6 +307,50 @@ fn window_metrics_line(
         line if line.is_empty() => format!("{label}: (no data)"),
         line => line,
     }
+}
+
+/// 2c: the evals half of the effect check — deterministic pass/fail in the same
+/// before/after windows as the run metrics, so an eval *regression* is data the
+/// improver can act on (not just LLM vibes over noisy run-metric samples).
+/// Reuses the already-computed before/after `MetricsSummary` (its `evals*`
+/// fields are aggregated over `MetricsLine::Eval`). Returns `None` when there
+/// are no evals in either window (nothing to report).
+fn evals_window_lines(
+    before_start: chrono::DateTime<chrono::Utc>,
+    since: chrono::DateTime<chrono::Utc>,
+    before: &crate::agents::metrics::MetricsSummary,
+    after: &crate::agents::metrics::MetricsSummary,
+) -> Option<String> {
+    if before.evals == 0 && after.evals == 0 {
+        return None;
+    }
+    let mut s = format!(
+        "Evals before the change ({} → {}): {} eval(s), {} passed, {} failed\n\
+         Evals after the change ({} → now): {} eval(s), {} passed, {} failed",
+        before_start.format("%Y-%m-%d"),
+        since.format("%Y-%m-%d"),
+        before.evals,
+        before.evals_passed,
+        before.evals.saturating_sub(before.evals_passed),
+        since.format("%Y-%m-%d"),
+        after.evals,
+        after.evals_passed,
+        after.evals.saturating_sub(after.evals_passed),
+    );
+    // Flag a regression: the after-window pass rate is strictly below the
+    // before-window's, with evals in both (a deterministic signal, unlike runs).
+    if before.evals > 0 && after.evals > 0 {
+        let before_rate = before.evals_passed as f64 / before.evals as f64;
+        let after_rate = after.evals_passed as f64 / after.evals as f64;
+        if after_rate < before_rate {
+            s.push_str(&format!(
+                "\n⚠ eval regression: pass rate dropped from {:.0}% to {:.0}% since the change",
+                before_rate * 100.0,
+                after_rate * 100.0
+            ));
+        }
+    }
+    Some(s)
 }
 
 /// I1: one-line trajectory summary fed to the improver (and kept as evidence).
