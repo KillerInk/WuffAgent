@@ -96,7 +96,7 @@ fn backdate(entry: &mut MemoryEntry, days: i64) {
 /// must serialize (same pattern as the MCP config-path tests).
 static METRICS_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-struct MetricsDirGuard {
+pub(crate) struct MetricsDirGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     /// Kept alive so the temp dir outlives the test (the value itself is
     /// never read — only its cleanup on drop matters).
@@ -104,7 +104,7 @@ struct MetricsDirGuard {
 }
 
 impl MetricsDirGuard {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let lock = METRICS_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         crate::agents::metrics::set_metrics_dir_for_testing(Some(dir.path().to_path_buf()));
@@ -116,7 +116,7 @@ impl MetricsDirGuard {
 
     /// The temp dir the override currently points at (tests write known
     /// metric lines into it via `MetricsLog::new(guard.dir())`).
-    fn dir(&self) -> &std::path::Path {
+    pub(crate) fn dir(&self) -> &std::path::Path {
         self._dir.path()
     }
 }

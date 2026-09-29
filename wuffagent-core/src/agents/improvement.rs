@@ -1232,4 +1232,4 @@ fn truncate_for_evidence(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

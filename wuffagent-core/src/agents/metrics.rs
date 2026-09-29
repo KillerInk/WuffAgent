@@ -393,6 +393,8 @@ pub struct MetricsReport {
     /// (model, runs) per model used in the window, most-used first
     /// (ties: name-ascending; empty model reported as "(unknown)").
     pub model_mix: Vec<(String, u32)>,
+    /// 2d: sum of the runs' estimated `cost_usd` (0.0 when unpriced).
+    pub cost_usd: f64,
 }
 
 /// 2b: one zero-filled bucket of the metrics store's time window — the
@@ -969,6 +971,7 @@ impl MetricsLog {
             p95_tokens: None,
             tool_stats: Vec::new(),
             model_mix: Vec::new(),
+            cost_usd: 0.0,
         };
 
         let mut durations: Vec<f64> = Vec::new();
@@ -984,6 +987,7 @@ impl MetricsLog {
                 tokens_out,
                 tools,
                 model,
+                cost_usd,
                 ..
             } = line
             else {
@@ -1009,6 +1013,7 @@ impl MetricsLog {
             }
             let key = if model.is_empty() { "(unknown)" } else { model.as_str() };
             *models.entry(key.to_string()).or_insert(0) += 1;
+            report.cost_usd += cost_usd;
         }
 
         durations.sort_by(f64::total_cmp);
@@ -1044,6 +1049,26 @@ impl MetricsLog {
         (
             self.report(agent, Some(cur_start), Some(now)),
             self.report(agent, Some(cur_start - d), Some(cur_start)),
+        )
+    }
+
+    /// 2d: gate-style comparison — the AFTER window `[since, now)` and the
+    /// immediately preceding same-length window (length clamped to
+    /// 1..=30 days, the evidence-gate rule), via the same windowed reader.
+    /// Returns `(after, before)`.
+    ///
+    /// This is the single primitive the metric evidence gate
+    /// (`MemoryManager::agent_metric_evidence`) AND the status rendering
+    /// (`list_improvement_status`) share — so what the gate fired on and
+    /// what the tool shows can never diverge.
+    pub fn compare_since(&self, agent: &str, since: DateTime<Utc>) -> (MetricsReport, MetricsReport) {
+        let now = Utc::now();
+        let days = now.signed_duration_since(since).num_days().max(0);
+        let window_days = i64::from(days).clamp(1, 30);
+        let d = chrono::Duration::days(window_days);
+        (
+            self.report(agent, Some(since), Some(now)),
+            self.report(agent, Some(since - d), Some(since)),
         )
     }
 

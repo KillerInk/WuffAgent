@@ -490,24 +490,17 @@ impl MemoryManager {
     pub fn agent_metric_evidence(&self, agent: &str) -> Option<String> {
         let baseline = self.agent_improvement_state(agent).last_check?;
         let metrics_log = crate::agents::metrics::MetricsLog::default();
-        let after = metrics_log.summary_since(agent, Some(baseline));
-        // Before = the immediately preceding period of the same length (min
-        // 1 day so a fresh baseline still gets a window, max 30 days so an old
-        // baseline doesn't sweep in months of history) — mirroring
-        // `effect_check_section`'s before-window rule.
-        let days = chrono::Utc::now()
-            .signed_duration_since(baseline)
-            .num_days()
-            .max(0);
-        let window_days = i64::from(days).clamp(1, 30);
-        let before = metrics_log.summary_between(
-            agent,
-            Some(baseline - chrono::Duration::days(window_days)),
-            Some(baseline),
-        );
+        // 2d: the shared gate primitive — after `[since, now)` vs the
+        // immediately preceding same-length window (min 1 day so a fresh
+        // baseline still gets a window, max 30 days so an old baseline
+        // doesn't sweep in months of history, mirroring
+        // `effect_check_section`'s before-window rule). The status rendering
+        // (`list_improvement_status`) calls the same fn, so gate and display
+        // cannot diverge.
+        let (after, before) = metrics_log.compare_since(agent, baseline);
         metric_evidence_reason(
-            &before,
-            &after,
+            &before.summary,
+            &after.summary,
             self.config().improvement_metric_evidence_runs,
         )
     }

@@ -149,7 +149,11 @@ impl Tool for ListImprovementStatusTool {
             // 1a: surface the METRIC trigger reason when the loop re-arms on
             // data (not just a new lesson) — "yes (metric delta: err 12%→34%)"
             // makes the auto-improvement loop explainable.
-            let evidence_label = match self.memory.agent_metric_evidence(name) {
+            // 2d: keep the gate's reason so we can render the LIVE windows
+            // behind it (recomputed with the same compare_since primitive
+            // the gate uses — the stored reason is point-in-time).
+            let metric_reason = self.memory.agent_metric_evidence(name);
+            let evidence_label = match &metric_reason {
                 Some(reason) => format!("yes (metric delta: {reason})"),
                 None => {
                     if self.memory.has_new_agent_improvement_evidence(name) {
@@ -182,6 +186,37 @@ impl Tool for ListImprovementStatusTool {
                         .to_string()
                 }
             );
+            // 2d: when the metric gate fired, render the actual before/after
+            // windows — recomputed with the SAME primitive the gate used
+            // (compare_since), so display and gate cannot diverge.
+            if metric_reason.is_some() {
+                if let Some(baseline) = state.last_check {
+                    let (after, before) = log.compare_since(name, baseline);
+                    let err = |s: &crate::agents::metrics::MetricsSummary| {
+                        if s.tool_calls > 0 {
+                            100.0 * s.tool_errors as f64 / s.tool_calls as f64
+                        } else {
+                            0.0
+                        }
+                    };
+                    out.push_str(&format!(
+                        "\n  metric windows (live, same primitive as the gate): \
+                         previous window {} run(s), {:.1}% err, {} gave_up \
+                         \u{2192} since last check {} run(s), {:.1}% err, {} gave_up \
+                         (tokens in/out {} + {} \u{2192} {} + {})",
+                        before.summary.runs,
+                        err(&before.summary),
+                        before.summary.gave_up,
+                        after.summary.runs,
+                        err(&after.summary),
+                        after.summary.gave_up,
+                        before.summary.tokens_in,
+                        before.summary.tokens_out,
+                        after.summary.tokens_in,
+                        after.summary.tokens_out
+                    ));
+                }
+            }
             let since = state.last_check;
             let label = if since.is_some() {
                 "since last check"
@@ -735,6 +770,77 @@ mod tests {
                 "loop cost (2d, all agents): 2 check(s), 620 tok in / 160 tok out, 7 suggestion(s)"
             ),
             "got: {out}"
+        );
+    }
+
+    /// 2d: when the metric gate fired, the agent view renders the LIVE
+    /// before/after windows — recomputed with the same `compare_since`
+    /// primitive the gate used (the stored reason is point-in-time).
+    #[test]
+    fn test_agent_mode_renders_live_metric_windows_when_gate_fired() {
+        use crate::agents::improvement::tests::MetricsDirGuard;
+        let _guard = MetricsDirGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let config = MemoryConfig {
+            memories_dir: Some(dir.path().to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        let manager = MemoryManager::new(config).unwrap();
+        manager.record_agent_improvement_check("coder", false);
+        // Backdate the baseline 2 days (unix ms in the per-agent state doc).
+        let path = dir.path().join("improvement_state.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        v["agents"]["coder"]["last_check"] =
+            serde_json::json!((chrono::Utc::now() - chrono::Duration::days(2)).timestamp_millis());
+        std::fs::write(&path, v.to_string()).unwrap();
+
+        // Fixture in the guard's metrics dir: before-window (3d ago) 10% err,
+        // after-window (25h ago) 80% err → the error-rate path re-arms.
+        let log = crate::agents::metrics::MetricsLog::new(_guard.dir());
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.agent_path("coder"))
+            .unwrap();
+        let mut line = |hours_ago: i64, errors: u32| {
+            let ts = (chrono::Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339();
+            writeln!(
+                f,
+                r#"{{"kind":"run","ts":"{ts}","tool_calls":10,"tool_errors":{errors},"verification_attempts":1,"duration_ms":10000,"outcome":"verified","tokens_in":100,"tokens_out":20,"tools":[],"model":""}}"#
+            )
+            .unwrap();
+        };
+        for i in 0..4 {
+            line(72 - i, 1); // before window: 1/10 err
+        }
+        for i in 0..4 {
+            line(25 - i, 8); // after window: 8/10 err
+        }
+
+        let tool =
+            ListImprovementStatusTool::new(std::sync::Arc::new(manager)).with_log(log);
+        let out = run_with_agent(&tool, "coder");
+        assert!(
+            out.contains("yes (metric delta:"),
+            "gate fired, reason surfaced: {out}"
+        );
+        assert!(
+            out.contains("metric windows (live, same primitive as the gate):"),
+            "live windows rendered: {out}"
+        );
+        assert!(
+            out.contains("previous window 4 run(s), 10.0% err, 0 gave_up"),
+            "before side matches fixture: {out}"
+        );
+        assert!(
+            out.contains("since last check 4 run(s), 80.0% err, 0 gave_up"),
+            "after side matches fixture: {out}"
+        );
+        assert!(
+            out.contains("tokens in/out 400 + 80 \u{2192} 400 + 80"),
+            "token sums per window: {out}"
         );
     }
 }

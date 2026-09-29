@@ -17,10 +17,12 @@
 //!   agent's windowed metrics + its most recent metric line, plus the
 //!   fleet's token spend over the window (the loop-cost line).
 //!
-//! Read-only and LLM-free: it just parses JSONL lines. Note the data model
-//! has no per-tool error attribution (only per-run counts), so "worst
-//! tool" is not available — the raw recent lines carry the per-run error
-//! counts for manual digging.
+//! Read-only and LLM-free: it just parses JSONL lines. 2d: agent mode now
+//! also renders the per-run distribution (`percentiles:`) and the
+//! per-tool breakdown (`tools (top by errors):`, from the runs' tool
+//! histograms written since 1a), and `compare: true` appends a
+//! before/after window block (`Nd vs previous Nd` via the shared
+//! `MetricsLog::compare` primitive).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -94,7 +96,7 @@ impl ReadMetricsTool {
     }
 
     /// Agent-mode report: aggregates over the window + newest raw lines.
-    fn agent_report(&self, agent: &str, days: u64) -> ToolOutput {
+    fn agent_report(&self, agent: &str, days: u64, compare: bool) -> ToolOutput {
         let log = self.log();
         let all = log.read_all(agent);
         if all.is_empty() {
@@ -122,7 +124,8 @@ impl ReadMetricsTool {
             ));
         }
 
-        let summary = log.summary_between(agent, Some(since), None);
+        let report = log.report(agent, Some(since), None);
+        let summary = report.summary;
         let max_duration_ms = window
             .iter()
             .filter_map(|l| match l {
@@ -138,12 +141,20 @@ impl ReadMetricsTool {
             .map(|l| l.describe())
             .collect();
 
-        ToolOutput::success(format!(
-            "Metrics for '{agent}' — window: last {days} day(s) ({} line(s)):\n  {} run(s): \
-             {} verified / {} verified_after_retry / {} gave_up / {} not verified\n  {} tool \
-             call(s), {} errors ({:.1}% error rate)\n  duration: avg {:.1}s, max {:.1}s\n  \
-             tokens: {} in / {} out\n  user feedback: {} up / {} down\nRecent lines \
-             (newest first, up to {} shown):\n{}",
+        let err_rate = if summary.tool_calls > 0 {
+            100.0 * summary.tool_errors as f64 / summary.tool_calls as f64
+        } else {
+            0.0
+        };
+        let mut out = format!(
+            "Metrics for '{agent}' — window: last {days} day(s) ({} line(s)):\
+             \n  {} run(s): \
+             {} verified / {} verified_after_retry / {} gave_up / {} not verified\
+             \n  {} tool \
+             call(s), {} errors ({:.1}% error rate)\
+             \n  duration: avg {:.1}s, max {:.1}s\
+             \n  tokens: {} in / {} out\
+             \n  user feedback: {} up / {} down",
             window.len(),
             summary.runs,
             summary.verified,
@@ -152,20 +163,101 @@ impl ReadMetricsTool {
             summary.not_verified,
             summary.tool_calls,
             summary.tool_errors,
-            if summary.tool_calls > 0 {
-                100.0 * summary.tool_errors as f64 / summary.tool_calls as f64
-            } else {
-                0.0
-            },
+            err_rate,
             summary.avg_duration_secs(),
             max_duration_ms as f64 / 1000.0,
             summary.tokens_in,
             summary.tokens_out,
             summary.feedback_up,
             summary.feedback_down,
+        );
+
+        // 2d: the per-run distribution — with a handful of long runs the
+        // mean is misleading, so p50/p95 sit right next to it.
+        let dur = |v: Option<u64>| match v {
+            Some(ms) => format!("{:.1}s", ms as f64 / 1000.0),
+            None => "-".to_string(),
+        };
+        let toks = |v: Option<u64>| v.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
+        out.push_str(&format!(
+            "\n  percentiles: p50 {} / p95 {} duration; p50 {} / p95 {} tokens",
+            dur(report.p50_duration_ms),
+            dur(report.p95_duration_ms),
+            toks(report.p50_tokens),
+            toks(report.p95_tokens)
+        ));
+
+        // 2d: per-tool breakdown (top-5 by errors, then by calls) — "which
+        // tool is most error-prone / slowest" is now answerable.
+        if !report.tool_stats.is_empty() {
+            let mut by_errors: Vec<&crate::agents::metrics::ReportToolStat> =
+                report.tool_stats.iter().collect();
+            by_errors.sort_by(|a, b| {
+                b.errors
+                    .cmp(&a.errors)
+                    .then_with(|| b.calls.cmp(&a.calls))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+            let top: Vec<String> = by_errors
+                .into_iter()
+                .take(5)
+                .map(|t| {
+                    let err = if t.calls > 0 {
+                        100.0 * t.errors as f64 / t.calls as f64
+                    } else {
+                        0.0
+                    };
+                    format!(
+                        "{}: {} calls, {:.1}% err, avg {}ms",
+                        t.name, t.calls, err, t.avg_ms
+                    )
+                })
+                .collect();
+            out.push_str(&format!("\n  tools (top by errors): {}", top.join(" | ")));
+        }
+
+        // 2d: before/after window via the shared compare primitive.
+        if compare {
+            let (cur, prev) = log.compare(agent, days as u32);
+            let rate = |s: &crate::agents::metrics::MetricsSummary| {
+                if s.tool_calls > 0 {
+                    100.0 * s.tool_errors as f64 / s.tool_calls as f64
+                } else {
+                    0.0
+                }
+            };
+            let delta_pp = rate(&cur.summary) - rate(&prev.summary);
+            out.push_str(&format!(
+                "\n  window: {days}d vs previous {days}d: runs {} → {} | err rate {:.1}% → {:.1}% (Δ {:+.1}pp) | gave_up {} → {}",
+                prev.summary.runs,
+                cur.summary.runs,
+                rate(&prev.summary),
+                rate(&cur.summary),
+                delta_pp,
+                prev.summary.gave_up,
+                cur.summary.gave_up
+            ));
+            out.push_str(&format!(
+                "\n    tokens: {} in / {} out → {} in / {} out",
+                prev.summary.tokens_in,
+                prev.summary.tokens_out,
+                cur.summary.tokens_in,
+                cur.summary.tokens_out
+            ));
+            if prev.cost_usd > 0.0 || cur.cost_usd > 0.0 {
+                out.push_str(&format!(
+                    " | cost ${:.4} → ${:.4}",
+                    prev.cost_usd, cur.cost_usd
+                ));
+            }
+        }
+
+        out.push_str(&format!(
+            "\nRecent lines (newest first, up to {} shown):\n{}",
             MAX_RECENT_LINES,
             recent.join("\n  ")
-        ))
+        ));
+        ToolOutput::success(out)
     }
 
     /// Fleet-mode report: one summary line per agent + skills used.
@@ -322,7 +414,9 @@ impl Tool for ReadMetricsTool {
          improvement-LOOP state instead of the plain metrics overview — per-agent last check, \
          no-op streak/backoff, last effect verdict, most recent activity, and fleet token spend). \
          Use it for regression analysis of your own (or another agent's) performance, or with \
-         status=true to see the self-improvement loop's fleet-wide state."
+         status=true to see the self-improvement loop's fleet-wide state. Agent mode also \
+         shows percentiles + a per-tool error table, and compare=true adds a before/after \
+         window (Nd vs previous Nd)."
     }
 
     fn parameters_schema(&self) -> ToolSchema {
@@ -332,6 +426,18 @@ impl Tool for ReadMetricsTool {
             input_type: Some(JsonSchema {
                 type_name: "object".to_string(),
                 properties: Some(HashMap::from([
+                    (
+                        "compare".to_string(),
+                        FieldSchema {
+                            type_name: "boolean".to_string(),
+                            description: "Agent mode only: append a before/after block \
+                                          comparing the last `days` against the preceding \
+                                          same-length window (runs, error rate, gave_up, \
+                                          tokens, cost when priced)"
+                                .to_string(),
+                            nullable: true,
+                        },
+                    ),
                     (
                         "agent".to_string(),
                         FieldSchema {
@@ -386,8 +492,10 @@ impl Tool for ReadMetricsTool {
             .get::<String>("agent")
             .filter(|a| !a.is_empty());
         let status = params.get::<bool>("status").unwrap_or(false);
+        let compare = params.get::<bool>("compare").unwrap_or(false);
         Ok(match agent {
-            Some(name) => self.agent_report(&name, days),
+            // 2d: `compare` only changes the agent view (before/after block).
+            Some(name) => self.agent_report(&name, days, compare),
             // `status` only changes the FLEET view; in agent mode the report
             // already shows the agent's own window in full.
             None if status => self.fleet_status_report(days),
@@ -489,6 +597,108 @@ mod tests {
         let tool = tool_in(dir.path());
         let out = text(call(&tool, Some("coder"), None));
         assert!(out.contains("tokens: 150 in / 30 out"), "got: {out}");
+    }
+
+    /// 2d: agent mode renders the per-run percentiles and the per-tool
+    /// breakdown (top by errors, then by calls) from the runs' histograms.
+    #[test]
+    fn agent_mode_shows_percentiles_and_tool_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        let rs = crate::agents::types::RunStats {
+            tool_calls: 5,
+            tool_errors: 2,
+            verification_attempts: 1,
+            tools: vec![
+                crate::agents::types::ToolStat {
+                    name: "shell".into(),
+                    calls: 3,
+                    errors: 2,
+                    duration_ms: 300,
+                },
+                crate::agents::types::ToolStat {
+                    name: "read_file".into(),
+                    calls: 2,
+                    errors: 0,
+                    duration_ms: 100,
+                },
+            ],
+            ..Default::default()
+        };
+        log.log_run("coder", &rs, 40_000, RunOutcome::Verified, 10, 5, "run-1", "sess-1");
+        log.log_run("coder", &run(0, 0, 0), 100_000, RunOutcome::GaveUp, 4, 2, "run-1", "sess-1");
+
+        let tool = tool_in(dir.path());
+        let out = text(call(&tool, Some("coder"), None));
+        // durations [40s,100s]: p50 = 70s, p95 = 40 + 0.95*60 = 97s.
+        assert!(
+            out.contains("percentiles: p50 70.0s / p95 97.0s duration"),
+            "got: {out}"
+        );
+        // per-run tokens [15,6] -> sorted [6,15]: p50 = 10.5 -> 11, p95 = 14.55 -> 15.
+        assert!(out.contains("p50 11 / p95 15 tokens"), "got: {out}");
+        // shell (2 errors) before read_file (0); shell avg 300/3 = 100ms.
+        assert!(
+            out.contains("tools (top by errors): shell: 3 calls, 66.7% err, avg 100ms"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("read_file: 2 calls, 0.0% err, avg 50ms"),
+            "got: {out}"
+        );
+    }
+
+    /// 2d: `compare: true` appends the before/after window block via the
+    /// shared compare primitive; without the flag the block is absent.
+    #[test]
+    fn agent_mode_compare_renders_window_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        record_run(&log, "coder", 10, 2, 20_000); // current 7d window
+        // One run 10 days ago -> previous 7d window (9/10 calls errored).
+        use std::io::Write;
+        let path = log.agent_path("coder");
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"run","ts":"{old_ts}","tool_calls":10,"tool_errors":9,"verification_attempts":1,"duration_ms":20000,"outcome":"gave_up","tokens_in":0,"tokens_out":0}}"#
+        )
+        .unwrap();
+
+        let tool = tool_in(dir.path());
+        let mut values = HashMap::new();
+        values.insert("agent".to_string(), serde_json::json!("coder"));
+        values.insert("days".to_string(), serde_json::json!(7));
+        values.insert("compare".to_string(), serde_json::json!(true));
+        let out = text(match tool.execute(ToolParams { values }) {
+            Ok(o) => o,
+            Err(e) => panic!("unexpected ToolError: {e}"),
+        });
+        assert!(out.contains("window: 7d vs previous 7d"), "got: {out}");
+        assert!(out.contains("runs 1 → 1"), "got: {out}");
+        assert!(out.contains("err rate 90.0% → 20.0%"), "got: {out}");
+        assert!(out.contains("gave_up 1 → 0"), "got: {out}");
+        // Without compare: no window block.
+        let plain = text(call(&tool, Some("coder"), Some(7)));
+        assert!(!plain.contains("window: 7d vs previous"), "got: {plain}");
+    }
+
+    /// 2d: the schema exposes the new `compare` param (no required fields).
+    #[test]
+    fn schema_includes_compare_param() {
+        let tool = tool_in(std::env::temp_dir().as_path());
+        let schema = tool.parameters_schema();
+        let props = schema
+            .input_type
+            .as_ref()
+            .and_then(|j| j.properties.as_ref())
+            .expect("object schema with properties");
+        assert!(props.contains_key("compare"), "compare param missing");
     }
 
     #[test]

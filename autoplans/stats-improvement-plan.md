@@ -363,7 +363,7 @@ tests), DST-safe boundary case ported from `usage/stats.rs`.
 Tests: percentile edges; `compare` on the 4-day fixture (metrics/tests.rs:178
 shape) → correct window split at the boundary.
 
-**2d. `read_metrics` v2 (E1, E2)** — `stats(2d)`
+**2d. `read_metrics` v2 (E1, E2)** — `stats(2d)` — **DONE**
 - `tools/builtin/improvement/metrics.rs` (`ReadMetricsTool`): new optional
   param `compare: bool` (default false). Per-agent output gains:
   - `Tools (top by errors):` — top-5 from `report.tool_stats`
