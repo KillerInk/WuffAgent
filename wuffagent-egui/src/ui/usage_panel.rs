@@ -1,10 +1,12 @@
 use eframe::egui;
 use egui_plot::{GridMark, Legend, Line, Plot};
 
-use super::charts::fmt_tokens;
+use super::charts::{fmt_tokens, fmt_usd};
 use super::theme::Theme;
-use wuffagent_core::usage::recorder::UsageRecorder;
+use wuffagent_core::config::ModelPrice;
+use wuffagent_core::usage::recorder::{UsageEntry, UsageRecorder};
 use wuffagent_core::usage::stats::{bucketize, Bucket, Granularity, UsageLogReader};
+use wuffagent_core::usage::cost_usd;
 
 /// Aggregation window shown in the chart.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -57,6 +59,20 @@ pub struct UsagePanel {
     dirty: bool,
     /// True once the initial full load has happened.
     loaded: bool,
+    /// 3c: filter selections — "all" = unfiltered, else the exact
+    /// agent / model string as recorded on the lines.
+    filter_agent: String,
+    filter_model: String,
+    /// 3c: distinct agent / model values seen in the loaded lines (feed
+    /// the filter dropdowns); rebuilt whenever new lines arrive.
+    agent_options: Vec<String>,
+    model_options: Vec<String>,
+    /// 3c: the entries passing the filters (rebuilt only on load/poll or
+    /// a filter change — never per frame).
+    filtered: Vec<UsageEntry>,
+    needs_refilter: bool,
+    /// 3c: the config's price table (loaded once; empty = "unpriced").
+    prices: Vec<ModelPrice>,
 }
 
 impl Default for UsagePanel {
@@ -74,6 +90,13 @@ impl UsagePanel {
             entries: Vec::new(),
             dirty: true,
             loaded: false,
+            filter_agent: "all".to_string(),
+            filter_model: "all".to_string(),
+            agent_options: Vec::new(),
+            model_options: Vec::new(),
+            filtered: Vec::new(),
+            needs_refilter: true,
+            prices: Vec::new(),
         }
     }
 
@@ -97,6 +120,12 @@ impl UsagePanel {
                 let (entries, _skipped) = self.reader.load_all(&path);
                 self.entries = entries;
                 self.loaded = true;
+                // 3c: the price table, once (empty = "recorded but unpriced").
+                self.prices = wuffagent_core::config::Config::load(
+                    &wuffagent_core::config::get_config_path(),
+                )
+                .map(|c| c.model_prices)
+                .unwrap_or_default();
             } else {
                 let (new_entries, _skipped) = self.reader.poll(&path);
                 if !new_entries.is_empty() {
@@ -104,9 +133,67 @@ impl UsagePanel {
                 }
             }
             self.dirty = false;
+            // 3c: rebuild the filter options (distinct values) and drop a
+            // stale selection if its value disappeared from the file.
+            self.agent_options = distinct_values(&self.entries, |e| e.agent.as_str());
+            self.model_options = distinct_values(&self.entries, |e| e.model.as_str());
+            if self.filter_agent != "all" && !self.agent_options.contains(&self.filter_agent) {
+                self.filter_agent = "all".to_string();
+            }
+            if self.filter_model != "all" && !self.model_options.contains(&self.filter_model) {
+                self.filter_model = "all".to_string();
+            }
+            self.needs_refilter = true;
         }
 
         let range = self.range;
+
+        // 3c: apply the filters (only when the lines or a selection changed).
+        if self.needs_refilter {
+            let fa = self.filter_agent.clone();
+            let fm = self.filter_model.clone();
+            self.filtered = self
+                .entries
+                .iter()
+                .filter(|e| {
+                    (fa == "all" || e.agent == fa) && (fm == "all" || e.model == fm)
+                })
+                .cloned()
+                .collect();
+            self.needs_refilter = false;
+        }
+
+        let now = chrono::Utc::now();
+        let window = bucketize(&self.filtered, range.granularity(), now);
+
+        // 3c: window cost — sum `cost_usd` over the filtered entries inside
+        // the SAME local wall-clock window bucketize uses (entries before
+        // `window_start` or in the future are excluded). Models missing
+        // from the price table count as $0 and are tallied separately.
+        let now_local = now.with_timezone(&chrono::Local).naive_local();
+        let window_start = range.granularity().window_start(now_local);
+        let mut cost = 0.0f64;
+        let mut unpriced_tokens: u64 = 0;
+        for e in &self.filtered {
+            let ts_local = e.ts.with_timezone(&chrono::Local).naive_local();
+            if ts_local < window_start || ts_local > now_local {
+                continue;
+            }
+            if self
+                .prices
+                .iter()
+                .any(|p| p.model.eq_ignore_ascii_case(&e.model))
+            {
+                cost += cost_usd(
+                    &self.prices,
+                    &e.model,
+                    e.prompt_tokens as u64,
+                    e.completion_tokens as u64,
+                );
+            } else {
+                unpriced_tokens += e.total_tokens as u64;
+            }
+        }
 
         // egui only draws the title-bar ✕ when `open` is provided; a local
         // bool keeps the borrow checker happy (the content closure below
@@ -153,7 +240,34 @@ impl UsagePanel {
                         }
                     }
                 });
-                let window = bucketize(&self.entries, range.granularity(), chrono::Utc::now());
+
+                // 3c: agent / model filters (the distinct values feed the
+                // dropdowns; item 0 is always "all").
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("agent").weak());
+                    let mut sel = filter_index(&self.filter_agent, &self.agent_options);
+                    let resp = egui::ComboBox::from_id_salt("usage_filter_agent")
+                        .show_index(ui, &mut sel, self.agent_options.len() + 1, |i| {
+                            filter_option_at(i, &self.agent_options)
+                        });
+                    if resp.changed() {
+                        self.filter_agent = filter_option_at(sel, &self.agent_options);
+                        self.needs_refilter = true;
+                    }
+                    ui.label(egui::RichText::new("model").weak());
+                    let mut sel = filter_index(&self.filter_model, &self.model_options);
+                    let resp = egui::ComboBox::from_id_salt("usage_filter_model")
+                        .show_index(ui, &mut sel, self.model_options.len() + 1, |i| {
+                            filter_option_at(i, &self.model_options)
+                        });
+                    if resp.changed() {
+                        self.filter_model = filter_option_at(sel, &self.model_options);
+                        self.needs_refilter = true;
+                    }
+                });
+                // The window/cost locals are computed above (outside the
+                // closure) from the filtered vec.
+                let window = &window;
 
                 // Stat cards above the chart: window totals, calls, tool
                 // calls and thinking volume.
@@ -184,8 +298,27 @@ impl UsagePanel {
                         theme.text_secondary,
                         theme,
                     );
+                    // 3c: estimated window cost (from the config price table).
+                    stat_card_str(
+                        ui,
+                        "cost",
+                        fmt_usd(cost),
+                        theme.text_primary,
+                        theme,
+                    );
                     ui.add_space(2.0);
                 });
+                // 3c: note the tokens that could not be priced.
+                if unpriced_tokens > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "unpriced tokens: {} (model missing from the price table)",
+                            fmt_tokens(unpriced_tokens)
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
                 ui.add_space(10.0);
 
                 if window.calls == 0 {
@@ -338,4 +471,63 @@ fn series_pts(buckets: &[Bucket], get: impl Fn(&Bucket) -> f64) -> Vec<[f64; 2]>
         .enumerate()
         .map(|(i, b)| [i as f64, get(b)])
         .collect()
+}
+
+/// 3c: a stat card with an arbitrary text value (the `stat_card` twin for
+/// non-token values like the USD cost).
+fn stat_card_str(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: String,
+    value_color: egui::Color32,
+    theme: &Theme,
+) {
+    egui::Frame::new()
+        .fill(theme.surface_light)
+        .stroke(egui::Stroke::new(1.0, theme.border))
+        .corner_radius(7.0)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(78.0);
+            ui.label(egui::RichText::new(label).weak().size(10.5));
+            ui.add_space(1.0);
+            ui.label(
+                egui::RichText::new(value)
+                    .strong()
+                    .size(16.0)
+                    .color(value_color),
+            );
+        });
+    ui.add_space(7.0);
+}
+
+/// 3c: the distinct non-empty values of one `UsageEntry` field, sorted —
+/// the options for the filter dropdowns.
+fn distinct_values(entries: &[UsageEntry], get: impl Fn(&UsageEntry) -> &str) -> Vec<String> {
+    let mut out: Vec<String> = entries
+        .iter()
+        .map(|e| get(e).to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 3c: dropdown index for a selection (0 = "all"; unknown → 0).
+fn filter_index(sel: &str, options: &[String]) -> usize {
+    if sel == "all" {
+        0
+    } else {
+        options.iter().position(|o| o == sel).map(|p| p + 1).unwrap_or(0)
+    }
+}
+
+/// 3c: the selection for a dropdown index (0 = "all").
+fn filter_option_at(i: usize, options: &[String]) -> String {
+    if i == 0 {
+        "all".to_string()
+    } else {
+        options[i - 1].clone()
+    }
 }
