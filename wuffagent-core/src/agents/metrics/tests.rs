@@ -1006,10 +1006,7 @@ fn test_from_lines_matches_summary_since() {
     let lines = log.read_all("coder");
     let via_lines = MetricsSummary::from_lines(&lines);
     let via_file = log.summary_since("coder", None);
-    assert_eq!(
-        via_lines, via_file,
-        "from_lines must equal summary_since(all time)"
-    );
+    assert_eq!(via_lines, via_file, "from_lines must equal summary_since(all time)");
     // And that the aggregate actually reflects the fixture (guards against
     // both paths silently emptying).
     assert_eq!(via_file.runs, 2);
@@ -1021,5 +1018,124 @@ fn test_from_lines_matches_summary_since() {
     assert_eq!(via_file.feedback_down, 1);
     assert_eq!(via_file.evals, 2);
     assert_eq!(via_file.evals_passed, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 2b test helper: local wall-clock datetime for a deterministic test
+/// (port of the usage-stats helper — avoids DST-ambiguous local times).
+fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Utc> {
+    let nd = chrono::NaiveDate::from_ymd_opt(y, mo, d)
+        .unwrap()
+        .and_hms_opt(h, mi, 0)
+        .unwrap();
+    chrono::Local
+        .from_local_datetime(&nd)
+        .single()
+        .expect("test time must not be ambiguous/nonexistent")
+        .into()
+}
+
+/// 2b test helper: write one raw run line with a fixed ts (log_run stamps
+/// Utc::now, which is not deterministic enough for window math).
+fn write_run_line(path: &std::path::Path, ts: &str, attempts: u32, outcome: &str, duration: u64) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(
+        f,
+        r#"{{"kind":"run","ts":"{ts}","tool_calls":2,"tool_errors":1,"verification_attempts":{attempts},"duration_ms":{duration},"outcome":"{outcome}","tokens_in":10,"tokens_out":2}}"#
+    )
+    .unwrap();
+}
+
+/// 2b: `bucket_summary` returns a zero-filled window — the shared bucket
+/// math on a sparse metrics fixture (mirror of the usage bucket tests).
+#[test]
+fn test_bucket_summary_zero_filled_day_window() {
+    let dir = tmp_dir("bucket-day");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let path = log.agent_path("coder");
+
+    let now = local(2026, 9, 15, 12, 0); // local noon on a Tuesday
+    let today = local(2026, 9, 15, 9, 0).to_rfc3339();
+    let five_days_ago = local(2026, 9, 10, 9, 0).to_rfc3339();
+    write_run_line(&path, &five_days_ago, 2, "gave_up", 500);
+    write_run_line(&path, &today, 1, "verified", 700);
+
+    let buckets = log.bucket_summary("coder", Granularity::Day, now);
+    assert_eq!(buckets.len(), 30, "day window is always 30 buckets");
+
+    // Window = Aug 17 .. Sep 15 (local). Index = days since Aug 17.
+    assert_eq!(
+        buckets[24].start.date(),
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(),
+        "bucket 24 is Sep 10"
+    );
+    assert_eq!(buckets[24].runs, 1);
+    assert_eq!(buckets[24].tool_errors, 1);
+    assert_eq!(buckets[24].gave_up, 1);
+    assert_eq!(buckets[24].duration_ms_sum, 500);
+    assert_eq!(buckets[24].tokens_in, 10);
+
+    assert_eq!(
+        buckets[29].start.date(),
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap(),
+        "bucket 29 is Sep 15"
+    );
+    assert_eq!(buckets[29].runs, 1);
+    assert_eq!(buckets[29].verified_after_retry, 0);
+    assert_eq!(buckets[29].duration_ms_sum, 700);
+
+    // Every other bucket is zero-filled.
+    let total_runs: u32 = buckets.iter().map(|b| b.runs).sum();
+    assert_eq!(total_runs, 2, "exactly the two fixture runs");
+    let nonzero = buckets
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.runs != 0)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert_eq!(nonzero, vec![24, 29]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 2b: ported from the usage DST test — entries one wall-clock hour apart
+/// across local midnight (near the US DST fall-back) land in ADJACENT
+/// hour buckets; wall-clock bucket math is immune to the fold.
+#[test]
+fn test_bucket_summary_hours_adjacent_across_midnight() {
+    let dir = tmp_dir("bucket-dst");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let path = log.agent_path("coder");
+
+    let now = local(2026, 11, 1, 1, 0); // early local, near US DST fall-back
+    let a = local(2026, 10, 31, 23, 15);
+    let b = local(2026, 11, 1, 0, 45);
+    write_run_line(&path, &a.to_rfc3339(), 1, "verified", 1);
+    write_run_line(&path, &b.to_rfc3339(), 1, "verified", 1);
+
+    let buckets = log.bucket_summary("coder", Granularity::Hour, now);
+    assert_eq!(buckets.len(), 24);
+    // Window = [02:00 Oct 31 .. 01:00 Nov 1] local: a -> bucket 21 (23:00),
+    // b -> bucket 22 (00:00) — adjacent wall-clock hours, exactly one apart.
+    let filled: Vec<usize> = buckets
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.runs != 0)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(filled, vec![21, 22], "runs must sit in adjacent hour buckets");
+    assert_eq!(
+        buckets[22].start.time(),
+        chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        "bucket 22 starts at local midnight"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

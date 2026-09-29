@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::usage::recorder::UsageEntry;
-use chrono::TimeZone;
+use chrono::{NaiveDate, TimeZone};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Local wall-clock datetime for tests (deterministic regardless of the

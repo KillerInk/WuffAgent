@@ -65,6 +65,7 @@ pub mod llm;
 pub mod memory;
 pub mod server;
 pub mod sessions;
+pub mod stats;
 pub mod tools;
 pub mod trimming;
 pub mod types;

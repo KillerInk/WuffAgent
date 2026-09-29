@@ -336,7 +336,7 @@ Tests: append → poll returns exactly the new line; half-written line buffers
 and completes next poll; file truncated → rescan; `from_lines` matches
 `summary_since` on the same fixture.
 
-**2b. Shared bucketing for the metrics store (B2, part of D3)** — `stats(2b)`
+**2b. Shared bucketing for the metrics store (B2, part of D3)** — `stats(2b)` — **DONE**
 - New module `wuffagent-core/src/stats/bucket.rs`: move the `Granularity`
   enum + zero-filled window math out of `usage/stats.rs` (usage re-exports
   so its call sites/tests stay green).

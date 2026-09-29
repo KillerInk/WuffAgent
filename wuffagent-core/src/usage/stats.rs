@@ -11,83 +11,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::path::Path;
 
-use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 
-/// Bucket granularity (also selects the window size).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Granularity {
-    /// One bucket per hour; window = the last 24 hours.
-    Hour,
-    /// One bucket per day; window = the last 30 days.
-    Day,
-    /// One bucket per week (Monday-based); window = the last 12 weeks.
-    Week,
-}
-
-impl Granularity {
-    /// Number of buckets in the window for this granularity.
-    pub fn bucket_count(self) -> usize {
-        match self {
-            Granularity::Hour => 24,
-            Granularity::Day => 30,
-            Granularity::Week => 12,
-        }
-    }
-
-    /// The local wall-clock start of the first bucket in the window ending at
-    /// `now_local`.
-    fn window_start(&self, now_local: NaiveDateTime) -> NaiveDateTime {
-        let days = chrono::Duration::days;
-        match self {
-            Granularity::Hour => {
-                let hour_start = now_local
-                    .date()
-                    .and_hms_opt(now_local.hour(), 0, 0)
-                    .expect("valid hour");
-                hour_start - chrono::Duration::hours(23)
-            }
-            Granularity::Day => (now_local.date() - days(29)).and_hms_opt(0, 0, 0).unwrap(),
-            Granularity::Week => monday_of(now_local.date()) - days(7 * 11),
-        }
-    }
-
-    /// Zero-based index of the bucket containing `nd` (local wall clock), or
-    /// `None` when the timestamp falls outside the window
-    /// (`window_start..window_start + bucket_count * unit`).
-    fn bucket_index(&self, nd: NaiveDateTime, window_start: NaiveDateTime) -> Option<usize> {
-        let n = self.bucket_count();
-        match self {
-            Granularity::Hour => {
-                let i = (nd - window_start).num_hours();
-                (0..n as i64).contains(&i).then_some(i as usize)
-            }
-            Granularity::Day => {
-                let i = (nd.date() - window_start.date()).num_days();
-                (0..n as i64).contains(&i).then_some(i as usize)
-            }
-            Granularity::Week => {
-                let i = (monday_of(nd.date()) - window_start).num_days() / 7;
-                (0..n as i64).contains(&i).then_some(i as usize)
-            }
-        }
-    }
-
-    /// Local wall-clock start of bucket `i` (0-based) in the window.
-    fn bucket_start(&self, window_start: NaiveDateTime, i: usize) -> NaiveDateTime {
-        match self {
-            Granularity::Hour => window_start + chrono::Duration::hours(i as i64),
-            Granularity::Day => window_start + chrono::Duration::days(i as i64),
-            Granularity::Week => window_start + chrono::Duration::days(7 * i as i64),
-        }
-    }
-}
-
-/// Monday (local wall clock, midnight) of the week containing `d`.
-fn monday_of(d: NaiveDate) -> NaiveDateTime {
-    (d - chrono::Duration::days(d.weekday().number_from_monday() as i64 - 1))
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-}
+/// 2b: the bucket granularity moved to `stats/bucket.rs` (shared with the
+/// metrics store) — re-exported so existing call sites and tests stay green.
+pub use crate::stats::bucket::Granularity;
 
 /// One bucket of aggregated usage.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -38,10 +38,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::types::{RunStats, ToolStat};
+use crate::stats::bucket::{bucket_index_utc, bucket_starts, Granularity};
 
 /// Terminal verification outcome of an agent run (see the module docs for the
 /// exact semantics of each value).
@@ -341,6 +342,27 @@ impl MetricsLine {
             ),
         }
     }
+}
+
+/// 2b: one zero-filled bucket of the metrics store's time window — the
+/// metrics twin of the usage store's `Bucket` (same shared bucket math).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketSummary {
+    /// Local wall-clock start of the bucket (oldest bucket first in the
+    /// returned window).
+    pub start: NaiveDateTime,
+    /// Completed runs in this bucket.
+    pub runs: u32,
+    /// Tool-call errors in this bucket.
+    pub tool_errors: u32,
+    /// Runs whose terminal outcome was `gave_up`.
+    pub gave_up: u32,
+    /// Runs verified only after a nudge retry.
+    pub verified_after_retry: u32,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    /// Sum of `duration_ms` over the bucket's runs.
+    pub duration_ms_sum: u64,
 }
 
 /// Aggregate counts over an agent's metric lines (all-time or since `since`).
@@ -821,6 +843,62 @@ impl MetricsLog {
     /// (`None` = all time).
     pub fn summary_since(&self, agent: &str, since: Option<DateTime<Utc>>) -> MetricsSummary {
         self.summary_between(agent, since, None)
+    }
+
+    /// 2b: zero-filled time-bucket window over `agent`'s metric lines,
+    /// using the shared usage-store bucket math (`stats/bucket.rs`).
+    ///
+    /// `granularity` selects the window size (Hour=24, Day=30, Week=12
+    /// buckets) ending at `now` (UTC); non-Run lines are ignored. Returned
+    /// oldest first, `buckets.len() == granularity.bucket_count()`.
+    pub fn bucket_summary(
+        &self,
+        agent: &str,
+        granularity: Granularity,
+        now: DateTime<Utc>,
+    ) -> Vec<BucketSummary> {
+        let mut buckets: Vec<BucketSummary> = bucket_starts(granularity, now)
+            .into_iter()
+            .map(|start| BucketSummary {
+                start,
+                runs: 0,
+                tool_errors: 0,
+                gave_up: 0,
+                verified_after_retry: 0,
+                tokens_in: 0,
+                tokens_out: 0,
+                duration_ms_sum: 0,
+            })
+            .collect();
+        for line in self.read_all(agent) {
+            let MetricsLine::Run {
+                ts,
+                tool_errors,
+                duration_ms,
+                outcome,
+                tokens_in,
+                tokens_out,
+                ..
+            } = line
+            else {
+                continue;
+            };
+            let Some(i) = bucket_index_utc(granularity, now, ts) else {
+                continue;
+            };
+            let b = &mut buckets[i];
+            b.runs += 1;
+            b.tool_errors += tool_errors;
+            b.tokens_in += tokens_in;
+            b.tokens_out += tokens_out;
+            b.duration_ms_sum += duration_ms;
+            match outcome {
+                RunOutcome::GaveUp => b.gave_up += 1,
+                RunOutcome::VerifiedAfterRetry => b.verified_after_retry += 1,
+                RunOutcome::Verified | RunOutcome::None => {}
+            }
+        }
+        buckets
     }
 
     /// All lines for `agent` with `ts >= since` (`None` = all time), oldest
