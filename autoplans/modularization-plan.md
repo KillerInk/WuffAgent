@@ -108,7 +108,11 @@ Single concern (render improvement status). Borderline; only split if it grows. 
   816/816 core tests + 70/70 metrics tests pass, egui check clean.
   NOTE: `log.rs` is still the biggest chunk (MetricsLog 40 methods) — acceptable for now;
   split append/rollup out only if it grows.
-- [ ] Phase 4 — F3: split `improvement/metrics.rs` tool → tool/report/export sub-files
+- [x] Phase 4 — F3: split `improvement/metrics.rs` tool → `metrics/` dir — DONE (c854e77):
+  `mod.rs` (40KB: struct + Tool impl + tests), `report.rs` (16KB: agent/fleet/status/run-detail
+  renderers), `export.rs` (5.7KB: 4c export + CSV helpers). Report/export fns `pub(crate)`,
+  `super::status::` paths → `crate::tools::builtin::improvement::status::`. 816/816 tests,
+  egui clean. NOTE: mod.rs is still ~380 non-test lines (execute + schema) — fine as-is.
 - [ ] Phase 5 — F4: split `agents/improvement.rs` → policy/evidence/suggest/fleet
 - [ ] Phase 6 — F5: extract `ImprovementStateStore` + dedup from `MemoryManager`
 - [ ] Phase 7 — F7: break `ImprovementsPanel::draw` into section fns (UI, no API change)
