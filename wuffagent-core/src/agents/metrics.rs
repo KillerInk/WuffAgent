@@ -404,6 +404,7 @@ pub fn metrics_report_from_lines(
         tool_stats: Vec::new(),
         model_mix: Vec::new(),
         cost_usd: 0.0,
+        trim_correlation: Default::default(),
     };
     // The summary must reflect the SAME window as the per-run stats below:
     // re-filter for the window when one is active (from_lines is all-time).
@@ -416,6 +417,14 @@ pub fn metrics_report_from_lines(
     let mut tool_acc: std::collections::BTreeMap<String, (u32, u32, u64)> =
         std::collections::BTreeMap::new();
     let mut models: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    // 4a: runs that experienced at least one trim, by the 1e run_id.
+    let trimmed_ids: std::collections::HashSet<&str> = lines
+        .iter()
+        .filter_map(|l| match l {
+            MetricsLine::Trim { run_id, .. } if !run_id.is_empty() => Some(run_id.as_str()),
+            _ => None,
+        })
+        .collect();
     for line in lines {
         let MetricsLine::Run {
             ts,
@@ -455,6 +464,27 @@ pub fn metrics_report_from_lines(
         };
         *models.entry(key.to_string()).or_insert(0) += 1;
         report.cost_usd += cost_usd;
+        // 4a: trim correlation (the Run pattern binds the remaining fields
+        // via `..`; destructure the two we need explicitly).
+        if let MetricsLine::Run {
+            run_id,
+            outcome,
+            ..
+        } = line
+        {
+            let gave_up = matches!(outcome, RunOutcome::GaveUp);
+            if trimmed_ids.contains(run_id.as_str()) {
+                report.trim_correlation.trimmed_runs += 1;
+                if gave_up {
+                    report.trim_correlation.trimmed_gave_up += 1;
+                }
+            } else {
+                report.trim_correlation.untrimmed_runs += 1;
+                if gave_up {
+                    report.trim_correlation.untrimmed_gave_up += 1;
+                }
+            }
+        }
     }
 
     durations.sort_by(f64::total_cmp);
@@ -477,6 +507,27 @@ pub fn metrics_report_from_lines(
         .model_mix
         .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     report
+}
+
+/// 4a: the fully-joined view of one run — its own metrics line (with the
+/// per-tool breakdown), every LLM round it made (usage.jsonl entries
+/// carrying the same 1e `run_id`, in log order), and its run-level feedback
+/// (3d). On-demand only: the caller reads both files once per call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunDetail {
+    /// The run's own metrics line (always the `Run` variant).
+    pub run: MetricsLine,
+    /// The run's LLM rounds (empty for pre-1e runs or a missing usage log).
+    pub rounds: Vec<crate::usage::recorder::UsageEntry>,
+    /// Run-level feedback lines for this run (3d; 0 or 1 in practice).
+    pub feedback: Vec<MetricsLine>,
+}
+
+impl RunDetail {
+    /// Sum of `total_tokens` across the run's rounds (0 when unlinked).
+    pub fn total_round_tokens(&self) -> u64 {
+        self.rounds.iter().map(|r| r.total_tokens as u64).sum()
+    }
 }
 
 /// 3b: `MetricsLog::bucket_summary`'s bucketing as a pure fn over an already
@@ -592,6 +643,25 @@ pub struct MetricsReport {
     pub model_mix: Vec<(String, u32)>,
     /// 2d: sum of the runs' estimated `cost_usd` (0.0 when unpriced).
     pub cost_usd: f64,
+    /// 4a: correlation between context trims and gave-ups, joined by the
+    /// 1e run_id.
+    pub trim_correlation: TrimCorrelation,
+}
+
+/// 4a: correlation — how often runs that experienced a context trim
+/// (joined by the 1e `run_id`) ended in `gave_up`, versus runs that were
+/// never trimmed. Pre-1e runs carry an empty run_id and can never link to a
+/// trim line, so they count as untrimmed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrimCorrelation {
+    /// Runs with at least one trim line carrying the same run_id.
+    pub trimmed_runs: u32,
+    /// Of those, runs whose terminal outcome was `gave_up`.
+    pub trimmed_gave_up: u32,
+    /// Runs with no linked trim line (incl. pre-1e runs).
+    pub untrimmed_runs: u32,
+    /// Of those, runs whose terminal outcome was `gave_up`.
+    pub untrimmed_gave_up: u32,
 }
 
 /// 2b: one zero-filled bucket of the metrics store's time window — the
@@ -616,6 +686,18 @@ pub struct BucketSummary {
     pub tokens_out: u64,
     /// Sum of `duration_ms` over the bucket's runs.
     pub duration_ms_sum: u64,
+}
+
+impl BucketSummary {
+    /// 4a: fraction of the bucket's runs that needed a nudge retry to reach
+    /// verification (`verified_after_retry / runs`; 0.0 for an empty bucket).
+    pub fn retry_rate(&self) -> f64 {
+        if self.runs == 0 {
+            0.0
+        } else {
+            self.verified_after_retry as f64 / self.runs as f64
+        }
+    }
 }
 
 /// Aggregate counts over an agent's metric lines (all-time or since `since`).
@@ -1153,6 +1235,39 @@ impl MetricsLog {
         // (shared with the egui agent editor's cached vec) — this method is
         // just the file read + delegate.
         metrics_report_from_lines(&self.read_all(agent), since, end)
+    }
+
+    /// 4a: join one run across the metrics + usage stores by the 1e
+    /// `run_id` — the run's own line, its LLM rounds (usage.jsonl entries
+    /// with the same run_id), and its run-level feedback. `None` when no
+    /// run line for `agent` carries that id. Reads both JSONL files in full
+    /// (on-demand; never called per frame).
+    pub fn run_detail(&self, agent: &str, run_id: &str) -> Option<RunDetail> {
+        let lines = self.read_all(agent);
+        let run = lines
+            .iter()
+            .rev()
+            .find(|l| matches!(l, MetricsLine::Run { run_id: rid, .. } if rid == run_id))?
+            .clone();
+        let feedback = lines
+            .iter()
+            .filter(|l| {
+                matches!(l, MetricsLine::Feedback { run_id: Some(frid), .. } if frid == run_id)
+            })
+            .cloned()
+            .collect();
+        let (entries, _) = crate::usage::stats::load_entries(
+            &crate::usage::recorder::UsageRecorder::usage_log_path(),
+        );
+        let rounds = entries
+            .into_iter()
+            .filter(|e| e.run_id == run_id)
+            .collect();
+        Some(RunDetail {
+            run,
+            rounds,
+            feedback,
+        })
     }
 
     /// 2c: before/after comparison — the CURRENT window `[now-days, now)`

@@ -9,7 +9,7 @@ use super::agent_history;
 use super::theme::Theme;
 use wuffagent_core::agents::config::{AgentConfig, AgentManager};
 use wuffagent_core::agents::metrics::{
-    bucket_summary_from_lines, metrics_report_from_lines, FeedbackKind, MetricsLine,
+    bucket_summary_from_lines, metrics_report_from_lines, FeedbackKind, MetricsLine, RunDetail,
 };
 use wuffagent_core::stats::bucket::Granularity;
 use wuffagent_core::tools::{ToolManager, ToolOutput, ToolParams};
@@ -240,6 +240,13 @@ pub struct AgentConfigDialog {
     /// 3b: the metrics window toggle for the read-only metrics block
     /// (7d / 30d / all-time; default all-time = the pre-3b view).
     metrics_window: MetricsWindow,
+    /// 4a: the recent run whose cross-store detail view is expanded (its 1e
+    /// run_id); `None` = nothing expanded.
+    expanded_run_id: Option<String>,
+    /// 4a: the lazily-loaded join view of the expanded run, keyed by
+    /// (run_id, usage-file len) — reloaded when a different run is expanded
+    /// or usage.jsonl grew (new rounds appended).
+    run_detail: Option<(String, u64, RunDetail)>,
 }
 
 impl AgentConfigDialog {
@@ -293,6 +300,8 @@ impl AgentConfigDialog {
             runtime: runtime.clone(),
             metrics_cache: std::collections::HashMap::new(),
             metrics_window: MetricsWindow::AllTime,
+            expanded_run_id: None,
+            run_detail: None,
         }
     }
 
@@ -762,12 +771,25 @@ impl AgentConfigDialog {
                 egui::RichText::new("Recent metric lines (latest 5):").strong(),
             );
             for l in lines.iter().rev().take(5) {
+                let run_id: &str = match l {
+                    MetricsLine::Run { run_id: rid, .. } if !rid.is_empty() => rid,
+                    _ => "",
+                };
+                let expanded = self.expanded_run_id.as_deref() == Some(run_id);
                 ui.horizontal(|ui| {
+                    if !run_id.is_empty() {
+                        let arrow = if expanded { "▾ " } else { "▸ " };
+                        ui.button(egui::RichText::new(arrow).weak().small())
+                            .on_hover_text("Show this run's LLM rounds + feedback (cross-store view)")
+                            .clicked()
+                            .then(|| {
+                                self.expanded_run_id =
+                                    if expanded { None } else { Some(run_id.to_string()) };
+                                self.run_detail = None;
+                            });
+                    }
                     ui.label(egui::RichText::new(l.describe()).weak().small());
-                    let MetricsLine::Run { run_id: rid, .. } = l else {
-                        return;
-                    };
-                    if rid.is_empty() {
+                    if run_id.is_empty() {
                         return;
                     }
                     let rated = lines.iter().find_map(|f| match f {
@@ -775,7 +797,7 @@ impl AgentConfigDialog {
                             feedback,
                             run_id: Some(frid),
                             ..
-                        } if frid == rid => Some(*feedback),
+                        } if frid == run_id => Some(*feedback),
                         _ => None,
                     });
                     let up = ui
@@ -786,11 +808,81 @@ impl AgentConfigDialog {
                         .on_hover_text("Rate this run: bad");
                     if up.clicked() || down.clicked() {
                         wuffagent_core::agents::metrics::MetricsLog::default()
-                            .log_feedback_run(agent, rid, up.clicked());
+                            .log_feedback_run(agent, run_id, up.clicked());
                     }
                 });
+                // 4a: the expanded cross-store view under the run row.
+                if expanded {
+                    self.draw_run_detail(ui, agent, run_id);
+                }
             }
         });
+    }
+
+    /// 4a: the expandable cross-store detail under a recent run row — the
+    /// run's LLM rounds (usage.jsonl entries carrying the same 1e run_id,
+    /// in log order) plus its run-level feedback. Loaded lazily and
+    /// re-fetched only when the usage file grew (new rounds) or a different
+    /// run was expanded.
+    fn draw_run_detail(&mut self, ui: &mut egui::Ui, agent: &str, run_id: &str) {
+        let usage_path =
+            wuffagent_core::usage::recorder::UsageRecorder::usage_log_path();
+        let usage_len = std::fs::metadata(&usage_path).map(|m| m.len()).unwrap_or(0);
+        let stale = !self
+            .run_detail
+            .as_ref()
+            .is_some_and(|(id, len, _)| id == run_id && *len == usage_len);
+        if stale {
+            let detail =
+                wuffagent_core::agents::metrics::MetricsLog::default().run_detail(agent, run_id);
+            self.run_detail = detail.map(|d| (run_id.to_string(), usage_len, d));
+        }
+        let Some((_, _, detail)) = &self.run_detail else {
+            return;
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "    LLM rounds ({}): {} total tokens",
+                detail.rounds.len(),
+                detail.total_round_tokens()
+            ))
+            .weak()
+            .small(),
+        );
+        for (i, r) in detail.rounds.iter().enumerate() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "      {}. {} {} — {} in / {} out, {} thinking chars, {} tool call(s)",
+                    i + 1,
+                    r.ts.format("%m-%d %H:%M"),
+                    r.model,
+                    r.prompt_tokens,
+                    r.completion_tokens,
+                    r.thinking_chars,
+                    r.tool_calls
+                ))
+                .weak()
+                .small(),
+            );
+        }
+        if detail.rounds.is_empty() {
+            ui.label(
+                egui::RichText::new("      (no rounds linked — pre-1e run or usage log missing)")
+                    .weak()
+                    .small(),
+            );
+        }
+        if detail.feedback.is_empty() {
+            ui.label(egui::RichText::new("    run-level feedback: none").weak().small());
+        } else {
+            for f in &detail.feedback {
+                ui.label(
+                    egui::RichText::new(format!("    feedback: {}", f.describe()))
+                        .weak()
+                        .small(),
+                );
+            }
+        }
     }
 
     /// 2d: the golden/regression eval panel for the selected EXISTING agent —

@@ -187,6 +187,30 @@ impl ReadMetricsTool {
             toks(report.p95_tokens)
         ));
 
+        // 4a: retry rate + trim correlation (derived from existing fields,
+        // per the stats plan's cheap-correlation list).
+        if summary.runs > 0 {
+            let retry = 100.0 * summary.verified_after_retry as f64 / summary.runs as f64;
+            out.push_str(&format!("\n  retry rate: {:.0}% of runs needed a nudge", retry));
+        }
+        let tc = report.trim_correlation;
+        if tc.trimmed_runs > 0 || tc.untrimmed_runs > 0 {
+            let share = |runs: u32, up: u32| {
+                if runs > 0 {
+                    100.0 * up as f64 / runs as f64
+                } else {
+                    0.0
+                }
+            };
+            out.push_str(&format!(
+                "\n  trim correlation: {} trimmed run(s) → {:.0}% gave_up | {} untrimmed → {:.0}% gave_up",
+                tc.trimmed_runs,
+                share(tc.trimmed_runs, tc.trimmed_gave_up),
+                tc.untrimmed_runs,
+                share(tc.untrimmed_runs, tc.untrimmed_gave_up)
+            ));
+        }
+
         // 2d: per-tool breakdown (top-5 by errors, then by calls) — "which
         // tool is most error-prone / slowest" is now answerable.
         if !report.tool_stats.is_empty() {
@@ -402,6 +426,56 @@ fn line_ts(line: &MetricsLine) -> chrono::DateTime<chrono::Utc> {
     }
 }
 
+impl ReadMetricsTool {
+    /// 4a: the cross-store join view of one run — its own metrics line, its
+    /// LLM rounds (usage.jsonl entries carrying the same 1e run_id), and its
+    /// run-level feedback (3d).
+    fn run_detail_report(&self, agent: &str, run_id: &str) -> ToolOutput {
+        let detail = match self.log().run_detail(agent, run_id) {
+            Some(d) => d,
+            None => {
+                return ToolOutput::success(format!(
+                    "No run with run_id '{run_id}' for agent '{agent}'. Run ids are on every run \
+                     line (1e schema) — call again without run_id and copy the id from a recent \
+                     run line."
+                ))
+            }
+        };
+        let mut out = format!(
+            "Run detail for '{agent}' (run {run_id}):\n  {}\n",
+            detail.run.describe()
+        );
+        out.push_str(&format!(
+            "  LLM rounds ({}): {} total tokens\n",
+            detail.rounds.len(),
+            detail.total_round_tokens()
+        ));
+        for (i, r) in detail.rounds.iter().enumerate() {
+            out.push_str(&format!(
+                "    {}. {} {} — {} in / {} out, {} thinking chars, {} tool call(s)\n",
+                i + 1,
+                r.ts.format("%m-%d %H:%M"),
+                r.model,
+                r.prompt_tokens,
+                r.completion_tokens,
+                r.thinking_chars,
+                r.tool_calls
+            ));
+        }
+        if detail.rounds.is_empty() {
+            out.push_str("    (no rounds linked — pre-1e run or usage log missing)\n");
+        }
+        if detail.feedback.is_empty() {
+            out.push_str("  run-level feedback: none\n");
+        } else {
+            for f in &detail.feedback {
+                out.push_str(&format!("  feedback: {}\n", f.describe()));
+            }
+        }
+        ToolOutput::success(out)
+    }
+}
+
 impl Tool for ReadMetricsTool {
     fn name(&self) -> &str {
         "read_metrics"
@@ -418,7 +492,8 @@ impl Tool for ReadMetricsTool {
          Use it for regression analysis of your own (or another agent's) performance, or with \
          status=true to see the self-improvement loop's fleet-wide state. Agent mode also \
          shows percentiles + a per-tool error table, and compare=true adds a before/after \
-         window (Nd vs previous Nd)."
+          window (Nd vs previous Nd). Agent mode with run_id drills into one run's cross-store \
+          join view (its LLM rounds from the usage log + run-level feedback)."
     }
 
     fn parameters_schema(&self) -> ToolSchema {
@@ -428,6 +503,18 @@ impl Tool for ReadMetricsTool {
             input_type: Some(JsonSchema {
                 type_name: "object".to_string(),
                 properties: Some(HashMap::from([
+                    (
+                        "run_id".to_string(),
+                        FieldSchema {
+                            type_name: "string".to_string(),
+                            description: "Agent mode only: drill into ONE run's cross-store join \
+                                          view (the run line, its LLM rounds from the usage log, \
+                                          and its run-level feedback). Copy the id from a recent \
+                                          run line of the same agent"
+                                .to_string(),
+                            nullable: true,
+                        },
+                    ),
                     (
                         "compare".to_string(),
                         FieldSchema {
@@ -493,9 +580,14 @@ impl Tool for ReadMetricsTool {
         let agent = params
             .get::<String>("agent")
             .filter(|a| !a.is_empty());
+        let run_id = params
+            .get::<String>("run_id")
+            .filter(|r| !r.is_empty());
         let status = params.get::<bool>("status").unwrap_or(false);
         let compare = params.get::<bool>("compare").unwrap_or(false);
         Ok(match agent {
+            // 4a: `run_id` drills into one run's cross-store join view.
+            Some(name) if run_id.is_some() => self.run_detail_report(&name, &run_id.clone().unwrap()),
             // 2d: `compare` only changes the agent view (before/after block).
             Some(name) => self.agent_report(&name, days, compare),
             // `status` only changes the FLEET view; in agent mode the report
@@ -924,5 +1016,81 @@ cost_usd: 0.0,
         });
         assert_eq!(plain, with_status);
         assert!(!plain.contains("Loop status"), "got: {plain}");
+    }
+
+    /// 4a: `run_id` in agent mode drills into the cross-store join view —
+    /// the run line, its usage-log rounds (other runs' rounds excluded), and
+    /// its run-level feedback; unknown ids get an explanatory success.
+    static RUN_DETAIL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct RunDetailGuard(std::sync::MutexGuard<'static, ()>);
+    impl RunDetailGuard {
+        fn new() -> Self {
+            let guard = RUN_DETAIL_LOCK.lock().unwrap();
+            let path = std::env::temp_dir()
+                .join(format!("wuffagent-run-detail-usage-{}", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            crate::usage::recorder::UsageRecorder::set_usage_path_for_testing(Some(path));
+            Self(guard)
+        }
+    }
+    impl Drop for RunDetailGuard {
+        fn drop(&mut self) {
+            crate::usage::recorder::UsageRecorder::set_usage_path_for_testing(None);
+        }
+    }
+
+    #[test]
+    fn run_id_drill_reports_rounds_and_feedback() {
+        let _g = RunDetailGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        record_run(&log, "coder", 2, 0, 3_000);
+        log.log_feedback_run("coder", "run-1", true);
+
+        use std::io::Write;
+        let entry = |run_id: &str, tokens: u32| crate::usage::recorder::UsageEntry {
+            ts: chrono::Utc::now(),
+            session_id: "s".to_string(),
+            agent: "coder".to_string(),
+            model: "m-1".to_string(),
+            prompt_tokens: tokens,
+            completion_tokens: 0,
+            total_tokens: tokens,
+            tool_calls: 1,
+            thinking_chars: 7,
+            run_id: run_id.to_string(),
+        };
+        let upath = crate::usage::recorder::UsageRecorder::usage_log_path();
+        let mut f = std::fs::File::create(&upath).unwrap();
+        writeln!(f, "{}", serde_json::to_string(&entry("run-1", 120)).unwrap()).unwrap();
+        writeln!(f, "{}", serde_json::to_string(&entry("run-2", 555)).unwrap()).unwrap();
+        drop(f);
+
+        let tool = tool_in(dir.path());
+        let out = text({
+            let mut values = HashMap::new();
+            values.insert("agent".to_string(), serde_json::json!("coder"));
+            values.insert("run_id".to_string(), serde_json::json!("run-1"));
+            match tool.execute(ToolParams { values }) {
+                Ok(out) => out,
+                Err(e) => panic!("unexpected ToolError: {e}"),
+            }
+        });
+        assert!(out.contains("Run detail for 'coder' (run run-1)"), "got: {out}");
+        assert!(out.contains("LLM rounds (1): 120 total tokens"), "got: {out}");
+        assert!(out.contains("m-1"), "got: {out}");
+        assert!(!out.contains("555"), "other run's round must not leak in: {out}");
+        assert!(out.contains("(run run-1)"), "run-level feedback: {out}");
+
+        let out2 = text({
+            let mut values = HashMap::new();
+            values.insert("agent".to_string(), serde_json::json!("coder"));
+            values.insert("run_id".to_string(), serde_json::json!("ghost"));
+            match tool.execute(ToolParams { values }) {
+                Ok(out) => out,
+                Err(e) => panic!("unexpected ToolError: {e}"),
+            }
+        });
+        assert!(out2.contains("No run with run_id 'ghost'"), "got: {out2}");
     }
 }

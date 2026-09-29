@@ -79,6 +79,20 @@ impl Clone for UsageRecorder {
     }
 }
 
+/// 4a: test override for the usage log path (same process-global pattern
+/// as `agents::metrics::set_metrics_dir_for_testing` — join tests must never
+/// read the real `~/.wuffagent/usage.jsonl`).
+static TEST_USAGE_PATH: std::sync::OnceLock<std::sync::Mutex<Option<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+fn usage_test_slot() -> &'static std::sync::Mutex<Option<PathBuf>> {
+    TEST_USAGE_PATH.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn usage_test_path() -> Option<PathBuf> {
+    usage_test_slot().lock().unwrap().clone()
+}
+
 impl UsageRecorder {
     /// Create a recorder for `path`. The file is created (and its parent
     /// directory, if needed) on the first successful write.
@@ -96,9 +110,25 @@ impl UsageRecorder {
         crate::config::get_wuffagent_home().join("usage.jsonl")
     }
 
+    /// 4a: the usage log's effective path — the test override wins when set,
+    /// otherwise [`Self::default_path`]. Readers that must follow the same
+    /// file as the writer (the 4a join, the UI) use this instead of
+    /// `default_path`.
+    pub fn usage_log_path() -> PathBuf {
+        usage_test_path().unwrap_or_else(Self::default_path)
+    }
+
     /// Recorder at the default log location.
     pub fn default_recorder() -> Self {
-        Self::new(Self::default_path())
+        Self::new(Self::usage_log_path())
+    }
+
+    /// Set (or clear with `None`) the test override for the usage log path
+    /// (same process-global pattern as
+    /// `agents::metrics::set_metrics_dir_for_testing` — join tests must
+    /// never read the real `~/.wuffagent/usage.jsonl`).
+    pub fn set_usage_path_for_testing(path: Option<PathBuf>) {
+        *usage_test_slot().lock().unwrap() = path;
     }
 
     /// The log file path this recorder appends to.

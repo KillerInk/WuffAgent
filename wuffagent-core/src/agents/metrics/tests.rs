@@ -1494,3 +1494,133 @@ fn test_feedback_run_level_counts_and_legacy() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 4a: the global usage-path override is shared across the test binary's
+/// parallel tests — serialize the tests that set it (same pattern as the
+/// improvement tests' MetricsDirGuard).
+static USAGE_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct UsagePathGuard(std::sync::MutexGuard<'static, ()>, PathBuf);
+
+impl UsagePathGuard {
+    fn new() -> Self {
+        let guard = USAGE_PATH_LOCK.lock().unwrap();
+        let path = tmp_dir("usage-join").join("usage.jsonl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+        crate::usage::recorder::UsageRecorder::set_usage_path_for_testing(Some(path.clone()));
+        Self(guard, path)
+    }
+}
+
+impl Drop for UsagePathGuard {
+    fn drop(&mut self) {
+        crate::usage::recorder::UsageRecorder::set_usage_path_for_testing(None);
+    }
+}
+
+/// 4a: `run_detail` joins one run across the metrics + usage stores by the
+/// 1e run_id — the run line, its LLM rounds (usage entries with the same
+/// run_id, in log order, other runs' rounds excluded), and its run-level
+/// feedback. Unknown run ids yield `None`.
+#[test]
+fn test_run_detail_joins_stores() {
+    let _guard = UsagePathGuard::new();
+    let dir = tmp_dir("run-detail");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    log.log_run("coder", &rs(3, 1, 1), 5_000, RunOutcome::Verified, 10, 2, "r1", "sess-1");
+    log.log_run("coder", &rs(1, 0, 0), 1_000, RunOutcome::GaveUp, 5, 1, "r2", "sess-2");
+    log.log_feedback_run("coder", "r1", true);
+
+    use std::io::Write;
+    let entry = |run_id: &str, tokens: u32| crate::usage::recorder::UsageEntry {
+        ts: Utc::now(),
+        session_id: "sess".to_string(),
+        agent: "coder".to_string(),
+        model: "test-model".to_string(),
+        prompt_tokens: tokens,
+        completion_tokens: 0,
+        total_tokens: tokens,
+        tool_calls: 1,
+        thinking_chars: 42,
+        run_id: run_id.to_string(),
+    };
+    let mut f = std::fs::File::create(_guard.1.as_path()).unwrap();
+    writeln!(f, "{}", serde_json::to_string(&entry("r1", 100)).unwrap()).unwrap();
+    writeln!(f, "{}", serde_json::to_string(&entry("other", 999)).unwrap()).unwrap();
+    writeln!(f, "{}", serde_json::to_string(&entry("r1", 50)).unwrap()).unwrap();
+    drop(f);
+
+    let d = log.run_detail("coder", "r1").expect("r1 exists");
+    assert!(matches!(&d.run, MetricsLine::Run { run_id, .. } if run_id == "r1"));
+    assert_eq!(d.rounds.len(), 2, "only r1's rounds (log order): {d:?}");
+    assert_eq!(d.rounds[0].total_tokens, 100);
+    assert_eq!(d.rounds[1].total_tokens, 50);
+    assert_eq!(d.total_round_tokens(), 150);
+    assert_eq!(d.feedback.len(), 1, "the run-level feedback links in");
+    assert!(
+        matches!(&d.feedback[0], MetricsLine::Feedback { run_id: Some(r), .. } if r == "r1")
+    );
+    assert!(log.run_detail("coder", "nope").is_none(), "unknown id → None");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 4a: the report's trim correlation joins Trim lines to Run lines by the
+/// 1e run_id — trimmed vs untrimmed gave-up shares stay separate, and a
+/// trim for a non-existent run id is ignored.
+#[test]
+fn test_report_trim_correlation() {
+    let dir = tmp_dir("trim-corr");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    log.log_run("coder", &rs(1, 0, 1), 1_000, RunOutcome::GaveUp, 0, 0, "r1", "s");
+    log.log_run("coder", &rs(1, 0, 1), 1_000, RunOutcome::Verified, 0, 0, "r2", "s");
+    log.log_run("coder", &rs(1, 0, 1), 1_000, RunOutcome::GaveUp, 0, 0, "r3", "s");
+    log.log_run("coder", &rs(1, 0, 1), 1_000, RunOutcome::Verified, 0, 0, "r4", "s");
+    log.log_trim("coder", 100, 50, 1, false, false, "r1");
+    log.log_trim("coder", 100, 50, 1, false, false, "r2");
+    log.log_trim("coder", 100, 50, 1, false, false, "ghost"); // no such run
+
+    let rep = log.report("coder", None, None);
+    assert_eq!(
+        rep.trim_correlation,
+        TrimCorrelation {
+            trimmed_runs: 2,
+            trimmed_gave_up: 1,
+            untrimmed_runs: 2,
+            untrimmed_gave_up: 1,
+        },
+        "got {rep:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 4a: `BucketSummary::retry_rate` is `verified_after_retry / runs` (0.0 for
+/// an empty bucket).
+#[test]
+fn test_bucket_retry_rate() {
+    use chrono::Local;
+    let empty = BucketSummary {
+        start: Local::now().naive_local(),
+        runs: 0,
+        tool_calls: 0,
+        tool_errors: 0,
+        gave_up: 0,
+        verified_after_retry: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        duration_ms_sum: 0,
+    };
+    assert_eq!(empty.retry_rate(), 0.0);
+    let some = BucketSummary {
+        runs: 4,
+        verified_after_retry: 1,
+        ..empty
+    };
+    assert!((some.retry_rate() - 0.25).abs() < f64::EPSILON);
+}
