@@ -157,6 +157,9 @@ impl FleetDashboard {
             .show(ctx, |ui| {
                 ui.visuals_mut().panel_fill = theme.surface;
 
+                // The whole body scrolls: in a small window the KPI cards,
+                // the trend chart and the loop table must not be clipped.
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 // Header: title left, window label right.
                 ui.horizontal(|ui| {
                     ui.heading("Fleet Dashboard");
@@ -253,6 +256,7 @@ impl FleetDashboard {
                     )
                     .weak(),
                 );
+                });
             });
 
         // The ✕ in the title bar may have cleared the flag.
@@ -296,7 +300,10 @@ impl FleetDashboard {
             ui,
             "fleet_trend_plot",
             n,
-            (ui.available_height() - 220.0).max(140.0),
+            // Clamped: inside the dashboard's ScrollArea the available
+            // height is infinite, and a giant chart would push the loop
+            // table far below the visible area.
+            (ui.available_height() - 220.0).clamp(160.0, 360.0),
             Some((bars, theme.primary)),
             vec![Line::new("tool errors %", err_line)
                 .color(theme.warning)
@@ -378,7 +385,10 @@ impl FleetDashboard {
         let grid = egui::Grid::new("fleet_loop_table")
             .striped(true)
             .spacing(egui::vec2(14.0, 3.0));
-        grid.show(ui, |ui| {
+        // Horizontal scroll: the verdict column can make the 7-column grid
+        // wider than a narrow window (min 520px) — scroll instead of clip.
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            grid.show(ui, |ui| {
             ui.weak("agent");
             ui.weak("last check");
             ui.weak("tasks since");
@@ -425,6 +435,7 @@ impl FleetDashboard {
                 ui.label(err);
                 ui.end_row();
             }
+            });
         });
     }
 }
@@ -438,74 +449,76 @@ fn agent_kpi_card(ui: &mut egui::Ui, k: &Kpi, theme: &Theme) {
         .corner_radius(7.0)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
-            ui.set_min_width(150.0);
-            ui.label(egui::RichText::new(k.name.clone()).strong().size(13.0));
-            ui.add_space(2.0);
+            // The frame inherits the parent (horizontal_wrapped) layout —
+            // force a vertical stack so the card is a compact block that
+            // wraps instead of overflowing the row.
+            ui.vertical(|ui| {
+                ui.set_min_width(150.0);
+                ui.label(egui::RichText::new(k.name.clone()).strong().size(13.0));
+                ui.add_space(2.0);
 
-            let r = &k.report;
-            let verified_pct = if r.summary.runs > 0 {
-                100.0 * (r.summary.verified + r.summary.verified_after_retry) as f64 / r.summary.runs as f64
-            } else {
-                0.0
-            };
-            let err_pct = if r.summary.tool_calls > 0 {
-                100.0 * r.summary.tool_errors as f64 / r.summary.tool_calls as f64
-            } else {
-                0.0
-            };
+                let r = &k.report;
+                let verified_pct = if r.summary.runs > 0 {
+                    100.0
+                        * (r.summary.verified + r.summary.verified_after_retry) as f64
+                        / r.summary.runs as f64
+                } else {
+                    0.0
+                };
+                let err_pct = if r.summary.tool_calls > 0 {
+                    100.0 * r.summary.tool_errors as f64 / r.summary.tool_calls as f64
+                } else {
+                    0.0
+                };
 
-            kpi_row(ui, "runs", r.summary.runs.to_string(), theme.text_primary);
-            kpi_row(
-                ui,
-                "outcome",
-                if r.summary.runs > 0 {
-                    format!("{verified_pct:.0}% verified")
-                } else {
-                    "—".to_string()
-                },
-                theme.success,
-            );
-            kpi_row(
-                ui,
-                "tools err",
-                if r.summary.tool_calls > 0 {
-                    format!("{err_pct:.1}%")
-                } else {
-                    "—".to_string()
-                },
-                if err_pct > 25.0 && r.summary.tool_calls >= 10 {
-                    theme.error
-                } else {
-                    theme.text_primary
-                },
-            );
-            kpi_row(
-                ui,
-                "tokens",
-                format!(
-                    "{} in / {} out",
-                    fmt_tokens(r.summary.tokens_in),
-                    fmt_tokens(r.summary.tokens_out)
-                ),
-                theme.accent,
-            );
-            kpi_row(
-                ui,
-                "spend",
-                fmt_usd(r.cost_usd),
-                theme.warning,
-            );
-            kpi_row(
-                ui,
-                "last active",
-                ago(k.last_activity),
-                theme.text_secondary,
-            );
+                kpi_row(ui, "runs", r.summary.runs.to_string(), theme.text_primary);
+                kpi_row(
+                    ui,
+                    "outcome",
+                    if r.summary.runs > 0 {
+                        format!("{verified_pct:.0}% verified")
+                    } else {
+                        "—".to_string()
+                    },
+                    theme.success,
+                );
+                kpi_row(
+                    ui,
+                    "tools err",
+                    if r.summary.tool_calls > 0 {
+                        format!("{err_pct:.1}%")
+                    } else {
+                        "—".to_string()
+                    },
+                    if err_pct > 25.0 && r.summary.tool_calls >= 10 {
+                        theme.error
+                    } else {
+                        theme.text_primary
+                    },
+                );
+                kpi_row(
+                    ui,
+                    "tokens",
+                    format!(
+                        "{} in / {} out",
+                        fmt_tokens(r.summary.tokens_in),
+                        fmt_tokens(r.summary.tokens_out)
+                    ),
+                    theme.accent,
+                );
+                kpi_row(ui, "spend", fmt_usd(r.cost_usd), theme.warning);
+                kpi_row(
+                    ui,
+                    "last active",
+                    ago(k.last_activity),
+                    theme.text_secondary,
+                );
+            });
         });
     ui.add_space(8.0);
 }
 
-/// A small fleet-wide stat card (label + value).
+/// A small fleet-wide stat card (label + value, stacked vertically).
 fn kpi_stat(
     ui: &mut egui::Ui,
     label: &str,
@@ -519,11 +532,15 @@ fn kpi_stat(
         .corner_radius(7.0)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(label).weak().size(10.5));
-            ui.add_space(1.0);
-            ui.label(
-                egui::RichText::new(value).strong().size(16.0).color(value_color),
-            );
+            // The frame inherits the parent (horizontal) layout — force the
+            // label/value to stack vertically.
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(label).weak().size(10.5));
+                ui.add_space(1.0);
+                ui.label(
+                    egui::RichText::new(value).strong().size(16.0).color(value_color),
+                );
+            });
         });
     ui.add_space(7.0);
 }
