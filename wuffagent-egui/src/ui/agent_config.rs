@@ -200,6 +200,11 @@ pub struct AgentConfigDialog {
     run_eval_running: bool,
     /// 2d: the last manual eval run's summary (or error), shown as a status line.
     run_eval_status: Option<String>,
+    /// 2a: per-agent metrics cache, keyed by agent name:
+    /// (file len, file mtime) → full line list. While the editor is open, the
+    /// per-frame metrics/evals blocks re-read the JSONL only when the file
+    /// changed (len or mtime), instead of scanning it twice per frame.
+    metrics_cache: std::collections::HashMap<String, (u64, std::time::SystemTime, Vec<MetricsLine>)>,
 }
 
 impl AgentConfigDialog {
@@ -251,6 +256,7 @@ impl AgentConfigDialog {
             run_eval_running: false,
             run_eval_status: None,
             runtime: runtime.clone(),
+            metrics_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -510,6 +516,30 @@ impl AgentConfigDialog {
         });
     }
 
+    /// 2a: the full metric lines for `agent`, cached by (file len, mtime) —
+    /// the per-frame blocks below (recent metrics, evals) stop doing full
+    /// JSONL scans every frame while the file is unchanged.
+    fn cached_metrics_lines(&mut self, agent: &str) -> Vec<MetricsLine> {
+        use std::time::SystemTime;
+        let log = wuffagent_core::agents::metrics::MetricsLog::default();
+        let meta = std::fs::metadata(log.agent_path(agent)).ok();
+        let key = match meta.as_ref() {
+            Some(m) => (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)),
+            None => (0, SystemTime::UNIX_EPOCH),
+        };
+        let hit = self
+            .metrics_cache
+            .get(agent)
+            .filter(|c| c.0 == key.0 && c.1 == key.1);
+        if let Some(c) = hit {
+            return c.2.clone();
+        }
+        let lines = log.read_all(agent);
+        self.metrics_cache
+            .insert(agent.to_string(), (key.0, key.1, lines.clone()));
+        lines
+    }
+
     /// Allowed-tools checkboxes + the read-only recent-metrics block (M1).
     fn draw_tools_and_metrics(&mut self, ui: &mut egui::Ui, history_agent: Option<&str>) {
         ui.label("Allowed Tools:");
@@ -528,10 +558,19 @@ impl AgentConfigDialog {
         // (run/outcome/feedback counts + the last few metric lines) from the
         // per-agent log.
         if let Some(name) = history_agent {
-            let metrics = wuffagent_core::agents::metrics::MetricsLog::default();
-            let summary = metrics.summary_since(name, None);
+            // 2a: cached lines + pure aggregation (one file read when the
+            // file changed, none otherwise — was two full scans per frame).
+            let lines = self.cached_metrics_lines(name);
+            let summary = wuffagent_core::agents::metrics::MetricsSummary::from_lines(&lines);
             if summary.runs + summary.feedback_up + summary.feedback_down > 0 {
                 ui.separator();
+                // The last five lines, newest first (display order).
+                let recent: Vec<String> = lines
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .map(|l| l.describe())
+                    .collect();
                 ui.group(|ui| {
                     ui.label(egui::RichText::new("Recent metrics (all time):").strong());
                     ui.label(format!(
@@ -546,11 +585,9 @@ impl AgentConfigDialog {
                         summary.feedback_up,
                         summary.feedback_down
                     ));
-                    for line in metrics.recent(name, 5).iter().rev() {
+                    for desc in &recent {
                         ui.label(
-                            egui::RichText::new(format!("  {}", line.describe()))
-                                .weak()
-                                .small(),
+                            egui::RichText::new(format!("  {desc}")).weak().small(),
                         );
                     }
                 });
@@ -572,15 +609,15 @@ impl AgentConfigDialog {
         let mut passed = 0usize;
         let mut last_desc: Option<String> = None;
         let mut last_passed: Option<bool> = None;
-        for l in wuffagent_core::agents::metrics::MetricsLog::default().read_all(agent_name) {
+        for l in &self.cached_metrics_lines(agent_name) {
             if let MetricsLine::Eval { ts, id, passed: p, .. } = l {
                 total += 1;
-                if p {
+                if *p {
                     passed += 1;
                 }
                 let id_label = if id.is_empty() { "(ad-hoc)" } else { id.as_str() };
                 last_desc = Some(format!("{} — {}", ts.format("%Y-%m-%d %H:%M"), id_label));
-                last_passed = Some(p);
+                last_passed = Some(*p);
             }
         }
         let failed = total - passed;

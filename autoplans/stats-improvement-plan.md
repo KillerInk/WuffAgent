@@ -319,7 +319,7 @@ garbage after colon, lowercase); eval line stores the score end-to-end.
 
 ### Phase 2 — analysis + cheap reads (4 commits)
 
-**2a. Incremental metrics reader + egui cache (D1)** — `stats(2a)`
+**2a. Incremental metrics reader + egui cache (D1)** — `stats(2a)` — **DONE**
 - New `MetricsLogReader` in `agents/metrics.rs` (or `agents/metrics/reader.rs`):
   port the `UsageLogReader` pattern (grep it in `usage/`): byte-offset poll,
   torn-line buffer, shrink/rotate → full rescan.

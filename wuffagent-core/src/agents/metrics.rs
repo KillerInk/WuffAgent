@@ -386,6 +386,17 @@ pub struct MetricsSummary {
 }
 
 impl MetricsSummary {
+    /// 2a: aggregate `lines` with no time window — the shared computation
+    /// behind `summary_between` (which filters by window first) and the egui
+    /// metrics cache (which feeds it the full cached vec).
+    pub fn from_lines(lines: &[MetricsLine]) -> Self {
+        let mut s = Self::default();
+        for line in lines {
+            accumulate(&mut s, line);
+        }
+        s
+    }
+
     /// One-line rendering with a caller-supplied label (the I5 effect check
     /// labels its before/after windows). Returns an empty string when there
     /// is nothing to report (no runs and no feedback).
@@ -849,14 +860,7 @@ impl MetricsLog {
             }
         }
         for line in self.read_all(agent) {
-            let ts = match &line {
-                MetricsLine::Run { ts, .. } => ts,
-                MetricsLine::Feedback { ts, .. } => ts,
-                MetricsLine::SkillUse { ts, .. } => ts,
-                MetricsLine::Trim { ts, .. } => ts,
-                MetricsLine::Check { ts, .. } => ts,
-                MetricsLine::Eval { ts, .. } => ts,
-            };
+            let ts = line_ts(&line);
             if let Some(start) = start {
                 if *ts < start {
                     continue;
@@ -867,65 +871,7 @@ impl MetricsLog {
                     continue;
                 }
             }
-            match &line {
-                MetricsLine::Run {
-                    tool_calls,
-                    tool_errors,
-                    duration_ms,
-                    outcome,
-                    tokens_in,
-                    tokens_out,
-                    ..
-                } => {
-                    s.runs += 1;
-                    s.tool_calls += tool_calls;
-                    s.tool_errors += tool_errors;
-                    s.total_duration_ms += duration_ms;
-                    s.tokens_in += tokens_in;
-                    s.tokens_out += tokens_out;
-                    match outcome {
-                        RunOutcome::Verified => s.verified += 1,
-                        RunOutcome::VerifiedAfterRetry => s.verified_after_retry += 1,
-                        RunOutcome::GaveUp => s.gave_up += 1,
-                        RunOutcome::None => s.not_verified += 1,
-                    }
-                }
-                MetricsLine::Feedback { feedback, .. } => match feedback {
-                    FeedbackKind::Up => s.feedback_up += 1,
-                    FeedbackKind::Down => s.feedback_down += 1,
-                },
-                MetricsLine::Trim { .. } => {
-                    s.trims += 1;
-                }
-                MetricsLine::SkillUse { .. } => {
-                    // Not counted in the per-agent summary (the skills file
-                    // is fleet-wide); the ts filter above still applies.
-                }
-                MetricsLine::Check {
-                    tokens_in,
-                    tokens_out,
-                    suggestions,
-                    ..
-                } => {
-                    s.checks += 1;
-                    s.check_tokens_in += tokens_in;
-                    s.check_tokens_out += tokens_out;
-                    s.check_suggestions += *suggestions as u32;
-                }
-                MetricsLine::Eval {
-                    passed,
-                    tokens_in,
-                    tokens_out,
-                    ..
-                } => {
-                    s.evals += 1;
-                    if *passed {
-                        s.evals_passed += 1;
-                    }
-                    s.eval_tokens_in += tokens_in;
-                    s.eval_tokens_out += tokens_out;
-                }
-            }
+            accumulate(&mut s, &line);
         }
         s
     }
@@ -1068,6 +1014,75 @@ pub fn record_check(
         suggestions,
         duration_ms,
     );
+}
+
+mod reader;
+
+pub use reader::MetricsLogReader;
+
+/// 2a: fold one metric line into an aggregate summary — the shared
+/// per-line computation behind `summary_between` (which applies the time
+/// window first) and `MetricsSummary::from_lines` (no window).
+fn accumulate(s: &mut MetricsSummary, line: &MetricsLine) {
+    match line {
+        MetricsLine::Run {
+            tool_calls,
+            tool_errors,
+            duration_ms,
+            outcome,
+            tokens_in,
+            tokens_out,
+            ..
+        } => {
+            s.runs += 1;
+            s.tool_calls += tool_calls;
+            s.tool_errors += tool_errors;
+            s.total_duration_ms += duration_ms;
+            s.tokens_in += tokens_in;
+            s.tokens_out += tokens_out;
+            match outcome {
+                RunOutcome::Verified => s.verified += 1,
+                RunOutcome::VerifiedAfterRetry => s.verified_after_retry += 1,
+                RunOutcome::GaveUp => s.gave_up += 1,
+                RunOutcome::None => s.not_verified += 1,
+            }
+        }
+        MetricsLine::Feedback { feedback, .. } => match feedback {
+            FeedbackKind::Up => s.feedback_up += 1,
+            FeedbackKind::Down => s.feedback_down += 1,
+        },
+        MetricsLine::Trim { .. } => {
+            s.trims += 1;
+        }
+        MetricsLine::SkillUse { .. } => {
+            // Not counted in the per-agent summary (the skills file
+            // is fleet-wide).
+        }
+        MetricsLine::Check {
+            tokens_in,
+            tokens_out,
+            suggestions,
+            ..
+        } => {
+            s.checks += 1;
+            s.check_tokens_in += tokens_in;
+            s.check_tokens_out += tokens_out;
+            s.check_suggestions += *suggestions as u32;
+        }
+        MetricsLine::Eval {
+            passed,
+            tokens_in,
+            tokens_out,
+            ..
+        } => {
+            s.evals += 1;
+            if *passed {
+                s.evals_passed += 1;
+            }
+            s.eval_tokens_in += tokens_in;
+            s.eval_tokens_out += tokens_out;
+        }
+    }
 }
 
 #[cfg(test)]

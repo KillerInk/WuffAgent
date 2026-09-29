@@ -853,3 +853,173 @@ fn test_record_check_writes_default_log() {
     set_metrics_dir_for_testing(None);
     let _ = std::fs::remove_dir_all(&override_dir);
 }
+
+/// 2a: `MetricsLogReader::poll` returns exactly the appended lines — a
+/// full load, then incremental appends (the UI pattern: one rescan, then
+/// only new lines per poll).
+#[test]
+fn test_reader_poll_incremental() {
+    let dir = tmp_dir("reader-incremental");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("coder.jsonl");
+
+    let write = |line: &str| {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
+    };
+    let run_line = |attempts: u32| {
+        format!(
+            r#"{{"kind":"run","ts":"2026-09-01T00:00:0{attempts}.000Z","tool_calls":1,"tool_errors":0,"verification_attempts":{attempts},"duration_ms":100,"outcome":"verified","tokens_in":0,"tokens_out":0}}"#
+        )
+    };
+    write(&run_line(0));
+
+    let mut r = MetricsLogReader::new();
+    let initial = r.load_all(&path);
+    assert_eq!(initial.len(), 1, "got: {initial:?}");
+
+    // Unchanged file: poll returns nothing.
+    assert!(r.poll(&path).is_empty(), "unchanged file must not yield lines");
+
+    write(&run_line(1));
+    let new = r.poll(&path);
+    assert_eq!(new.len(), 1, "got: {new:?}");
+    assert!(matches!(&new[0], MetricsLine::Run { verification_attempts: 1, .. }));
+
+    write(&run_line(2));
+    write(&run_line(3));
+    let new = r.poll(&path);
+    assert_eq!(new.len(), 2, "got: {new:?}");
+    assert!(matches!(&new[0], MetricsLine::Run { verification_attempts: 2, .. }));
+    assert!(matches!(&new[1], MetricsLine::Run { verification_attempts: 3, .. }));
+
+    // Missing file (deleted): poll returns nothing, no panic.
+    std::fs::remove_file(&path).unwrap();
+    assert!(r.poll(&path).is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 2a: a torn trailing line (no newline yet) is buffered by `poll` and
+/// delivered on the next poll once the write completes — it is never
+/// returned half-parsed and never lost.
+#[test]
+fn test_reader_buffers_torn_line() {
+    let dir = tmp_dir("reader-torn");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("coder.jsonl");
+    use std::io::Write;
+    let mut f = std::fs::File::create(&path).unwrap();
+    let line1 = r#"{"kind":"run","ts":"2026-09-01T00:00:00.000Z","tool_calls":1,"tool_errors":0,"verification_attempts":1,"duration_ms":1,"outcome":"verified","tokens_in":0,"tokens_out":0}"#;
+    writeln!(f, "{line1}").unwrap();
+    // Second line with NO trailing newline yet (a write in progress).
+    let line2 = r#"{"kind":"run","ts":"2026-09-01T00:00:01.000Z","tool_calls":1,"tool_errors":0,"verification_attempts":2,"duration_ms":1,"outcome":"verified","tokens_in":0,"tokens_out":0}"#;
+    let partial = &line2[..line2.len() / 2];
+    f.write_all(partial.as_bytes()).unwrap();
+    drop(f);
+
+    let mut r = MetricsLogReader::new();
+    let first = r.poll(&path);
+    assert_eq!(first.len(), 1, "only the complete line; got: {first:?}");
+    assert!(matches!(
+        first[0],
+        MetricsLine::Run { verification_attempts: 1, .. }
+    ));
+
+    // Complete the torn line.
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(line2[partial.len()..].as_bytes()).unwrap();
+    writeln!(f).unwrap();
+    drop(f);
+
+    let second = r.poll(&path);
+    assert_eq!(second.len(), 1, "got: {second:?}");
+    assert!(matches!(
+        second[0],
+        MetricsLine::Run { verification_attempts: 2, .. }
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 2a: when the file shrinks (truncated/rotated), `poll` transparently
+/// rescans from the beginning and returns the full new content.
+#[test]
+fn test_reader_truncate_rescans() {
+    let dir = tmp_dir("reader-truncate");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("coder.jsonl");
+    use std::io::Write;
+    let line = |a: u32| {
+        format!(
+            r#"{{"kind":"run","ts":"2026-09-01T00:00:0{a}.000Z","tool_calls":1,"tool_errors":0,"verification_attempts":{a},"duration_ms":1,"outcome":"verified","tokens_in":0,"tokens_out":0}}"#
+        )
+    };
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "{}", line(0)).unwrap();
+    writeln!(f, "{}", line(1)).unwrap();
+    drop(f);
+
+    let mut r = MetricsLogReader::new();
+    assert_eq!(r.load_all(&path).len(), 2);
+
+    // Truncate the file down to a single (different) line.
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "{}", line(2)).unwrap();
+    drop(f);
+
+    let rescanned = r.poll(&path);
+    assert_eq!(rescanned.len(), 1, "got: {rescanned:?}");
+    assert!(matches!(&rescanned[0], MetricsLine::Run { verification_attempts: 2, .. }));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 2a: `MetricsSummary::from_lines` (the egui cache path) computes exactly
+/// what `summary_since(name, None)` (the file path) does on the same
+/// fixture — one full read, two computations, one result.
+#[test]
+fn test_from_lines_matches_summary_since() {
+    let dir = tmp_dir("from-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+
+    let mut stats = rs(0, 0, 0);
+    stats.bump_tool("shell", true, 50);
+    stats.bump_tool("read_file", false, 30);
+    stats.bump_tool("read_file", true, 20);
+    log.log_run("coder", &stats, 1200, RunOutcome::Verified, 10, 2, "r1", "s1");
+    log.log_run("coder", &rs(1, 0, 1), 800, RunOutcome::GaveUp, 5, 1, "r2", "s1");
+    log.log_feedback("coder", true);
+    log.log_feedback("coder", false);
+    log.log_eval("coder", "e1", true, Some(0.9), 250, 100, 50, "gpt-4o-mini", 0.001);
+    log.log_eval("coder", "e2", false, None, 300, 120, 60, "", 0.0);
+
+    let lines = log.read_all("coder");
+    let via_lines = MetricsSummary::from_lines(&lines);
+    let via_file = log.summary_since("coder", None);
+    assert_eq!(
+        via_lines, via_file,
+        "from_lines must equal summary_since(all time)"
+    );
+    // And that the aggregate actually reflects the fixture (guards against
+    // both paths silently emptying).
+    assert_eq!(via_file.runs, 2);
+    assert_eq!(via_file.tool_calls, 4);
+    assert_eq!(via_file.tool_errors, 2);
+    assert_eq!(via_file.verified, 1);
+    assert_eq!(via_file.gave_up, 1);
+    assert_eq!(via_file.feedback_up, 1);
+    assert_eq!(via_file.feedback_down, 1);
+    assert_eq!(via_file.evals, 2);
+    assert_eq!(via_file.evals_passed, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
