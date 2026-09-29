@@ -420,6 +420,7 @@ llm_ms: 0,
 tools_ms: 0,
 model: String::new(),
 cost_usd: 0.0,
+v: 1,
         })
         .unwrap()
     };
@@ -474,6 +475,7 @@ llm_ms: 0,
 tools_ms: 0,
 model: String::new(),
 cost_usd: 0.0,
+v: 1,
         })
         .unwrap()
     };
@@ -547,6 +549,7 @@ llm_ms: 0,
 tools_ms: 0,
 model: String::new(),
 cost_usd: 0.0,
+v: 1,
             })
             .unwrap()
         )
@@ -559,6 +562,7 @@ cost_usd: 0.0,
             ts: ts(21, 9),
             feedback: FeedbackKind::Up,
             run_id: None,
+            v: 1,
         })
         .unwrap()
     )
@@ -1559,6 +1563,7 @@ fn test_run_detail_joins_stores() {
         tool_calls: 1,
         thinking_chars: 42,
         run_id: run_id.to_string(),
+        v: 1,
     };
     let mut f = std::fs::File::create(_guard.1.as_path()).unwrap();
     writeln!(f, "{}", serde_json::to_string(&entry("r1", 100)).unwrap()).unwrap();
@@ -1847,4 +1852,91 @@ fn test_daily_rollup_marker() {
     // The marker file holds today's UTC date.
     let marker = std::fs::read_to_string(dir.join(".rollup-state")).unwrap();
     assert_eq!(marker.trim(), "2026-09-30");
+}
+
+/// 4d: the writers stamp `v: 1` — the migration anchor for future schema
+/// changes. Round-trip: the real `log_run` writer writes, `read_all` reports
+/// v == 1 (not the serde default).
+#[test]
+fn test_v_writer_stamps_one_and_roundtrips() {
+    let dir = tmp_dir("v-stamp");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let stats = rs(5, 1, 2);
+    log.log_run("coder", &stats, 1_000, RunOutcome::Verified, 100, 200, "run-v", "sess-v");
+    let lines = log.read_all("coder");
+    assert_eq!(lines.len(), 1);
+    match &lines[0] {
+        MetricsLine::Run { v, .. } => assert_eq!(*v, 1, "writer must stamp v:1"),
+        other => panic!("expected a Run line, got: {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 4d: a line written BEFORE the `v` field existed (no `v` key in the JSON)
+/// still parses — `#[serde(default)]` fills v == 0. Tolerant parsing of old
+/// stores is unchanged by the schema-version migration.
+#[test]
+fn test_v_legacy_line_without_v_parses_as_zero() {
+    let dir = tmp_dir("v-legacy");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    // A pre-4d Run line: every field except `v`.
+    let legacy = serde_json::to_string(&serde_json::json!({
+        "kind": "run",
+        "ts": "2026-09-01T10:00:00Z",
+        "tool_calls": 4,
+        "tool_errors": 0,
+        "verification_attempts": 1,
+        "duration_ms": 250,
+        "outcome": "verified",
+        "tokens_in": 10,
+        "tokens_out": 20,
+        "tools": [],
+        "run_id": "legacy-run",
+        "session_id": "legacy-sess",
+        "llm_ms": 0,
+        "tools_ms": 0,
+        "model": "",
+        "cost_usd": 0.0
+    }))
+    .unwrap();
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("coder")).unwrap();
+    writeln!(f, "{legacy}").unwrap();
+    drop(f);
+    let lines = log.read_all("coder");
+    assert_eq!(lines.len(), 1, "legacy line must parse");
+    match &lines[0] {
+        MetricsLine::Run { v, .. } => assert_eq!(*v, 0, "legacy line must default to v:0"),
+        other => panic!("expected a Run line, got: {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 4d: the same tolerant-parse guarantee for the usage log's `UsageEntry` —
+/// a pre-4d usage line (no `v`) loads with v == 0 via the incremental reader.
+#[test]
+fn test_v_legacy_usage_entry_defaults_zero() {
+    let entry = crate::usage::recorder::UsageEntry {
+        ts: Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap(),
+        session_id: "u-legacy-sess".to_string(),
+        agent: "coder".to_string(),
+        model: String::new(),
+        prompt_tokens: 12,
+        completion_tokens: 34,
+        total_tokens: 46,
+        tool_calls: 1,
+        thinking_chars: 0,
+        run_id: "u-legacy".to_string(),
+        v: 0,
+    };
+    // Serialize WITHOUT v to mimic a pre-4d line, then deserialize.
+    let mut obj = serde_json::to_value(&entry).unwrap();
+    obj.as_object_mut().unwrap().remove("v");
+    let parsed: crate::usage::recorder::UsageEntry =
+        serde_json::from_value(obj).expect("pre-4d usage line must parse");
+    assert_eq!(parsed.v, 0, "legacy usage entry must default to v:0");
 }

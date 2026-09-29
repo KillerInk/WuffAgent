@@ -127,6 +127,11 @@ pub enum MetricsLine {
         /// 1b: estimated cost in USD (0.0 = recorded but unpriced).
         #[serde(default)]
         cost_usd: f64,
+        /// 4d: schema version of this line's fields (0 = pre-4d line, 1 =
+        /// current). A pure migration anchor: old lines without it parse as
+        /// 0, writers stamp 1.
+        #[serde(default)]
+        v: u32,
     },
     /// User feedback on an assistant answer.
     Feedback {
@@ -137,6 +142,9 @@ pub enum MetricsLine {
         /// run-level feedback, `None` = legacy message-level rating).
         #[serde(default)]
         run_id: Option<String>,
+        /// 4d: schema version (0 = pre-4d line, 1 = current).
+        #[serde(default)]
+        v: u32,
     },
     /// An agent read a skill (usage signal for the improver).
     SkillUse {
@@ -144,6 +152,9 @@ pub enum MetricsLine {
         ts: DateTime<Utc>,
         /// Skill name (slug) that was read.
         skill: String,
+        /// 4d: schema version (0 = pre-4d line, 1 = current).
+        #[serde(default)]
+        v: u32,
     },
     /// An agent's context was trimmed before an LLM call (context-rot
     /// signal — how often the model loses its own history mid-run).
@@ -168,6 +179,9 @@ pub enum MetricsLine {
         /// of the reported window) rather than the proactive 90%→50% trim.
         /// Frequent `true` means the estimator/trigger is miscalibrated.
         overflow: bool,
+        /// 4d: schema version (0 = pre-4d line, 1 = current).
+        #[serde(default)]
+        v: u32,
     },
     /// 1c: one self-improvement check (the loop's OWN cost — an improver LLM
     /// call). The line is stored in the reviewed profile's file (scope
@@ -195,6 +209,9 @@ pub enum MetricsLine {
         /// Wall-clock duration of the check's LLM call, in milliseconds.
         #[serde(default)]
         duration_ms: u64,
+        /// 4d: schema version (0 = pre-4d line, 1 = current).
+        #[serde(default)]
+        v: u32,
     },
     /// 2b: a golden/regression eval run (the eval harness's pass/fail record,
     /// written by `run_eval`). `id` is the eval's id (per-eval tracking);
@@ -230,6 +247,9 @@ pub enum MetricsLine {
         /// 1b: estimated cost in USD (0.0 = recorded but unpriced).
         #[serde(default)]
         cost_usd: f64,
+        /// 4d: schema version (0 = pre-4d line, 1 = current).
+        #[serde(default)]
+        v: u32,
     },
 }
 
@@ -248,12 +268,7 @@ impl MetricsLine {
                 tokens_in,
                 tokens_out,
                 tools,
-                run_id: _,
-                session_id: _,
-                llm_ms: _,
-                tools_ms: _,
-                model: _,
-                cost_usd: _,
+                ..
             } => {
                 let mut s = format!(
                     "{} run: {} tool calls ({} errors), {} verification attempt(s), {:.1}s, {} tokens in / {} out, outcome: {}",
@@ -285,7 +300,7 @@ impl MetricsLine {
                 }
                 s
             }
-            MetricsLine::Feedback { ts, feedback, run_id } => format!(
+            MetricsLine::Feedback { ts, feedback, run_id, .. } => format!(
                 "{} feedback: {}{}",
                 ts.format("%Y-%m-%d %H:%M"),
                 if *feedback == FeedbackKind::Up { "up" } else { "down" },
@@ -294,7 +309,7 @@ impl MetricsLine {
                     .map(|id| format!(" (run {id})"))
                     .unwrap_or_default()
             ),
-            MetricsLine::SkillUse { ts, skill } => {
+            MetricsLine::SkillUse { ts, skill, .. } => {
                 format!("{} skill used: {}", ts.format("%Y-%m-%d %H:%M"), skill)
             }
             MetricsLine::Trim {
@@ -304,7 +319,7 @@ impl MetricsLine {
                 messages_removed,
                 brief_updated,
                 overflow,
-                run_id: _,
+                ..
             } => format!(
                 "{} context trim{}: {} messages removed ({} → {} chars){}",
                 ts.format("%Y-%m-%d %H:%M"),
@@ -322,6 +337,7 @@ impl MetricsLine {
                 tokens_out,
                 suggestions,
                 duration_ms,
+                ..
             } => format!(
                 "{} improvement check ({scope}, {agent}): {tokens_in} tok in / {tokens_out} out, \
                  {suggestions} suggestion(s), {:.1}s",
@@ -337,8 +353,7 @@ impl MetricsLine {
                 duration_ms,
                 tokens_in,
                 tokens_out,
-                model: _,
-                cost_usd: _,
+                ..
             } => format!(
                 "{} eval ({agent}, id={id}): {}{} {} tok in / {} out, {:.1}s",
                 ts.format("%Y-%m-%d %H:%M"),
@@ -1130,6 +1145,7 @@ impl MetricsLog {
                 tools_ms: stats.tools.iter().map(|t| t.duration_ms).sum(),
                 model: stats.model.clone(),
                 cost_usd: stats.cost_usd,
+                v: 1,
             },
         );
     }
@@ -1142,6 +1158,7 @@ impl MetricsLog {
             &MetricsLine::SkillUse {
                 ts: Utc::now(),
                 skill: skill.to_string(),
+                v: 1,
             },
         );
     }
@@ -1167,6 +1184,7 @@ impl MetricsLog {
                 brief_updated,
                 overflow,
                 run_id: run_id.to_string(),
+                v: 1,
             },
         );
     }
@@ -1183,6 +1201,7 @@ impl MetricsLog {
                     FeedbackKind::Down
                 },
                 run_id: None,
+                v: 1,
             },
         );
     }
@@ -1201,6 +1220,7 @@ impl MetricsLog {
                     FeedbackKind::Down
                 },
                 run_id: Some(run_id.to_string()),
+                v: 1,
             },
         );
     }
@@ -1228,6 +1248,7 @@ impl MetricsLog {
                 tokens_out,
                 suggestions,
                 duration_ms,
+                v: 1,
             },
         );
     }
@@ -1261,6 +1282,7 @@ impl MetricsLog {
                 tokens_out,
                 model: model.to_string(),
                 cost_usd,
+                v: 1,
             },
         );
     }
@@ -1758,7 +1780,7 @@ impl MetricsLog {
     pub fn skill_usage_since(&self, since: Option<DateTime<Utc>>) -> Vec<String> {
         let mut seen: Vec<String> = Vec::new();
         for line in self.read_all(SKILLS_FILE_STEM) {
-            if let MetricsLine::SkillUse { ts, skill } = &line {
+            if let MetricsLine::SkillUse { ts, skill, .. } = &line {
                 if let Some(since) = since {
                     if *ts < since {
                         continue;

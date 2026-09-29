@@ -51,6 +51,11 @@ pub struct UsageEntry {
     /// pre-1e log lines).
     #[serde(default)]
     pub run_id: String,
+    /// 4d: schema version of this entry's fields (0 = pre-4d line, 1 =
+    /// current). A pure migration anchor: old lines without it parse as 0,
+    /// writers stamp 1.
+    #[serde(default)]
+    pub v: u32,
 }
 
 /// Appends [`UsageEntry`] lines to a JSONL file.
@@ -217,6 +222,7 @@ mod tests {
             tool_calls: (total / 100).max(1),
             thinking_chars: (total as u64) * 7,
             run_id: "run-1".to_string(),
+            v: 1,
         }
     }
 

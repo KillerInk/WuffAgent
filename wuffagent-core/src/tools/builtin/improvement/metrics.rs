@@ -1034,6 +1034,7 @@ llm_ms: 0,
 tools_ms: 0,
 model: String::new(),
 cost_usd: 0.0,
+v: 1,
             },
         );
         let tool = tool_in(dir.path());
@@ -1143,6 +1144,7 @@ cost_usd: 0.0,
             ts: Utc::now(),
             feedback: FeedbackKind::Up,
             run_id: None,
+            v: 1,
         })
         .unwrap();
         assert_eq!(up["kind"], "feedback");
@@ -1274,6 +1276,7 @@ cost_usd: 0.0,
             tool_calls: 1,
             thinking_chars: 7,
             run_id: run_id.to_string(),
+            v: 1,
         };
         let upath = crate::usage::recorder::UsageRecorder::usage_log_path();
         let mut f = std::fs::File::create(&upath).unwrap();

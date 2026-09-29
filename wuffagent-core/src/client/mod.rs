@@ -402,6 +402,7 @@ impl ChatClient {
                 tool_calls,
                 thinking_chars,
                 run_id,
+                v: 1,
             });
     }
 
