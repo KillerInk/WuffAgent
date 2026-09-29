@@ -49,6 +49,8 @@ fn production_default_append_roundtrip() {
         RunOutcome::Verified,
         12,
         4,
+        "run-1",
+        "sess-1",
     );
     log.log_feedback("integration-selftest", true);
     let lines = log.read_all("integration-selftest");

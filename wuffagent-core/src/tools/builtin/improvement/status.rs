@@ -563,6 +563,8 @@ mod tests {
             crate::agents::metrics::RunOutcome::Verified,
             11,
             4,
+            "run-1",
+            "sess-1",
         );
         log.log_run(
             "coder",
@@ -576,6 +578,8 @@ mod tests {
             crate::agents::metrics::RunOutcome::GaveUp,
             0,
             0,
+            "run-1",
+            "sess-1",
         );
         log.log_feedback("coder", false);
 
@@ -611,6 +615,8 @@ mod tests {
             crate::agents::metrics::RunOutcome::Verified,
             0,
             0,
+            "run-1",
+            "sess-1",
         );
 
         let tool = ListImprovementStatusTool::new(manager).with_log(log);
@@ -647,6 +653,8 @@ mod tests {
             crate::agents::metrics::RunOutcome::Verified,
             0,
             0,
+            "run-1",
+            "sess-1",
         );
 
         let tool = ListImprovementStatusTool::new(manager).with_log(log);

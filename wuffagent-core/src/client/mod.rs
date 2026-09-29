@@ -179,6 +179,12 @@ pub struct ChatClient {
     /// values until an agent stamps its own (S3, autoplans/
     /// context-rot-prevention.md: the cliff is now tunable per agent).
     trim_pcts: Arc<Mutex<(u64, u64)>>,
+    /// 1e: the run id to stamp on usage-log lines written by this client
+    /// (`None` = no run active / cleared). Set by the agent loop at run
+    /// start and cleared at run end — the same per-run stamping pattern as
+    /// `agent_name`. The join key that ties usage.jsonl lines to the
+    /// metrics Run/Trim lines.
+    run_id: Arc<Mutex<Option<String>>>,
 }
 
 impl Clone for ChatClient {
@@ -201,6 +207,7 @@ impl Clone for ChatClient {
             usage_recorder: self.usage_recorder.clone(),
             agent_name: self.agent_name.clone(),
             trim_pcts: self.trim_pcts.clone(),
+            run_id: self.run_id.clone(),
         }
     }
 }
@@ -267,6 +274,7 @@ impl ChatClient {
             tool_event_tx: Arc::new(Mutex::new(None)),
             usage_recorder: Arc::new(crate::usage::recorder::UsageRecorder::default_recorder()),
             agent_name: Arc::new(Mutex::new("chat".to_string())),
+            run_id: Arc::new(Mutex::new(None)),
             trim_pcts: Arc::new(Mutex::new((
                 Self::TRIM_TRIGGER_PCT,
                 Self::TRIM_TARGET_PCT,
@@ -316,6 +324,14 @@ impl ChatClient {
         *self.agent_name.lock().unwrap() = name.to_string();
     }
 
+    /// 1e: stamp the run id on usage-log lines written by this client
+    /// (the join key to the metrics Run/Trim lines). `None` clears the
+    /// stamp — the agent loop sets it at run start and clears it at run
+    /// end (same per-run pattern as `set_agent_name`).
+    pub fn set_run_id(&self, run_id: Option<&str>) {
+        *self.run_id.lock().unwrap() = run_id.map(str::to_string);
+    }
+
     /// Stamp this agent's trim thresholds (percent of the n_ctx window:
     /// trigger / target) from its `TrimConfig`. Called by `Agent::builder`
     /// before each agent run, like [`Self::set_agent_name`]; the client then
@@ -355,6 +371,7 @@ impl ChatClient {
         };
         let session_id = self.session.session_id().unwrap_or_default();
         let agent = self.agent_name.lock().unwrap().clone();
+        let run_id = self.run_id.lock().unwrap().clone().unwrap_or_default();
         self.usage_recorder
             .record(&crate::usage::recorder::UsageEntry {
                 ts: chrono::Utc::now(),
@@ -366,6 +383,7 @@ impl ChatClient {
                 total_tokens: usage.total_tokens,
                 tool_calls,
                 thinking_chars,
+                run_id,
             });
     }
 

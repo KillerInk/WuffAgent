@@ -198,7 +198,7 @@ Tests: `bump_tool` aggregation (calls/errors/summed ms), `__other__` fold at
 deserializes to `tools.is_empty()`; existing metrics tests green after the
 `log_run` signature change.
 
-**1e. run_id + session_id join keys (A2)** — `stats(1e)`
+**1e. run_id + session_id join keys (A2)** — `stats(1e)` — **DONE**
 Files: `agents/metrics.rs`, `agents/agent/loop.rs`, `client/mod.rs`,
 `usage/recorder.rs`.
 1. metrics.rs — `Run` gains `#[serde(default)] pub run_id: String` and

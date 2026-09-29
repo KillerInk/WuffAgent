@@ -45,7 +45,7 @@ fn test_run_tools_roundtrip_and_legacy_default() {
     stats.bump_tool("shell", true, 800);
     stats.bump_tool("read_file", false, 40);
     stats.verification_attempts = 1;
-    log.log_run("coder", &stats, 5_000, RunOutcome::Verified, 10, 2);
+    log.log_run("coder", &stats, 5_000, RunOutcome::Verified, 10, 2, "run-1", "sess-1");
 
     // A legacy line without the `tools` field (pre-1a store format).
     use std::io::Write;
@@ -92,6 +92,61 @@ fn test_run_tools_roundtrip_and_legacy_default() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 1e: run_id/session_id round-trip on Run and Trim lines — the join key
+/// tying a run's Run line to its Trim lines and to the usage.jsonl
+/// entries. Legacy lines written before 1e parse with empty ids.
+#[test]
+fn test_run_ids_roundtrip_and_legacy_default() {
+    let dir = tmp_dir("run-ids");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+
+    log.log_run("coder", &rs(2, 0, 1), 5_000, RunOutcome::Verified, 10, 2, "run-abc", "sess-xyz");
+    log.log_trim("coder", 1_000, 400, 3, true, false, "run-abc");
+
+    let lines = log.read_all("coder");
+    assert_eq!(lines.len(), 2, "got: {lines:?}");
+    match &lines[0] {
+        MetricsLine::Run {
+            run_id,
+            session_id,
+            ..
+        } => {
+            assert_eq!(run_id, "run-abc");
+            assert_eq!(session_id, "sess-xyz");
+        }
+        other => panic!("expected run line, got {other:?}"),
+    }
+    match &lines[1] {
+        MetricsLine::Trim { run_id, .. } => assert_eq!(run_id, "run-abc"),
+        other => panic!("expected trim line, got {other:?}"),
+    }
+
+    // A pre-1e legacy run line (no run_id/session_id) parses with "".
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("legacyagent")).unwrap();
+    writeln!(
+        f,
+        r#"{{"kind":"run","ts":"2026-09-01T00:00:00.000Z","tool_calls":1,"tool_errors":0,"verification_attempts":0,"duration_ms":100,"outcome":"verified","tokens_in":0,"tokens_out":0}}"#
+    )
+    .unwrap();
+    drop(f);
+    let legacy = log.read_all("legacyagent");
+    assert_eq!(legacy.len(), 1, "got: {legacy:?}");
+    match &legacy[0] {
+        MetricsLine::Run {
+            run_id,
+            session_id,
+            ..
+        } => {
+            assert_eq!(run_id, "");
+            assert_eq!(session_id, "");
+        }
+        other => panic!("expected run line, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 1a: bump_tool aggregates calls/errors/summed ms per tool, and the 33rd
 /// distinct tool name folds into the "__other__" bucket (run lines stay
 /// bounded regardless of how many tools a run touches).
@@ -129,8 +184,8 @@ fn test_run_roundtrip_and_append() {
     let dir = tmp_dir("rt");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", &rs(12, 2, 1), 45_210, RunOutcome::Verified, 100, 20);
-    log.log_run("coder", &rs(3, 0, 2), 8_000, RunOutcome::GaveUp, 0, 0);
+    log.log_run("coder", &rs(12, 2, 1), 45_210, RunOutcome::Verified, 100, 20, "run-1", "sess-1");
+    log.log_run("coder", &rs(3, 0, 2), 8_000, RunOutcome::GaveUp, 0, 0, "run-1", "sess-1");
     log.log_feedback("coder", true);
     log.log_feedback("coder", false);
 
@@ -176,8 +231,8 @@ fn test_per_agent_files() {
     let dir = tmp_dir("peragent");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", &rs(1, 0, 1), 100, RunOutcome::Verified, 0, 0);
-    log.log_run("architect", &rs(2, 1, 1), 200, RunOutcome::None, 0, 0);
+    log.log_run("coder", &rs(1, 0, 1), 100, RunOutcome::Verified, 0, 0, "run-1", "sess-1");
+    log.log_run("architect", &rs(2, 1, 1), 200, RunOutcome::None, 0, 0, "run-1", "sess-1");
 
     let coder = log.read_all("coder");
     let architect = log.read_all("architect");
@@ -209,7 +264,7 @@ fn test_corrupt_lines_skipped() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", &rs(5, 1, 1), 1_000, RunOutcome::Verified, 0, 0);
+    log.log_run("coder", &rs(5, 1, 1), 1_000, RunOutcome::Verified, 0, 0, "run-1", "sess-1");
     // Append garbage + an empty line + a line of the wrong shape.
     use std::io::Write;
     let mut f = OpenOptions::new().append(true).open(log.agent_path("coder")).unwrap();
@@ -242,6 +297,8 @@ fn test_summary_since_and_format_line() {
             tokens_in: 0,
             tokens_out: 0,
             tools: Vec::new(),
+            run_id: String::new(),
+            session_id: String::new(),
         })
         .unwrap()
     };
@@ -290,6 +347,8 @@ fn test_summary_between_windows() {
             tokens_in: 0,
             tokens_out: 0,
             tools: Vec::new(),
+            run_id: String::new(),
+            session_id: String::new(),
         })
         .unwrap()
     };
@@ -357,6 +416,8 @@ fn test_lines_since_window() {
                 tokens_in: 0,
                 tokens_out: 0,
                 tools: Vec::new(),
+            run_id: String::new(),
+            session_id: String::new(),
             })
             .unwrap()
         )
@@ -411,7 +472,7 @@ fn test_recent_caps_to_last_n() {
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
     for i in 0..7 {
-        log.log_run("coder", &rs(i as u32, 0, 1), 100, RunOutcome::Verified, 0, 0);
+        log.log_run("coder", &rs(i as u32, 0, 1), 100, RunOutcome::Verified, 0, 0, "run-1", "sess-1");
     }
     let recent = log.recent("coder", 3);
     assert_eq!(recent.len(), 3);
@@ -450,7 +511,7 @@ fn test_default_uses_test_process_dir() {
 fn test_skill_usage_roundtrip_and_reserved_file() {
     let dir = tmp_dir("skill-usage");
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", &rs(3, 1, 1), 1000, RunOutcome::Verified, 0, 0);
+    log.log_run("coder", &rs(3, 1, 1), 1000, RunOutcome::Verified, 0, 0, "run-1", "sess-1");
     log.log_skill_use("wuffagent-self-restart");
     log.log_skill_use("git-rebase-workflow");
     log.log_skill_use("wuffagent-self-restart"); // duplicate
@@ -486,9 +547,9 @@ fn test_trim_line_roundtrip_and_summary() {
     let dir = tmp_dir("trim-line");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", &rs(12, 1, 1), 40_000, RunOutcome::Verified, 50_000, 1_200);
-    log.log_trim("coder", 900_000, 450_000, 34, true, false);
-    log.log_trim("coder", 990_000, 430_000, 41, true, true); // overflow backstop
+    log.log_run("coder", &rs(12, 1, 1), 40_000, RunOutcome::Verified, 50_000, 1_200, "run-1", "sess-1");
+    log.log_trim("coder", 900_000, 450_000, 34, true, false, "run-1");
+    log.log_trim("coder", 990_000, 430_000, 41, true, true, "run-1"); // overflow backstop
 
     let lines = log.read_all("coder");
     assert_eq!(lines.len(), 3);
@@ -541,7 +602,7 @@ fn test_trim_only_summary_is_not_empty() {
     let dir = tmp_dir("trim-only");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_trim("coder", 100_000, 50_000, 5, false, false);
+    log.log_trim("coder", 100_000, 50_000, 5, false, false, "");
     let s = log.summary_since("coder", None);
     assert_eq!(s.trims, 1);
     assert!(!s.format_line().is_empty(), "trim-only summary must not be empty");
@@ -613,7 +674,7 @@ fn test_check_summary_and_loop_cost() {
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
     // A run (not counted as loop cost) + two agent checks for "coder".
-    log.log_run("coder", &rs(4, 1, 1), 5_000, RunOutcome::Verified, 10, 5);
+    log.log_run("coder", &rs(4, 1, 1), 5_000, RunOutcome::Verified, 10, 5, "run-1", "sess-1");
     log.log_check("coder", "agent", 100, 20, 2, 1_000);
     log.log_check("coder", "agent", 300, 60, 3, 2_000);
     // A fleet check + a check for a second agent.

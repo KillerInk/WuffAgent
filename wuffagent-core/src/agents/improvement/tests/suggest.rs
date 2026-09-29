@@ -285,6 +285,8 @@ async fn test_improvement_prompt_includes_recent_metrics() {
         crate::agents::metrics::RunOutcome::VerifiedAfterRetry,
         500,
         100,
+        "run-1",
+        "sess-1",
     );
     crate::agents::metrics::record_feedback("metricsagent", false);
 

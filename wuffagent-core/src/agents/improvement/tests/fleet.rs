@@ -50,8 +50,8 @@ fn test_fleet_evidence_includes_metrics_lessons_and_skills() {
         verification_attempts: a,
         ..Default::default()
     };
-    log.log_run("coder", &mk(10, 3, 1), 5_000, RunOutcome::Verified, 100, 50);
-    log.log_run("reviewer", &mk(4, 0, 1), 2_000, RunOutcome::Verified, 60, 30);
+    log.log_run("coder", &mk(10, 3, 1), 5_000, RunOutcome::Verified, 100, 50, "run-1", "sess-1");
+    log.log_run("reviewer", &mk(4, 0, 1), 2_000, RunOutcome::Verified, 60, 30, "run-1", "sess-1");
     log.log_skill_use("read-skill");
 
     let (manager, _keep) = fresh_manager();

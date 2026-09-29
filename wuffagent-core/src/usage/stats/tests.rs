@@ -30,6 +30,7 @@ fn entry(ts: DateTime<Utc>, prompt: u32, completion: u32) -> UsageEntry {
         total_tokens: prompt + completion,
         tool_calls: 0,
         thinking_chars: 0,
+        run_id: String::new(),
     }
 }
 

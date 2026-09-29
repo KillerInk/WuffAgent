@@ -78,3 +78,63 @@ async fn test_completed_call_logs_one_usage_line() {
     assert!(lines[0].contains(r#""ts":"#));
     assert!(lines[0].ends_with('}'));
 }
+
+/// 1e: the client's run-id stamp is carried into every usage line, and
+/// `set_run_id(None)` (what the agent loop's RunIdGuard does on every exit
+/// path) clears it again — so a stamp never leaks into the next agent's
+/// calls.
+#[tokio::test]
+async fn test_run_id_stamp_roundtrip() {
+    use std::io::{Read, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("usage.jsonl");
+
+    // Mock server: two sequential connections, canned completion each.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let mut head = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body: &[u8] = r#"{"model":"mock-model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#
+                .as_bytes();
+            let resp_head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(resp_head.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        }
+    });
+
+    let mut client =
+        ChatClient::new(&format!("http://127.0.0.1:{port}/chat/completions"));
+    client.set_usage_recorder(std::sync::Arc::new(
+        crate::usage::recorder::UsageRecorder::new(log_path.clone()),
+    ));
+    client.set_agent_name("coder");
+
+    client.set_run_id(Some("run-123"));
+    client.send_message("hi").await.unwrap();
+    client.set_run_id(None);
+    client.send_message("hi again").await.unwrap();
+    server.join().unwrap();
+
+    let (entries, skipped) = crate::usage::stats::load_entries(&log_path);
+    assert_eq!(skipped, 0);
+    assert_eq!(entries.len(), 2, "got: {entries:?}");
+    assert_eq!(entries[0].run_id, "run-123");
+    assert_eq!(entries[1].run_id, "", "stamp must be cleared again");
+}

@@ -151,6 +151,19 @@ impl Agent {
         // RunStats literals stay untouched). Fed to the metrics log below.
         let mut tokens_in = 0u64;
         let mut tokens_out = 0u64;
+        // 1e: per-run join key for the metrics + usage stores — one id ties
+        // this run's Run line, its Trim lines, and the usage.jsonl
+        // UsageEntry lines (readers can join either direction).
+        let run_id = format!(
+            "{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            self.config.name
+        );
+        let session_id = self.session_id();
+        // Stamp the client so every LLM call of this run carries the id;
+        // the guard clears it on every exit path (success, error, cancel).
+        self.client.set_run_id(Some(&run_id));
+        let _run_id_guard = RunIdGuard(&self.client);
         let outcome: RunOutcome = loop {
             if cancel_token.is_cancelled() {
                 return Err("Cancelled".to_string());
@@ -310,6 +323,7 @@ impl Agent {
                             removed as u32,
                             brief_present,
                             false,
+                            &run_id,
                         );
                     }
                     // S4b: LLM brief polish (flag-gated, best-effort). The
@@ -471,6 +485,7 @@ impl Agent {
                                     removed as u32,
                                     brief_present,
                                     true,
+                                    &run_id,
                                 );
                             }
                             self.client.note_prompt_chars(crate::trimming::message_char_count(messages));
@@ -645,6 +660,8 @@ impl Agent {
                 verify_state.final_outcome.unwrap_or(crate::agents::metrics::RunOutcome::None),
                 tokens_in,
                 tokens_out,
+                &run_id,
+                &session_id,
             );
         }
         Ok(outcome)
@@ -704,4 +721,16 @@ fn truncate_note(note: &str) -> String {
     let mut out: String = note.chars().take(crate::trimming::brief::NOTE_INPUT_MAX - 1).collect();
     out.push('…');
     out
+}
+
+/// 1e: clears the client's run-id stamp when a run ends on any path
+/// (success, error, cancel) — the stamp must never leak into the next
+/// agent's calls. The next run re-stamps at its start anyway; the guard
+/// keeps the window between runs clean.
+struct RunIdGuard<'a>(&'a crate::client::ChatClient);
+
+impl Drop for RunIdGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set_run_id(None);
+    }
 }

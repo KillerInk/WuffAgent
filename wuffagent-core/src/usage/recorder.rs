@@ -46,6 +46,11 @@ pub struct UsageEntry {
     /// (0 = none). Absent in pre-existing log lines (serde default 0).
     #[serde(default)]
     pub thinking_chars: u64,
+    /// 1e: the agent run this call belonged to (the join key to the
+    /// metrics Run/Trim lines). Empty for calls outside a run (or on
+    /// pre-1e log lines).
+    #[serde(default)]
+    pub run_id: String,
 }
 
 /// Appends [`UsageEntry`] lines to a JSONL file.
@@ -181,6 +186,7 @@ mod tests {
             // Non-zero so the round-trip test actually covers the fields.
             tool_calls: (total / 100).max(1),
             thinking_chars: (total as u64) * 7,
+            run_id: "run-1".to_string(),
         }
     }
 

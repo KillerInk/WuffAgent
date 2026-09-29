@@ -103,6 +103,14 @@ pub enum MetricsLine {
         /// 1a, so old stores parse unchanged).
         #[serde(default)]
         tools: Vec<ToolStat>,
+        /// 1e: per-run join key — correlates this Run line with the run's
+        /// Trim lines and the usage.jsonl UsageEntry lines. Empty on lines
+        /// written before 1e.
+        #[serde(default)]
+        run_id: String,
+        /// 1e: the session the run belonged to (empty on pre-1e lines).
+        #[serde(default)]
+        session_id: String,
     },
     /// User feedback on an assistant answer.
     Feedback {
@@ -133,6 +141,9 @@ pub enum MetricsLine {
         /// re-anchoring — task/corrections/decisions/files — was available to
         /// the model after the drop).
         brief_updated: bool,
+        /// 1e: the run this trim happened in (empty on pre-1e lines).
+        #[serde(default)]
+        run_id: String,
         /// The trim was the 400-exceed-context backstop (force-trim to 85%
         /// of the reported window) rather than the proactive 90%→50% trim.
         /// Frequent `true` means the estimator/trigger is miscalibrated.
@@ -211,6 +222,8 @@ impl MetricsLine {
                 tokens_in,
                 tokens_out,
                 tools,
+                run_id: _,
+                session_id: _,
             } => {
                 let mut s = format!(
                     "{} run: {} tool calls ({} errors), {} verification attempt(s), {:.1}s, {} tokens in / {} out, outcome: {}",
@@ -257,6 +270,7 @@ impl MetricsLine {
                 messages_removed,
                 brief_updated,
                 overflow,
+                run_id: _,
             } => format!(
                 "{} context trim{}: {} messages removed ({} → {} chars){}",
                 ts.format("%Y-%m-%d %H:%M"),
@@ -575,6 +589,8 @@ impl MetricsLog {
         outcome: RunOutcome,
         tokens_in: u64,
         tokens_out: u64,
+        run_id: &str,
+        session_id: &str,
     ) {
         self.append(
             agent,
@@ -588,6 +604,8 @@ impl MetricsLog {
                 tokens_in,
                 tokens_out,
                 tools: stats.tools.clone(),
+                run_id: run_id.to_string(),
+                session_id: session_id.to_string(),
             },
         );
     }
@@ -613,6 +631,7 @@ impl MetricsLog {
         messages_removed: u32,
         brief_updated: bool,
         overflow: bool,
+        run_id: &str,
     ) {
         self.append(
             agent,
@@ -623,6 +642,7 @@ impl MetricsLog {
                 messages_removed,
                 brief_updated,
                 overflow,
+                run_id: run_id.to_string(),
             },
         );
     }
@@ -943,8 +963,19 @@ pub fn record_run(
     outcome: RunOutcome,
     tokens_in: u64,
     tokens_out: u64,
+    run_id: &str,
+    session_id: &str,
 ) {
-    MetricsLog::default().log_run(agent, stats, duration_ms, outcome, tokens_in, tokens_out);
+    MetricsLog::default().log_run(
+        agent,
+        stats,
+        duration_ms,
+        outcome,
+        tokens_in,
+        tokens_out,
+        run_id,
+        session_id,
+    );
 }
 
 /// Record a context trim in the DEFAULT metrics log (writer hook for the
@@ -956,6 +987,7 @@ pub fn record_trim(
     messages_removed: u32,
     brief_updated: bool,
     overflow: bool,
+    run_id: &str,
 ) {
     MetricsLog::default().log_trim(
         agent,
@@ -964,6 +996,7 @@ pub fn record_trim(
         messages_removed,
         brief_updated,
         overflow,
+        run_id,
     );
 }
 
