@@ -10,8 +10,13 @@
 //! NOTE: skills.rs's e2e test flips the process-global skills-dir override
 //! (serialized on its own lock, matching memory/skills/tests.rs).
 
+use super::evidence::*;
 use super::*;
+use crate::agents::RunStats;
+use crate::llm::LlmClient;
+use crate::memory::manager::MemoryManager;
 use crate::memory::{MemoryConfig, MemoryEntry, MemoryType};
+use crate::types::Message;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
