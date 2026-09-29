@@ -75,6 +75,14 @@ Methods become free fns taking `&mut AgentConfigDialog` (Rust allows private-fie
 No internal section markers; inline UI drawing only. → Break `draw` into per-panel-section fns
 (suggestions list, skills, memory, loop status header, filters…) each `fn draw_x(ui, panel, …)`.
 Helper fns at L845–923 stay. Highest single-blob value in the UI crate.
+DONE (phase 7): `draw` is now a thin 85-line orchestrator; sections extracted as private free fns in
+the same file (no API change): `draw_loop_status`, `draw_run_check`, `draw_pending_list` (returns
+`(ItemActions, item_histories)`), `draw_pending_item` (per-item renderer via new `ItemDrawCtx`), and
+`execute_actions` (collected approve/dismiss/revert execution after the loop). File is 1039 L now
+(added structs + doc comments) but the largest fn is 380 L (one cohesive item renderer).
+FINDING F14 (applies to phase 8): egui section fns can be private FREE functions taking
+`&mut Panel` — child-module privacy lets them call the panel's private methods (`agents()`,
+`persist()`, `refresh_agent_cache`), so no visibility bumps were needed.
 
 ### F8. `trimming/brief.rs` (48 KB, 1110 lines) — code is only L1–746 (746 lines), tests inline L747+
 Responsible and cohesive (brief lifecycle: render/parse/note ops/polish). Low value to split the code;
@@ -146,7 +154,10 @@ Single concern (render improvement status). Borderline; only split if it grows. 
     a child module can use the parent's private fields/methods.
   - Manager tests (`memory/manager/tests/`) reference NONE of the moved private items — only the public
     MemoryManager API — so no test import fixes were needed (unlike the improvement.rs split in phase 5).
-- [ ] Phase 7 — F7: break `ImprovementsPanel::draw` into section fns (UI, no API change)
+- [x] Phase 7 — F7: break `ImprovementsPanel::draw` into section fns (UI, no API change)
+  - `draw` 774 L → 85 L orchestrator; `ItemActions`/`ItemDrawCtx` structs + 5 section fns
+    (loop status, run-check, pending list, per-item, execute-actions); 41/41 egui tests ok,
+    workspace check EXIT=0.
 - [ ] Phase 8 — F6: split `agent_config.rs` dialog into sub-files (UI, no API change)
 - [ ] Phase 9 — F8/F10: brief tests move-out + `util/text.rs` truncate consolidation
 - [ ] Phase 10 — `cargo test` full run + update this plan with results + README/BUILD notes if module layout changed
