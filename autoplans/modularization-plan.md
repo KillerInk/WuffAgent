@@ -130,7 +130,22 @@ Single concern (render improvement status). Borderline; only split if it grows. 
     the next file.
   - One flaky failure observed (test_fleet_evidence_includes_metrics_lessons_and_skills) that passes in
     isolation and in re-runs — pre-existing test-interference, not the split (skills-dir global override).
-- [ ] Phase 6 — F5: extract `ImprovementStateStore` + dedup from `MemoryManager`
+- [x] Phase 6 — F5: extract improvement-loop + dedup from `MemoryManager` — DONE (29d1a8a):
+  `memory/manager.rs` 927L → 363L (core store only: search/get/add/update/delete/supersede/count/evict/cleanup/save).
+  New CHILD modules under `memory/manager/` (children of the `manager` module — they see its private
+  fields, so `load_state_doc`/`storage_path` needed NO visibility changes):
+  - `improvement.rs` (546L): check wrappers (suggest/run, agent + fleet), IMPROVEMENT_CHECK_RUNTIME,
+    block_on_improvement, per-agent state (ImprovementStateDoc/AgentStateRec, load/save/path),
+    evidence gate (lesson + metric halves, metric_evidence_reason), improvement_status.
+  - `dedup.rs` (39L): MemoryAddResult (pub, re-exported: `pub use dedup::MemoryAddResult` keeps
+    `manager::MemoryAddResult` + `memory::MemoryAddResult` paths stable), content_overlap, is_near_duplicate.
+  FINDINGS (applies to phases 7-9):
+  - F13: child-module-under-a-FILE-module layout — `memory/manager/tests/` already existed there, so new
+    sub-files go in the SAME dir (`memory/manager/improvement.rs`) and are declared in `manager.rs`
+    (`mod improvement;`). Cheaper than converting manager.rs → manager/mod.rs, and privacy works:
+    a child module can use the parent's private fields/methods.
+  - Manager tests (`memory/manager/tests/`) reference NONE of the moved private items — only the public
+    MemoryManager API — so no test import fixes were needed (unlike the improvement.rs split in phase 5).
 - [ ] Phase 7 — F7: break `ImprovementsPanel::draw` into section fns (UI, no API change)
 - [ ] Phase 8 — F6: split `agent_config.rs` dialog into sub-files (UI, no API change)
 - [ ] Phase 9 — F8/F10: brief tests move-out + `util/text.rs` truncate consolidation
