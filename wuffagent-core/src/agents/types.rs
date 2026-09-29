@@ -165,6 +165,11 @@ pub struct RunStats {
     pub verification_attempts: u32,
     /// 1a: per-tool breakdown (folded, ≤33 entries).
     pub tools: Vec<ToolStat>,
+    /// 1d: cumulative wall-clock ms spent in LLM calls — the main-round
+    /// streaming calls, plus the verification judge's time (folded in by
+    /// the loop before the run line is written, so `llm_ms` means "all
+    /// time spent in the LLM").
+    pub llm_ms: u64,
 }
 
 impl RunStats {

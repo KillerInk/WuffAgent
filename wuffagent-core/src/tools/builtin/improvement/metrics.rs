@@ -511,6 +511,8 @@ mod tests {
                 tools: Vec::new(),
                 run_id: String::new(),
                 session_id: String::new(),
+llm_ms: 0,
+tools_ms: 0,
             },
         );
         let tool = tool_in(dir.path());

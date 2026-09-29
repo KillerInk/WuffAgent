@@ -90,6 +90,10 @@ pub struct VerificationVerdict {
     /// The judge's raw response text — empty for the no-tool-outputs
     /// shortcut. Kept for logging and as S1 outcome evidence.
     pub judge_reason: String,
+    /// 1d: wall-clock ms the judge LLM call took (0 for the no-tool-outputs
+    /// shortcut) — accumulated into `VerificationState::judge_ms` by the
+    /// caller and folded into the run's `llm_ms` bucket.
+    pub judge_ms: u64,
 }
 
 impl Agent {
@@ -130,6 +134,7 @@ impl Agent {
             return Ok(VerificationVerdict {
                 verified: true,
                 judge_reason: String::new(),
+                judge_ms: 0,
             });
         }
         let recent_tool_summary: String = tool_outputs.join("\n");
@@ -208,6 +213,7 @@ impl Agent {
             Ok(VerificationVerdict {
                 verified: false,
                 judge_reason: response,
+                judge_ms: judge_started.elapsed().as_millis() as u64,
             })
         } else {
             // VERIFIED, or unclear — default to verified (better to continue
@@ -216,6 +222,7 @@ impl Agent {
             Ok(VerificationVerdict {
                 verified: true,
                 judge_reason: response,
+                judge_ms: judge_started.elapsed().as_millis() as u64,
             })
         }
     }
@@ -270,6 +277,9 @@ pub(crate) struct VerificationState {
     /// end at attempts==2). `None` = the run ended before completing
     /// verification (handoff/restart/hand-back).
     pub(crate) final_outcome: Option<crate::agents::metrics::RunOutcome>,
+    /// 1d: cumulative wall-clock ms spent in verification judge calls this
+    /// run (folded into the run's `llm_ms` bucket at run end).
+    pub(crate) judge_ms: u64,
 }
 
 impl VerificationState {
@@ -278,6 +288,7 @@ impl VerificationState {
             attempts: 0,
             last_failed_reason: String::new(),
             final_outcome: None,
+            judge_ms: 0,
         }
     }
 }
@@ -326,6 +337,10 @@ impl Agent {
         let verification_result = self
             .verify_tool_outputs(messages, original_request, &display_content, cancel_token)
             .await;
+        // 1d: accumulate the judge's wall-clock into the run's LLM bucket.
+        if let Ok(v) = &verification_result {
+            state.judge_ms += v.judge_ms;
+        }
         match verification_result {
             Ok(verdict) if verdict.verified => {
                 // S1: a pass that needed a retry is negative evidence for

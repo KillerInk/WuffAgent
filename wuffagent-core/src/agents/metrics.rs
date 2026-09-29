@@ -111,6 +111,15 @@ pub enum MetricsLine {
         /// 1e: the session the run belonged to (empty on pre-1e lines).
         #[serde(default)]
         session_id: String,
+        /// 1d: wall-clock ms spent in the LLM (main rounds + verification
+        /// judge). Empty/0 on lines written before 1d.
+        #[serde(default)]
+        llm_ms: u64,
+        /// 1d: wall-clock ms spent in tool execution (the per-tool
+        /// histogram's sum). 0 on lines written before 1d. Always
+        /// `llm_ms + tools_ms <= duration_ms`.
+        #[serde(default)]
+        tools_ms: u64,
     },
     /// User feedback on an assistant answer.
     Feedback {
@@ -224,6 +233,8 @@ impl MetricsLine {
                 tools,
                 run_id: _,
                 session_id: _,
+                llm_ms: _,
+                tools_ms: _,
             } => {
                 let mut s = format!(
                     "{} run: {} tool calls ({} errors), {} verification attempt(s), {:.1}s, {} tokens in / {} out, outcome: {}",
@@ -606,6 +617,8 @@ impl MetricsLog {
                 tools: stats.tools.clone(),
                 run_id: run_id.to_string(),
                 session_id: session_id.to_string(),
+                llm_ms: stats.llm_ms,
+                tools_ms: stats.tools.iter().map(|t| t.duration_ms).sum(),
             },
         );
     }

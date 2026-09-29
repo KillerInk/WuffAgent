@@ -387,6 +387,9 @@ impl Agent {
                 ),
             );
 
+            // 1d: time this round's LLM call (the main-round part of
+            // llm_ms; the judge's time is folded in at run end).
+            let llm_round_started = Instant::now();
             let (assistant_msg, usage) = {
                 self.client
                     .note_prompt_chars(crate::trimming::message_char_count(messages));
@@ -500,6 +503,7 @@ impl Agent {
                     }
                 }
             };
+            run_stats.llm_ms += llm_round_started.elapsed().as_millis() as u64;
             // Calibrate the chars/token ratio from the server's real count so
             // subsequent trim budgets track the actual tokenizer.
             self.client.calibrate_from_usage(usage.as_ref());
@@ -643,6 +647,9 @@ impl Agent {
         // so a run is never recorded zero or skipped). Best-effort, never
         // fails the run.
         run_stats.verification_attempts = verify_state.attempts;
+        // 1d: fold the verification judge's time into the LLM bucket —
+        // llm_ms is "all wall-clock spent in the LLM" (main rounds + judge).
+        run_stats.llm_ms += verify_state.judge_ms;
         self.run_stats = run_stats;
         // 2b: expose this run's token usage (the eval harness reads it for the
         // Eval line's cost record; tokens are loop-local, not in RunStats).

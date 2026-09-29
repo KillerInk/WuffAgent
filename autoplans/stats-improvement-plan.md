@@ -222,7 +222,7 @@ Tests: mock SSE + injected recorder → the written `UsageEntry` carries the
 stamped `run_id`/`session_id`; metrics roundtrip with/without ids; legacy
 `Trim` line → `run_id == ""`.
 
-**1d. Duration split (A6)** — `stats(1d)`
+**1d. Duration split (A6)** — `stats(1d)` — **DONE**
 Files: `agents/types.rs`, `agents/agent/loop.rs`, `agents/agent/verify.rs`,
 `agents/metrics.rs`.
 1. types.rs — `RunStats` gains `pub llm_ms: u64` (main rounds only).

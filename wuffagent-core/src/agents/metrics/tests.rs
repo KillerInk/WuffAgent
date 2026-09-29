@@ -147,6 +147,68 @@ fn test_run_ids_roundtrip_and_legacy_default() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 1d: log_run writes the duration split — `llm_ms` straight from
+/// RunStats (the loop folds the judge's time in before the write) and
+/// `tools_ms` as the per-tool histogram's sum. A legacy line (pre-1d)
+/// deserializes to 0/0, and the split never exceeds the wall-clock total.
+#[test]
+fn test_run_duration_split_roundtrip_and_legacy_default() {
+    let dir = tmp_dir("split");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+
+    let mut stats = rs(0, 0, 1);
+    stats.llm_ms = 4_000; // main rounds (the judge's time would be folded in here)
+    stats.bump_tool("shell", false, 2_000);
+    stats.bump_tool("read_file", true, 500);
+
+    log.log_run("coder", &stats, 7_000, RunOutcome::Verified, 10, 2, "run-1", "sess-1");
+
+    let lines = log.read_all("coder");
+    assert_eq!(lines.len(), 1, "got: {lines:?}");
+    match &lines[0] {
+        MetricsLine::Run {
+            llm_ms,
+            tools_ms,
+            duration_ms,
+            ..
+        } => {
+            assert_eq!(*llm_ms, 4_000);
+            assert_eq!(*tools_ms, 2_500, "must be the histogram's sum");
+            // The split can never exceed the wall-clock total.
+            assert!(
+                *llm_ms + *tools_ms <= *duration_ms,
+                "llm {llm_ms:?} + tools {tools_ms:?} > wall {duration_ms:?}"
+            );
+        }
+        other => panic!("expected run line, got {other:?}"),
+    }
+
+    // A pre-1d legacy run line (no llm_ms/tools_ms) parses with 0/0.
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("legacyagent")).unwrap();
+    writeln!(
+        f,
+        r#"{{"kind":"run","ts":"2026-09-01T00:00:00.000Z","tool_calls":1,"tool_errors":0,"verification_attempts":0,"duration_ms":100,"outcome":"verified","tokens_in":0,"tokens_out":0}}"#
+    )
+    .unwrap();
+    drop(f);
+    let legacy = log.read_all("legacyagent");
+    assert_eq!(legacy.len(), 1, "got: {legacy:?}");
+    match &legacy[0] {
+        MetricsLine::Run {
+            llm_ms,
+            tools_ms,
+            ..
+        } => {
+            assert_eq!(*llm_ms, 0);
+            assert_eq!(*tools_ms, 0);
+        }
+        other => panic!("expected run line, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 1a: bump_tool aggregates calls/errors/summed ms per tool, and the 33rd
 /// distinct tool name folds into the "__other__" bucket (run lines stay
 /// bounded regardless of how many tools a run touches).
@@ -299,6 +361,8 @@ fn test_summary_since_and_format_line() {
             tools: Vec::new(),
             run_id: String::new(),
             session_id: String::new(),
+llm_ms: 0,
+tools_ms: 0,
         })
         .unwrap()
     };
@@ -349,6 +413,8 @@ fn test_summary_between_windows() {
             tools: Vec::new(),
             run_id: String::new(),
             session_id: String::new(),
+llm_ms: 0,
+tools_ms: 0,
         })
         .unwrap()
     };
@@ -418,6 +484,8 @@ fn test_lines_since_window() {
                 tools: Vec::new(),
             run_id: String::new(),
             session_id: String::new(),
+llm_ms: 0,
+tools_ms: 0,
             })
             .unwrap()
         )
