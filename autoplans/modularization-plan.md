@@ -102,7 +102,12 @@ Single concern (render improvement status). Borderline; only split if it grows. 
 - [x] Phase 2 — F2: `MetricsLine::ts()` dedup — DONE: both `line_ts` free fns deleted
   (agents/metrics.rs, tools/.../improvement/metrics.rs), 6 call sites → `l.ts()`;
   `cargo test -p wuffagent-core metrics` = 70 passed; 0 failed
-- [ ] Phase 3 — F1: split `agents/metrics.rs` → `agents/metrics/` dir module
+- [x] Phase 3 — F1: split `agents/metrics.rs` → `agents/metrics/` — DONE (67ac31b):
+  `mod.rs` (3KB re-exports) + `schema.rs` (14KB) + `aggregates.rs` (24KB) + `log.rs` (37KB)
+  + `fleet.rs` (4KB); `reader.rs`/`tests.rs` kept. Public API unchanged (pub use);
+  816/816 core tests + 70/70 metrics tests pass, egui check clean.
+  NOTE: `log.rs` is still the biggest chunk (MetricsLog 40 methods) — acceptable for now;
+  split append/rollup out only if it grows.
 - [ ] Phase 4 — F3: split `improvement/metrics.rs` tool → tool/report/export sub-files
 - [ ] Phase 5 — F4: split `agents/improvement.rs` → policy/evidence/suggest/fleet
 - [ ] Phase 6 — F5: extract `ImprovementStateStore` + dedup from `MemoryManager`
