@@ -113,7 +113,23 @@ Single concern (render improvement status). Borderline; only split if it grows. 
   renderers), `export.rs` (5.7KB: 4c export + CSV helpers). Report/export fns `pub(crate)`,
   `super::status::` paths → `crate::tools::builtin::improvement::status::`. 816/816 tests,
   egui clean. NOTE: mod.rs is still ~380 non-test lines (execute + schema) — fine as-is.
-- [ ] Phase 5 — F4: split `agents/improvement.rs` → policy/evidence/suggest/fleet
+- [x] Phase 5 — F4: split `agents/improvement.rs` → policy/evidence/suggest/fleet — DONE (92424d2):
+  `improvement/` dir: `policy.rs` (3.6KB: no-op backoff, effect verdict, awaiting-samples, applied-marker),
+  `evidence.rs` (12KB: lesson/outcome collectors + window/eval/trajectory/cap formatters),
+  `suggest.rs` (17KB: suggest_improvements + skill_retire_line), `fleet.rs` (20KB: fleet evidence JSON,
+  suggest_fleet_improvements, sanitize/dice retargeting). Parent `improvement.rs` now 94 lines
+  (consts + re-exports + fleet_summary_line + truncate_for_evidence + test module decl).
+  Public paths stable via `pub use` globs. 816/816 core tests + 2 + 1 integration pass, egui clean.
+  FINDINGS (applies to phases 6-9):
+  - F12: `improvement/tests/` was ALREADY split per-area (mod.rs + 8 files). Test sub-modules relied on
+    the parent file's `use` imports leaking via `use super::*` — after the split, tests/mod.rs needs
+    explicit `use crate::...` for anything the parent no longer imports (MemoryManager, Message, RunStats,
+    LlmClient, evidence::*).
+  - `latest_applied_marker` was duplicated (kept in policy.rs, removed from evidence.rs) — the same
+    function existed twice pre-split because the file had grown; grep for other dup helpers when splitting
+    the next file.
+  - One flaky failure observed (test_fleet_evidence_includes_metrics_lessons_and_skills) that passes in
+    isolation and in re-runs — pre-existing test-interference, not the split (skills-dir global override).
 - [ ] Phase 6 — F5: extract `ImprovementStateStore` + dedup from `MemoryManager`
 - [ ] Phase 7 — F7: break `ImprovementsPanel::draw` into section fns (UI, no API change)
 - [ ] Phase 8 — F6: split `agent_config.rs` dialog into sub-files (UI, no API change)
