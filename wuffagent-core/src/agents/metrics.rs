@@ -344,6 +344,57 @@ impl MetricsLine {
     }
 }
 
+/// 2c: percentile of an ASCENDING-sorted slice, `p` on a 0..=100 scale,
+/// linear interpolation between the two nearest ranks (numpy-default
+/// semantics). `None` for an empty slice or a non-finite `p`; a single
+/// element returns itself for every `p`. Out-of-range `p` is clamped.
+pub fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
+    if sorted.is_empty() || !p.is_finite() {
+        return None;
+    }
+    if sorted.len() == 1 {
+        return Some(sorted[0]);
+    }
+    let clamped = p.clamp(0.0, 100.0);
+    let rank = clamped / 100.0 * (sorted.len() as f64 - 1.0);
+    let lo = rank.floor() as usize;
+    let hi = (lo + 1).min(sorted.len() - 1);
+    let frac = rank - lo as f64;
+    Some(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+}
+
+/// 2c: one tool's aggregated breakdown over a report window (the
+/// per-tool `ToolStat` folded across every run in the window).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportToolStat {
+    pub name: String,
+    pub calls: u32,
+    pub errors: u32,
+    /// Mean duration per call (0 when `calls == 0`).
+    pub avg_ms: u64,
+}
+
+/// 2c: a full metrics report over a window — everything `MetricsSummary`
+/// aggregates, plus per-run distribution statistics (percentiles) and
+/// the per-tool / per-model breakdowns that the summary folds away.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricsReport {
+    /// The window's aggregate counts (same computation as
+    /// `summary_between` over the same window).
+    pub summary: MetricsSummary,
+    /// p50/p95 of `duration_ms` over the window's runs (None = no runs).
+    pub p50_duration_ms: Option<u64>,
+    pub p95_duration_ms: Option<u64>,
+    /// p50/p95 of per-run total tokens (`tokens_in + tokens_out`).
+    pub p50_tokens: Option<u64>,
+    pub p95_tokens: Option<u64>,
+    /// Per-tool breakdown (name-sorted; from each run's `tools` histogram).
+    pub tool_stats: Vec<ReportToolStat>,
+    /// (model, runs) per model used in the window, most-used first
+    /// (ties: name-ascending; empty model reported as "(unknown)").
+    pub model_mix: Vec<(String, u32)>,
+}
+
 /// 2b: one zero-filled bucket of the metrics store's time window — the
 /// metrics twin of the usage store's `Bucket` (same shared bucket math).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,6 +950,101 @@ impl MetricsLog {
             }
         }
         buckets
+    }
+
+    /// 2c: full report over the window `ts >= since && ts < end`
+    /// (`None` bounds = unbounded) — the aggregate summary plus the
+    /// per-run percentiles and the tool/model breakdowns.
+    pub fn report(
+        &self,
+        agent: &str,
+        since: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> MetricsReport {
+        let mut report = MetricsReport {
+            summary: self.summary_between(agent, since, end),
+            p50_duration_ms: None,
+            p95_duration_ms: None,
+            p50_tokens: None,
+            p95_tokens: None,
+            tool_stats: Vec::new(),
+            model_mix: Vec::new(),
+        };
+
+        let mut durations: Vec<f64> = Vec::new();
+        let mut tokens: Vec<f64> = Vec::new();
+        let mut tool_acc: std::collections::BTreeMap<String, (u32, u32, u64)> =
+            std::collections::BTreeMap::new();
+        let mut models: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for line in self.read_all(agent) {
+            let MetricsLine::Run {
+                ts,
+                duration_ms,
+                tokens_in,
+                tokens_out,
+                tools,
+                model,
+                ..
+            } = line
+            else {
+                continue;
+            };
+            if let Some(s) = since {
+                if ts < s {
+                    continue;
+                }
+            }
+            if let Some(e) = end {
+                if ts >= e {
+                    continue;
+                }
+            }
+            durations.push(duration_ms as f64);
+            tokens.push((tokens_in + tokens_out) as f64);
+            for t in &tools {
+                let e = tool_acc.entry(t.name.clone()).or_insert((0, 0, 0));
+                e.0 += t.calls;
+                e.1 += t.errors;
+                e.2 += t.duration_ms;
+            }
+            let key = if model.is_empty() { "(unknown)" } else { model.as_str() };
+            *models.entry(key.to_string()).or_insert(0) += 1;
+        }
+
+        durations.sort_by(f64::total_cmp);
+        tokens.sort_by(f64::total_cmp);
+        report.p50_duration_ms = percentile(&durations, 50.0).map(|v| v.round() as u64);
+        report.p95_duration_ms = percentile(&durations, 95.0).map(|v| v.round() as u64);
+        report.p50_tokens = percentile(&tokens, 50.0).map(|v| v.round() as u64);
+        report.p95_tokens = percentile(&tokens, 95.0).map(|v| v.round() as u64);
+        report.tool_stats = tool_acc
+            .into_iter()
+            .map(|(name, (calls, errors, total_ms))| ReportToolStat {
+                name,
+                calls,
+                errors,
+                avg_ms: if calls > 0 { total_ms / calls as u64 } else { 0 },
+            })
+            .collect();
+        report.model_mix = models.into_iter().collect();
+        report
+            .model_mix
+            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        report
+    }
+
+    /// 2c: before/after comparison — the CURRENT window `[now-days, now)`
+    /// and the immediately preceding same-length window, both via the same
+    /// windowed reader so the numbers match what the I5 effect check
+    /// computes. Returns `(current, previous)`.
+    pub fn compare(&self, agent: &str, days: u32) -> (MetricsReport, MetricsReport) {
+        let now = Utc::now();
+        let d = chrono::Duration::days(days as i64);
+        let cur_start = now - d;
+        (
+            self.report(agent, Some(cur_start), Some(now)),
+            self.report(agent, Some(cur_start - d), Some(cur_start)),
+        )
     }
 
     /// All lines for `agent` with `ts >= since` (`None` = all time), oldest

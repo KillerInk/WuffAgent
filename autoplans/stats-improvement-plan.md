@@ -347,7 +347,7 @@ and completes next poll; file truncated → rescan; `from_lines` matches
 Tests: zero-filled windows on a sparse fixture (mirror the usage bucket
 tests), DST-safe boundary case ported from `usage/stats.rs`.
 
-**2c. Percentiles + comparison window (B1, B3)** — `stats(2c)`
+**2c. Percentiles + comparison window (B1, B3)** — `stats(2c)` — **DONE**
 - Pure `fn percentile(sorted: &[f64], p: f64) -> Option<f64>` (linear
   interpolation; unit-tested incl. empty/1-element).
 - New `MetricsReport` (metrics.rs) = everything `MetricsSummary` has, plus:

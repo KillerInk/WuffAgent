@@ -1139,3 +1139,131 @@ fn test_bucket_summary_hours_adjacent_across_midnight() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 2c: `percentile` — linear interpolation, edges, clamping.
+#[test]
+fn test_percentile_table() {
+    assert_eq!(percentile(&[], 50.0), None, "empty -> None");
+    assert_eq!(percentile(&[7.0], 50.0), Some(7.0), "single element -> itself");
+    assert_eq!(percentile(&[7.0], 100.0), Some(7.0));
+    assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], 50.0), Some(2.5), "odd midpoint");
+    assert_eq!(percentile(&[1.0, 2.0, 3.0], 50.0), Some(2.0), "even midpoint = middle");
+    assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], 0.0), Some(1.0), "p0 = min");
+    assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], 100.0), Some(4.0), "p100 = max");
+    assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], 150.0), Some(4.0), "clamped high");
+    assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], -10.0), Some(1.0), "clamped low");
+    assert_eq!(percentile(&[1.0, 2.0], f64::NAN), None, "non-finite p -> None");
+    assert_eq!(percentile(&[10.0, 20.0, 30.0, 40.0], 95.0), Some(38.5));
+}
+
+/// 2c: `report` — percentiles, per-tool fold and model mix on a 3-run
+/// fixture (raw lines with fixed ts, a tools histogram, and models).
+#[test]
+fn test_report_percentiles_tools_model_mix() {
+    let dir = tmp_dir("report");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let path = log.agent_path("coder");
+    use std::io::Write;
+    let now = chrono::Utc::now();
+    let line = |hours_ago: i64, body: &str| {
+        let ts = (now - chrono::Duration::hours(hours_ago)).to_rfc3339();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, r#"{{"kind":"run","ts":"{ts}",{body}}}"#).unwrap();
+    };
+    line(
+        1,
+        r#""tool_calls":3,"tool_errors":1,"verification_attempts":1,"duration_ms":100,"outcome":"verified","tokens_in":10,"tokens_out":2,"tools":[{"name":"shell","calls":2,"errors":1,"duration_ms":300},{"name":"read_file","calls":1,"errors":0,"duration_ms":50}],"model":"m-a""#,
+    );
+    line(
+        2,
+        r#""tool_calls":1,"tool_errors":0,"verification_attempts":1,"duration_ms":300,"outcome":"verified","tokens_in":20,"tokens_out":20,"tools":[{"name":"shell","calls":1,"errors":0,"duration_ms":100}],"model":"m-a""#,
+    );
+    // NOTE: "model" comes BEFORE "tools" on purpose — a raw r#"..."# string
+    // terminates at the first "#, so the line must not end with a quote.
+    line(
+        3,
+        r#""tool_calls":0,"tool_errors":0,"verification_attempts":1,"duration_ms":900,"outcome":"gave_up","tokens_in":5,"tokens_out":5,"model":"","tools":[]"#,
+    );
+
+    let r = log.report("coder", None, None);
+    assert_eq!(r.summary.runs, 3);
+    assert_eq!(r.summary.gave_up, 1);
+    // durations [100,300,900]: p50 = 300, p95 = 300 + 0.9*(900-300) = 840.
+    assert_eq!(r.p50_duration_ms, Some(300));
+    assert_eq!(r.p95_duration_ms, Some(840));
+    // per-run tokens [12,40,10] -> sorted [10,12,40]: p50 = 12,
+    // p95 = 12 + 0.9*28 = 37.2 -> 37.
+    assert_eq!(r.p50_tokens, Some(12));
+    assert_eq!(r.p95_tokens, Some(37));
+    // Tool fold: shell 3 calls / 1 error / 400ms (avg 133), read_file 1/0/50.
+    assert_eq!(
+        r.tool_stats,
+        vec![
+            ReportToolStat {
+                name: "read_file".to_string(),
+                calls: 1,
+                errors: 0,
+                avg_ms: 50,
+            },
+            ReportToolStat {
+                name: "shell".to_string(),
+                calls: 3,
+                errors: 1,
+                avg_ms: 133,
+            },
+        ]
+    );
+    // Model mix: m-a x2 (most-used first), empty model -> "(unknown)" x1.
+    assert_eq!(
+        r.model_mix,
+        vec![("m-a".to_string(), 2), ("(unknown)".to_string(), 1)]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 2c: `compare` splits at the window boundary — runs inside
+/// `[now-days, now)` count as current, the same-length preceding window
+/// holds the rest (and both sides share the same reader computation).
+#[test]
+fn test_compare_window_split() {
+    let dir = tmp_dir("compare");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let path = log.agent_path("coder");
+    use std::io::Write;
+    let now = chrono::Utc::now();
+    let run_at = |hours_ago: i64| {
+        let ts = (now - chrono::Duration::hours(hours_ago)).to_rfc3339();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"run","ts":"{ts}","tool_calls":1,"tool_errors":0,"verification_attempts":1,"duration_ms":10,"outcome":"verified","tokens_in":1,"tokens_out":1}}"#
+        )
+        .unwrap();
+    };
+    run_at(1); // current (1d window)
+    run_at(20); // current
+    run_at(40); // previous (window: 24h..48h ago)
+    run_at(96); // outside both windows (4 days ago)
+
+    let (cur, prev) = log.compare("coder", 1);
+    assert_eq!(cur.summary.runs, 2, "current = [now-1d, now)");
+    assert_eq!(prev.summary.runs, 1, "previous = [now-2d, now-1d)");
+    // The report computation matches the same-window summary.
+    assert_eq!(
+        cur,
+        log.report("coder", Some(now - chrono::Duration::hours(24)), Some(now))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
