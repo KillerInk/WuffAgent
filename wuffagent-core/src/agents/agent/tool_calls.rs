@@ -64,7 +64,6 @@ pub(crate) async fn run_native_tool_calls(
             pending.abort_all();
             return Err("Cancelled".to_string());
         }
-        counters.tool_calls += 1;
         if truncated_ids.contains(&call.id) {
             // Truncated mid-stream: the call cannot be executed. Abort a
             // started run (defensive — the ready callback only fires for
@@ -84,7 +83,7 @@ pub(crate) async fn run_native_tool_calls(
                 "Error: tool call arguments for '{}' were truncated (the model ran out of output tokens mid-argument), so the tool did not execute. Retry with a smaller payload - e.g. split the content across multiple tool calls or use a more targeted edit.",
                 call.function.name
             );
-            counters.tool_errors += 1;
+            counters.bump_tool(&call.function.name, true, 0);
             agent.send_event(crate::types::AppEvent::ToolCallError {
                 tool_name: call.function.name.clone(),
                 call_id: call.id.clone(),
@@ -98,6 +97,7 @@ pub(crate) async fn run_native_tool_calls(
         }
         // Bind the handle out of the map before awaiting: the mutex guard
         // must not live across the await (the enclosing future must stay Send).
+        let t0 = std::time::Instant::now(); // 1a: per-call duration
         let outcome: Result<String, String> = match pending.take(&call.id) {
             Some(handle) => match handle.await {
                 Ok(r) => r, // Ok = result text, Err = argument-parse error
@@ -152,9 +152,11 @@ pub(crate) async fn run_native_tool_calls(
                 format!("Error: {bad_args}")
             }
         };
-        if result_str.starts_with("Error: ") {
-            counters.tool_errors += 1;
-        }
+        counters.bump_tool(
+            &call.function.name,
+            result_str.starts_with("Error: "),
+            t0.elapsed().as_millis() as u64,
+        );
         // The UI card gets the FULL result (it renders the image from the
         // `data_uri` field); completions are emitted in call order.
         agent.send_event(crate::types::AppEvent::ToolCallComplete {
@@ -243,9 +245,9 @@ pub(crate) async fn run_text_embedded_calls(
             pending.abort_all();
             return Err("Cancelled".to_string());
         }
-        counters.tool_calls += 1;
         // Bind the handle out of the map before awaiting: the mutex guard
         // must not live across the await (the enclosing future must stay Send).
+        let t0 = std::time::Instant::now(); // 1a: per-call duration
         let outcome: Result<String, String> = match pending.take(&call.id) {
             Some(handle) => match handle.await {
                 Ok(r) => r, // Ok = result text, Err = argument-parse error
@@ -300,9 +302,11 @@ pub(crate) async fn run_text_embedded_calls(
                 format!("Error: {bad_args}")
             }
         };
-        if result_str.starts_with("Error: ") {
-            counters.tool_errors += 1;
-        }
+        counters.bump_tool(
+            &call.function.name,
+            result_str.starts_with("Error: "),
+            t0.elapsed().as_millis() as u64,
+        );
         agent.send_event(crate::types::AppEvent::ToolCallComplete {
             tool_name: call.function.name.clone(),
             call_id: call.id.clone(),

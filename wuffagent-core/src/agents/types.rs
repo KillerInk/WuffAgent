@@ -135,10 +135,27 @@ impl ControlRequest {
     }
 }
 
+/// 1a: per-tool aggregate for one run (the per-tool breakdown of the scalar
+/// `RunStats::tool_calls`/`tool_errors` counters, plus per-tool duration —
+/// the evidence for "which tools are slow or error-prone").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolStat {
+    /// Tool name; `"__other__"` is the fold bucket for runs that used more
+    /// than 32 distinct tools (keeps the run line small).
+    pub name: String,
+    /// Calls recorded for this tool (including truncation errors, which
+    /// never execute).
+    pub calls: u32,
+    /// Calls that returned an error ("Error: ..." tool output).
+    pub errors: u32,
+    /// Cumulative wall-clock milliseconds spent in this tool.
+    pub duration_ms: u64,
+}
+
 /// I1: tool-use trajectory stats for one agent run, fed to the improver so
 /// it can weigh HOW the agent worked (tool churn, errors, verification
 /// retries), not just the final text.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunStats {
     /// Total tool calls executed this run (across all LLM rounds).
     pub tool_calls: usize,
@@ -146,6 +163,44 @@ pub struct RunStats {
     pub tool_errors: usize,
     /// Verification judge attempts used (0 = no tool outputs / shortcut).
     pub verification_attempts: u32,
+    /// 1a: per-tool breakdown (folded, ≤33 entries).
+    pub tools: Vec<ToolStat>,
+}
+
+impl RunStats {
+    /// 1a: fold one tool call into the histogram AND the scalar counters
+    /// (the scalars stay the source of truth for summaries; `tools` is the
+    /// breakdown of the same events).
+    ///
+    /// Hot path (every tool call of every run): O(n) scan over ≤33 entries,
+    /// no allocation except first-seen tool names.
+    pub fn bump_tool(&mut self, name: &str, error: bool, ms: u64) {
+        self.tool_calls += 1;
+        if error {
+            self.tool_errors += 1;
+        }
+        const FOLD: &str = "__other__";
+        let target = if self.tools.iter().any(|t| t.name == name) || self.tools.len() < 32 {
+            name
+        } else {
+            FOLD
+        };
+        match self.tools.iter_mut().find(|t| t.name == target) {
+            Some(t) => {
+                t.calls += 1;
+                if error {
+                    t.errors += 1;
+                }
+                t.duration_ms += ms;
+            }
+            None => self.tools.push(ToolStat {
+                name: target.to_string(),
+                calls: 1,
+                errors: u32::from(error),
+                duration_ms: ms,
+            }),
+        }
+    }
 }
 
 /// Unique identifier for an agent instance.

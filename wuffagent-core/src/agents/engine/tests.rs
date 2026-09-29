@@ -77,20 +77,21 @@ async fn test_post_task_improvement_llm_called_only_on_boundary() {
         tool_calls: 0,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
 
     let params = RunParams::default();
 
     // Task 1: before the boundary -> no LLM call.
     engine
-        .post_task_maintenance(&cfg, "task", &Ok("ok".to_string()), stats, &params)
+        .post_task_maintenance(&cfg, "task", &Ok("ok".to_string()), stats.clone(), &params)
         .await;
     assert_eq!(calls.load(Ordering::SeqCst), 0, "task 1 is not a boundary");
 
     // Task 2: the boundary -> exactly one LLM call (and the check is
     // recorded, baselining the lesson).
     engine
-        .post_task_maintenance(&cfg, "task", &Ok("ok".to_string()), stats, &params)
+        .post_task_maintenance(&cfg, "task", &Ok("ok".to_string()), stats.clone(), &params)
         .await;
     assert_eq!(calls.load(Ordering::SeqCst), 1, "task 2 is the boundary");
 

@@ -20,13 +20,117 @@ fn ts(day: u32, hour: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, day, hour, 0, 0).unwrap()
 }
 
+/// 1a test helper: a RunStats with scalar counters only (no tool histogram).
+fn rs(calls: u32, errors: u32, attempts: u32) -> RunStats {
+    RunStats {
+        tool_calls: calls as usize,
+        tool_errors: errors as usize,
+        verification_attempts: attempts,
+        ..Default::default()
+    }
+}
+
+/// 1a: the per-tool histogram round-trips on run lines (bump_tool feeds it),
+/// and a legacy line written before 1a (no `tools` field) parses with an
+/// empty histogram.
+#[test]
+fn test_run_tools_roundtrip_and_legacy_default() {
+    let dir = tmp_dir("tools");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+
+    // A fresh RunStats fed through bump_tool (scalars + histogram agree).
+    let mut stats = RunStats::default();
+    stats.bump_tool("shell", false, 1_200);
+    stats.bump_tool("shell", true, 800);
+    stats.bump_tool("read_file", false, 40);
+    stats.verification_attempts = 1;
+    log.log_run("coder", &stats, 5_000, RunOutcome::Verified, 10, 2);
+
+    // A legacy line without the `tools` field (pre-1a store format).
+    use std::io::Write;
+    let mut f = OpenOptions::new()
+        .append(true)
+        .open(log.agent_path("coder"))
+        .unwrap();
+    writeln!(
+        f,
+        r#"{{"kind":"run","ts":"2026-09-01T00:00:00.000Z","tool_calls":2,"tool_errors":0,"verification_attempts":1,"duration_ms":100,"outcome":"verified","tokens_in":0,"tokens_out":0}}"#
+    )
+    .unwrap();
+    drop(f);
+
+    let lines = log.read_all("coder");
+    assert_eq!(lines.len(), 2, "got: {lines:?}");
+    match &lines[0] {
+        MetricsLine::Run {
+            tool_calls,
+            tool_errors,
+            tools,
+            ..
+        } => {
+            assert_eq!(*tool_calls, 3);
+            assert_eq!(*tool_errors, 1);
+            assert_eq!(tools.len(), 2);
+            let shell = tools.iter().find(|t| t.name == "shell").unwrap();
+            assert_eq!(
+                (shell.calls, shell.errors, shell.duration_ms),
+                (2, 1, 2_000)
+            );
+            let rf = tools.iter().find(|t| t.name == "read_file").unwrap();
+            assert_eq!((rf.calls, rf.errors, rf.duration_ms), (1, 0, 40));
+        }
+        other => panic!("expected run line, got {other:?}"),
+    }
+    match &lines[1] {
+        MetricsLine::Run { tools, .. } => assert!(
+            tools.is_empty(),
+            "legacy line must parse with an empty histogram"
+        ),
+        other => panic!("expected run line, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 1a: bump_tool aggregates calls/errors/summed ms per tool, and the 33rd
+/// distinct tool name folds into the "__other__" bucket (run lines stay
+/// bounded regardless of how many tools a run touches).
+#[test]
+fn test_bump_tool_aggregation_and_fold() {
+    let mut stats = RunStats::default();
+    for i in 0..33 {
+        stats.bump_tool(&format!("tool{i}"), false, 10);
+    }
+    // 32 distinct tools kept, the 33rd (tool32) folded.
+    assert_eq!(stats.tools.len(), 33, "32 named + __other__");
+    assert_eq!(stats.tool_calls, 33);
+    assert!(
+        stats.tools.iter().any(|t| t.name == "tool0" && t.calls == 1 && t.duration_ms == 10)
+    );
+    let other = stats
+        .tools
+        .iter()
+        .find(|t| t.name == "__other__")
+        .expect("__other__ bucket");
+    assert_eq!(other.calls, 1);
+    assert_eq!(other.duration_ms, 10);
+
+    // A second call of an EXISTING tool never re-folds, even past 32 names.
+    stats.bump_tool("tool0", true, 5);
+    let t0 = stats.tools.iter().find(|t| t.name == "tool0").unwrap();
+    assert_eq!((t0.calls, t0.errors, t0.duration_ms), (2, 1, 15));
+    assert_eq!(stats.tool_calls, 34);
+    assert_eq!(stats.tool_errors, 1);
+    assert_eq!(stats.tools.len(), 33);
+}
+
 #[test]
 fn test_run_roundtrip_and_append() {
     let dir = tmp_dir("rt");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 12, 2, 1, 45_210, RunOutcome::Verified, 100, 20);
-    log.log_run("coder", 3, 0, 2, 8_000, RunOutcome::GaveUp, 0, 0);
+    log.log_run("coder", &rs(12, 2, 1), 45_210, RunOutcome::Verified, 100, 20);
+    log.log_run("coder", &rs(3, 0, 2), 8_000, RunOutcome::GaveUp, 0, 0);
     log.log_feedback("coder", true);
     log.log_feedback("coder", false);
 
@@ -72,8 +176,8 @@ fn test_per_agent_files() {
     let dir = tmp_dir("peragent");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 1, 0, 1, 100, RunOutcome::Verified, 0, 0);
-    log.log_run("architect", 2, 1, 1, 200, RunOutcome::None, 0, 0);
+    log.log_run("coder", &rs(1, 0, 1), 100, RunOutcome::Verified, 0, 0);
+    log.log_run("architect", &rs(2, 1, 1), 200, RunOutcome::None, 0, 0);
 
     let coder = log.read_all("coder");
     let architect = log.read_all("architect");
@@ -105,7 +209,7 @@ fn test_corrupt_lines_skipped() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 5, 1, 1, 1_000, RunOutcome::Verified, 0, 0);
+    log.log_run("coder", &rs(5, 1, 1), 1_000, RunOutcome::Verified, 0, 0);
     // Append garbage + an empty line + a line of the wrong shape.
     use std::io::Write;
     let mut f = OpenOptions::new().append(true).open(log.agent_path("coder")).unwrap();
@@ -137,6 +241,7 @@ fn test_summary_since_and_format_line() {
             outcome: o,
             tokens_in: 0,
             tokens_out: 0,
+            tools: Vec::new(),
         })
         .unwrap()
     };
@@ -184,6 +289,7 @@ fn test_summary_between_windows() {
             outcome: o,
             tokens_in: 0,
             tokens_out: 0,
+            tools: Vec::new(),
         })
         .unwrap()
     };
@@ -250,6 +356,7 @@ fn test_lines_since_window() {
                 outcome: RunOutcome::Verified,
                 tokens_in: 0,
                 tokens_out: 0,
+                tools: Vec::new(),
             })
             .unwrap()
         )
@@ -304,7 +411,7 @@ fn test_recent_caps_to_last_n() {
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
     for i in 0..7 {
-        log.log_run("coder", i, 0, 1, 100, RunOutcome::Verified, 0, 0);
+        log.log_run("coder", &rs(i as u32, 0, 1), 100, RunOutcome::Verified, 0, 0);
     }
     let recent = log.recent("coder", 3);
     assert_eq!(recent.len(), 3);
@@ -343,7 +450,7 @@ fn test_default_uses_test_process_dir() {
 fn test_skill_usage_roundtrip_and_reserved_file() {
     let dir = tmp_dir("skill-usage");
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 3, 1, 1, 1000, RunOutcome::Verified, 0, 0);
+    log.log_run("coder", &rs(3, 1, 1), 1000, RunOutcome::Verified, 0, 0);
     log.log_skill_use("wuffagent-self-restart");
     log.log_skill_use("git-rebase-workflow");
     log.log_skill_use("wuffagent-self-restart"); // duplicate
@@ -379,7 +486,7 @@ fn test_trim_line_roundtrip_and_summary() {
     let dir = tmp_dir("trim-line");
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
-    log.log_run("coder", 12, 1, 1, 40_000, RunOutcome::Verified, 50_000, 1_200);
+    log.log_run("coder", &rs(12, 1, 1), 40_000, RunOutcome::Verified, 50_000, 1_200);
     log.log_trim("coder", 900_000, 450_000, 34, true, false);
     log.log_trim("coder", 990_000, 430_000, 41, true, true); // overflow backstop
 
@@ -506,7 +613,7 @@ fn test_check_summary_and_loop_cost() {
     let _ = std::fs::remove_dir_all(&dir);
     let log = MetricsLog::new(&dir);
     // A run (not counted as loop cost) + two agent checks for "coder".
-    log.log_run("coder", 4, 1, 1, 5_000, RunOutcome::Verified, 10, 5);
+    log.log_run("coder", &rs(4, 1, 1), 5_000, RunOutcome::Verified, 10, 5);
     log.log_check("coder", "agent", 100, 20, 2, 1_000);
     log.log_check("coder", "agent", 300, 60, 3, 2_000);
     // A fleet check + a check for a second agent.

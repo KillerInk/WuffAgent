@@ -404,10 +404,11 @@ impl Agent {
         &self.messages
     }
 
-    /// I1: trajectory stats (tool calls, tool errors, verification attempts)
-    /// of the last completed `run_llm_loop` — fed to the improver.
+    /// I1: trajectory stats (tool calls, tool errors, verification attempts,
+    /// 1a: per-tool histogram) of the last completed `run_llm_loop` — fed to
+    /// the improver.
     pub fn run_stats(&self) -> RunStats {
-        self.run_stats
+        self.run_stats.clone()
     }
 
     /// 2b: prompt/completion tokens of the last completed `run_llm_loop`

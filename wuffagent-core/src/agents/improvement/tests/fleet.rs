@@ -44,8 +44,14 @@ fn test_fleet_evidence_includes_metrics_lessons_and_skills() {
     store.save("stale-skill", "d", "w", "1. old").unwrap();
 
     let log = MetricsLog::new(metrics.dir());
-    log.log_run("coder", 10, 3, 1, 5_000, RunOutcome::Verified, 100, 50);
-    log.log_run("reviewer", 4, 0, 1, 2_000, RunOutcome::Verified, 60, 30);
+    let mk = |c: u32, e: u32, a: u32| crate::agents::types::RunStats {
+        tool_calls: c as usize,
+        tool_errors: e as usize,
+        verification_attempts: a,
+        ..Default::default()
+    };
+    log.log_run("coder", &mk(10, 3, 1), 5_000, RunOutcome::Verified, 100, 50);
+    log.log_run("reviewer", &mk(4, 0, 1), 2_000, RunOutcome::Verified, 60, 30);
     log.log_skill_use("read-skill");
 
     let (manager, _keep) = fresh_manager();

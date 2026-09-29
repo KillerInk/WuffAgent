@@ -35,6 +35,7 @@ async fn test_improvement_prompt_includes_trajectory_and_rejections() {
         tool_calls: 5,
         tool_errors: 2,
         verification_attempts: 3,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,
@@ -99,6 +100,7 @@ async fn test_evidence_attached_to_suggestions() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 1,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,
@@ -273,9 +275,12 @@ async fn test_improvement_prompt_includes_recent_metrics() {
     // Record a run + feedback -> the next prompt carries the summary line.
     crate::agents::metrics::record_run(
         "metricsagent",
-        9,
-        3,
-        1,
+        &crate::agents::RunStats {
+            tool_calls: 9,
+            tool_errors: 3,
+            verification_attempts: 1,
+            ..Default::default()
+        },
         12_345,
         crate::agents::metrics::RunOutcome::VerifiedAfterRetry,
         500,

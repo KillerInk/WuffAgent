@@ -439,8 +439,18 @@ mod tests {
         }
     }
 
+    /// 1a test helper: a RunStats with scalar counters only (no histogram).
+    fn run(calls: u32, errors: u32, attempts: u32) -> crate::agents::types::RunStats {
+        crate::agents::types::RunStats {
+            tool_calls: calls as usize,
+            tool_errors: errors as usize,
+            verification_attempts: attempts,
+            ..Default::default()
+        }
+    }
+
     fn record_run(log: &MetricsLog, agent: &str, calls: u32, errors: u32, ms: u64) {
-        log.log_run(agent, calls, errors, 1, ms, RunOutcome::Verified, 0, 0);
+        log.log_run(agent, &run(calls, errors, 1), ms, RunOutcome::Verified, 0, 0);
     }
 
     #[test]
@@ -448,7 +458,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = MetricsLog::new(dir.path());
         record_run(&log, "coder", 10, 2, 20_000);
-        log.log_run("coder", 4, 0, 0, 60_000, RunOutcome::GaveUp, 0, 0);
+        log.log_run("coder", &run(4, 0, 0), 60_000, RunOutcome::GaveUp, 0, 0);
         log.log_feedback("coder", true);
         log.log_feedback("coder", false);
 
@@ -473,8 +483,8 @@ mod tests {
     fn agent_mode_aggregates_tokens() {
         let dir = tempfile::tempdir().unwrap();
         let log = MetricsLog::new(dir.path());
-        log.log_run("coder", 10, 2, 1, 20_000, RunOutcome::Verified, 100, 20);
-        log.log_run("coder", 4, 0, 0, 60_000, RunOutcome::GaveUp, 50, 10);
+        log.log_run("coder", &run(10, 2, 1), 20_000, RunOutcome::Verified, 100, 20);
+        log.log_run("coder", &run(4, 0, 0), 60_000, RunOutcome::GaveUp, 50, 10);
 
         let tool = tool_in(dir.path());
         let out = text(call(&tool, Some("coder"), None));
@@ -498,6 +508,7 @@ mod tests {
                 outcome: RunOutcome::None,
                 tokens_in: 0,
                 tokens_out: 0,
+                tools: Vec::new(),
             },
         );
         let tool = tool_in(dir.path());
@@ -631,7 +642,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = MetricsLog::new(dir.path());
         record_run(&log, "coder", 10, 2, 20_000);
-        log.log_run("coder", 4, 0, 0, 60_000, RunOutcome::GaveUp, 50, 10);
+        log.log_run("coder", &run(4, 0, 0), 60_000, RunOutcome::GaveUp, 50, 10);
         record_run(&log, "generalist", 3, 0, 5_000);
 
         let tool = tool_in(dir.path()).with_memory(memory);

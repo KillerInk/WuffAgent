@@ -640,9 +640,7 @@ impl Agent {
         if self.config.metrics_enabled {
             crate::agents::metrics::record_run(
                 &self.config.name,
-                run_stats.tool_calls as u32,
-                run_stats.tool_errors as u32,
-                verify_state.attempts,
+                &self.run_stats,
                 start.elapsed().as_millis() as u64,
                 verify_state.final_outcome.unwrap_or(crate::agents::metrics::RunOutcome::None),
                 tokens_in,

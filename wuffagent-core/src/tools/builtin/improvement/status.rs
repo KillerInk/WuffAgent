@@ -551,12 +551,27 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let log = crate::agents::metrics::MetricsLog::new(dir.path());
-        log.log_run("coder", 3, 1, 0, 7_000, crate::agents::metrics::RunOutcome::Verified, 11, 4);
         log.log_run(
             "coder",
-            2,
-            0,
-            0,
+            &crate::agents::types::RunStats {
+                tool_calls: 3,
+                tool_errors: 1,
+                verification_attempts: 0,
+                ..Default::default()
+            },
+            7_000,
+            crate::agents::metrics::RunOutcome::Verified,
+            11,
+            4,
+        );
+        log.log_run(
+            "coder",
+            &crate::agents::types::RunStats {
+                tool_calls: 2,
+                tool_errors: 0,
+                verification_attempts: 0,
+                ..Default::default()
+            },
             9_000,
             crate::agents::metrics::RunOutcome::GaveUp,
             0,
@@ -584,7 +599,19 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let log = crate::agents::metrics::MetricsLog::new(dir.path());
-        log.log_run("coder", 5, 0, 1, 10_000, crate::agents::metrics::RunOutcome::Verified, 0, 0);
+        log.log_run(
+            "coder",
+            &crate::agents::types::RunStats {
+                tool_calls: 5,
+                tool_errors: 0,
+                verification_attempts: 1,
+                ..Default::default()
+            },
+            10_000,
+            crate::agents::metrics::RunOutcome::Verified,
+            0,
+            0,
+        );
 
         let tool = ListImprovementStatusTool::new(manager).with_log(log);
         let out = run_days(&tool, 2);
@@ -608,7 +635,19 @@ mod tests {
         manager.record_agent_improvement_check("coder", false);
         let dir = tempfile::tempdir().unwrap();
         let log = crate::agents::metrics::MetricsLog::new(dir.path());
-        log.log_run("coder", 1, 0, 0, 1_000, crate::agents::metrics::RunOutcome::Verified, 0, 0);
+        log.log_run(
+            "coder",
+            &crate::agents::types::RunStats {
+                tool_calls: 1,
+                tool_errors: 0,
+                verification_attempts: 0,
+                ..Default::default()
+            },
+            1_000,
+            crate::agents::metrics::RunOutcome::Verified,
+            0,
+            0,
+        );
 
         let tool = ListImprovementStatusTool::new(manager).with_log(log);
         // In agent mode a VALID `days` must not change the report (the window

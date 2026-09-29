@@ -101,6 +101,7 @@ async fn test_prompt_includes_retire_line_for_never_read_skills() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,

@@ -165,7 +165,7 @@ trends, no costs, no joins.**
 ### Phase 1 — writers (5 commits, in this order: 1a → 1e → 1d → 1b → 1c)
 1d depends on 1a's `tools` vec (for `tools_ms`); the rest are independent.
 
-**1a. Per-tool histogram on run lines (A1)** — `stats(1a)`
+**1a. Per-tool histogram on run lines (A1)** — `stats(1a)` — **DONE**
 Files: `agents/types.rs`, `agents/agent/tool_calls.rs`, `agents/metrics.rs`.
 1. types.rs — new type + `RunStats` extension:
 ```rust

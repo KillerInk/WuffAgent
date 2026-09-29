@@ -41,6 +41,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agents::types::{RunStats, ToolStat};
+
 /// Terminal verification outcome of an agent run (see the module docs for the
 /// exact semantics of each value).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +99,10 @@ pub enum MetricsLine {
         /// 4c: completion tokens produced across the run's LLM rounds.
         #[serde(default)]
         tokens_out: u64,
+        /// 1a: per-tool breakdown (folded; empty for lines written before
+        /// 1a, so old stores parse unchanged).
+        #[serde(default)]
+        tools: Vec<ToolStat>,
     },
     /// User feedback on an assistant answer.
     Feedback {
@@ -204,17 +210,38 @@ impl MetricsLine {
                 outcome,
                 tokens_in,
                 tokens_out,
-            } => format!(
-                "{} run: {} tool calls ({} errors), {} verification attempt(s), {:.1}s, {} tokens in / {} out, outcome: {}",
-                ts.format("%Y-%m-%d %H:%M"),
-                tool_calls,
-                tool_errors,
-                verification_attempts,
-                *duration_ms as f64 / 1000.0,
-                tokens_in,
-                tokens_out,
-                outcome.as_str(),
-            ),
+                tools,
+            } => {
+                let mut s = format!(
+                    "{} run: {} tool calls ({} errors), {} verification attempt(s), {:.1}s, {} tokens in / {} out, outcome: {}",
+                    ts.format("%Y-%m-%d %H:%M"),
+                    tool_calls,
+                    tool_errors,
+                    verification_attempts,
+                    *duration_ms as f64 / 1000.0,
+                    tokens_in,
+                    tokens_out,
+                    outcome.as_str(),
+                );
+                // 1a: per-tool breakdown (top 5 by duration, compact form
+                // name=calls/errors/ms) — the improver's slow/error-prone
+                // tool evidence, right on the run line.
+                if !tools.is_empty() {
+                    let mut sorted = tools.clone();
+                    sorted.sort_by(|a, b| b.duration_ms.cmp(&a.duration_ms));
+                    let seg: Vec<String> = sorted
+                        .iter()
+                        .take(5)
+                        .map(|t| format!(
+                            "{}={}/e{}/{}ms",
+                            t.name, t.calls, t.errors, t.duration_ms
+                        ))
+                        .collect();
+                    s.push_str("; tools: ");
+                    s.push_str(&seg.join(", "));
+                }
+                s
+            }
             MetricsLine::Feedback { ts, feedback } => format!(
                 "{} feedback: {}",
                 ts.format("%Y-%m-%d %H:%M"),
@@ -538,13 +565,12 @@ impl MetricsLog {
         }
     }
 
-    /// Append a completed-run line for `agent`.
+    /// Append a completed-run line for `agent` (1a: the full RunStats, so
+    /// the per-tool histogram lands on the line alongside the scalars).
     pub fn log_run(
         &self,
         agent: &str,
-        tool_calls: u32,
-        tool_errors: u32,
-        verification_attempts: u32,
+        stats: &RunStats,
         duration_ms: u64,
         outcome: RunOutcome,
         tokens_in: u64,
@@ -554,13 +580,14 @@ impl MetricsLog {
             agent,
             &MetricsLine::Run {
                 ts: Utc::now(),
-                tool_calls,
-                tool_errors,
-                verification_attempts,
+                tool_calls: stats.tool_calls as u32,
+                tool_errors: stats.tool_errors as u32,
+                verification_attempts: stats.verification_attempts,
                 duration_ms,
                 outcome,
                 tokens_in,
                 tokens_out,
+                tools: stats.tools.clone(),
             },
         );
     }
@@ -911,24 +938,13 @@ impl MetricsLog {
 /// `run_llm_loop`). Best-effort — never fails the run.
 pub fn record_run(
     agent: &str,
-    tool_calls: u32,
-    tool_errors: u32,
-    verification_attempts: u32,
+    stats: &RunStats,
     duration_ms: u64,
     outcome: RunOutcome,
     tokens_in: u64,
     tokens_out: u64,
 ) {
-    MetricsLog::default().log_run(
-        agent,
-        tool_calls,
-        tool_errors,
-        verification_attempts,
-        duration_ms,
-        outcome,
-        tokens_in,
-        tokens_out,
-    );
+    MetricsLog::default().log_run(agent, stats, duration_ms, outcome, tokens_in, tokens_out);
 }
 
 /// Record a context trim in the DEFAULT metrics log (writer hook for the

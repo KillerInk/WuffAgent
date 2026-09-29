@@ -64,6 +64,7 @@ async fn test_effect_check_includes_outcomes_since_marker() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,
@@ -131,6 +132,7 @@ async fn test_effect_check_absent_without_marker() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,
@@ -182,6 +184,7 @@ async fn test_effect_check_marker_without_outcomes_shows_none_yet() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,
@@ -275,6 +278,7 @@ async fn test_effect_check_before_after_metrics() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,
@@ -352,6 +356,7 @@ async fn test_effect_check_evals_window() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let _ = suggest_improvements(
         &manager,
@@ -477,6 +482,7 @@ async fn test_effect_check_records_verdict() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,
@@ -542,6 +548,7 @@ async fn test_effect_check_no_metrics_shows_no_data() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let _ = suggest_improvements(
         &manager,
@@ -600,6 +607,7 @@ async fn test_effect_check_excludes_outcomes_older_than_marker() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
     let suggestions = suggest_improvements(
         &manager,
@@ -652,6 +660,7 @@ async fn test_effect_check_low_sample_deferred() {
         tool_calls: 1,
         tool_errors: 0,
         verification_attempts: 0,
+        ..Default::default()
     };
 
     // Pass 1: one run after the change -> deferred (short section, no verdict).
