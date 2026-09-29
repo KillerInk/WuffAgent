@@ -344,8 +344,8 @@ mod tests {
             &crate::tools::types::ToolProgress::none(),
         )
         .await;
-        // Note: JSON string values display with their quotes (ToolOutput's
-        // Display formats the serde value directly) — pre-existing behavior.
-        assert_eq!(result.as_deref(), Ok("\"slept 1ms\""));
+        // Bare string results display verbatim (no JSON quoting), so the
+        // model sees the tool's exact output.
+        assert_eq!(result.as_deref(), Ok("slept 1ms"));
     }
 }

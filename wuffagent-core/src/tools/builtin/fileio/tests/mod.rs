@@ -53,3 +53,12 @@ fn success_json(out: ToolOutput) -> serde_json::Value {
         other => panic!("expected Success, got {other:?}"),
     }
 }
+
+/// read_file/search_content return a bare raw-text string (not a JSON
+/// object) — extract it directly.
+fn success_str(out: ToolOutput) -> String {
+    match out {
+        ToolOutput::Success(serde_json::Value::String(s)) => s,
+        other => panic!("expected a raw string result, got {other:?}"),
+    }
+}

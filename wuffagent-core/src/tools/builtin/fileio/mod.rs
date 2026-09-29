@@ -65,7 +65,7 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a text file, optionally limited to a line range. Returns the file content; large files are truncated with a `truncated` flag and `total_lines` for paging. A UTF-8 BOM is stripped from the first line (reported in the `bom` flag); CRLF files are shown as LF lines."
+        "Read a text file, optionally limited to a line range. Returns the file content as RAW TEXT — a one-line header (line range, total line count, `truncated`/`BOM stripped` flags) followed by the content verbatim — so lines can be copied into apply_diff/replace_lines SEARCH blocks exactly as shown. Use start_line/end_line to page through large files. CRLF files are shown as LF lines."
     }
     fn parameters_schema(&self) -> ToolSchema {
         build_schema(

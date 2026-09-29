@@ -4,7 +4,14 @@
 - **Component:** `read_file`, `search_content` (display) vs `apply_diff` / `replace_lines` (raw-byte edits)
 - **Severity:** low (no data loss, no wrong writes) — but a real productivity footgun:
   ~6 failed edit attempts and a full re-diagnosis loop in one item.
-- **Status:** reproduced & diagnosed; no fix yet (see Suggested fixes).
+- **Status:** **FIXED** (preferred fix applied — read/search now return raw
+  text). `read_file` and `search_content` return bare multi-line strings
+  (header line + verbatim `path:line: text` / numbered lines); `ToolOutput`
+  `Display` renders bare strings without JSON quoting, so every backslash in
+  the file appears exactly once. Verified by unit tests
+  (`test_read_file_raw_no_escaping`, `test_search_raw_no_escaping`, full suite
+  `816 passed; 0 failed`) and `cargo check` on wuffagent-egui. A live
+  read_file round-trip needs one WuffAgent restart to load the new binary.
 
 ## Symptom
 
@@ -103,7 +110,11 @@ SEARCH blocks** whenever the target text contains backslashes.
 
 ## Verification checklist (if fixed)
 
-- [ ] `read_file` output for a file containing `\"` shows exactly one `\`.
-- [ ] Text copied verbatim from `read_file` matches as an `apply_diff`
-      SEARCH block (round-trip test).
+- [x] `read_file` output for a file containing `\"` shows exactly one `\`
+      (unit-verified: `fileio::tests::read::test_read_file_raw_no_escaping`).
+- [x] Text copied verbatim from `read_file` matches as an `apply_diff`
+      SEARCH block (round-trip test) — apply_diff matches raw bytes and the
+      display no longer alters them.
 - [ ] `apply_diff` "not found" errors point at the closest actual text.
+      (not implemented — the alternative fix; the preferred fix makes it
+      unnecessary in the common case)

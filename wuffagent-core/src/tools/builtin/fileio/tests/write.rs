@@ -5,9 +5,11 @@ fn test_write_and_read_roundtrip() {
     let dir = temp_dir("rt");
     let p = dir.join("rt.txt");
     write_file(p.to_str().unwrap(), "data\nmore\n").unwrap();
-    let out = read_file(p.to_str().unwrap(), None, None, false).unwrap();
-    let json = success_json(out);
-    assert_eq!(json["content"].as_str().unwrap(), "data\nmore");
+    let raw = success_str(read_file(p.to_str().unwrap(), None, None, false).unwrap());
+    let path = p.to_str().unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    assert_eq!(lines[0], &format!("[read_file {path}: lines 1-2 of 2]"));
+    assert_eq!(&lines[1..], &["data", "more"]);
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -125,7 +125,7 @@ pub fn register_builtins(
     for (name, desc, tool) in [
         (
             "read_file",
-            "Read a text file, optionally limited to a line range. Large files are truncated with a `truncated` flag and `total_lines` for paging",
+            "Read a text file, optionally limited to a line range. Returns raw text (header line + content verbatim) so lines can be copied into edits unmodified. Large files are truncated (header says `truncated`); page with start_line/end_line",
             std::sync::Arc::new(ReadFileTool::new()) as std::sync::Arc<dyn Tool>,
         ),
         (

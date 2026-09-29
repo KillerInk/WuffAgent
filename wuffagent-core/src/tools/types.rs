@@ -307,7 +307,15 @@ impl ToolLogger for TracingToolLogger {
 impl fmt::Display for ToolOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ToolOutput::Success(v) => write!(f, "{}", v),
+            ToolOutput::Success(v) => match v {
+                // A bare string is rendered verbatim (no JSON quoting or
+                // escaping) so the model sees exactly the bytes the tool
+                // produced — content copied from such a result can be
+                // round-tripped into an apply_diff SEARCH block unmodified.
+                // (JSON objects are still rendered as compact JSON.)
+                serde_json::Value::String(s) => write!(f, "{s}"),
+                other => write!(f, "{}", other),
+            },
             ToolOutput::Error(e) => write!(f, "ERROR: {}", e),
         }
     }

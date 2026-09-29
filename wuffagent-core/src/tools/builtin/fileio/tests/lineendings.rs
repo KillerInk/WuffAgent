@@ -9,11 +9,11 @@ fn test_read_file_bom_stripped_and_reported() {
     let dir = temp_dir("bomread");
     let p = dir.join("bom.txt");
     fs::write(&p, format!("{BOM}hello\r\nworld\r\n")).unwrap();
-    let out = read_file(p.to_str().unwrap(), None, None, false).unwrap();
-    let json = success_json(out);
-    assert_eq!(json["content"].as_str().unwrap(), "hello\nworld");
-    assert_eq!(json["total_lines"].as_u64().unwrap(), 2);
-    assert!(json["bom"].as_bool().unwrap(), "BOM must be reported");
+    let raw = success_str(read_file(p.to_str().unwrap(), None, None, false).unwrap());
+    let path = p.to_str().unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    assert_eq!(lines[0], &format!("[read_file {path}: lines 1-2 of 2, BOM stripped]"));
+    assert_eq!(&lines[1..], &["hello", "world"]);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -22,8 +22,9 @@ fn test_read_file_no_bom_flag() {
     let dir = temp_dir("nombom");
     let p = dir.join("n.txt");
     write(p.to_str().unwrap(), "plain\n");
-    let json = success_json(read_file(p.to_str().unwrap(), None, None, false).unwrap());
-    assert!(!json["bom"].as_bool().unwrap());
+    let raw = success_str(read_file(p.to_str().unwrap(), None, None, false).unwrap());
+    let header = raw.lines().next().unwrap();
+    assert!(!header.contains("BOM stripped"), "header: {header}");
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -32,13 +33,13 @@ fn test_read_file_line_numbers_with_bom() {
     let dir = temp_dir("bomnums");
     let p = dir.join("b.txt");
     fs::write(&p, format!("{BOM}first\r\nsecond\r\n")).unwrap();
-    let json = success_json(read_file(p.to_str().unwrap(), None, None, true).unwrap());
-    let content = json["content"].as_str().unwrap().to_string();
+    let raw = success_str(read_file(p.to_str().unwrap(), None, None, true).unwrap());
+    let lines: Vec<&str> = raw.lines().collect();
     assert!(
-        content.starts_with("     1 | first"),
-        "BOM must not leak into numbered output: {content:?}"
+        lines[1].starts_with("     1 | first"),
+        "BOM must not leak into numbered output: {lines:?}"
     );
-    assert!(content.contains("     2 | second"));
+    assert!(lines[2].starts_with("     2 | second"));
     let _ = fs::remove_dir_all(&dir);
 }
 

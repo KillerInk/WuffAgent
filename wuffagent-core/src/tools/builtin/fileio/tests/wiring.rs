@@ -13,8 +13,11 @@ fn test_read_file_tool_executes() {
     prms.values
         .insert("line_numbers".to_string(), serde_json::json!(false));
     let out = tool.execute(prms).unwrap();
-    let json = success_json(out);
-    assert_eq!(json["content"].as_str().unwrap(), "abc");
+    let raw = success_str(out);
+    let path = p.to_str().unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    assert_eq!(lines[0], &format!("[read_file {path}: lines 1-1 of 1]"));
+    assert_eq!(lines[1], "abc");
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -1,6 +1,7 @@
 //! Content search tool (`search_content`): grep/ripgrep-like pattern search
-//! across files, returning matching lines with file paths and 1-based line
-//! numbers. Closes the biggest gap in the named file toolset — before this,
+//! across files, returning matching lines as raw `path:line: text` output
+//! (context lines indented), so the model can copy match text verbatim into
+//! edits. Closes the biggest gap in the named file toolset — before this,
 //! searching file content required the shell tool.
 
 use std::fs;
@@ -177,11 +178,10 @@ fn walk_dir(
                 max_results,
                 matches,
             )?;
+            // Count the file even if its scan was truncated.
+            *files_searched += 1;
             if result == ScanResult::Truncated {
                 return Ok(result);
-            }
-            if result == ScanResult::Completed {
-                *files_searched += 1;
             }
         }
     }
@@ -220,33 +220,45 @@ fn search_content(
             &mut files_searched,
         )?
     } else {
-        match search_file(path, &matcher, context_lines, max_results, &mut matches)? {
-            ScanResult::Completed => {
-                files_searched = 1;
-                ScanResult::Completed
-            }
-            other => other,
-        }
+        // The file was searched even if the scan stopped early (truncated).
+        files_searched = 1;
+        search_file(path, &matcher, context_lines, max_results, &mut matches)?
     };
 
-    Ok(ToolOutput::Success(serde_json::json!({
-        "pattern": pattern,
-        "path": path,
-        "total_matches": matches.len(),
-        "truncated": result == ScanResult::Truncated,
-        "files_searched": files_searched,
-        "matches": matches.iter().map(|m| {
-            let mut map = serde_json::Map::new();
-            map.insert("path".to_string(), serde_json::json!(m.path));
-            map.insert("line".to_string(), serde_json::json!(m.line));
-            map.insert("text".to_string(), serde_json::json!(m.text));
-            if context_lines > 0 {
-                map.insert("context_before".to_string(), serde_json::json!(m.context_before));
-                map.insert("context_after".to_string(), serde_json::json!(m.context_after));
-            }
-            serde_json::Value::Object(map)
-        }).collect::<Vec<_>>(),
-    })))
+    // Raw text: one header line, then `path:line: text` per match; context
+    // lines are indented (and carry their own line number). A JSON object
+    // would escape backslashes/quotes/newlines in the match text, so the
+    // model couldn't copy it verbatim into apply_diff SEARCH blocks.
+    let mut header = format!(
+        "[search_content {pattern} in {path}: {} match{} in {} file{}",
+        matches.len(),
+        if matches.len() == 1 { "" } else { "es" },
+        files_searched,
+        if files_searched == 1 { "" } else { "s" },
+    );
+    if result == ScanResult::Truncated {
+        header.push_str(", truncated");
+    }
+    header.push(']');
+
+    let mut raw = header;
+    for m in &matches {
+        // Context lines first (indented, own line numbers), then the match.
+        for (i, ctx) in m.context_before.iter().enumerate() {
+            let ln = m.line - m.context_before.len() as u64 + i as u64;
+            raw.push_str(&format!("\n    {}:{}: {}", m.path, ln, ctx));
+        }
+        raw.push_str(&format!("\n{}:{}: {}", m.path, m.line, m.text));
+        for (i, ctx) in m.context_after.iter().enumerate() {
+            raw.push_str(&format!(
+                "\n    {}:{}: {}",
+                m.path,
+                m.line + i as u64 + 1,
+                ctx
+            ));
+        }
+    }
+    Ok(ToolOutput::Success(serde_json::Value::String(raw)))
 }
 
 /// Read a non-negative integer param, tolerating integral floats (e.g. `2.0`).
@@ -271,7 +283,7 @@ impl Tool for SearchContentTool {
         "search_content"
     }
     fn description(&self) -> &str {
-        "Search for a text pattern (literal substring by default, or regex) in a file or directory, like grep/ripgrep. Returns matching lines with file paths and 1-based line numbers. Skips binary files and .git directories; results are capped at max_results."
+        "Search for a text pattern (literal substring by default, or regex) in a file or directory, like grep/ripgrep. Returns matching lines as raw text — one header line, then `path:line: text` per match (context lines indented) — so the text can be copied verbatim into edits. Skips binary files and .git directories; results are capped at max_results."
     }
     fn parameters_schema(&self) -> ToolSchema {
         build_schema(

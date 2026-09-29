@@ -487,14 +487,21 @@ impl ChatApp {
     }
 
     /// Render a plain (non-JSON) tool result as a monospace code block.
+    /// Long text (e.g. read_file's raw output) scrolls inside a capped
+    /// height, mirroring the JSON file-read card.
     pub(super) fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, theme: &Theme) {
         Self::code_block(ui, theme, |ui| {
-            ui.add(Self::breaking_label(
-                text,
-                egui::FontId::monospace(13.0),
-                theme.code_text,
-                false,
-            ));
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(Self::breaking_label(
+                        text,
+                        egui::FontId::monospace(13.0),
+                        theme.code_text,
+                        false,
+                    ));
+                });
         });
     }
 

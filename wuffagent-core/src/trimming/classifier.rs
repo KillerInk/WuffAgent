@@ -39,10 +39,11 @@ pub fn classify_content(content: &str) -> ContentType {
     }
 
     // Source code: check before JSON wrapper because source-code tool results
-    // (e.g. file reads returning {"content":"...","total_lines":N}) must be
-    // classified as SourceCode so the CodeSummarizer preserves line structure
-    // instead of the generic char-based truncator mashing them into
-    // "head...[...]...tail" and losing the middle content.
+    // (read_file returns RAW multi-line text, optionally with `    42 | `
+    // line-number prefixes) must be classified as SourceCode so the
+    // CodeSummarizer preserves line structure instead of the generic
+    // char-based truncator mashing them into "head...[...]...tail" and losing
+    // the middle content.
     if is_source_code(content) {
         return ContentType::SourceCode;
     }

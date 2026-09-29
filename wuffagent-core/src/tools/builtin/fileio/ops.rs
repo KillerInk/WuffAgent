@@ -13,16 +13,26 @@ use super::common::*;
 /// When `line_numbers` is true, each returned line is prefixed with its
 /// 1-based line number in `cat -n` style (`"    42 | <content>"`).
 ///
+/// The result is RAW TEXT (no JSON wrapper): one header line followed by the
+/// file content verbatim. Raw text is the whole point — a JSON object would
+/// escape backslashes, quotes and newlines inside `content`, and the model
+/// re-typing that escaped text into `apply_diff`/`replace_lines` SEARCH blocks
+/// would never match the on-disk bytes
+/// (autoplans/bugreport-diff-tools-backslash-display.md).
+///
+/// The header line (`[read_file <path>: lines A-B of T, ...]`) reports the
+/// returned line range, the full file line count, and the `truncated` /
+/// `BOM stripped` flags, so the model can page large files with
+/// `start_line`/`end_line`.
+///
 /// Content is capped (total bytes, line count, and per-line length) to
 /// protect the model's context window. When a cap cuts the content, the
-/// result carries `truncated: true` so the model can page with
-/// `start_line`/`end_line`. `total_lines` always reports the full file
-/// line count, so the model knows how far the file continues.
+/// header says `truncated`.
 ///
 /// A UTF-8 BOM is stripped from the first line (so the model sees clean
-/// text and can copy it into `apply_diff` SEARCH blocks) and reported in
-/// the `bom` output flag. CRLF files are returned as LF lines — `write_file`
-/// and `apply_diff` restore the file's original line ending on save.
+/// text) and the header says `BOM stripped`. CRLF files are returned as LF
+/// lines — `write_file` and `apply_diff` restore the file's original line
+/// ending on save.
 pub(crate) fn read_file(
     path: &str,
     start_line: Option<usize>,
@@ -119,17 +129,38 @@ pub(crate) fn read_file(
         line_idx += 1;
     }
 
-    // Return as a JSON object with content + total_lines so the classifier
-    // can recognise it as source code (not FreeText) and apply the
-    // CodeSummarizer instead of the generic char-based truncator.
-    Ok(ToolOutput::Success(serde_json::json!({
-        "content": result,
-        "total_lines": total_lines,
-        "lines_returned": lines_returned,
-        "truncated": truncated,
-        "line_numbers": line_numbers,
-        "bom": had_bom,
-    })))
+    // Raw text: one header line + the content verbatim. (A JSON object here
+    // would escape backslashes/quotes/newlines in the content — see the
+    // function docs. The raw multi-line text with `    N | ` prefixes is also
+    // what the trimming classifier's is_source_code recognises, so large
+    // reads still get the CodeSummarizer, not the generic truncator.)
+    let mut header = format!("[read_file {path}: ");
+    if total_lines == 0 {
+        header.push_str("(empty file)");
+    } else if lines_returned == 0 {
+        header.push_str(&format!("no lines in range (file has {total_lines} lines)"));
+    } else {
+        header.push_str(&format!(
+            "lines {}-{} of {}",
+            start + 1,
+            start + lines_returned,
+            total_lines
+        ));
+    }
+    if truncated {
+        header.push_str(", truncated");
+    }
+    if had_bom {
+        header.push_str(", BOM stripped");
+    }
+    header.push(']');
+
+    let mut raw = header;
+    if !result.is_empty() {
+        raw.push('\n');
+        raw.push_str(&result);
+    }
+    Ok(ToolOutput::Success(serde_json::Value::String(raw)))
 }
 
 /// List directory entries with per-entry metadata: `type` (dir/file/
