@@ -1267,3 +1267,57 @@ fn test_compare_window_split() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 3a: `fleet_loop_status` unions the metrics store's agents with the
+/// memory manager's per-agent loop states (loop-only agents still appear,
+/// all-zero), aggregates fleet spend, and surfaces the loop config.
+#[test]
+fn test_fleet_loop_status_unions_and_sums() {
+    let dir = tmp_dir("fleet-status");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+    log.log_run("coder", &rs(10, 1, 1), 1000, RunOutcome::Verified, 100, 20, "r1", "s1");
+
+    let mdir = tmp_dir("fleet-status-mem");
+    let _ = std::fs::remove_dir_all(&mdir);
+    let config = crate::memory::MemoryConfig {
+        memories_dir: Some(mdir.to_str().unwrap().to_string()),
+        ..Default::default()
+    };
+    let memory = crate::memory::MemoryManager::new(config).unwrap();
+    memory.record_agent_improvement_check("coder", true);
+    memory.record_agent_improvement_check("writer", false); // no metrics file
+
+    let st = fleet_loop_status(&log, Some(&memory), 7);
+    assert_eq!(st.window_days, 7);
+    assert_eq!(st.agents.len(), 2, "union of metrics + loop agents");
+    assert_eq!(st.agents[0].name, "coder");
+    assert!(st.agents[0].loop_state.is_some());
+    assert_eq!(st.agents[0].summary.runs, 1);
+    assert!(st.agents[0].last_line.is_some(), "run in window");
+    assert_eq!(st.agents[1].name, "writer");
+    assert!(st.agents[1].loop_state.is_some());
+    assert_eq!(st.agents[1].summary.runs, 0, "loop-only agent: empty window");
+    assert!(st.agents[1].last_line.is_none());
+
+    assert_eq!(st.fleet_spend.runs, 1);
+    assert_eq!(st.fleet_spend.tokens_in, 100);
+    assert_eq!(st.fleet_spend.tokens_out, 20);
+
+    let cfg = st.loop_config.expect("memory manager wired");
+    assert!(cfg.auto_improve, "default config has auto_improve on");
+    assert_eq!(cfg.lessons, 0);
+
+    // No memory manager: metrics only, no loop rows.
+    let st = fleet_loop_status(&log, None, 7);
+    assert!(st.loop_config.is_none());
+    assert_eq!(st.agents.len(), 1);
+    assert!(st.agents[0].loop_state.is_none());
+
+    // last_activity: the agent's newest line (any kind); None when absent.
+    assert!(log.last_activity("coder").is_some());
+    assert!(log.last_activity("writer").is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&mdir);
+}

@@ -87,6 +87,10 @@ pub struct Dialogs {
     /// `show_panel` gates whether the window is drawn; stream completions
     /// mark it dirty so the next frame picks up newly logged calls.
     pub usage_panel: crate::ui::usage_panel::UsagePanel,
+    /// The fleet dashboard panel (3a: per-agent KPI cards + 30-day trend +
+    /// improvement-loop state). `show` gates the window; stream completions
+    /// mark it dirty so the next frame re-reads the metrics stores.
+    pub dashboard: crate::ui::dashboard::FleetDashboard,
     /// The MCP panel widget (server list, add/edit, per-tool toggles).
     pub mcp_panel: crate::ui::mcp_panel::McpPanel,
     /// Pending agent improvement suggestions.

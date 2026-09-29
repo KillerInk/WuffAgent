@@ -1,6 +1,7 @@
 use eframe::egui;
 use egui_plot::{GridMark, Legend, Line, Plot};
 
+use super::charts::fmt_tokens;
 use super::theme::Theme;
 use wuffagent_core::usage::recorder::UsageRecorder;
 use wuffagent_core::usage::stats::{bucketize, Bucket, Granularity, UsageLogReader};
@@ -337,14 +338,4 @@ fn series_pts(buckets: &[Bucket], get: impl Fn(&Bucket) -> f64) -> Vec<[f64; 2]>
         .enumerate()
         .map(|(i, b)| [i as f64, get(b)])
         .collect()
-}
-
-/// Format a token count compactly (1234 → "1.2k", 1_500_000 → "1.5M").
-fn fmt_tokens(n: u64) -> String {
-    match n {
-        0..=999 => n.to_string(),
-        1_000..=9_999 => format!("{:.1}k", n as f64 / 1e3),
-        10_000..=999_999 => format!("{:.0}k", n as f64 / 1e3),
-        _ => format!("{:.1}M", n as f64 / 1e6),
-    }
 }

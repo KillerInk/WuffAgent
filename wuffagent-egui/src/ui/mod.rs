@@ -1,7 +1,9 @@
 pub mod agent_config;
 pub mod agent_history;
 pub mod chat_area;
+pub mod charts;
 pub mod chat_feedback;
+pub mod dashboard;
 pub mod event_handler;
 pub mod improvements;
 pub mod input;

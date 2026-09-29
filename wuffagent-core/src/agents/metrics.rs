@@ -406,6 +406,9 @@ pub struct BucketSummary {
     pub start: NaiveDateTime,
     /// Completed runs in this bucket.
     pub runs: u32,
+    /// 3a: tool calls in this bucket (the denominator for the bucket's
+    /// error rate).
+    pub tool_calls: u32,
     /// Tool-call errors in this bucket.
     pub tool_errors: u32,
     /// Runs whose terminal outcome was `gave_up`.
@@ -915,6 +918,7 @@ impl MetricsLog {
             .map(|start| BucketSummary {
                 start,
                 runs: 0,
+                tool_calls: 0,
                 tool_errors: 0,
                 gave_up: 0,
                 verified_after_retry: 0,
@@ -926,6 +930,7 @@ impl MetricsLog {
         for line in self.read_all(agent) {
             let MetricsLine::Run {
                 ts,
+                tool_calls,
                 tool_errors,
                 duration_ms,
                 outcome,
@@ -941,6 +946,7 @@ impl MetricsLog {
             };
             let b = &mut buckets[i];
             b.runs += 1;
+            b.tool_calls += tool_calls;
             b.tool_errors += tool_errors;
             b.tokens_in += tokens_in;
             b.tokens_out += tokens_out;
@@ -1331,6 +1337,131 @@ fn accumulate(s: &mut MetricsSummary, line: &MetricsLine) {
             s.eval_tokens_in += tokens_in;
             s.eval_tokens_out += tokens_out;
         }
+    }
+}
+
+// ── 3a: fleet loop status (core shared by the read_metrics status=true
+// tool and the egui fleet dashboard) ────────────────────────────────────
+
+impl MetricsLog {
+    /// 3a: the timestamp of the agent's most recent metric line of ANY
+    /// kind (`None` = the agent has no lines yet) — the dashboard's
+    /// "last activity" KPI.
+    pub fn last_activity(&self, agent: &str) -> Option<DateTime<Utc>> {
+        self.read_all(agent)
+            .into_iter()
+            .rev()
+            .map(|line| match line {
+                MetricsLine::Run { ts, .. }
+                | MetricsLine::Feedback { ts, .. }
+                | MetricsLine::SkillUse { ts, .. }
+                | MetricsLine::Trim { ts, .. }
+                | MetricsLine::Check { ts, .. }
+                | MetricsLine::Eval { ts, .. } => ts,
+            })
+            .next()
+    }
+}
+
+/// 3a: the loop half of the fleet status — cost-control settings and the
+/// global (legacy) baseline. `None` in [`FleetLoopStatus`] when no memory
+/// manager was wired (standalone tools/tests degrade to metrics only).
+#[derive(Debug, Clone, Default)]
+pub struct LoopConfigInfo {
+    pub auto_improve: bool,
+    pub cooldown_tasks: usize,
+    pub min_interval_hours: u32,
+    pub lessons: usize,
+    /// Global (legacy) last check; per-agent baselines live on the rows.
+    pub last_check: Option<DateTime<Utc>>,
+    /// Whether new Lesson evidence exists since the global last check.
+    pub new_evidence: bool,
+}
+
+/// 3a: one agent row of the fleet status — its loop state (if ever
+/// checked) joined with its windowed metrics and its most recent line
+/// (`describe()` text — what actually happened in the window).
+#[derive(Debug, Clone)]
+pub struct FleetAgentStatus {
+    pub name: String,
+    pub loop_state: Option<crate::memory::types::AgentImprovementState>,
+    /// Windowed metrics (`ts >= since`); all-zero when the agent had no
+    /// lines in the window.
+    pub summary: MetricsSummary,
+    /// The window's newest line rendered for humans (None = none).
+    pub last_line: Option<String>,
+}
+
+/// 3a: fleet-wide token spend over the window (from the metrics store —
+/// the runs the loop improves, not the improvement checks' own calls).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FleetSpend {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub runs: u32,
+}
+
+/// 3a: structured fleet loop status — the single implementation behind
+/// BOTH the `read_metrics status=true` tool (renders it as text) and the
+/// egui fleet dashboard (draws it), so the two surfaces cannot diverge.
+#[derive(Debug, Clone, Default)]
+pub struct FleetLoopStatus {
+    pub window_days: u64,
+    pub loop_config: Option<LoopConfigInfo>,
+    /// One row per agent in the UNION of the metrics store's agent files
+    /// and the memory manager's per-agent loop states (name-sorted) —
+    /// loop-only agents still appear (with all-zero window metrics).
+    pub agents: Vec<FleetAgentStatus>,
+    pub fleet_spend: FleetSpend,
+}
+
+/// 3a: build the structured fleet loop status over the last `days` days.
+/// Read-only (file reads + in-memory state); the window is `[now-days, now)`.
+pub fn fleet_loop_status(
+    log: &MetricsLog,
+    memory: Option<&crate::memory::MemoryManager>,
+    days: u64,
+) -> FleetLoopStatus {
+    let st = memory.map(|m| m.improvement_status());
+    let loop_config = st.as_ref().map(|st| LoopConfigInfo {
+        auto_improve: st.auto_improve,
+        cooldown_tasks: st.improvement_cooldown_tasks,
+        min_interval_hours: st.improvement_min_interval_hours,
+        lessons: st.lesson_count,
+        last_check: st.last_check,
+        new_evidence: st.has_new_evidence,
+    });
+
+    let mut names: std::collections::BTreeSet<String> =
+        log.agent_names().into_iter().collect();
+    if let Some(st) = &st {
+        for name in st.agents.keys() {
+            names.insert(name.clone());
+        }
+    }
+
+    let since = Utc::now() - chrono::Duration::days(days as i64);
+    let mut agents = Vec::new();
+    let mut spend = FleetSpend::default();
+    for name in names {
+        let summary = log.summary_between(&name, Some(since), None);
+        spend.tokens_in += summary.tokens_in;
+        spend.tokens_out += summary.tokens_out;
+        spend.runs += summary.runs;
+        let last_line = log.lines_since(&name, Some(since)).pop().map(|l| l.describe());
+        let loop_state = st.as_ref().and_then(|s| s.agents.get(&name).cloned());
+        agents.push(FleetAgentStatus {
+            name,
+            loop_state,
+            summary,
+            last_line,
+        });
+    }
+    FleetLoopStatus {
+        window_days: days,
+        loop_config,
+        agents,
+        fleet_spend: spend,
     }
 }
 

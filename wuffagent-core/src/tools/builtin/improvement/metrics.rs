@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use crate::agents::metrics::{MetricsLine, MetricsLog};
+use crate::agents::metrics::{fleet_loop_status, MetricsLine, MetricsLog};
 use crate::memory::MemoryManager;
 use crate::tools::types::{
     FieldSchema, JsonSchema, Tool, ToolOutput, ToolParams, ToolSchema, ToolResult,
@@ -298,89 +298,91 @@ impl ReadMetricsTool {
     /// actually happened since), plus the fleet's token spend over the
     /// window (the loop-cost line: the run budget the loop improves on).
     fn fleet_status_report(&self, days: u64) -> ToolOutput {
+        // 3a: the structured core is shared with the egui fleet dashboard —
+        // this fn is now just its text renderer.
         let log = self.log();
-        let since = Utc::now() - Duration::days(days as i64);
+        let st = fleet_loop_status(&log, self.memory.as_deref(), days);
         let mut out = format!("Loop status — window: last {days} day(s):");
 
-        // The loop half: per-agent improvement state (the memory manager is
-        // optional — standalone tests degrade to metrics only).
-        if let Some(memory) = &self.memory {
-            let st = memory.improvement_status();
-            out.push_str(&format!(
-                "\n  loop: auto_improve {}; cooldown 1 check / {} task(s), min interval {}; \\\
-                 lessons in store: {}",
-                if st.auto_improve { "on" } else { "off" },
-                st.improvement_cooldown_tasks,
-                super::status::min_interval_label(st.improvement_min_interval_hours),
-                st.lesson_count,
-            ));
-            out.push_str(&format!(
-                "\n  last check (global/legacy): {}",
-                super::status::format_ago(st.last_check)
-            ));
-            if st.agents.is_empty() {
-                out.push_str("\n  per-agent loop state: none recorded yet");
-            } else {
-                out.push_str(
-                    "\n  per-agent loop state (last check · tasks since · no-op streak · verdict):",
-                );
-                for (name, a) in &st.agents {
-                    out.push_str(&format!(
-                        "\n    {}: last check {}; {} task(s) since; no-op streak {}; verdict {}",
-                        name,
-                        super::status::format_ago(a.last_check),
-                        a.runs_since_check,
-                        a.no_op_streak,
-                        a.last_effect_verdict
-                            .clone()
-                            .unwrap_or_else(|| "-".to_string()),
-                    ));
+        // The loop half: cost-control settings + per-agent loop state (the
+        // memory manager is optional — standalone tests degrade to metrics
+        // only).
+        match &st.loop_config {
+            Some(cfg) => {
+                out.push_str(&format!(
+                    "\n  loop: auto_improve {}; cooldown 1 check / {} task(s), min interval {}; \
+                     lessons in store: {}",
+                    if cfg.auto_improve { "on" } else { "off" },
+                    cfg.cooldown_tasks,
+                    super::status::min_interval_label(cfg.min_interval_hours),
+                    cfg.lessons,
+                ));
+                out.push_str(&format!(
+                    "\n  last check (global/legacy): {}",
+                    super::status::format_ago(cfg.last_check)
+                ));
+                if st.agents.iter().all(|a| a.loop_state.is_none()) {
+                    out.push_str("\n  per-agent loop state: none recorded yet");
+                } else {
+                    out.push_str(
+                        "\n  per-agent loop state (last check · tasks since · no-op streak · verdict):",
+                    );
+                    for a in &st.agents {
+                        if let Some(ls) = &a.loop_state {
+                            out.push_str(&format!(
+                                "\n    {}: last check {}; {} task(s) since; no-op streak {}; verdict {}",
+                                a.name,
+                                super::status::format_ago(ls.last_check),
+                                ls.runs_since_check,
+                                ls.no_op_streak,
+                                ls.last_effect_verdict
+                                    .clone()
+                                    .unwrap_or_else(|| "-".to_string()),
+                            ));
+                        }
+                    }
                 }
             }
-        } else {
-            out.push_str("\n  loop state: (no memory manager wired — metrics only)");
+            None => out.push_str(
+                "\n  loop state: (no memory manager wired — metrics only)",
+            ),
         }
 
         // The metrics half: windowed per-agent summary + the agent's most
         // recent line in the window (what actually happened).
-        let names = log.agent_names();
-        if names.is_empty() {
+        if st.agents.is_empty() {
             out.push_str(
                 "\n  per-agent metrics: no agents have metrics files yet (the store is \
                  created on the first recorded run)",
             );
         } else {
             out.push_str("\n  per-agent metrics (window) + most recent line:");
-        }
-        let (mut tok_in, mut tok_out, mut runs) = (0u64, 0u64, 0u32);
-        for name in &names {
-            let summary = log.summary_between(name, Some(since), None);
-            tok_in += summary.tokens_in;
-            tok_out += summary.tokens_out;
-            runs += summary.runs;
-            let label = match summary.format_labeled(name) {
-                s if s.is_empty() => format!("{name}: no activity in window"),
-                s => s,
-            };
-            let last = log.lines_since(name, Some(since)).pop();
-            match last {
-                Some(l) => out.push_str(&format!("\n    {label} [last: {}]", l.describe())),
-                None => out.push_str(&format!("\n    {label}")),
+            for a in &st.agents {
+                let label = match a.summary.format_labeled(&a.name) {
+                    s if s.is_empty() => format!("{}: no activity in window", a.name),
+                    s => s,
+                };
+                match &a.last_line {
+                    Some(l) => out.push_str(&format!("\n    {label} [last: {l}]")),
+                    None => out.push_str(&format!("\n    {label}")),
+                }
             }
         }
 
         // The loop-cost line: fleet token spend over the window (from the
         // metrics store — the runs the loop improves, not the improvement
         // checks' own LLM calls).
-        if runs > 0 || tok_in > 0 || tok_out > 0 {
+        let spend = st.fleet_spend;
+        if spend.runs > 0 || spend.tokens_in > 0 || spend.tokens_out > 0 {
             out.push_str(&format!(
-                "\n  token spend (window): {tok_in} in / {tok_out} out over {runs} run(s)",
+                "\n  token spend (window): {} in / {} out over {} run(s)",
+                spend.tokens_in, spend.tokens_out, spend.runs
             ));
-            if runs > 0 {
+            if spend.runs > 0 {
                 out.push_str(&format!(
                     " (avg {:.0} in / {:.0} out per run)",
-                    tok_in as f64 / runs as f64,
-                    tok_out as f64 / runs as f64
+                    spend.tokens_in as f64 / spend.runs as f64,
+                    spend.tokens_out as f64 / spend.runs as f64
                 ));
             }
         }

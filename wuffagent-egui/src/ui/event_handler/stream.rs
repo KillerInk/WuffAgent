@@ -64,6 +64,8 @@ impl ChatApp {
         }
         // Token tracker: a round just finished and was logged.
         self.dialogs.usage_panel.mark_dirty();
+        // Fleet dashboard (3a): new metrics may have been recorded.
+        self.dialogs.dashboard.mark_dirty();
     }
 
     /// StreamComplete arm of `handle_event`.
@@ -115,6 +117,8 @@ impl ChatApp {
         self.drain_next_queued_message(sid);
         // Token tracker: the run finished and its final round was logged.
         self.dialogs.usage_panel.mark_dirty();
+        // Fleet dashboard (3a): the run's metrics line was recorded.
+        self.dialogs.dashboard.mark_dirty();
     }
 
     /// StreamError arm of `handle_event`.

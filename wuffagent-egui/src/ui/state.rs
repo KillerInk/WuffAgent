@@ -142,6 +142,7 @@ impl ChatApp {
                 agent_config_dialog: None,
                 memory_panel: super::memory_panel::MemoryPanel::new(),
                 usage_panel: super::usage_panel::UsagePanel::new(),
+                dashboard: super::dashboard::FleetDashboard::new(),
                 mcp_panel: super::mcp_panel::McpPanel::new(),
                 improvements_panel: {
                     // G.1: suggestions pending since the last run come

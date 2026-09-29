@@ -77,6 +77,19 @@ impl ChatApp {
                             self.dialogs.usage_panel.show_panel = true;
                         }
 
+                        // Fleet dashboard button (3a: per-agent KPI cards +
+                        // trend + improvement-loop state).
+                        let dashboard_btn = egui::Button::new("🚦")
+                            .fill(theme.surface_light)
+                            .corner_radius(4);
+                        if ui
+                            .add(dashboard_btn)
+                            .on_hover_text("Fleet dashboard (agent stats + improvement loop)")
+                            .clicked()
+                        {
+                            self.dialogs.dashboard.show = true;
+                        }
+
                         // MCP servers button
                         let mcp_btn = egui::Button::new("🔌")
                             .fill(theme.surface_light)
@@ -162,6 +175,12 @@ impl ChatApp {
         self.dialogs
             .usage_panel
             .draw(ctx, &Theme::from_name(&self.core.config.theme));
+
+        // Draw fleet dashboard on top (disjoint field borrows: the panel
+        // (mutable) + the memory manager (immutable) are separate fields).
+        self.dialogs
+            .dashboard
+            .draw(ctx, &Theme::from_name(&self.core.config.theme), &self.core.memory_manager);
 
         // Draw MCP panel on top (disjoint field borrows; `&mut self.core.config`
         // so the panel can persist server changes).
