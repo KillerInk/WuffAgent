@@ -8,7 +8,10 @@ use eframe::egui;
 use super::agent_history;
 use super::theme::Theme;
 use wuffagent_core::agents::config::{AgentConfig, AgentManager};
-use wuffagent_core::agents::metrics::MetricsLine;
+use wuffagent_core::agents::metrics::{
+    bucket_summary_from_lines, metrics_report_from_lines, MetricsLine,
+};
+use wuffagent_core::stats::bucket::Granularity;
 use wuffagent_core::tools::{ToolManager, ToolOutput, ToolParams};
 use wuffagent_core::types::AppEvent;
 
@@ -146,6 +149,35 @@ fn build_tools_tree(tools: &[String]) -> Vec<ToolNode> {
     tree
 }
 
+/// 3b: the agent editor's metrics window toggle (the summary + per-tool
+/// table recompute from the 2a cached vec; the outcome mini-chart always
+/// shows the last 30 days regardless).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetricsWindow {
+    Day7,
+    Day30,
+    AllTime,
+}
+
+impl MetricsWindow {
+    /// `None` = unbounded (all-time).
+    fn since(&self, now: chrono::DateTime<chrono::Utc>) -> Option<chrono::DateTime<chrono::Utc>> {
+        match self {
+            MetricsWindow::Day7 => Some(now - chrono::Duration::days(7)),
+            MetricsWindow::Day30 => Some(now - chrono::Duration::days(30)),
+            MetricsWindow::AllTime => None,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            MetricsWindow::Day7 => "7d",
+            MetricsWindow::Day30 => "30d",
+            MetricsWindow::AllTime => "all-time",
+        }
+    }
+}
+
 /// UI dialog for adding/editing/removing agent configurations.
 pub struct AgentConfigDialog {
     /// Loaded agents from disk.
@@ -205,6 +237,9 @@ pub struct AgentConfigDialog {
     /// per-frame metrics/evals blocks re-read the JSONL only when the file
     /// changed (len or mtime), instead of scanning it twice per frame.
     metrics_cache: std::collections::HashMap<String, (u64, std::time::SystemTime, Vec<MetricsLine>)>,
+    /// 3b: the metrics window toggle for the read-only metrics block
+    /// (7d / 30d / all-time; default all-time = the pre-3b view).
+    metrics_window: MetricsWindow,
 }
 
 impl AgentConfigDialog {
@@ -257,6 +292,7 @@ impl AgentConfigDialog {
             run_eval_status: None,
             runtime: runtime.clone(),
             metrics_cache: std::collections::HashMap::new(),
+            metrics_window: MetricsWindow::AllTime,
         }
     }
 
@@ -561,38 +597,177 @@ impl AgentConfigDialog {
             // 2a: cached lines + pure aggregation (one file read when the
             // file changed, none otherwise — was two full scans per frame).
             let lines = self.cached_metrics_lines(name);
-            let summary = wuffagent_core::agents::metrics::MetricsSummary::from_lines(&lines);
-            if summary.runs + summary.feedback_up + summary.feedback_down > 0 {
+            // The gate stays all-time (the block appears once the agent has
+            // ANY metrics); the window toggle only scopes the numbers inside.
+            let any = wuffagent_core::agents::metrics::MetricsSummary::from_lines(&lines);
+            if any.runs + any.feedback_up + any.feedback_down > 0 {
                 ui.separator();
-                // The last five lines, newest first (display order).
-                let recent: Vec<String> = lines
-                    .iter()
-                    .rev()
-                    .take(5)
-                    .map(|l| l.describe())
-                    .collect();
-                ui.group(|ui| {
-                    ui.label(egui::RichText::new("Recent metrics (all time):").strong());
-                    ui.label(format!(
-                        "{} run(s): {} verified, {} after retry, {} gave up, {} before verification; {} tool call(s) ({} errors); feedback {} up / {} down",
-                        summary.runs,
-                        summary.verified,
-                        summary.verified_after_retry,
-                        summary.gave_up,
-                        summary.not_verified,
-                        summary.tool_calls,
-                        summary.tool_errors,
-                        summary.feedback_up,
-                        summary.feedback_down
-                    ));
-                    for desc in &recent {
-                        ui.label(
-                            egui::RichText::new(format!("  {desc}")).weak().small(),
-                        );
-                    }
-                });
+                self.draw_agent_metrics_block(ui, name, &lines);
             }
         }
+    }
+
+    /// 3b: the read-only agent metrics block, windowed: 7d/30d/all-time
+    /// toggle, the windowed summary + cost + percentiles + model mix, the
+    /// per-tool table, a 30-day outcome mini-chart (runs bars + gave-up
+    /// line), and the last five metric lines. Everything computes from the
+    /// 2a cached vec (no per-frame JSONL scan).
+    fn draw_agent_metrics_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent: &str,
+        lines: &[MetricsLine],
+    ) {
+        use super::charts::{fmt_tokens, fmt_usd, index_series, trend_plot};
+        use egui_plot::Line;
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Metrics:").strong());
+            for w in [
+                MetricsWindow::Day7,
+                MetricsWindow::Day30,
+                MetricsWindow::AllTime,
+            ] {
+                ui.selectable_value(&mut self.metrics_window, w, w.label());
+            }
+        });
+
+        let now = chrono::Utc::now();
+        let report =
+            metrics_report_from_lines(lines, self.metrics_window.since(now), None);
+        let s = &report.summary;
+
+        let mut summary = format!(
+            "{} run(s): {} verified, {} after retry, {} gave up, {} before verification; {} tool call(s) ({} errors); feedback {} up / {} down",
+            s.runs,
+            s.verified,
+            s.verified_after_retry,
+            s.gave_up,
+            s.not_verified,
+            s.tool_calls,
+            s.tool_errors,
+            s.feedback_up,
+            s.feedback_down
+        );
+        if report.cost_usd > f64::EPSILON {
+            summary.push_str(&format!("; cost {}", fmt_usd(report.cost_usd)));
+        }
+        ui.label(egui::RichText::new(summary).small());
+
+        // Percentiles + model mix (windowed; only when the window has runs).
+        if report.p50_duration_ms.is_some() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "p50/p95 duration: {} / {} ms · tokens/run: {} / {}",
+                    report.p50_duration_ms.map_or("—".to_string(), |v| v.to_string()),
+                    report.p95_duration_ms.map_or("—".to_string(), |v| v.to_string()),
+                    report.p50_tokens.map_or("—".to_string(), |v| fmt_tokens(v)),
+                    report.p95_tokens.map_or("—".to_string(), |v| fmt_tokens(v)),
+                ))
+                .weak()
+                .small(),
+            );
+        }
+        if !report.model_mix.is_empty() {
+            let mix: Vec<String> = report
+                .model_mix
+                .iter()
+                .take(3)
+                .map(|(m, n)| format!("{m} ({n})"))
+                .collect();
+            ui.label(
+                egui::RichText::new(format!("models: {}", mix.join(", ")))
+                    .weak()
+                    .small(),
+            );
+        }
+
+        // Per-tool table (windowed; only when the window has tool stats).
+        if !report.tool_stats.is_empty() {
+            let grid = egui::Grid::new(format!("agent_tools_{agent}"))
+                .striped(true)
+                .spacing(egui::vec2(14.0, 2.0));
+            grid.show(ui, |ui| {
+                ui.weak("tool");
+                ui.weak("calls");
+                ui.weak("err %");
+                ui.weak("avg ms");
+                ui.end_row();
+                for t in &report.tool_stats {
+                    let err = if t.calls > 0 {
+                        100.0 * t.errors as f64 / t.calls as f64
+                    } else {
+                        0.0
+                    };
+                    ui.label(t.name.clone());
+                    ui.label(t.calls.to_string());
+                    ui.label(format!("{err:.0}%"));
+                    ui.label(t.avg_ms.to_string());
+                    ui.end_row();
+                }
+            });
+        }
+
+        // 30-day outcome mini-chart: runs bars + gave-up line (always the
+        // last 30 days; the toggle only scopes the numbers above).
+        let buckets = bucket_summary_from_lines(lines, Granularity::Day, now);
+        if buckets.iter().any(|b| b.runs > 0) {
+            let runs: Vec<f64> = buckets.iter().map(|b| b.runs as f64).collect();
+            let gave_up_pts = index_series(
+                &buckets.iter().map(|b| b.gave_up as f64).collect::<Vec<_>>(),
+            );
+            let tick_labels: Vec<String> = buckets
+                .iter()
+                .map(|b| b.start.format("%m-%d").to_string())
+                .collect();
+            let mut hovered_x: Option<f64> = None;
+            let resp = trend_plot(
+                ui,
+                &format!("agent_trend_{agent}"),
+                buckets.len(),
+                120.0,
+                Some((index_series(&runs), ui.visuals().hyperlink_color)),
+                vec![Line::new("gave up", gave_up_pts).width(1.5)],
+                move |i| tick_labels[i].clone(),
+                |v| (v as u32).to_string(),
+                &mut hovered_x,
+            );
+            if resp.hovered() {
+                if let Some(x) = hovered_x {
+                    let i = x.round().clamp(0.0, (buckets.len() - 1) as f64) as usize;
+                    let b = &buckets[i];
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} — {} run(s) · {} tool call(s) · {} err · {} gave up · {} after retry",
+                            b.start.format("%Y-%m-%d"),
+                            b.runs,
+                            b.tool_calls,
+                            b.tool_errors,
+                            b.gave_up,
+                            b.verified_after_retry
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
+            }
+        }
+
+        // The last five lines, newest first (window-independent).
+        let recent: Vec<String> = lines
+            .iter()
+            .rev()
+            .take(5)
+            .map(|l| l.describe())
+            .collect();
+        ui.group(|ui| {
+            ui.label(
+                egui::RichText::new("Recent metric lines (latest 5):").strong(),
+            );
+            for desc in &recent {
+                ui.label(egui::RichText::new(format!("  {desc}")).weak().small());
+            }
+        });
     }
 
     /// 2d: the golden/regression eval panel for the selected EXISTING agent —

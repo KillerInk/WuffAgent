@@ -1321,3 +1321,125 @@ fn test_fleet_loop_status_unions_and_sums() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&mdir);
 }
+
+/// 3b: the pure `metrics_report_from_lines` must produce EXACTLY the same
+/// report as `MetricsLog::report` over the same file (the egui agent editor
+/// feeds the cached vec to the pure fn; both paths must agree).
+#[test]
+fn test_report_from_lines_matches_report() {
+    let dir = tmp_dir("report-from-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let path = log.agent_path("coder");
+    use std::io::Write;
+    // One run with a tool histogram + model + cost, one plain run, one
+    // feedback line (non-Run lines must not count as runs).
+    {
+        let mut f = OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"run","ts":"2026-09-10T00:00:00.000Z","tool_calls":3,"tool_errors":1,"verification_attempts":1,"duration_ms":5000,"outcome":"verified","tokens_in":100,"tokens_out":50,"tools":[{{"name":"shell","calls":2,"errors":1,"duration_ms":3000}},{{"name":"read_file","calls":1,"errors":0,"duration_ms":100}}],"model":"test-model","cost_usd":0.05}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"run","ts":"2026-09-12T00:00:00.000Z","tool_calls":1,"tool_errors":0,"verification_attempts":1,"duration_ms":2000,"outcome":"gave_up","tokens_in":10,"tokens_out":5}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"feedback","ts":"2026-09-12T01:00:00.000Z","feedback":"up"}}"#
+        )
+        .unwrap();
+    }
+
+    let lines = log.read_all("coder");
+    let via_method = log.report("coder", None, None);
+    let via_lines = metrics_report_from_lines(&lines, None, None);
+    assert_eq!(via_method, via_lines, "pure fn and method must agree");
+    // Spot-check the interesting bits actually landed (not both empty).
+    assert_eq!(via_lines.summary.runs, 2);
+    assert_eq!(via_lines.summary.tool_calls, 4);
+    assert_eq!(via_lines.cost_usd, 0.05);
+    assert_eq!(via_lines.tool_stats.len(), 2);
+    let shell = via_lines.tool_stats.iter().find(|t| t.name == "shell").unwrap();
+    assert_eq!((shell.calls, shell.errors, shell.avg_ms), (2, 1, 1500));
+    // Tie (1 run each) → name-ascending: "(unknown)" sorts before "test-model".
+    assert_eq!(via_lines.model_mix, vec![("(unknown)".to_string(), 1), ("test-model".to_string(), 1)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 3b: `metrics_report_from_lines` windows by `since`/`end` the same way
+/// `report` does (the egui 7d/30d/all-time toggle feeds this).
+#[test]
+fn test_report_from_lines_window() {
+    let dir = tmp_dir("report-window");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let path = log.agent_path("coder");
+    use std::io::Write;
+    let now = Utc::now();
+    let run_at = |hours_ago: i64, outcome: &str| {
+        let ts = (now - chrono::Duration::hours(hours_ago)).to_rfc3339();
+        let mut f = OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"run","ts":"{ts}","tool_calls":1,"tool_errors":0,"verification_attempts":1,"duration_ms":10,"outcome":"{outcome}","tokens_in":1,"tokens_out":1}}"#
+        )
+        .unwrap();
+        drop(f);
+    };
+    run_at(1, "verified"); // inside 7d AND 30d
+    run_at(20, "verified"); // inside 7d AND 30d
+    run_at(10 * 24, "gave_up"); // inside 30d only (10d ago)
+    run_at(40 * 24, "verified"); // outside both (40d ago)
+
+    let lines = log.read_all("coder");
+    let all = metrics_report_from_lines(&lines, None, None);
+    let w7 = metrics_report_from_lines(&lines, Some(now - chrono::Duration::days(7)), None);
+    let w30 = metrics_report_from_lines(&lines, Some(now - chrono::Duration::days(30)), None);
+    assert_eq!(all.summary.runs, 4);
+    assert_eq!(w7.summary.runs, 2, "7d window: only the two fresh runs");
+    assert_eq!(w7.summary.gave_up, 0);
+    assert_eq!(w30.summary.runs, 3, "30d window: drops the 25d-old run");
+    assert_eq!(w30.summary.gave_up, 1);
+    // The windowed summary path must match the method over the same window.
+    let via_method = log.report("coder", Some(now - chrono::Duration::days(30)), None);
+    assert_eq!(w30.summary, via_method.summary);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 3b: `bucket_summary_from_lines` must match `MetricsLog::bucket_summary`
+/// over the same file (the egui outcome mini-chart uses the pure fn).
+#[test]
+fn test_bucket_from_lines_matches_method() {
+    let dir = tmp_dir("bucket-from-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let path = log.agent_path("coder");
+    use std::io::Write;
+    let now = Utc::now();
+    // Runs spread across the last 3 days (all inside the Day window).
+    for h in [1, 30, 70] {
+        let ts = (now - chrono::Duration::hours(h)).to_rfc3339();
+        let mut f = OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"run","ts":"{ts}","tool_calls":2,"tool_errors":1,"verification_attempts":1,"duration_ms":100,"outcome":"gave_up","tokens_in":7,"tokens_out":3}}"#
+        )
+        .unwrap();
+        drop(f);
+    }
+
+    let lines = log.read_all("coder");
+    let via_method = log.bucket_summary("coder", Granularity::Day, now);
+    let via_lines = bucket_summary_from_lines(&lines, Granularity::Day, now);
+    assert_eq!(via_method, via_lines, "pure fn and method must agree");
+    assert_eq!(via_lines.len(), 30, "Day window is 30 buckets");
+    let total: u32 = via_lines.iter().map(|b| b.runs).sum();
+    assert_eq!(total, 3, "all three runs land in the window");
+    let _ = std::fs::remove_dir_all(&dir);
+}

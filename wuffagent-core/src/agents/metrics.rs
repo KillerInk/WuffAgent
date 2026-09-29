@@ -342,6 +342,20 @@ impl MetricsLine {
             ),
         }
     }
+
+    /// 3b: the line's UTC timestamp (every variant carries one) — lets the
+    /// egui cache (which holds `Vec<MetricsLine>`) window lines without the
+    /// field being public.
+    pub fn ts(&self) -> DateTime<Utc> {
+        match self {
+            MetricsLine::Run { ts, .. }
+            | MetricsLine::Feedback { ts, .. }
+            | MetricsLine::SkillUse { ts, .. }
+            | MetricsLine::Trim { ts, .. }
+            | MetricsLine::Check { ts, .. }
+            | MetricsLine::Eval { ts, .. } => *ts,
+        }
+    }
 }
 
 /// 2c: percentile of an ASCENDING-sorted slice, `p` on a 0..=100 scale,
@@ -361,6 +375,181 @@ pub fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
     let hi = (lo + 1).min(sorted.len() - 1);
     let frac = rank - lo as f64;
     Some(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+}
+
+/// 3b: `MetricsReport::report`'s computation as a pure fn over an already
+/// loaded `Vec<MetricsLine>` — the egui agent editor (2a cache) feeds it the
+/// cached vec per selected window instead of re-scanning the JSONL per frame.
+/// Window semantics identical to `report`: `ts >= since && ts < end`
+/// (`None` bounds = unbounded).
+pub fn metrics_report_from_lines(
+    lines: &[MetricsLine],
+    since: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+) -> MetricsReport {
+    let mut report = MetricsReport {
+        summary: MetricsSummary::from_lines(lines),
+        p50_duration_ms: None,
+        p95_duration_ms: None,
+        p50_tokens: None,
+        p95_tokens: None,
+        tool_stats: Vec::new(),
+        model_mix: Vec::new(),
+        cost_usd: 0.0,
+    };
+    // The summary must reflect the SAME window as the per-run stats below:
+    // re-filter for the window when one is active (from_lines is all-time).
+    if since.is_some() || end.is_some() {
+        report.summary = windowed_summary(lines, since, end);
+    }
+
+    let mut durations: Vec<f64> = Vec::new();
+    let mut tokens: Vec<f64> = Vec::new();
+    let mut tool_acc: std::collections::BTreeMap<String, (u32, u32, u64)> =
+        std::collections::BTreeMap::new();
+    let mut models: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for line in lines {
+        let MetricsLine::Run {
+            ts,
+            duration_ms,
+            tokens_in,
+            tokens_out,
+            tools,
+            model,
+            cost_usd,
+            ..
+        } = line
+        else {
+            continue;
+        };
+        if let Some(s) = since {
+            if *ts < s {
+                continue;
+            }
+        }
+        if let Some(e) = end {
+            if *ts >= e {
+                continue;
+            }
+        }
+        durations.push(*duration_ms as f64);
+        tokens.push((tokens_in + tokens_out) as f64);
+        for t in tools {
+            let e = tool_acc.entry(t.name.clone()).or_insert((0, 0, 0));
+            e.0 += t.calls;
+            e.1 += t.errors;
+            e.2 += t.duration_ms;
+        }
+        let key = if model.is_empty() {
+            "(unknown)"
+        } else {
+            model.as_str()
+        };
+        *models.entry(key.to_string()).or_insert(0) += 1;
+        report.cost_usd += cost_usd;
+    }
+
+    durations.sort_by(f64::total_cmp);
+    tokens.sort_by(f64::total_cmp);
+    report.p50_duration_ms = percentile(&durations, 50.0).map(|v| v.round() as u64);
+    report.p95_duration_ms = percentile(&durations, 95.0).map(|v| v.round() as u64);
+    report.p50_tokens = percentile(&tokens, 50.0).map(|v| v.round() as u64);
+    report.p95_tokens = percentile(&tokens, 95.0).map(|v| v.round() as u64);
+    report.tool_stats = tool_acc
+        .into_iter()
+        .map(|(name, (calls, errors, total_ms))| ReportToolStat {
+            name,
+            calls,
+            errors,
+            avg_ms: if calls > 0 { total_ms / calls as u64 } else { 0 },
+        })
+        .collect();
+    report.model_mix = models.into_iter().collect();
+    report
+        .model_mix
+        .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    report
+}
+
+/// 3b: `MetricsLog::bucket_summary`'s bucketing as a pure fn over an already
+/// loaded `Vec<MetricsLine>` (the egui 2a cache feeds it the cached vec —
+/// no JSONL re-scan per frame). Same window/bucket math as the method.
+pub fn bucket_summary_from_lines(
+    lines: &[MetricsLine],
+    granularity: Granularity,
+    now: DateTime<Utc>,
+) -> Vec<BucketSummary> {
+    let mut buckets: Vec<BucketSummary> = bucket_starts(granularity, now)
+        .into_iter()
+        .map(|start| BucketSummary {
+            start,
+            runs: 0,
+            tool_calls: 0,
+            tool_errors: 0,
+            gave_up: 0,
+            verified_after_retry: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            duration_ms_sum: 0,
+        })
+        .collect();
+    for line in lines {
+        let MetricsLine::Run {
+            ts,
+            tool_calls,
+            tool_errors,
+            duration_ms,
+            outcome,
+            tokens_in,
+            tokens_out,
+            ..
+        } = line
+        else {
+            continue;
+        };
+        let Some(i) = bucket_index_utc(granularity, now, *ts) else {
+            continue;
+        };
+        let b = &mut buckets[i];
+        b.runs += 1;
+        b.tool_calls += tool_calls;
+        b.tool_errors += tool_errors;
+        b.tokens_in += tokens_in;
+        b.tokens_out += tokens_out;
+        b.duration_ms_sum += duration_ms;
+        match outcome {
+            RunOutcome::GaveUp => b.gave_up += 1,
+            RunOutcome::VerifiedAfterRetry => b.verified_after_retry += 1,
+            RunOutcome::Verified | RunOutcome::None => {}
+        }
+    }
+    buckets
+}
+
+/// 3b: `MetricsSummary` over the window `ts >= since && ts < end` (an
+/// all-time `from_lines` re-filtered by the same per-line computation) —
+/// the windowed twin of `MetricsSummary::from_lines`.
+fn windowed_summary(
+    lines: &[MetricsLine],
+    since: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+) -> MetricsSummary {
+    let mut s = MetricsSummary::default();
+    for line in lines {
+        let ts = line.ts();
+        if let Some(s_) = since {
+            if ts < s_ {
+                continue;
+            }
+        }
+        if let Some(e) = end {
+            if ts >= e {
+                continue;
+            }
+        }
+        accumulate(&mut s, line);
+    }
+    s
 }
 
 /// 2c: one tool's aggregated breakdown over a report window (the
@@ -913,51 +1102,10 @@ impl MetricsLog {
         granularity: Granularity,
         now: DateTime<Utc>,
     ) -> Vec<BucketSummary> {
-        let mut buckets: Vec<BucketSummary> = bucket_starts(granularity, now)
-            .into_iter()
-            .map(|start| BucketSummary {
-                start,
-                runs: 0,
-                tool_calls: 0,
-                tool_errors: 0,
-                gave_up: 0,
-                verified_after_retry: 0,
-                tokens_in: 0,
-                tokens_out: 0,
-                duration_ms_sum: 0,
-            })
-            .collect();
-        for line in self.read_all(agent) {
-            let MetricsLine::Run {
-                ts,
-                tool_calls,
-                tool_errors,
-                duration_ms,
-                outcome,
-                tokens_in,
-                tokens_out,
-                ..
-            } = line
-            else {
-                continue;
-            };
-            let Some(i) = bucket_index_utc(granularity, now, ts) else {
-                continue;
-            };
-            let b = &mut buckets[i];
-            b.runs += 1;
-            b.tool_calls += tool_calls;
-            b.tool_errors += tool_errors;
-            b.tokens_in += tokens_in;
-            b.tokens_out += tokens_out;
-            b.duration_ms_sum += duration_ms;
-            match outcome {
-                RunOutcome::GaveUp => b.gave_up += 1,
-                RunOutcome::VerifiedAfterRetry => b.verified_after_retry += 1,
-                RunOutcome::Verified | RunOutcome::None => {}
-            }
-        }
-        buckets
+        // 3b: the bucketing lives in the pure `bucket_summary_from_lines`
+        // (shared with the egui agent editor's cached vec) — this method is
+        // just the file read + delegate.
+        bucket_summary_from_lines(&self.read_all(agent), granularity, now)
     }
 
     /// 2c: full report over the window `ts >= since && ts < end`
@@ -969,79 +1117,10 @@ impl MetricsLog {
         since: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
     ) -> MetricsReport {
-        let mut report = MetricsReport {
-            summary: self.summary_between(agent, since, end),
-            p50_duration_ms: None,
-            p95_duration_ms: None,
-            p50_tokens: None,
-            p95_tokens: None,
-            tool_stats: Vec::new(),
-            model_mix: Vec::new(),
-            cost_usd: 0.0,
-        };
-
-        let mut durations: Vec<f64> = Vec::new();
-        let mut tokens: Vec<f64> = Vec::new();
-        let mut tool_acc: std::collections::BTreeMap<String, (u32, u32, u64)> =
-            std::collections::BTreeMap::new();
-        let mut models: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
-        for line in self.read_all(agent) {
-            let MetricsLine::Run {
-                ts,
-                duration_ms,
-                tokens_in,
-                tokens_out,
-                tools,
-                model,
-                cost_usd,
-                ..
-            } = line
-            else {
-                continue;
-            };
-            if let Some(s) = since {
-                if ts < s {
-                    continue;
-                }
-            }
-            if let Some(e) = end {
-                if ts >= e {
-                    continue;
-                }
-            }
-            durations.push(duration_ms as f64);
-            tokens.push((tokens_in + tokens_out) as f64);
-            for t in &tools {
-                let e = tool_acc.entry(t.name.clone()).or_insert((0, 0, 0));
-                e.0 += t.calls;
-                e.1 += t.errors;
-                e.2 += t.duration_ms;
-            }
-            let key = if model.is_empty() { "(unknown)" } else { model.as_str() };
-            *models.entry(key.to_string()).or_insert(0) += 1;
-            report.cost_usd += cost_usd;
-        }
-
-        durations.sort_by(f64::total_cmp);
-        tokens.sort_by(f64::total_cmp);
-        report.p50_duration_ms = percentile(&durations, 50.0).map(|v| v.round() as u64);
-        report.p95_duration_ms = percentile(&durations, 95.0).map(|v| v.round() as u64);
-        report.p50_tokens = percentile(&tokens, 50.0).map(|v| v.round() as u64);
-        report.p95_tokens = percentile(&tokens, 95.0).map(|v| v.round() as u64);
-        report.tool_stats = tool_acc
-            .into_iter()
-            .map(|(name, (calls, errors, total_ms))| ReportToolStat {
-                name,
-                calls,
-                errors,
-                avg_ms: if calls > 0 { total_ms / calls as u64 } else { 0 },
-            })
-            .collect();
-        report.model_mix = models.into_iter().collect();
-        report
-            .model_mix
-            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        report
+        // 3b: the computation lives in the pure `metrics_report_from_lines`
+        // (shared with the egui agent editor's cached vec) — this method is
+        // just the file read + delegate.
+        metrics_report_from_lines(&self.read_all(agent), since, end)
     }
 
     /// 2c: before/after comparison — the CURRENT window `[now-days, now)`
