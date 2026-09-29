@@ -835,6 +835,7 @@ cost_usd: 0.0,
         let up = serde_json::to_value(MetricsLine::Feedback {
             ts: Utc::now(),
             feedback: FeedbackKind::Up,
+            run_id: None,
         })
         .unwrap();
         assert_eq!(up["kind"], "feedback");

@@ -133,6 +133,10 @@ pub enum MetricsLine {
         /// UTC timestamp of the rating.
         ts: DateTime<Utc>,
         feedback: FeedbackKind,
+        /// 3d: the specific run the rating is about (`Some(run_id)` =
+        /// run-level feedback, `None` = legacy message-level rating).
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// An agent read a skill (usage signal for the improver).
     SkillUse {
@@ -281,10 +285,14 @@ impl MetricsLine {
                 }
                 s
             }
-            MetricsLine::Feedback { ts, feedback } => format!(
-                "{} feedback: {}",
+            MetricsLine::Feedback { ts, feedback, run_id } => format!(
+                "{} feedback: {}{}",
                 ts.format("%Y-%m-%d %H:%M"),
-                if *feedback == FeedbackKind::Up { "up" } else { "down" }
+                if *feedback == FeedbackKind::Up { "up" } else { "down" },
+                run_id
+                    .as_deref()
+                    .map(|id| format!(" (run {id})"))
+                    .unwrap_or_default()
             ),
             MetricsLine::SkillUse { ts, skill } => {
                 format!("{} skill used: {}", ts.format("%Y-%m-%d %H:%M"), skill)
@@ -623,6 +631,11 @@ pub struct MetricsSummary {
     pub not_verified: u32,
     pub feedback_up: u32,
     pub feedback_down: u32,
+    /// 3d: feedback lines attached to a specific run (`run_id` set) — the
+    /// run-level subset of `feedback_up` (message-level = up - run_up).
+    pub feedback_run_up: u32,
+    /// 3d: run-level subset of `feedback_down` (see `feedback_run_up`).
+    pub feedback_run_down: u32,
     /// Total wall-clock duration of the counted runs, in milliseconds
     /// (2c: lets the `read_metrics` tool and the effect check report
     /// duration averages/deltas without re-reading the raw lines).
@@ -956,7 +969,7 @@ impl MetricsLog {
         );
     }
 
-    /// Append a user-feedback line for `agent`.
+    /// Append a user-feedback line for `agent` (message-level: no run link).
     pub fn log_feedback(&self, agent: &str, up: bool) {
         self.append(
             agent,
@@ -967,6 +980,25 @@ impl MetricsLog {
                 } else {
                     FeedbackKind::Down
                 },
+                run_id: None,
+            },
+        );
+    }
+
+    /// 3d: append a RUN-LEVEL user-feedback line for `agent`, linked to the
+    /// specific run `run_id` (the agent editor's 👍/👎 on a recent-run row).
+    /// `run_id` is the Run line's 1e join key.
+    pub fn log_feedback_run(&self, agent: &str, run_id: &str, up: bool) {
+        self.append(
+            agent,
+            &MetricsLine::Feedback {
+                ts: Utc::now(),
+                feedback: if up {
+                    FeedbackKind::Up
+                } else {
+                    FeedbackKind::Down
+                },
+                run_id: Some(run_id.to_string()),
             },
         );
     }
@@ -1381,9 +1413,21 @@ fn accumulate(s: &mut MetricsSummary, line: &MetricsLine) {
                 RunOutcome::None => s.not_verified += 1,
             }
         }
-        MetricsLine::Feedback { feedback, .. } => match feedback {
-            FeedbackKind::Up => s.feedback_up += 1,
-            FeedbackKind::Down => s.feedback_down += 1,
+        MetricsLine::Feedback {
+            feedback, run_id, ..
+        } => match feedback {
+            FeedbackKind::Up => {
+                s.feedback_up += 1;
+                if run_id.is_some() {
+                    s.feedback_run_up += 1;
+                }
+            }
+            FeedbackKind::Down => {
+                s.feedback_down += 1;
+                if run_id.is_some() {
+                    s.feedback_run_down += 1;
+                }
+            }
         },
         MetricsLine::Trim { .. } => {
             s.trims += 1;

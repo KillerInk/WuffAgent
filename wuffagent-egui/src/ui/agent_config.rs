@@ -9,7 +9,7 @@ use super::agent_history;
 use super::theme::Theme;
 use wuffagent_core::agents::config::{AgentConfig, AgentManager};
 use wuffagent_core::agents::metrics::{
-    bucket_summary_from_lines, metrics_report_from_lines, MetricsLine,
+    bucket_summary_from_lines, metrics_report_from_lines, FeedbackKind, MetricsLine,
 };
 use wuffagent_core::stats::bucket::Granularity;
 use wuffagent_core::tools::{ToolManager, ToolOutput, ToolParams};
@@ -753,19 +753,42 @@ impl AgentConfigDialog {
             }
         }
 
-        // The last five lines, newest first (window-independent).
-        let recent: Vec<String> = lines
-            .iter()
-            .rev()
-            .take(5)
-            .map(|l| l.describe())
-            .collect();
+        // The last five lines, newest first (window-independent) — 3d: 👍/👎
+        // on each recent RUN row writes a run-level feedback line linked via
+        // the 1e run_id; the pressed rating stays highlighted (matched from
+        // the Feedback lines of the same file).
         ui.group(|ui| {
             ui.label(
                 egui::RichText::new("Recent metric lines (latest 5):").strong(),
             );
-            for desc in &recent {
-                ui.label(egui::RichText::new(format!("  {desc}")).weak().small());
+            for l in lines.iter().rev().take(5) {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(l.describe()).weak().small());
+                    let MetricsLine::Run { run_id: rid, .. } = l else {
+                        return;
+                    };
+                    if rid.is_empty() {
+                        return;
+                    }
+                    let rated = lines.iter().find_map(|f| match f {
+                        MetricsLine::Feedback {
+                            feedback,
+                            run_id: Some(frid),
+                            ..
+                        } if frid == rid => Some(*feedback),
+                        _ => None,
+                    });
+                    let up = ui
+                        .selectable_label(rated == Some(FeedbackKind::Up), "👍")
+                        .on_hover_text("Rate this run: good");
+                    let down = ui
+                        .selectable_label(rated == Some(FeedbackKind::Down), "👎")
+                        .on_hover_text("Rate this run: bad");
+                    if up.clicked() || down.clicked() {
+                        wuffagent_core::agents::metrics::MetricsLog::default()
+                            .log_feedback_run(agent, rid, up.clicked());
+                    }
+                });
             }
         });
     }

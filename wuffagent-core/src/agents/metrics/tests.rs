@@ -549,6 +549,7 @@ cost_usd: 0.0,
         serde_json::to_string(&MetricsLine::Feedback {
             ts: ts(21, 9),
             feedback: FeedbackKind::Up,
+            run_id: None,
         })
         .unwrap()
     )
@@ -1441,5 +1442,55 @@ fn test_bucket_from_lines_matches_method() {
     assert_eq!(via_lines.len(), 30, "Day window is 30 buckets");
     let total: u32 = via_lines.iter().map(|b| b.runs).sum();
     assert_eq!(total, 3, "all three runs land in the window");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 3d: run-level feedback lines carry `run_id` through serde, legacy
+/// message-level lines (no `run_id` field) parse as `None`, and the summary
+/// counts run-level feedback separately from — while still including it in —
+/// the feedback totals.
+#[test]
+fn test_feedback_run_level_counts_and_legacy() {
+    let dir = tmp_dir("feedback-run-level");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    let path = log.agent_path("coder");
+    use std::io::Write;
+    let ts = Utc::now().to_rfc3339();
+    // Legacy pre-3d lines: message-level (no `run_id` field in the JSON).
+    let mut f = OpenOptions::new().create(true).append(true).open(&path).unwrap();
+    writeln!(f, r#"{{"kind":"feedback","ts":"{ts}","feedback":"up"}}"#).unwrap();
+    writeln!(f, r#"{{"kind":"feedback","ts":"{ts}","feedback":"down"}}"#).unwrap();
+    drop(f);
+    // 3d writers: run-level (linked) + the legacy message-level writer.
+    log.log_feedback_run("coder", "run-abc", true);
+    log.log_feedback_run("coder", "run-abc", false);
+    log.log_feedback("coder", true);
+
+    let lines = log.read_all("coder");
+    assert_eq!(lines.len(), 5);
+    assert!(
+        matches!(&lines[0], MetricsLine::Feedback { run_id: None, .. }),
+        "legacy line must parse message-level: {lines:?}"
+    );
+    let MetricsLine::Feedback { run_id, .. } = &lines[2] else {
+        panic!("expected a feedback line, got {lines:?}");
+    };
+    assert_eq!(run_id.as_deref(), Some("run-abc"), "writer must link the run");
+    let rt: MetricsLine =
+        serde_json::from_str(&serde_json::to_string(&lines[2]).unwrap()).unwrap();
+    assert_eq!(rt, lines[2], "serde round-trip must preserve run_id");
+    // Totals include run-level; the run-level subset is counted separately.
+    let s = MetricsSummary::from_lines(&lines);
+    assert_eq!(s.feedback_up, 3, "legacy up + run up + message up");
+    assert_eq!(s.feedback_down, 2, "legacy down + run down");
+    assert_eq!(s.feedback_run_up, 1);
+    assert_eq!(s.feedback_run_down, 1);
+    assert!(
+        lines[2].describe().contains("(run run-abc)"),
+        "{}",
+        lines[2].describe()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
