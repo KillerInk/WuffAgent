@@ -31,7 +31,7 @@ use chrono::{Duration, Utc};
 use crate::agents::metrics::{fleet_loop_status, MetricsLine, MetricsLog};
 use crate::memory::MemoryManager;
 use crate::tools::types::{
-    FieldSchema, JsonSchema, Tool, ToolOutput, ToolParams, ToolSchema, ToolResult,
+    FieldSchema, JsonSchema, Tool, ToolError, ToolOutput, ToolParams, ToolSchema, ToolResult,
 };
 
 /// Fallback window when `days` is omitted for the standalone constructor.
@@ -61,16 +61,26 @@ pub struct ReadMetricsTool {
     /// `improvement_metrics_window_days` at registration; `DEFAULT_DAYS` for
     /// the standalone constructor.
     default_days: u64,
+    /// 4c: export-directory override (test seam); `None` =
+    /// `~/.wuffagent/exports`.
+    export_dir: Option<std::path::PathBuf>,
 }
 
 impl ReadMetricsTool {
     pub fn new() -> Self {
-        Self { log: None, memory: None, default_days: DEFAULT_DAYS }
+        Self { log: None, memory: None, default_days: DEFAULT_DAYS, export_dir: None }
     }
 
     /// Use an explicit metrics root instead of the default location (tests).
     pub fn with_log(log: MetricsLog) -> Self {
-        Self { log: Some(log), memory: None, default_days: DEFAULT_DAYS }
+        Self { log: Some(log), memory: None, default_days: DEFAULT_DAYS, export_dir: None }
+    }
+
+    /// 4c: override the export directory (tests — the default would write
+    /// into the real `~/.wuffagent/exports`).
+    pub fn with_export_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.export_dir = Some(dir);
+        self
     }
 
     /// Wire the memory manager for the fleet loop-status view.
@@ -493,7 +503,7 @@ impl Tool for ReadMetricsTool {
          status=true to see the self-improvement loop's fleet-wide state. Agent mode also \
          shows percentiles + a per-tool error table, and compare=true adds a before/after \
           window (Nd vs previous Nd). Agent mode with run_id drills into one run's cross-store \
-          join view (its LLM rounds from the usage log + run-level feedback)."
+          join view (its LLM rounds from the usage log + run-level feedback). export (optional, \"csv\" or \"json\") also writes the window's raw metric lines (all kinds) to a file under ~/.wuffagent/exports/ and appends the file path to the response (fleet mode adds an agent column)."
     }
 
     fn parameters_schema(&self) -> ToolSchema {
@@ -560,6 +570,14 @@ impl Tool for ReadMetricsTool {
                             nullable: true,
                         },
                     ),
+                    (
+                        "export".to_string(),
+                        FieldSchema {
+                            type_name: "string".to_string(),
+                            description: "Also write the window's raw metric lines (all kinds) to a file: \"csv\" (flattened with kind/ts columns, agent column in fleet mode) or \"json\" (array of raw lines). The file lands in ~/.wuffagent/exports/ and the response appends its path".to_string(),
+                            nullable: true,
+                        },
+                    ),
                 ])),
                 required: vec![],
             }),
@@ -585,7 +603,18 @@ impl Tool for ReadMetricsTool {
             .filter(|r| !r.is_empty());
         let status = params.get::<bool>("status").unwrap_or(false);
         let compare = params.get::<bool>("compare").unwrap_or(false);
-        Ok(match agent {
+        let export = params
+            .get::<String>("export")
+            .filter(|e| !e.is_empty())
+            .map(|e| e.to_ascii_lowercase());
+        if let Some(e) = &export {
+            if e != "csv" && e != "json" {
+                return Ok(ToolOutput::error(format!(
+                    "export must be \"csv\" or \"json\" (got {e:?})"
+                )));
+            }
+        }
+        let out = match agent.clone() {
             // 4a: `run_id` drills into one run's cross-store join view.
             Some(name) if run_id.is_some() => self.run_detail_report(&name, &run_id.clone().unwrap()),
             // 2d: `compare` only changes the agent view (before/after block).
@@ -594,7 +623,160 @@ impl Tool for ReadMetricsTool {
             // already shows the agent's own window in full.
             None if status => self.fleet_status_report(days),
             None => self.fleet_report(days),
-        })
+        };
+        // 4c: `export` also writes the window's raw lines (all kinds) to a
+        // file and appends the path — the report text itself is unchanged.
+        if let Some(kind) = export {
+            let (n, path) = self
+                .export_lines(agent.as_deref(), days, &kind)
+                .map_err(ToolError::Execution)?;
+            let text = match &out {
+                ToolOutput::Success(v) => v.as_str().unwrap_or("").to_string(),
+                ToolOutput::Error(e) => e.clone(),
+            };
+            return Ok(ToolOutput::success(format!(
+                "{text}\n\nExported {n} metric line(s) (last {days} day(s)) to {}",
+                path.display()
+            )));
+        }
+        Ok(out)
+    }
+}
+
+impl ReadMetricsTool {
+    /// 4c: writes the window's raw metric lines (ALL kinds — the same
+    /// `days` window as the report, not the report's aggregates) to the
+    /// export dir. JSON = an array of the raw lines (fleet mode injects an
+    /// `agent` key into each line); CSV = flattened (`kind`,`ts` columns,
+    /// `agent` after `ts` in fleet mode, then the union of all remaining
+    /// fields in first-seen order — nested values such as a run's per-tool
+    /// histogram stay compact JSON, missing fields become empty cells).
+    /// Returns `(line_count, file_path)`.
+    fn export_lines(
+        &self,
+        agent: Option<&str>,
+        days: u64,
+        format: &str,
+    ) -> Result<(usize, std::path::PathBuf), String> {
+        let log = self.log();
+        let since = Utc::now() - Duration::days(days as i64);
+        let mut rows: Vec<(Option<String>, MetricsLine)> = Vec::new();
+        if let Some(name) = agent {
+            // Agent mode: no agent column (the scope already says who).
+            for line in log.read_all(name) {
+                if line_ts(&line) >= since {
+                    rows.push((None, line));
+                }
+            }
+        } else {
+            // Fleet mode: every metrics file (agents + skills + fleet),
+            // each line tagged with its file's agent name.
+            for name in log.agent_names() {
+                for line in log.read_all(&name) {
+                    if line_ts(&line) >= since {
+                        rows.push((Some(name.clone()), line));
+                    }
+                }
+            }
+        }
+        let dir = self.export_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("creating export dir: {e}"))?;
+        let stem = match agent {
+            Some(a) => format!("metrics-{a}"),
+            None => "metrics-fleet".to_string(),
+        };
+        let ts = Utc::now().format("%Y%m%d-%H%M%S");
+        let path = dir.join(format!("{stem}-{days}d-{ts}.{format}"));
+        let values: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(a, line)| {
+                let mut v = serde_json::to_value(line).expect("MetricsLine serializes");
+                if let Some(a) = a {
+                    if let Some(obj) = v.as_object_mut() {
+                        // Overwrites the line's own `agent` field (Check/Eval)
+                        // with the file stem — the same value the field
+                        // mirrors, and fixes pre-default empty stems.
+                        obj.insert("agent".into(), serde_json::Value::String(a.clone()));
+                    }
+                }
+                v
+            })
+            .collect();
+        let content = if format == "json" {
+            serde_json::to_string_pretty(&values).map_err(|e| e.to_string())?
+        } else {
+            export_csv(&values)
+        };
+        std::fs::write(&path, content).map_err(|e| e.to_string())?;
+        Ok((values.len(), path))
+    }
+
+    /// 4c: export directory — the test override, or `~/.wuffagent/exports`.
+    fn export_dir(&self) -> std::path::PathBuf {
+        self.export_dir
+            .clone()
+            .unwrap_or_else(|| crate::config::get_wuffagent_home().join("exports"))
+    }
+}
+
+/// 4c: flattens serialized metric lines into CSV (see `export_lines`).
+fn export_csv(values: &[serde_json::Value]) -> String {
+    // Union of the remaining field names, in first-seen order.
+    let mut rest: Vec<String> = Vec::new();
+    for v in values {
+        let Some(obj) = v.as_object() else {
+            continue;
+        };
+        for k in obj.keys() {
+            if k == "kind" || k == "ts" || k == "agent" {
+                continue;
+            }
+            if !rest.iter().any(|r| r == k) {
+                rest.push(k.clone());
+            }
+        }
+    }
+    let has_agent = values.iter().any(|v| v.get("agent").is_some());
+    let mut header: Vec<String> = vec!["kind".to_string(), "ts".to_string()];
+    if has_agent {
+        header.push("agent".to_string());
+    }
+    for r in &rest {
+        header.push(r.clone());
+    }
+    let mut out = header.join(",").to_string();
+    out.push('\n');
+    for v in values {
+        let Some(obj) = v.as_object() else {
+            continue;
+        };
+        let mut row: Vec<String> = vec![
+            csv_cell(obj.get("kind").and_then(|v| v.as_str()).unwrap_or("")),
+            csv_cell(obj.get("ts").and_then(|v| v.as_str()).unwrap_or("")),
+        ];
+        if has_agent {
+            row.push(csv_cell(obj.get("agent").and_then(|v| v.as_str()).unwrap_or("")));
+        }
+        for r in &rest {
+            match obj.get(r.as_str()) {
+                Some(serde_json::Value::Null) | None => row.push(String::new()),
+                Some(serde_json::Value::String(s)) => row.push(csv_cell(s)),
+                Some(other) => row.push(csv_cell(&other.to_string())),
+            }
+        }
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// 4c: RFC-4180 quoting — quote fields containing a comma, quote, or
+/// line break; double inner quotes.
+fn csv_cell(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
     }
 }
 
@@ -627,6 +809,39 @@ mod tests {
             ToolOutput::Success(v) => v.as_str().unwrap_or("").to_string(),
             ToolOutput::Error(e) => panic!("expected success, got error: {e}"),
         }
+    }
+
+    /// 4c test helper: like `call`, but also passes `export`.
+    fn call_export(
+        tool: &ReadMetricsTool,
+        agent: Option<&str>,
+        days: Option<u64>,
+        export: &str,
+    ) -> ToolOutput {
+        let mut values = HashMap::new();
+        if let Some(a) = agent {
+            values.insert("agent".to_string(), serde_json::json!(a));
+        }
+        if let Some(d) = days {
+            values.insert("days".to_string(), serde_json::json!(d));
+        }
+        values.insert("export".to_string(), serde_json::json!(export));
+        match tool.execute(ToolParams { values }) {
+            Ok(out) => out,
+            Err(e) => panic!("unexpected ToolError: {e}"),
+        }
+    }
+
+    /// 4c test helper: append one raw JSONL line with an EXACT ts (the log_*
+    /// writers stamp now, which window tests can't rely on).
+    fn append_raw_line(log: &MetricsLog, agent: &str, line: &str) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log.agent_path(agent))
+            .unwrap();
+        writeln!(f, "{line}").unwrap();
     }
 
     fn call_status(tool: &ReadMetricsTool, days: Option<u64>) -> ToolOutput {
@@ -1092,5 +1307,124 @@ cost_usd: 0.0,
             }
         });
         assert!(out2.contains("No run with run_id 'ghost'"), "got: {out2}");
+    }
+
+    // ── 4c: export ────────────────────────────────────────────────────────
+
+    /// 4c: `export=json` (agent mode) writes the windowed raw lines (all
+    /// kinds, NO agent column) to the export dir, names the file
+    /// `metrics-<agent>-<N>d-*.json`, and appends the path to the response.
+    #[test]
+    fn export_json_agent_mode_writes_window_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        record_run(&log, "coder", 2, 0, 3_000); // in-window run line
+        log.log_feedback_run("coder", "run-1", true); // in-window feedback
+        append_raw_line(
+            &log,
+            "coder",
+            r#"{"kind":"feedback","ts":"2020-01-01T00:00:00.000Z","feedback":"down"}"#,
+        ); // out-of-window
+
+        let exports = dir.path().join("exports");
+        let tool = tool_in(dir.path()).with_export_dir(exports.clone());
+        let out = text(call_export(&tool, Some("coder"), Some(7), "json"));
+
+        assert!(out.contains("Exported 2 metric line(s) (last 7 day(s)) to "), "got: {out}");
+        let files: Vec<_> = std::fs::read_dir(&exports)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files.len(), 1, "exactly one export file: {files:?}");
+        assert!(
+            files[0].starts_with("metrics-coder-7d-") && files[0].ends_with(".json"),
+            "file name: {}",
+            files[0]
+        );
+        let v: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(exports.join(&files[0])).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v.len(), 2, "in-window lines only (the 2020 line is pruned)");
+        let kinds: Vec<&str> = v
+            .iter()
+            .map(|x| x["kind"].as_str().unwrap())
+            .collect();
+        assert!(kinds.contains(&"run") && kinds.contains(&"feedback"), "{kinds:?}");
+        assert!(
+            v.iter().all(|x| x.get("agent").is_none()),
+            "agent mode has no agent column: {v:?}"
+        );
+    }
+
+    /// 4c: `export=csv` (fleet mode) flattens every file's windowed lines
+    /// with a `kind`,`ts`,`agent` header prefix; the agent column carries the
+    /// file stem and out-of-window lines are excluded.
+    #[test]
+    fn export_csv_fleet_mode_adds_agent_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = MetricsLog::new(dir.path());
+        record_run(&log, "coder", 2, 0, 3_000);
+        log.log_feedback_run("architect", "run-a", true);
+        append_raw_line(
+            &log,
+            "coder",
+            r#"{"kind":"skill_use","ts":"2019-05-05T00:00:00.000Z","skill":"old-skill"}"#,
+        );
+
+        let exports = dir.path().join("exports");
+        let tool = tool_in(dir.path()).with_export_dir(exports.clone());
+        let out = text(call_export(&tool, None, Some(7), "csv"));
+        assert!(out.contains("Exported 2 metric line(s)"), "got: {out}");
+
+        let files: Vec<_> = std::fs::read_dir(&exports)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            files[0].starts_with("metrics-fleet-7d-") && files[0].ends_with(".csv"),
+            "file name: {}",
+            files[0]
+        );
+        let csv = std::fs::read_to_string(exports.join(&files[0])).unwrap();
+        let mut lines = csv.lines();
+        let header = lines.next().unwrap();
+        assert!(
+            header.starts_with("kind,ts,agent,"),
+            "header has the fixed prefix: {header}"
+        );
+        let agent_col = header
+            .split(',')
+            .position(|h| h == "agent")
+            .unwrap();
+        let rows: Vec<Vec<&str>> = lines.map(|l| l.split(',').collect()).collect();
+        assert_eq!(rows.len(), 2, "in-window lines only: {csv:?}");
+        let mut agents: Vec<&str> = rows.iter().map(|r| r[agent_col]).collect();
+        agents.sort();
+        assert_eq!(agents, vec!["architect", "coder"], "agent column: {csv:?}");
+        let mut kinds: Vec<&str> = rows.iter().map(|r| r[0]).collect();
+        kinds.sort();
+        assert_eq!(kinds, vec!["feedback", "run"], "kind column: {csv:?}");
+    }
+
+    /// 4c: an unknown `export` value is a friendly error (no file written).
+    #[test]
+    fn export_invalid_format_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let exports = dir.path().join("exports");
+        let tool = tool_in(dir.path()).with_export_dir(exports.clone());
+        match call_export(&tool, Some("coder"), Some(7), "xml") {
+            ToolOutput::Error(e) => assert!(
+                e.contains("export must be"),
+                "friendly error names the valid values: {e}"
+            ),
+            other => panic!("expected an error, got: {other:?}"),
+        }
+        assert!(
+            !exports.exists(),
+            "no export dir is created for a rejected format"
+        );
     }
 }
