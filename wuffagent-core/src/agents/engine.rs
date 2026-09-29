@@ -27,6 +27,9 @@ pub struct AgentEngine {
     pub(super) agents_search_dirs: Vec<std::path::PathBuf>,
     /// Completed task count, shared across clones; throttles post-task work.
     tasks_completed: Arc<AtomicUsize>,
+    /// 1b: the app config's model price table (cost_usd estimates on run
+    /// lines; empty = all runs "recorded but unpriced").
+    model_prices: Vec<crate::config::ModelPrice>,
 }
 
 /// Run-scoped values for one `execute_with_tools` call, passed by the caller
@@ -72,6 +75,7 @@ impl AgentEngine {
             agents_dir: None,
             agents_search_dirs: Vec::new(),
             tasks_completed: Arc::new(AtomicUsize::new(0)),
+            model_prices: Vec::new(),
         }
     }
 
@@ -89,6 +93,13 @@ impl AgentEngine {
     /// the handoff tool.
     pub fn with_agents_search_dirs(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
         self.agents_search_dirs = dirs;
+        self
+    }
+
+    /// 1b: the app config's model price table (cost_usd estimates on run
+    /// lines; empty = all runs "recorded but unpriced").
+    pub fn with_model_prices(mut self, model_prices: Vec<crate::config::ModelPrice>) -> Self {
+        self.model_prices = model_prices;
         self
     }
 
@@ -189,6 +200,7 @@ impl AgentEngine {
             .event_tx(params.event_tx.clone())
             .memory(self.memory.clone())
             .agent_session_id(params.session_id.clone())
+            .model_prices(self.model_prices.clone())
             .build();
         // Mid-run injection channel: the agent loop drains it at LLM round
         // boundaries (user messages sent while this run is active are

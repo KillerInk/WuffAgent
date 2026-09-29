@@ -155,7 +155,7 @@ pub struct ToolStat {
 /// I1: tool-use trajectory stats for one agent run, fed to the improver so
 /// it can weigh HOW the agent worked (tool churn, errors, verification
 /// retries), not just the final text.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunStats {
     /// Total tool calls executed this run (across all LLM rounds).
     pub tool_calls: usize,
@@ -170,6 +170,11 @@ pub struct RunStats {
     /// the loop before the run line is written, so `llm_ms` means "all
     /// time spent in the LLM").
     pub llm_ms: u64,
+    /// 1b: model name of the run's LLM calls ("" = server reported none).
+    pub model: String,
+    /// 1b: estimated cost in USD (`usage::cost_usd` against the app's price
+    /// table; 0.0 = recorded but unpriced).
+    pub cost_usd: f64,
 }
 
 impl RunStats {

@@ -73,6 +73,8 @@ struct EvalOnce {
     tokens_out: u64,
     /// Total tool calls executed (post-hoc `max_tool_calls` enforcement).
     tool_calls: usize,
+    /// 1b: model name stamped by the client ("" = server reported none).
+    model: String,
 }
 
 /// Run ONE eval headlessly: build a fresh agent → execute the task → judge the
@@ -97,6 +99,9 @@ async fn run_eval_once(
     cfg.metrics_enabled = false;
     cfg.task_timeout_ms = 0;
 
+    // 1b: keep a handle for the shared model stamp (the builder takes
+    // `client` by value below, but the stamp is shared interior state).
+    let model_probe = client.clone();
     let mut agent = AgentBuilder::new(cfg, llm_client, client)
         .tool_manager(tool_manager)
         .build();
@@ -121,6 +126,9 @@ async fn run_eval_once(
 
     let (tokens_in, tokens_out) = agent.run_tokens();
     let tool_calls = agent.run_stats().tool_calls;
+    // 1b: the model the run used (the client stamps it per LLM call; clones
+    // share the stamp).
+    let model = model_probe.last_model();
 
     Ok(EvalOnce {
         verified: verdict.verified,
@@ -129,6 +137,7 @@ async fn run_eval_once(
         tokens_in,
         tokens_out,
         tool_calls,
+        model,
     })
 }
 
@@ -152,6 +161,8 @@ pub struct RunEvalTool {
     session_client: Arc<ChatClient>,
     /// The app's tool manager (a per-agent view is derived at build time).
     tool_manager: Arc<ToolManager>,
+    /// 1b: the app config's model price table (Eval lines' cost_usd).
+    model_prices: Vec<crate::config::ModelPrice>,
 }
 
 impl RunEvalTool {
@@ -161,6 +172,7 @@ impl RunEvalTool {
         llm_client: Arc<dyn LlmClient>,
         session_client: Arc<ChatClient>,
         tool_manager: Arc<ToolManager>,
+        model_prices: Vec<crate::config::ModelPrice>,
     ) -> Self {
         Self {
             evals,
@@ -168,6 +180,7 @@ impl RunEvalTool {
             llm_client,
             session_client,
             tool_manager,
+            model_prices,
         }
     }
 }
@@ -327,6 +340,13 @@ impl Tool for RunEvalTool {
                         r.duration_ms,
                         r.tokens_in,
                         r.tokens_out,
+                        &r.model,
+                        crate::usage::cost_usd(
+                            &self.model_prices,
+                            &r.model,
+                            r.tokens_in,
+                            r.tokens_out,
+                        ),
                     );
                     let budget_note = if over_budget {
                         format!(
@@ -359,6 +379,8 @@ impl Tool for RunEvalTool {
                         started.elapsed().as_millis() as u64,
                         0,
                         0,
+                        "",
+                        0.0,
                     );
                     format!("[{}] ERROR — {e}", eval.id)
                 }
@@ -371,6 +393,8 @@ impl Tool for RunEvalTool {
                         EVAL_TIMEOUT_SECS * 1000,
                         0,
                         0,
+                        "",
+                        0.0,
                     );
                     format!("[{}] TIMEOUT (> {EVAL_TIMEOUT_SECS}s)", eval.id)
                 }
@@ -564,7 +588,8 @@ mod tests {
         let llm: Arc<dyn LlmClient> = Arc::new(MockLlm {
             response: "HELLO".to_string(),
         });
-        let tool = RunEvalTool::new(store, agents, llm, client, empty_tool_manager());
+        let tool =
+            RunEvalTool::new(store, agents, llm, client, empty_tool_manager(), Vec::new());
 
         let mut values = HashMap::new();
         values.insert("agent".to_string(), serde_json::json!("coder"));
@@ -573,6 +598,20 @@ mod tests {
         assert!(msg.contains("Ran 1 eval(s) for 'coder'"), "got: {msg}");
         assert!(msg.contains("1 passed, 0 failed"), "got: {msg}");
         assert!(msg.contains("[greet] PASS"), "got: {msg}");
+        // 1b: the Eval line carries the model the server reported ("" when
+        // none) and a 0.0 cost (no prices configured in this test). Only
+        // run_eval writes Eval lines, so `any` stays race-free across tests.
+        let lines = MetricsLog::default().read_all("coder");
+        assert!(
+            lines.iter().any(|l| {
+                matches!(
+                    l,
+                    crate::agents::metrics::MetricsLine::Eval { model, cost_usd, .. }
+                        if model.is_empty() && *cost_usd == 0.0
+                )
+            }),
+            "no unpriced Eval line recorded; lines: {lines:?}"
+        );
     }
 
     /// `run_eval` with no saved evals for the profile is an explicit error (not
@@ -596,7 +635,8 @@ mod tests {
             "http://127.0.0.1:1",
             None,
         )));
-        let tool = RunEvalTool::new(store, agents, llm, client, empty_tool_manager());
+        let tool =
+            RunEvalTool::new(store, agents, llm, client, empty_tool_manager(), Vec::new());
         let mut values = HashMap::new();
         values.insert("agent".to_string(), serde_json::json!("coder"));
         let (ok, msg) = outcome(tool.execute(ToolParams { values }));

@@ -209,6 +209,52 @@ fn test_run_duration_split_roundtrip_and_legacy_default() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 1b: log_run writes the model label + estimated cost straight from
+/// RunStats (the loop stamps them from the client's last model and the app's
+/// price table before the write); a legacy line (pre-1b) deserializes to
+/// model "" and cost 0.0.
+#[test]
+fn test_run_model_and_cost_roundtrip_and_legacy_default() {
+    let dir = tmp_dir("model-cost");
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = MetricsLog::new(&dir);
+
+    let mut stats = rs(0, 0, 1);
+    stats.model = "gpt-4o-mini".to_string();
+    stats.cost_usd = 0.00023;
+    log.log_run("coder", &stats, 5_000, RunOutcome::Verified, 10, 2, "run-1", "sess-1");
+
+    let lines = log.read_all("coder");
+    assert_eq!(lines.len(), 1, "got: {lines:?}");
+    match &lines[0] {
+        MetricsLine::Run { model, cost_usd, .. } => {
+            assert_eq!(model, "gpt-4o-mini");
+            assert!((*cost_usd - 0.00023).abs() < 1e-12, "got: {cost_usd}");
+        }
+        other => panic!("expected run line, got {other:?}"),
+    }
+
+    // A pre-1b legacy run line (no model/cost_usd) parses to ""/0.0.
+    use std::io::Write;
+    let mut f = std::fs::File::create(log.agent_path("legacyagent")).unwrap();
+    writeln!(
+        f,
+        r#"{{"kind":"run","ts":"2026-09-01T00:00:00.000Z","tool_calls":1,"tool_errors":0,"verification_attempts":0,"duration_ms":100,"outcome":"verified","tokens_in":0,"tokens_out":0}}"#
+    )
+    .unwrap();
+    drop(f);
+    let legacy = log.read_all("legacyagent");
+    assert_eq!(legacy.len(), 1, "got: {legacy:?}");
+    match &legacy[0] {
+        MetricsLine::Run { model, cost_usd, .. } => {
+            assert_eq!(model, "");
+            assert_eq!(*cost_usd, 0.0);
+        }
+        other => panic!("expected run line, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 1a: bump_tool aggregates calls/errors/summed ms per tool, and the 33rd
 /// distinct tool name folds into the "__other__" bucket (run lines stay
 /// bounded regardless of how many tools a run touches).
@@ -363,6 +409,8 @@ fn test_summary_since_and_format_line() {
             session_id: String::new(),
 llm_ms: 0,
 tools_ms: 0,
+model: String::new(),
+cost_usd: 0.0,
         })
         .unwrap()
     };
@@ -415,6 +463,8 @@ fn test_summary_between_windows() {
             session_id: String::new(),
 llm_ms: 0,
 tools_ms: 0,
+model: String::new(),
+cost_usd: 0.0,
         })
         .unwrap()
     };
@@ -486,6 +536,8 @@ fn test_lines_since_window() {
             session_id: String::new(),
 llm_ms: 0,
 tools_ms: 0,
+model: String::new(),
+cost_usd: 0.0,
             })
             .unwrap()
         )

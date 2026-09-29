@@ -184,6 +184,7 @@ pub fn bootstrap() -> AppContext {
             clients.llm_client.clone(),
             clients.session_client.clone(),
             tooling.tool_manager.clone(),
+            config.model_prices.clone(),
         )
         .expect("Failed to register self-improvement tools");
     }
@@ -203,7 +204,8 @@ pub fn bootstrap() -> AppContext {
     )
     .with_memory(memory_manager.clone())
     .with_agents_dir(agents_dir)
-    .with_agents_search_dirs(agents_search_dirs);
+    .with_agents_search_dirs(agents_search_dirs)
+    .with_model_prices(config.model_prices.clone());
 
     AppContext {
         config,

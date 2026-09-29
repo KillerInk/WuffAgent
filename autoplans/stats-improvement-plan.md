@@ -241,7 +241,7 @@ Tests: crafted `RunStats` + `judge_ms` → `log_run` writes the right split;
 legacy line deserializes to `0/0`; assert `llm_ms + tools_ms ≤ duration_ms`
 on a fixture.
 
-**1b. model + cost_usd on run/eval lines (A3, A5)** — `stats(1b)`
+**1b. model + cost_usd on run/eval lines (A3, A5)** — `stats(1b)` — **DONE**
 Files: `config/mod.rs`, new `usage/cost.rs`, `client/mod.rs`,
 `agents/metrics.rs`, `agents/agent` (builder + run-completion hook),
 `tools/builtin/improvement/run_eval.rs`.
@@ -276,6 +276,12 @@ pub struct ModelPrice {
    grep the `AgentBuilder::new` call sites outside tests). `Eval` gains
    `model`/`cost_usd` too; `log_eval` (metrics.rs:647) gains
    `model: &str, cost_usd: f64` params.
+   - DEVIATION (applied): model+cost ride in `RunStats` (new
+     `model: String` / `cost_usd: f64` fields; RunStats drops `Eq`) instead
+     of `record_run` params — `log_run`/`record_run` keep their signatures,
+     so the ~15 test call sites are untouched. The loop stamps them at run
+     end from `client.last_model()` + the `Agent`'s price table (the
+     AgentBuilder `.model_prices(...)` path from the plan is unchanged).
 5. run_eval.rs — `RunEvalTool` gains a `model_prices: Vec<ModelPrice>`
    field (extend its single `RunEvalTool::new` construction site in the app);
    `EvalOnce` gains `model: String` (from `client.last_model()` next to the

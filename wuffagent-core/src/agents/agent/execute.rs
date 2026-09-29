@@ -150,6 +150,7 @@ impl Agent {
             .event_tx(self.event_tx.clone())
             .memory(self.memory.clone())
             .agent_session_id(self.agent_session_id.clone())
+            .model_prices(self.model_prices.clone())
             .build();
             // The whole handoff chain is still the same turn: keep receiving
             // user injections on the next agent too.

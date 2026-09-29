@@ -650,6 +650,15 @@ impl Agent {
         // 1d: fold the verification judge's time into the LLM bucket —
         // llm_ms is "all wall-clock spent in the LLM" (main rounds + judge).
         run_stats.llm_ms += verify_state.judge_ms;
+        // 1b: stamp the run's model + estimated cost (the price table comes
+        // from the app config; unknown model = 0.0 "recorded but unpriced").
+        run_stats.model = self.client.last_model();
+        run_stats.cost_usd = crate::usage::cost_usd(
+            &self.model_prices,
+            &run_stats.model,
+            tokens_in,
+            tokens_out,
+        );
         self.run_stats = run_stats;
         // 2b: expose this run's token usage (the eval harness reads it for the
         // Eval line's cost record; tokens are loop-local, not in RunStats).

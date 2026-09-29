@@ -44,6 +44,17 @@ pub enum ConnectionType {
     Remote,
 }
 
+/// 1b: USD price per 1M tokens for one model (prompt and completion billed
+/// separately, OpenAI-style). The config's `model_prices` table drives the
+/// run/eval metric lines' `cost_usd` estimates (`usage::cost_usd`); an empty
+/// table means "recorded but unpriced" (cost 0.0).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPrice {
+    pub model: String,
+    pub per_1M_in_usd: f64,
+    pub per_1M_out_usd: f64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     #[serde(default)]
@@ -103,6 +114,11 @@ pub struct Config {
     // field load with an empty list.
     #[serde(default)]
     pub mcp_servers: Vec<mcp::McpServerConfig>,
+
+    // 1b: model price table for cost estimation (user-editable; old configs
+    // load with an empty list).
+    #[serde(default)]
+    pub model_prices: Vec<ModelPrice>,
 }
 
 /// Deserialize `agent_config` with migration support.
@@ -184,6 +200,7 @@ impl Default for Config {
             agent_config: crate::agents::config::AgentConfig::default(),
             memory_config: MemoryConfig::default(),
             mcp_servers: Vec::new(),
+            model_prices: Vec::new(),
         }
     }
 }

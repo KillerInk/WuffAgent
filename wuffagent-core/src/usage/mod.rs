@@ -12,7 +12,9 @@
 //!   bucket math is done on local *wall-clock* `NaiveDateTime`s so DST
 //!   transitions can't shift bucket boundaries.
 
+pub mod cost;
 pub mod recorder;
 pub mod stats;
 
+pub use cost::cost_usd;
 pub use recorder::{UsageEntry, UsageRecorder};

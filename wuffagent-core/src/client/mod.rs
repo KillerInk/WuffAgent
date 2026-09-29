@@ -185,6 +185,12 @@ pub struct ChatClient {
     /// `agent_name`. The join key that ties usage.jsonl lines to the
     /// metrics Run/Trim lines.
     run_id: Arc<Mutex<Option<String>>>,
+    /// 1b: the model name of the most recent recorded LLM call (None until
+    /// the first call reports one) — read by the agent's run-completion hook
+    /// for the Run line's model label. Safe: clients are per-session and
+    /// agents run sequentially per session (same assumption as `agent_name`);
+    /// clones of the client share the stamp (shared interior state).
+    last_model: Arc<Mutex<Option<String>>>,
 }
 
 impl Clone for ChatClient {
@@ -208,6 +214,7 @@ impl Clone for ChatClient {
             agent_name: self.agent_name.clone(),
             trim_pcts: self.trim_pcts.clone(),
             run_id: self.run_id.clone(),
+            last_model: self.last_model.clone(),
         }
     }
 }
@@ -275,6 +282,7 @@ impl ChatClient {
             usage_recorder: Arc::new(crate::usage::recorder::UsageRecorder::default_recorder()),
             agent_name: Arc::new(Mutex::new("chat".to_string())),
             run_id: Arc::new(Mutex::new(None)),
+            last_model: Arc::new(Mutex::new(None)),
             trim_pcts: Arc::new(Mutex::new((
                 Self::TRIM_TRIGGER_PCT,
                 Self::TRIM_TARGET_PCT,
@@ -332,6 +340,12 @@ impl ChatClient {
         *self.run_id.lock().unwrap() = run_id.map(str::to_string);
     }
 
+    /// 1b: the model name of the most recent recorded LLM call ("" when the
+    /// server reported none yet).
+    pub fn last_model(&self) -> String {
+        self.last_model.lock().unwrap().clone().unwrap_or_default()
+    }
+
     /// Stamp this agent's trim thresholds (percent of the n_ctx window:
     /// trigger / target) from its `TrimConfig`. Called by `Agent::builder`
     /// before each agent run, like [`Self::set_agent_name`]; the client then
@@ -372,6 +386,10 @@ impl ChatClient {
         let session_id = self.session.session_id().unwrap_or_default();
         let agent = self.agent_name.lock().unwrap().clone();
         let run_id = self.run_id.lock().unwrap().clone().unwrap_or_default();
+        // 1b: remember the last model name for the run line's model label.
+        if let Some(m) = model {
+            *self.last_model.lock().unwrap() = Some(m.to_string());
+        }
         self.usage_recorder
             .record(&crate::usage::recorder::UsageEntry {
                 ts: chrono::Utc::now(),

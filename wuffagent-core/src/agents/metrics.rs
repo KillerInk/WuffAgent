@@ -120,6 +120,12 @@ pub enum MetricsLine {
         /// `llm_ms + tools_ms <= duration_ms`.
         #[serde(default)]
         tools_ms: u64,
+        /// 1b: model name of the run's LLM calls ("" = unknown/unreported).
+        #[serde(default)]
+        model: String,
+        /// 1b: estimated cost in USD (0.0 = recorded but unpriced).
+        #[serde(default)]
+        cost_usd: f64,
     },
     /// User feedback on an assistant answer.
     Feedback {
@@ -213,6 +219,12 @@ pub enum MetricsLine {
         /// Completion tokens produced by the eval run (0 when the server reports none).
         #[serde(default)]
         tokens_out: u64,
+        /// 1b: model name the eval ran on ("" = server reported none).
+        #[serde(default)]
+        model: String,
+        /// 1b: estimated cost in USD (0.0 = recorded but unpriced).
+        #[serde(default)]
+        cost_usd: f64,
     },
 }
 
@@ -235,6 +247,8 @@ impl MetricsLine {
                 session_id: _,
                 llm_ms: _,
                 tools_ms: _,
+                model: _,
+                cost_usd: _,
             } => {
                 let mut s = format!(
                     "{} run: {} tool calls ({} errors), {} verification attempt(s), {:.1}s, {} tokens in / {} out, outcome: {}",
@@ -314,6 +328,8 @@ impl MetricsLine {
                 duration_ms,
                 tokens_in,
                 tokens_out,
+                model: _,
+                cost_usd: _,
             } => format!(
                 "{} eval ({agent}, id={id}): {}{} {} tok in / {} out, {:.1}s",
                 ts.format("%Y-%m-%d %H:%M"),
@@ -619,6 +635,8 @@ impl MetricsLog {
                 session_id: session_id.to_string(),
                 llm_ms: stats.llm_ms,
                 tools_ms: stats.tools.iter().map(|t| t.duration_ms).sum(),
+                model: stats.model.clone(),
+                cost_usd: stats.cost_usd,
             },
         );
     }
@@ -712,6 +730,8 @@ impl MetricsLog {
         duration_ms: u64,
         tokens_in: u64,
         tokens_out: u64,
+        model: &str,
+        cost_usd: f64,
     ) {
         self.append(
             agent,
@@ -726,6 +746,8 @@ impl MetricsLog {
                 duration_ms,
                 tokens_in,
                 tokens_out,
+                model: model.to_string(),
+                cost_usd,
             },
         );
     }

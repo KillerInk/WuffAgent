@@ -513,6 +513,8 @@ mod tests {
                 session_id: String::new(),
 llm_ms: 0,
 tools_ms: 0,
+model: String::new(),
+cost_usd: 0.0,
             },
         );
         let tool = tool_in(dir.path());

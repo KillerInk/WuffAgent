@@ -68,6 +68,9 @@ pub struct Agent {
     control_mailbox: Arc<Mutex<Vec<crate::agents::types::ControlRequest>>>,
     /// I1: trajectory stats of the last completed `run_llm_loop`.
     run_stats: RunStats,
+    /// 1b: the app config's model price table (cost_usd estimates on run
+    /// lines; empty = all runs "recorded but unpriced").
+    model_prices: Vec<crate::config::ModelPrice>,
     /// 2b: prompt tokens consumed by the last completed `run_llm_loop` (kept
     /// separate from `RunStats` so the existing `RunStats` literals stay
     /// untouched; the eval harness reads this for its cost record).
@@ -101,6 +104,7 @@ pub struct AgentBuilder {
     event_tx: Option<Arc<Mutex<std::sync::mpsc::Sender<crate::types::AppEvent>>>>,
     memory: Option<Arc<crate::memory::MemoryManager>>,
     agent_session_id: Option<String>,
+    model_prices: Vec<crate::config::ModelPrice>,
 }
 
 impl AgentBuilder {
@@ -118,6 +122,7 @@ impl AgentBuilder {
             event_tx: None,
             memory: None,
             agent_session_id: None,
+            model_prices: Vec::new(),
         }
     }
 
@@ -145,6 +150,13 @@ impl AgentBuilder {
     /// Session ID for this agent's persistent conversation (None = none).
     pub fn agent_session_id(mut self, agent_session_id: Option<String>) -> Self {
         self.agent_session_id = agent_session_id;
+        self
+    }
+
+    /// 1b: the app config's model price table (cost_usd estimates on run
+    /// lines; empty = all runs "recorded but unpriced").
+    pub fn model_prices(mut self, model_prices: Vec<crate::config::ModelPrice>) -> Self {
+        self.model_prices = model_prices;
         self
     }
 
@@ -181,6 +193,7 @@ impl AgentBuilder {
             event_tx,
             memory,
             agent_session_id,
+            model_prices,
         } = self;
         let client = if config.reasoning_effort != crate::types::ReasoningEffort::Off {
             let c = (*client).clone();
@@ -270,6 +283,7 @@ impl AgentBuilder {
             memory,
             messages: Vec::new(),
             agent_session_id,
+            model_prices,
             trimming: ContextTrimming::new(),
             control_mailbox,
             run_stats: RunStats::default(),
