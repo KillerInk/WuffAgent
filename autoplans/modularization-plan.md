@@ -99,7 +99,9 @@ Single concern (render improvement status). Borderline; only split if it grows. 
 
 ## Phases (each = one commit, `cargo test` green before commit)
 - [ ] Phase 1 — done: analysis (this file)
-- [ ] Phase 2 — F2: `MetricsLine::ts()` dedup (tiny, unlocks F1/F3 cleanly)
+- [x] Phase 2 — F2: `MetricsLine::ts()` dedup — DONE: both `line_ts` free fns deleted
+  (agents/metrics.rs, tools/.../improvement/metrics.rs), 6 call sites → `l.ts()`;
+  `cargo test -p wuffagent-core metrics` = 70 passed; 0 failed
 - [ ] Phase 3 — F1: split `agents/metrics.rs` → `agents/metrics/` dir module
 - [ ] Phase 4 — F3: split `improvement/metrics.rs` tool → tool/report/export sub-files
 - [ ] Phase 5 — F4: split `agents/improvement.rs` → policy/evidence/suggest/fleet

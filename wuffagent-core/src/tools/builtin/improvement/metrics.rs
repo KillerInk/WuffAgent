@@ -117,7 +117,7 @@ impl ReadMetricsTool {
             ));
         }
         let since = Utc::now() - Duration::days(days as i64);
-        let window: Vec<&MetricsLine> = all.iter().filter(|l| line_ts(l) >= since).collect();
+        let window: Vec<&MetricsLine> = all.iter().filter(|l| l.ts() >= since).collect();
 
         if window.is_empty() {
             let recent: Vec<String> = all
@@ -424,18 +424,6 @@ impl ReadMetricsTool {
     }
 }
 
-/// The timestamp of any metrics line (all variants carry one).
-fn line_ts(line: &MetricsLine) -> chrono::DateTime<chrono::Utc> {
-    match line {
-        MetricsLine::Run { ts, .. }
-        | MetricsLine::Feedback { ts, .. }
-        | MetricsLine::SkillUse { ts, .. }
-        | MetricsLine::Trim { ts, .. }
-        | MetricsLine::Check { ts, .. }
-        | MetricsLine::Eval { ts, .. } => *ts,
-    }
-}
-
 impl ReadMetricsTool {
     /// 4a: the cross-store join view of one run — its own metrics line, its
     /// LLM rounds (usage.jsonl entries carrying the same 1e run_id), and its
@@ -664,7 +652,7 @@ impl ReadMetricsTool {
         if let Some(name) = agent {
             // Agent mode: no agent column (the scope already says who).
             for line in log.read_all(name) {
-                if line_ts(&line) >= since {
+                if line.ts() >= since {
                     rows.push((None, line));
                 }
             }
@@ -673,7 +661,7 @@ impl ReadMetricsTool {
             // each line tagged with its file's agent name.
             for name in log.agent_names() {
                 for line in log.read_all(&name) {
-                    if line_ts(&line) >= since {
+                    if line.ts() >= since {
                         rows.push((Some(name.clone()), line));
                     }
                 }

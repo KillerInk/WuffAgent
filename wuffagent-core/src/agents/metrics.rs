@@ -967,18 +967,6 @@ pub fn agent_file_name(agent: &str) -> String {
     }
 }
 
-/// The timestamp of a metrics line (all variants carry one).
-fn line_ts(line: &MetricsLine) -> &DateTime<Utc> {
-    match line {
-        MetricsLine::Run { ts, .. }
-        | MetricsLine::Feedback { ts, .. }
-        | MetricsLine::SkillUse { ts, .. }
-        | MetricsLine::Trim { ts, .. }
-        | MetricsLine::Check { ts, .. }
-        | MetricsLine::Eval { ts, .. } => ts,
-    }
-}
-
 /// Test override for the default metrics directory (the improver's tests
 /// must not read the real `~/.wuffagent/metrics`). Same process-global
 /// pattern as `config::set_config_path_for_testing`; tests that use it
@@ -1726,14 +1714,14 @@ impl MetricsLog {
             Some(s) => self
                 .read_all(agent)
                 .into_iter()
-                .filter(|l| *line_ts(l) >= s)
+                .filter(|l| l.ts() >= s)
                 .collect(),
             None => self.read_all(agent),
         };
         // `read_all` is newest-first (display order); the documented
         // oldest-first order is re-sorted here — the status views render
         // chronological histories.
-        lines.sort_by_key(|l| *line_ts(l));
+        lines.sort_by_key(|l| l.ts());
         lines
     }
 
@@ -1757,14 +1745,14 @@ impl MetricsLog {
         }
         let lines = self.read_all(agent);
         for line in &lines {
-            let ts = line_ts(line);
+            let ts = line.ts();
             if let Some(start) = start {
-                if *ts < start {
+                if ts < start {
                     continue;
                 }
             }
             if let Some(end) = end {
-                if *ts >= end {
+                if ts >= end {
                     continue;
                 }
             }
