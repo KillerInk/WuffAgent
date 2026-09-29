@@ -119,6 +119,13 @@ pub struct Config {
     // load with an empty list).
     #[serde(default)]
     pub model_prices: Vec<ModelPrice>,
+
+    // 4b: retention (in days) of the metrics store's raw `run` lines. At
+    // startup (once per calendar day) fully-elapsed days older than this are
+    // rolled up to metrics/rollups/ and the raw run lines are pruned; old
+    // configs load with the 90-day default.
+    #[serde(default = "default_metrics_retention_days")]
+    pub metrics_retention_days: u32,
 }
 
 /// Deserialize `agent_config` with migration support.
@@ -174,6 +181,12 @@ fn default_max_messages() -> usize {
     100
 }
 
+/// 4b: default metrics retention — 90 days of raw run lines before they
+/// rotate into rollup files.
+fn default_metrics_retention_days() -> u32 {
+    90
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -201,6 +214,7 @@ impl Default for Config {
             memory_config: MemoryConfig::default(),
             mcp_servers: Vec::new(),
             model_prices: Vec::new(),
+            metrics_retention_days: default_metrics_retention_days(),
         }
     }
 }

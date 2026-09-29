@@ -38,7 +38,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::agents::types::{RunStats, ToolStat};
@@ -390,10 +390,58 @@ pub fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
 /// cached vec per selected window instead of re-scanning the JSONL per frame.
 /// Window semantics identical to `report`: `ts >= since && ts < end`
 /// (`None` bounds = unbounded).
+/// 4b: the merged totals of the agent's rollup files that fall inside the
+/// report window AND before the raw file's oldest run line (see
+/// `MetricsLog::load_rollups_in`). Private: only `build_report` consumes it.
+#[derive(Debug, Default)]
+struct RollupTotals {
+    summary: MetricsSummary,
+    cost_usd: f64,
+    tools: std::collections::BTreeMap<String, (u32, u32, u64)>,
+    models: std::collections::BTreeMap<String, u32>,
+    trim_correlation: TrimCorrelation,
+}
+
+impl RollupTotals {
+    fn add_rollup(&mut self, r: &MetricsRollup) {
+        self.summary += r.summary;
+        self.cost_usd += r.cost_usd;
+        for (name, (calls, errors, total_ms)) in &r.tools {
+            let e = self.tools.entry(name.clone()).or_insert((0, 0, 0));
+            e.0 += calls;
+            e.1 += errors;
+            e.2 += total_ms;
+        }
+        for (model, runs) in &r.model_mix {
+            *self.models.entry(model.clone()).or_insert(0) += runs;
+        }
+        self.trim_correlation.trimmed_runs += r.trim_correlation.trimmed_runs;
+        self.trim_correlation.trimmed_gave_up += r.trim_correlation.trimmed_gave_up;
+        self.trim_correlation.untrimmed_runs += r.trim_correlation.untrimmed_runs;
+        self.trim_correlation.untrimmed_gave_up += r.trim_correlation.untrimmed_gave_up;
+    }
+}
+
+/// 2c/3b: report over in-memory lines (the egui agent editor's cached vec) —
+/// delegates to [`build_report`] with empty rollup totals (the editor never
+/// reads rollup files; `MetricsLog::report` does).
 pub fn metrics_report_from_lines(
     lines: &[MetricsLine],
     since: Option<DateTime<Utc>>,
     end: Option<DateTime<Utc>>,
+) -> MetricsReport {
+    build_report(lines, since, end, &RollupTotals::default())
+}
+
+/// 2c/3b + 4b: the full report computation over `lines`, topped up with the
+/// rolled-up days `rt` (their run lines were pruned from the raw log, so
+/// they are the ONLY source for those days). Percentiles stay raw-only: a
+/// day's per-run distribution cannot be reconstructed from its aggregate.
+fn build_report(
+    lines: &[MetricsLine],
+    since: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+    rt: &RollupTotals,
 ) -> MetricsReport {
     let mut report = MetricsReport {
         summary: MetricsSummary::from_lines(lines),
@@ -403,20 +451,22 @@ pub fn metrics_report_from_lines(
         p95_tokens: None,
         tool_stats: Vec::new(),
         model_mix: Vec::new(),
-        cost_usd: 0.0,
-        trim_correlation: Default::default(),
+        cost_usd: rt.cost_usd,
+        trim_correlation: rt.trim_correlation,
     };
     // The summary must reflect the SAME window as the per-run stats below:
     // re-filter for the window when one is active (from_lines is all-time).
     if since.is_some() || end.is_some() {
         report.summary = windowed_summary(lines, since, end);
     }
+    // 4b: the rolled-up days of this window (additive; run-derived only).
+    report.summary += rt.summary;
 
     let mut durations: Vec<f64> = Vec::new();
     let mut tokens: Vec<f64> = Vec::new();
-    let mut tool_acc: std::collections::BTreeMap<String, (u32, u32, u64)> =
-        std::collections::BTreeMap::new();
-    let mut models: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    // 4b: pre-seeded with the rollups' per-tool / per-model raw sums.
+    let mut tool_acc: std::collections::BTreeMap<String, (u32, u32, u64)> = rt.tools.clone();
+    let mut models: std::collections::BTreeMap<String, u32> = rt.models.clone();
     // 4a: runs that experienced at least one trim, by the 1e run_id.
     let trimmed_ids: std::collections::HashSet<&str> = lines
         .iter()
@@ -648,11 +698,41 @@ pub struct MetricsReport {
     pub trim_correlation: TrimCorrelation,
 }
 
+/// 4b: one UTC day of an agent's `run` lines, rolled up when the raw lines
+/// rotate out of the JSONL log (retention). The rollup covers ONLY run
+/// lines: feedback/skill_use/trim/check/eval lines are never pruned, so the
+/// run-unrelated `MetricsSummary` fields stay 0 and double-counting is
+/// impossible when `report`/`summary_between` merge rollups with raw lines.
+/// Every field is additive, so days merge into a report by simple sums.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MetricsRollup {
+    /// The UTC day this rollup covers (YYYY-MM-DD).
+    pub day: String,
+    /// The agent this rollup belongs to (mirrors the file stem).
+    pub agent: String,
+    /// The day's run-derived aggregate (run-unrelated fields are 0 — see
+    /// the type docs).
+    pub summary: MetricsSummary,
+    /// Sum of the day's runs' `cost_usd` (0.0 when all unpriced).
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Per-tool raw totals: name → (calls, errors, total_ms) — additive
+    /// (the report turns this into `ReportToolStat` with the average).
+    #[serde(default)]
+    pub tools: std::collections::BTreeMap<String, (u32, u32, u64)>,
+    /// Per-model run counts ("" → "(unknown)", the report's convention).
+    #[serde(default)]
+    pub model_mix: std::collections::BTreeMap<String, u32>,
+    /// The day's trim correlation (run-based; all fields additive).
+    #[serde(default)]
+    pub trim_correlation: TrimCorrelation,
+}
+
 /// 4a: correlation — how often runs that experienced a context trim
 /// (joined by the 1e `run_id`) ended in `gave_up`, versus runs that were
 /// never trimmed. Pre-1e runs carry an empty run_id and can never link to a
 /// trim line, so they count as untrimmed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrimCorrelation {
     /// Runs with at least one trim line carrying the same run_id.
     pub trimmed_runs: u32,
@@ -701,7 +781,7 @@ impl BucketSummary {
 }
 
 /// Aggregate counts over an agent's metric lines (all-time or since `since`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetricsSummary {
     pub runs: u32,
     pub tool_calls: u32,
@@ -811,6 +891,37 @@ impl MetricsSummary {
     }
 }
 
+/// 4b: every field is an additive sum, so rollups merge into summaries
+/// field-wise (and the windowed summary of raw lines can be topped up with
+/// the rolled-up days of the same window).
+impl std::ops::AddAssign for MetricsSummary {
+    fn add_assign(&mut self, o: Self) {
+        self.runs += o.runs;
+        self.tool_calls += o.tool_calls;
+        self.tool_errors += o.tool_errors;
+        self.verified += o.verified;
+        self.verified_after_retry += o.verified_after_retry;
+        self.gave_up += o.gave_up;
+        self.not_verified += o.not_verified;
+        self.feedback_up += o.feedback_up;
+        self.feedback_down += o.feedback_down;
+        self.feedback_run_up += o.feedback_run_up;
+        self.feedback_run_down += o.feedback_run_down;
+        self.total_duration_ms += o.total_duration_ms;
+        self.tokens_in += o.tokens_in;
+        self.tokens_out += o.tokens_out;
+        self.trims += o.trims;
+        self.checks += o.checks;
+        self.check_tokens_in += o.check_tokens_in;
+        self.check_tokens_out += o.check_tokens_out;
+        self.check_suggestions += o.check_suggestions;
+        self.evals += o.evals;
+        self.evals_passed += o.evals_passed;
+        self.eval_tokens_in += o.eval_tokens_in;
+        self.eval_tokens_out += o.eval_tokens_out;
+    }
+}
+
 /// File name for an agent's metrics log: lowercased, `[a-z0-9_-]` only,
 /// everything else replaced by `-` (runs of `-` collapsed, leading/trailing
 /// `-` trimmed). Empty → `agent`.
@@ -873,6 +984,15 @@ fn test_metrics_dir() -> Option<PathBuf> {
 pub fn set_metrics_dir_for_testing(dir: Option<PathBuf>) {
     *test_metrics_dir_slot().lock().unwrap() = dir;
 }
+
+/// Serializes the tests that read or write the process-global test override
+/// above: it is one global slot, so a test asserting the DEFAULT dir
+/// (`test_default_uses_test_process_dir`) races with any parallel test that
+/// sets an override. Every such test — the hygiene tests in this module AND
+/// the `MetricsDirGuard` users in the improvement tests — must hold this
+/// lock for the whole test body.
+#[cfg(test)]
+pub(crate) static METRICS_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Per-process temp dir that [`MetricsLog::default`] falls back to when this
 /// crate runs under `#[cfg(test)]` (its own test binary only — a dependent
@@ -1224,17 +1344,21 @@ impl MetricsLog {
 
     /// 2c: full report over the window `ts >= since && ts < end`
     /// (`None` bounds = unbounded) — the aggregate summary plus the
-    /// per-run percentiles and the tool/model breakdowns.
+    /// per-run percentiles and the tool/model breakdowns. 4b: rolled-up
+    /// days (their raw run lines pruned by retention) are merged in, so
+    /// pruning never loses an aggregate this method reports.
     pub fn report(
         &self,
         agent: &str,
         since: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
     ) -> MetricsReport {
-        // 3b: the computation lives in the pure `metrics_report_from_lines`
-        // (shared with the egui agent editor's cached vec) — this method is
-        // just the file read + delegate.
-        metrics_report_from_lines(&self.read_all(agent), since, end)
+        // 3b: the computation lives in the pure `build_report` (shared with
+        // the egui agent editor's cached vec via `metrics_report_from_lines`)
+        // — this method is the file read + rollup merge + delegate.
+        let lines = self.read_all(agent);
+        let rt = self.load_rollups_in(agent, since, end, &lines);
+        build_report(&lines, since, end, &rt)
     }
 
     /// 4a: join one run across the metrics + usage stores by the 1e
@@ -1270,7 +1394,274 @@ impl MetricsLog {
         })
     }
 
-    /// 2c: before/after comparison — the CURRENT window `[now-days, now)`
+    /// 4b: path of the rollup file for one agent's UTC day
+    /// (`metrics/rollups/<agent_file>-YYYY-MM-DD.json`).
+    pub fn rollup_path(&self, agent: &str, day: NaiveDate) -> std::path::PathBuf {
+        self.dir
+            .join("rollups")
+            .join(format!("{}-{}.json", agent_file_name(agent), day.format("%Y-%m-%d")))
+    }
+
+    /// 4b: the agent's rollup totals for the window `ts >= since && ts <
+    /// end` — every rollup file whose day is (a) fully inside the window
+    /// and (b) entirely before the raw file's oldest run line (otherwise
+    /// the raw file still holds that day's runs and would double-count).
+    /// Corrupt rollup files are skipped (tolerant, like `read_all`).
+    fn load_rollups_in(
+        &self,
+        agent: &str,
+        since: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        raw_lines: &[MetricsLine],
+    ) -> RollupTotals {
+        let mut totals = RollupTotals::default();
+        let raw_min_run_ts = raw_lines
+            .iter()
+            .filter_map(|l| match l {
+                MetricsLine::Run { ts, .. } => Some(*ts),
+                _ => None,
+            })
+            .min();
+        let rollups_dir = self.dir.join("rollups");
+        let Ok(entries) = std::fs::read_dir(&rollups_dir) else {
+            return totals;
+        };
+        let prefix = format!("{}-", agent_file_name(agent));
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(date_str) = name.strip_prefix(&prefix).and_then(|s| s.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let Ok(day) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
+                continue;
+            };
+            let day_start = day
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc();
+            let day_end = (day + chrono::Duration::days(1))
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc();
+            if let Some(s) = since {
+                if day_start < s {
+                    continue;
+                }
+            }
+            if let Some(e) = end {
+                if day_end > e {
+                    continue;
+                }
+            }
+            if let Some(min) = raw_min_run_ts {
+                if day_end > min {
+                    continue;
+                }
+            }
+            match std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|content| serde_json::from_str::<MetricsRollup>(&content).ok())
+            {
+                Some(r) => totals.add_rollup(&r),
+                None => {
+                    tracing::debug!(
+                        "skipping unreadable/corrupt metrics rollup {}",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
+        totals
+    }
+
+    /// 4b: retention rotation for one agent — write a rollup file for every
+    /// fully-elapsed UTC day that is entirely older than `retention_days`
+    /// and has no rollup yet, then prune the raw `run` lines of the days
+    /// that now HAVE a rollup. Non-run lines (feedback/skill_use/trim/check/
+    /// eval) are never pruned — small and high-signal. A day is only pruned
+    /// if its rollup file exists on disk, so a failed write never loses
+    /// data. Returns the rollup paths written (empty = nothing to do).
+    pub fn roll_up_and_prune(
+        &self,
+        agent: &str,
+        now: DateTime<Utc>,
+        retention_days: u32,
+    ) -> Vec<std::path::PathBuf> {
+        let lines = self.read_all(agent);
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        let cutoff = now - chrono::Duration::days(retention_days as i64);
+        // A day is eligible when it has fully elapsed AND is entirely
+        // before the retention cutoff.
+        let eligible_before = now.date_naive().min(cutoff.date_naive());
+
+        // Group the agent's run lines by UTC day.
+        let mut day_runs: std::collections::BTreeMap<NaiveDate, Vec<&MetricsLine>> =
+            std::collections::BTreeMap::new();
+        for line in &lines {
+            if let MetricsLine::Run { ts, .. } = line {
+                day_runs.entry(ts.date_naive()).or_default().push(line);
+            }
+        }
+        // Trim correlation for a day links via the 1e run_id: the trimmed
+        // ids are the non-empty run_ids of the agent's trim lines.
+        let trimmed_ids: std::collections::HashSet<&str> = lines
+            .iter()
+            .filter_map(|l| match l {
+                MetricsLine::Trim { run_id, .. } if !run_id.is_empty() => Some(run_id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        let mut written = Vec::new();
+        for (day, runs) in day_runs.iter().filter(|(d, _)| **d < eligible_before) {
+            let path = self.rollup_path(agent, *day);
+            if path.exists() {
+                continue; // already rolled up (idempotent across restarts)
+            }
+            let mut rollup = MetricsRollup {
+                day: day.format("%Y-%m-%d").to_string(),
+                agent: agent.to_string(),
+                summary: MetricsSummary::from_lines(
+                    &runs.iter().map(|l| (*l).clone()).collect::<Vec<_>>(),
+                ),
+                ..Default::default()
+            };
+            for line in runs {
+                if let MetricsLine::Run {
+                    cost_usd,
+                    model,
+                    outcome,
+                    run_id,
+                    ..
+                } = line
+                {
+                    rollup.cost_usd += cost_usd;
+                    // Same "(unknown)" convention as build_report.
+                    let key = if model.trim().is_empty() {
+                        "(unknown)"
+                    } else {
+                        model.trim()
+                    };
+                    *rollup.model_mix.entry(key.to_string()).or_insert(0) += 1;
+                    let gave_up = matches!(outcome, RunOutcome::GaveUp);
+                    if trimmed_ids.contains(run_id.as_str()) {
+                        rollup.trim_correlation.trimmed_runs += 1;
+                        if gave_up {
+                            rollup.trim_correlation.trimmed_gave_up += 1;
+                        }
+                    } else {
+                        rollup.trim_correlation.untrimmed_runs += 1;
+                        if gave_up {
+                            rollup.trim_correlation.untrimmed_gave_up += 1;
+                        }
+                    }
+                    // Per-tool totals (the additive raw form the report
+                    // turns into ReportToolStat).
+                    if let MetricsLine::Run { tools, .. } = line {
+                        for t in tools {
+                            let e = rollup
+                                .tools
+                                .entry(t.name.clone())
+                                .or_insert((0, 0, 0));
+                            e.0 += t.calls;
+                            e.1 += t.errors;
+                            e.2 += t.duration_ms;
+                        }
+                    }
+                }
+            }
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match serde_json::to_string(&rollup) {
+                Ok(json) => {
+                    if std::fs::write(&path, json).is_ok() {
+                        written.push(path);
+                    } else {
+                        tracing::warn!(
+                            "4b: failed writing metrics rollup {}",
+                            path.display()
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!("4b: failed serializing rollup: {e}"),
+            }
+        }
+        if !written.is_empty() {
+            // Prune ONLY the run lines of days whose rollup now exists on
+            // disk (a failed write keeps its raw lines).
+            let n = lines.len();
+            let keep: Vec<MetricsLine> = lines
+                .into_iter()
+                .filter(|l| match l {
+                    MetricsLine::Run { ts, .. } => {
+                        let d = ts.date_naive();
+                        !(d < eligible_before && self.rollup_path(agent, d).exists())
+                    }
+                    _ => true,
+                })
+                .collect();
+            self.rewrite_agent_file(agent, &keep, keep.len() < n);
+        }
+        written
+    }
+
+    /// 4b: atomically rewrite one agent's raw file (temp file + rename —
+    /// the same guarantee as `write_file`, so a crash never truncates the
+    /// log). Skipped entirely when `rewrite` is false (nothing pruned).
+    fn rewrite_agent_file(&self, agent: &str, lines: &[MetricsLine], rewrite: bool) {
+        if !rewrite {
+            return;
+        }
+        let path = self.agent_path(agent);
+        let tmp = path.with_extension("jsonl.tmp");
+        let mut content = String::new();
+        for line in lines {
+            if let Ok(json) = serde_json::to_string(line) {
+                content.push_str(&json);
+                content.push('\n');
+            }
+        }
+        if let Err(e) = std::fs::write(&tmp, content) {
+            tracing::warn!("4b: failed pruning metrics file {}: {e}", path.display());
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            tracing::warn!("4b: failed renaming pruned metrics file: {e}");
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    /// 4b: the app-startup daily rollup — runs `roll_up_and_prune` over
+    /// every agent at most once per UTC calendar day (marker file
+    /// `metrics/.rollup-state`, plain date string). Returns the number of
+    /// rollup files written (0 when today's rollup already ran).
+    pub fn maybe_daily_rollup(&self, now: DateTime<Utc>, retention_days: u32) -> usize {
+        let today = now.format("%Y-%m-%d").to_string();
+        let marker = self.dir.join(".rollup-state");
+        if let Ok(content) = std::fs::read_to_string(&marker) {
+            if content.trim() == today {
+                return 0;
+            }
+        }
+        let mut count = 0;
+        for agent in self.agent_names() {
+            count += self.roll_up_and_prune(&agent, now, retention_days).len();
+        }
+        // Write the marker only after the loop so a crash mid-run retries
+        // the rollup on the next startup (it is idempotent per file).
+        if let Err(e) = std::fs::write(&marker, today) {
+            tracing::debug!("4b: could not write rollup marker: {e}");
+        }
+        count
+    }
     /// and the immediately preceding same-length window, both via the same
     /// windowed reader so the numbers match what the I5 effect check
     /// computes. Returns `(current, previous)`.
@@ -1327,7 +1718,9 @@ impl MetricsLog {
     /// Aggregate counts for `agent` over lines with `start <= ts < end`
     /// (a `None` bound is unbounded; `start >= end` yields the empty
     /// summary). The single code path behind `summary_since` (end = `None`)
-    /// and the I5 effect-check before/after windows.
+    /// and the I5 effect-check before/after windows. 4b: the run-derived
+    /// rollups of pruned days inside the window are merged in (additive),
+    /// so the I5 before/after windows stay correct across retention.
     pub fn summary_between(
         &self,
         agent: &str,
@@ -1340,8 +1733,9 @@ impl MetricsLog {
                 return s;
             }
         }
-        for line in self.read_all(agent) {
-            let ts = line_ts(&line);
+        let lines = self.read_all(agent);
+        for line in &lines {
+            let ts = line_ts(line);
             if let Some(start) = start {
                 if *ts < start {
                     continue;
@@ -1352,8 +1746,9 @@ impl MetricsLog {
                     continue;
                 }
             }
-            accumulate(&mut s, &line);
+            accumulate(&mut s, line);
         }
+        s += self.load_rollups_in(agent, start, end, &lines).summary;
         s
     }
 

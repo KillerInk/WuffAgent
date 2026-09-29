@@ -92,10 +92,10 @@ fn backdate(entry: &mut MemoryEntry, days: i64) {
 
 /// M1: points `MetricsLog::default()` (read by `suggest_improvements`) at a
 /// temp dir for the scope of a test. The override is PROCESS-GLOBAL, so the
-/// guard holds a process-wide lock for the whole test — file-metrics tests
-/// must serialize (same pattern as the MCP config-path tests).
-static METRICS_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+/// guard holds the shared `METRICS_DIR_LOCK` (defined in `agents::metrics`,
+/// next to the override slot it guards) for the whole test — the
+/// agents::metrics hygiene tests must hold the SAME lock (same pattern as
+/// the MCP config-path tests).
 pub(crate) struct MetricsDirGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     /// Kept alive so the temp dir outlives the test (the value itself is
@@ -105,7 +105,8 @@ pub(crate) struct MetricsDirGuard {
 
 impl MetricsDirGuard {
     pub(crate) fn new() -> Self {
-        let lock = METRICS_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock =
+            crate::agents::metrics::METRICS_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         crate::agents::metrics::set_metrics_dir_for_testing(Some(dir.path().to_path_buf()));
         MetricsDirGuard {

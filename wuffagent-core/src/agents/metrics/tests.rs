@@ -30,6 +30,15 @@ fn rs(calls: u32, errors: u32, attempts: u32) -> RunStats {
     }
 }
 
+/// Serializes the tests that read or write the process-global test override
+/// (`set_metrics_dir_for_testing`) — the SAME shared lock the improvement
+/// tests' MetricsDirGuard holds: `test_default_uses_test_process_dir`
+/// asserts the default is the per-process dir, which only holds while no
+/// parallel test has set an override.
+fn metrics_override_lock() -> std::sync::MutexGuard<'static, ()> {
+    super::METRICS_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 1a: the per-tool histogram round-trips on run lines (bump_tool feeds it),
 /// and a legacy line written before 1a (no `tools` field) parses with an
 /// empty histogram.
@@ -609,6 +618,7 @@ fn test_recent_caps_to_last_n() {
 /// explicit override must still win.
 #[test]
 fn test_default_uses_test_process_dir() {
+    let _lock = metrics_override_lock();
     let d = MetricsLog::default().dir().to_path_buf();
     assert!(
         d.starts_with(std::env::temp_dir())
@@ -833,6 +843,7 @@ fn test_check_summary_and_loop_cost() {
 /// `fleet.jsonl`.
 #[test]
 fn test_record_check_writes_default_log() {
+    let _lock = metrics_override_lock();
     let override_dir = tmp_dir("record-check");
     let _ = std::fs::remove_dir_all(&override_dir);
     set_metrics_dir_for_testing(Some(override_dir.clone()));
@@ -1623,4 +1634,217 @@ fn test_bucket_retry_rate() {
         ..empty
     };
     assert!((some.retry_rate() - 0.25).abs() < f64::EPSILON);
+}
+
+// ── 4b: retention rollup + raw-line rotation ───────────────────────────────
+
+/// 4b helper: a fixed "now" for the retention tests (UTC), so day/cutoff
+/// arithmetic is deterministic.
+fn rollup_now() -> DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-09-29T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+/// 4b helper: parse "YYYY-MM-DD" as a UTC midnight DateTime.
+fn day_start(s: &str) -> DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339(&format!("{s}T00:00:00Z"))
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+/// 4b helper: append a raw `run` JSONL line with an EXACT ts (the log_*
+/// writers stamp `Utc::now()`, which retention tests can't rely on).
+fn write_run_at(log: &MetricsLog, agent: &str, ts: &str, run_id: &str, outcome: &str) {
+    let path = log.agent_path(agent);
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(
+        f,
+        r#"{{"kind":"run","ts":"{ts}","tool_calls":2,"tool_errors":1,"verification_attempts":1,"duration_ms":1000,"outcome":"{outcome}","tokens_in":100,"tokens_out":10,"tools":[{{"name":"shell","calls":2,"errors":1,"duration_ms":300}}],"run_id":"{run_id}","session_id":"s","llm_ms":700,"tools_ms":300,"model":"m1","cost_usd":0.25}}"#
+    )
+    .unwrap();
+}
+
+/// 4b helper: the shared 4b fixture — two runs on 2026-06-01 (120 days
+/// before `rollup_now`, beyond the 90-day retention), one run on
+/// 2026-08-15 (inside retention), plus a trim (linked to the gave-up old
+/// run) and a feedback from the old day.
+fn rollup_fixture(name: &str) -> (std::path::PathBuf, MetricsLog) {
+    let dir = tmp_dir(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    write_run_at(&log, "coder", "2026-06-01T08:00:00Z", "r1", "verified");
+    write_run_at(&log, "coder", "2026-06-01T09:00:00Z", "r2", "gave_up");
+    write_run_at(&log, "coder", "2026-08-15T10:00:00Z", "r3", "verified");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log.agent_path("coder"))
+        .unwrap();
+    writeln!(
+        f,
+        r#"{{"kind":"trim","ts":"2026-06-01T09:05:00Z","chars_before":200000,"chars_after":100000,"messages_removed":40,"brief_updated":true,"run_id":"r2","overflow":false}}"#
+    )
+    .unwrap();
+    writeln!(
+        f,
+        r#"{{"kind":"feedback","ts":"2026-06-01T10:00:00Z","feedback":"up"}}"#
+    )
+    .unwrap();
+    (dir, log)
+}
+
+/// 4b: a fully-elapsed day older than the retention gets rolled up and its
+/// raw run lines pruned; the recent day and the high-signal non-run lines
+/// (trim/feedback) survive untouched. The pass is idempotent.
+#[test]
+fn test_rollup_writes_and_prunes() {
+    let (_dir, log) = rollup_fixture("rollup-basic");
+    let written = log.roll_up_and_prune("coder", rollup_now(), 90);
+    assert_eq!(written.len(), 1, "only the 120-day-old day is eligible");
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+    assert_eq!(written[0], log.rollup_path("coder", day));
+
+    let r: super::MetricsRollup =
+        serde_json::from_str(&std::fs::read_to_string(&written[0]).unwrap()).unwrap();
+    assert_eq!(r.day, "2026-06-01");
+    assert_eq!(r.agent, "coder");
+    assert_eq!(r.summary.runs, 2);
+    assert_eq!(r.summary.gave_up, 1);
+    assert!((r.cost_usd - 0.5).abs() < 1e-9, "cost sums over the day");
+    // The day holds TWO runs, each with shell=(2,1,300) → the day total.
+    assert_eq!(r.tools["shell"], (4, 2, 600));
+    assert_eq!(r.model_mix["m1"], 2);
+    // The trim line links to r2 (which gave up) — the correlation survives
+    // the pruning of r2's run line.
+    assert_eq!(r.trim_correlation.trimmed_runs, 1);
+    assert_eq!(r.trim_correlation.trimmed_gave_up, 1);
+    assert_eq!(r.trim_correlation.untrimmed_runs, 1);
+
+    // Raw file: only r3's run line + the trim + the feedback remain.
+    let lines = log.read_all("coder");
+    let runs: Vec<_> = lines
+        .iter()
+        .filter(|l| matches!(l, MetricsLine::Run { .. }))
+        .collect();
+    assert_eq!(runs.len(), 1, "old day's run lines pruned, recent kept");
+    assert!(
+        lines.iter().any(|l| matches!(l, MetricsLine::Trim { .. })),
+        "trim lines are never pruned"
+    );
+    assert!(
+        lines.iter().any(|l| matches!(l, MetricsLine::Feedback { .. })),
+        "feedback lines are never pruned"
+    );
+
+    // Idempotent: a second pass writes nothing and prunes nothing.
+    assert!(log.roll_up_and_prune("coder", rollup_now(), 90).is_empty());
+    assert_eq!(log.read_all("coder").len(), 3);
+}
+
+/// 4b: `report` and `summary_between` consult the rollups for pruned days,
+/// so a retention rotation never changes what the dashboards (report) or
+/// the I5 effect check (summary_between) read.
+#[test]
+fn test_report_merges_rollups() {
+    let (_dir, log) = rollup_fixture("rollup-merge");
+    log.roll_up_and_prune("coder", rollup_now(), 90);
+
+    // All-time: 2 rolled + 1 raw.
+    let all = log.report("coder", None, None);
+    assert_eq!(all.summary.runs, 3);
+    assert!((all.cost_usd - 0.75).abs() < 1e-9);
+    // All-time shell: the rolled-up day (4,2) + the raw recent run (2,1).
+    let shell = all.tool_stats.iter().find(|t| t.name == "shell").unwrap();
+    assert_eq!((shell.calls, shell.errors), (6, 3));
+    assert_eq!(
+        all.model_mix.iter().find(|(m, _)| m == "m1").unwrap().1,
+        3
+    );
+    assert_eq!(all.trim_correlation.trimmed_gave_up, 1);
+
+    // A window covering ONLY the pruned day is served entirely from the
+    // rollup (the raw file no longer has that day's lines).
+    let old_win = log.report("coder", Some(day_start("2026-06-01")), Some(day_start("2026-06-02")));
+    assert_eq!(old_win.summary.runs, 2, "rollup serves the pruned day");
+
+    // A window covering only the raw day gets no rollup contribution.
+    let new_win = log.report("coder", Some(day_start("2026-08-15")), Some(day_start("2026-08-16")));
+    assert_eq!(new_win.summary.runs, 1);
+
+    // summary_between (the I5 before/after path) merges the same way.
+    assert_eq!(log.summary_between("coder", None, None).runs, 3);
+    assert_eq!(
+        log.summary_between("coder", Some(day_start("2026-06-01")), Some(day_start("2026-06-02")))
+            .runs,
+        2
+    );
+    assert_eq!(
+        log.summary_between("coder", Some(day_start("2026-08-15")), Some(day_start("2026-08-16")))
+            .runs,
+        1
+    );
+}
+
+/// 4b: a day whose runs straddle the retention cutoff is NOT rolled — the
+/// cutoff must fall between whole days, so a partially-covered day keeps
+/// its raw lines until a later pass (when it has fully elapsed).
+#[test]
+fn test_partial_day_not_pruned() {
+    let dir = tmp_dir("rollup-partial");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    // Cutoff = now - 1d = 2026-09-28T12:00Z: yesterday's runs sit on both
+    // sides of it; 09-27 is fully before it.
+    write_run_at(&log, "coder", "2026-09-28T09:00:00Z", "a", "verified");
+    write_run_at(&log, "coder", "2026-09-28T15:00:00Z", "b", "verified");
+    write_run_at(&log, "coder", "2026-09-27T10:00:00Z", "c", "verified");
+
+    let written = log.roll_up_and_prune("coder", rollup_now(), 1);
+    assert_eq!(written.len(), 1, "only the fully-elapsed 09-27 rolls");
+    assert_eq!(
+        written[0],
+        log.rollup_path("coder", chrono::NaiveDate::from_ymd_opt(2026, 9, 27).unwrap())
+    );
+    let lines = log.read_all("coder");
+    let runs: Vec<_> = lines
+        .iter()
+        .filter(|l| matches!(l, MetricsLine::Run { .. }))
+        .collect();
+    assert_eq!(runs.len(), 2, "the straddling day's raw lines survive");
+}
+
+/// 4b: `maybe_daily_rollup` covers every agent and runs at most once per
+/// UTC calendar day (the `.rollup-state` marker); the next day's pass is a
+/// no-op when every rollup already exists.
+#[test]
+fn test_daily_rollup_marker() {
+    let dir = tmp_dir("rollup-marker");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = MetricsLog::new(&dir);
+    write_run_at(&log, "coder", "2026-03-01T08:00:00Z", "x1", "verified");
+    write_run_at(&log, "architect", "2026-03-01T09:00:00Z", "x2", "verified");
+
+    assert_eq!(log.maybe_daily_rollup(rollup_now(), 90), 2, "both agents roll");
+    assert_eq!(
+        log.maybe_daily_rollup(rollup_now(), 90),
+        0,
+        "same-day pass is short-circuited by the marker"
+    );
+    let next_day = rollup_now() + chrono::Duration::days(1);
+    assert_eq!(
+        log.maybe_daily_rollup(next_day, 90),
+        0,
+        "next day re-runs but every rollup already exists"
+    );
+    // The marker file holds today's UTC date.
+    let marker = std::fs::read_to_string(dir.join(".rollup-state")).unwrap();
+    assert_eq!(marker.trim(), "2026-09-30");
 }

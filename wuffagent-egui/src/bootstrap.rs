@@ -67,6 +67,21 @@ pub fn bootstrap() -> AppContext {
     crate::logging::init_tracing();
 
     let config = load_config();
+
+    // 4b: daily metrics retention — at most once per UTC calendar day
+    // (marker file in the metrics dir): fully-elapsed days older than
+    // `metrics_retention_days` get rolled up to metrics/rollups/ and their
+    // raw `run` lines are pruned. Logged-only on failure; never blocks
+    // startup.
+    {
+        let log = wuffagent_core::agents::metrics::MetricsLog::default();
+        let rolled =
+            log.maybe_daily_rollup(chrono::Utc::now(), config.metrics_retention_days);
+        if rolled > 0 {
+            tracing::info!("4b: metrics retention — rolled up {rolled} day(s)");
+        }
+    }
+
     let connection = Arc::new(ConnectionSettings::new(
         &config.base_url(),
         config.remote_api_key.as_deref(),
