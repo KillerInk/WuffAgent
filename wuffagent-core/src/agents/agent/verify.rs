@@ -79,10 +79,12 @@ static VERIFICATION_SYSTEM_PROMPT: &str =
      Respond with 'NEEDS_FIX' followed by a brief explanation ONLY if the response is factually wrong, \
      incomplete, or contradicts the tool outputs. \
      Do NOT reply NEEDS_FIX merely because the tool outputs alone do not spell out the full answer — \
-     the response itself is what you are grading.";
+     the response itself is what you are grading. \
+     On the LAST line of your reply, write 'SCORE: <x>' where x is a decimal between 0.0 and 1.0 \
+     for how well the response satisfies the request (1.0 = fully satisfied).";
 /// The verification judge's verdict on the assistant's final response for
 /// the current turn (returned by `verify_tool_outputs`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VerificationVerdict {
     /// Whether the judge (or the no-tool-outputs shortcut) accepts the
     /// response.
@@ -94,6 +96,57 @@ pub struct VerificationVerdict {
     /// shortcut) — accumulated into `VerificationState::judge_ms` by the
     /// caller and folded into the run's `llm_ms` bucket.
     pub judge_ms: u64,
+    /// 1c: the judge's 0..=1 quality score from its `SCORE: <x>` line
+    /// (`Some(1.0)` for the no-tool-outputs shortcut; None when the judge
+    /// line is absent or malformed). Eval lines record it; run lines don't.
+    pub score: Option<f64>,
+}
+
+/// 1c: parse the judge's `SCORE: <x>` line into a clamped 0..=1 score.
+///
+/// Case-insensitive; takes the text on the line containing the FIRST
+/// `SCORE:` and parses it as a float. `None` when the marker is absent,
+/// the value is not a finite float, or parsing fails. Out-of-range values
+/// are clamped to 0..=1 (a model that writes 1.5 for "great" still counts
+/// as fully satisfied).
+pub fn parse_judge_score(text: &str) -> Option<f64> {
+    let upper = text.to_uppercase();
+    let start = upper.find("SCORE:")? + "SCORE:".len();
+    let rest = &text[start..];
+    let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+    // First whitespace-separated token (tolerates trailing commentary).
+    let v: f64 = line.split_whitespace().next()?.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    Some(v.clamp(0.0, 1.0))
+}
+
+#[cfg(test)]
+mod score_tests {
+    use super::parse_judge_score;
+
+    #[test]
+    fn parses_valid_scores() {
+        assert_eq!(parse_judge_score("VERIFIED\nSCORE: 0.9"), Some(0.9));
+        assert_eq!(parse_judge_score("score: 0.25"), Some(0.25));
+        assert_eq!(parse_judge_score("SCORE:1.0"), Some(1.0));
+        assert_eq!(parse_judge_score("SCORE: 0"), Some(0.0));
+    }
+
+    #[test]
+    fn clamps_out_of_range() {
+        assert_eq!(parse_judge_score("SCORE: 1.5"), Some(1.0));
+        assert_eq!(parse_judge_score("SCORE: -0.2"), Some(0.0));
+    }
+
+    #[test]
+    fn missing_or_malformed_is_none() {
+        assert_eq!(parse_judge_score("VERIFIED"), None);
+        assert_eq!(parse_judge_score("SCORE: abc"), None);
+        assert_eq!(parse_judge_score("SCORE:"), None);
+        assert_eq!(parse_judge_score("SCORE: 0.5 but wait"), Some(0.5));
+    }
 }
 
 impl Agent {
@@ -135,6 +188,7 @@ impl Agent {
                 verified: true,
                 judge_reason: String::new(),
                 judge_ms: 0,
+                score: Some(1.0),
             });
         }
         let recent_tool_summary: String = tool_outputs.join("\n");
@@ -210,19 +264,23 @@ impl Agent {
             || response_upper.contains("INCORRECT")
             || response_upper.contains("INCOMPLETE")
         {
+            let score = parse_judge_score(&response);
             Ok(VerificationVerdict {
                 verified: false,
                 judge_reason: response,
                 judge_ms: judge_started.elapsed().as_millis() as u64,
+                score,
             })
         } else {
             // VERIFIED, or unclear — default to verified (better to continue
             // than to abort a successful execution on an ambiguous LLM
             // response). The judge text is kept either way for S1 evidence.
+            let score = parse_judge_score(&response);
             Ok(VerificationVerdict {
                 verified: true,
                 judge_reason: response,
                 judge_ms: judge_started.elapsed().as_millis() as u64,
+                score,
             })
         }
     }

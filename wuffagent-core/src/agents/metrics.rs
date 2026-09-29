@@ -722,11 +722,14 @@ impl MetricsLog {
 
     /// 2b: append a golden/regression eval line (the eval harness's pass/fail
     /// record). Written to `agent`'s file (the profile that ran the eval).
+    /// 1c: `score` is the judge's 0..=1 quality score (None = the judge gave
+    /// no usable score line, or the run never reached the judge).
     pub fn log_eval(
         &self,
         agent: &str,
         id: &str,
         passed: bool,
+        score: Option<f64>,
         duration_ms: u64,
         tokens_in: u64,
         tokens_out: u64,
@@ -740,9 +743,7 @@ impl MetricsLog {
                 agent: agent.to_string(),
                 id: id.to_string(),
                 passed,
-                // Score is not computed yet (2c adds it); the field stays for
-                // forward compatibility.
-                score: None,
+                score,
                 duration_ms,
                 tokens_in,
                 tokens_out,

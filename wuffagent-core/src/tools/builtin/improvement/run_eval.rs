@@ -75,6 +75,9 @@ struct EvalOnce {
     tool_calls: usize,
     /// 1b: model name stamped by the client ("" = server reported none).
     model: String,
+    /// 1c: the judge's 0..=1 quality score (Some(1.0) for the no-tool-outputs
+    /// shortcut; None when the judge gave no usable score line).
+    score: Option<f64>,
 }
 
 /// Run ONE eval headlessly: build a fresh agent → execute the task → judge the
@@ -138,6 +141,7 @@ async fn run_eval_once(
         tokens_out,
         tool_calls,
         model,
+        score: verdict.score,
     })
 }
 
@@ -337,6 +341,7 @@ impl Tool for RunEvalTool {
                         &agent_name,
                         &eval.id,
                         p,
+                        r.score,
                         r.duration_ms,
                         r.tokens_in,
                         r.tokens_out,
@@ -376,6 +381,7 @@ impl Tool for RunEvalTool {
                         &agent_name,
                         &eval.id,
                         false,
+                        None,
                         started.elapsed().as_millis() as u64,
                         0,
                         0,
@@ -390,6 +396,7 @@ impl Tool for RunEvalTool {
                         &agent_name,
                         &eval.id,
                         false,
+                        None,
                         EVAL_TIMEOUT_SECS * 1000,
                         0,
                         0,
@@ -555,6 +562,8 @@ mod tests {
         assert!(r.verified, "no tool calls -> verified shortcut");
         assert_eq!(r.tool_calls, 0);
         assert!(r.duration_ms < EVAL_TIMEOUT_SECS * 1000);
+        // 1c: the no-tool-outputs shortcut derives a perfect score.
+        assert_eq!(r.score, Some(1.0), "shortcut score");
     }
 
     /// The tool's full path: a saved eval runs headlessly and is reported as a
@@ -598,19 +607,25 @@ mod tests {
         assert!(msg.contains("Ran 1 eval(s) for 'coder'"), "got: {msg}");
         assert!(msg.contains("1 passed, 0 failed"), "got: {msg}");
         assert!(msg.contains("[greet] PASS"), "got: {msg}");
-        // 1b: the Eval line carries the model the server reported ("" when
-        // none) and a 0.0 cost (no prices configured in this test). Only
-        // run_eval writes Eval lines, so `any` stays race-free across tests.
+        // 1b/1c: the Eval line carries the model the server reported ("" when
+        // none), a 0.0 cost (no prices configured in this test), and the
+        // shortcut's derived score Some(1.0) (no tool calls in this mock).
+        // Only run_eval writes Eval lines, so `any` stays race-free across
+        // tests.
         let lines = MetricsLog::default().read_all("coder");
         assert!(
             lines.iter().any(|l| {
                 matches!(
                     l,
-                    crate::agents::metrics::MetricsLine::Eval { model, cost_usd, .. }
-                        if model.is_empty() && *cost_usd == 0.0
+                    crate::agents::metrics::MetricsLine::Eval {
+                        model,
+                        cost_usd,
+                        score,
+                        ..
+                    } if model.is_empty() && *cost_usd == 0.0 && *score == Some(1.0)
                 )
             }),
-            "no unpriced Eval line recorded; lines: {lines:?}"
+            "no Eval line with model/cost/score recorded; lines: {lines:?}"
         );
     }
 

@@ -294,7 +294,7 @@ table, arithmetic); `log_run` writes model+cost (tempdir); the existing
 `run_eval` mock test extended: the Eval line carries a model + `0.0` cost
 (no prices configured).
 
-**1c. Eval score via judge-prompt extension (A4)** — `stats(1c)`
+**1c. Eval score via judge-prompt extension (A4)** — `stats(1c)` — **DONE**
 Files: `agents/agent/verify.rs`, `agents/metrics.rs`,
 `tools/builtin/improvement/run_eval.rs`.
 1. verify.rs — extend `VERIFICATION_SYSTEM_PROMPT` (verify.rs:75) with one
