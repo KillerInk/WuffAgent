@@ -102,131 +102,8 @@ impl ImprovementsPanel {
                 // per-frame list_agents() re-scan flooded the log while
                 // tokens streamed.
                 self.refresh_agent_cache(agent_manager);
-                // 4a: one-line loop-status header (data from 2a's state file,
-                // same snapshot the list_improvement_status tool reads). The
-                // panel is fleet-wide, so show the most recent check across
-                // the global + per-agent states.
-                let loop_status = memory.improvement_status();
-                let status_text = loop_status_header_line(&loop_status);
-                ui.label(egui::RichText::new(status_text).weak());
-                ui.separator();
-
-                // 4b: "run check now" — an on-demand improvement check that
-                // bypasses the cooldown (the same core path the
-                // `run_self_improvement` tool uses: `run_improvement_check`).
-                // It runs on a background thread (LLM call, up to 180s); the
-                // result comes back over the AppEvent channel (suggestions →
-                // `ImprovementSuggested`, the always-sent done-signal →
-                // `ImprovementCheckFinished`, which clears the running flag).
-                {
-                    let agents: Vec<String> = self
-                        .agents()
-                        .iter()
-                        .map(|a| a.name.clone())
-                        .collect();
-                    // 2d: the selector lists every profile PLUS the special
-                    // "fleet" entry (cross-agent review, 2b(b)).
-                    let mut selector: Vec<String> = agents.clone();
-                    selector.push(FLEET_SCOPE.to_string());
-                    let auto_on = memory.config().auto_improve;
-                    // Re-resolve the selector if it is empty or the entry
-                    // disappeared (fresh agent list each frame). The default
-                    // is the FIRST profile (not "fleet") — per-agent checks
-                    // are the common case.
-                    if self.run_check_agent.is_empty() || !selector.contains(&self.run_check_agent) {
-                        self.run_check_agent = agents.first().cloned().unwrap_or_else(|| FLEET_SCOPE.to_string());
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Run check for:");
-                        // egui 0.36: ComboBox is a widget struct (no Ui::combo_box).
-                        // Write into a local, then copy back (matches input/mod.rs).
-                        let mut next_agent = self.run_check_agent.clone();
-                        egui::ComboBox::from_id_salt("improvements_run_check_agent")
-                            .width(140.0)
-                            .selected_text(self.run_check_agent.clone())
-                            .show_ui(ui, |ui| {
-                                for name in selector.iter() {
-                                    ui.selectable_value(&mut next_agent, name.clone(), name.as_str());
-                                }
-                            });
-                        self.run_check_agent = next_agent;
-                        let label = if self.run_check_running {
-                            "Checking…"
-                        } else {
-                            "Run check now"
-                        };
-                        let enabled = auto_on && !self.run_check_running;
-                        let hover = if !auto_on {
-                            "auto_improve is off (memory settings)"
-                        } else if self.run_check_running {
-                            "A check is already in progress"
-                        } else if self.run_check_agent == FLEET_SCOPE {
-                            "Run an on-demand FLEET review now: cross-agent patterns (shared failures → skills / new shared agents, skill maintenance). Bypasses the per-agent cooldowns"
-                        } else {
-                            "Run an on-demand self-improvement check for this agent now (bypasses the cooldown)"
-                        };
-                        if ui.add_enabled(enabled, egui::Button::new(label)).on_hover_text(hover).clicked()
-                        {
-                            let agent = self.run_check_agent.clone();
-                            if agent == FLEET_SCOPE {
-                                // 2d: FLEET review (2b(b)) — roster = name +
-                                // description of every known profile (the
-                                // MemoryManager does not know about profiles,
-                                // so the panel builds it).
-                                let roster: Vec<(String, String)> = self
-                                    .agents()
-                                    .iter()
-                                    .map(|a| (a.name.clone(), a.description.clone()))
-                                    .collect();
-                                self.run_check_running = true;
-                                self.run_check_status = "Checking the fleet…".to_string();
-                                let memory = memory_arc.clone();
-                                let events = events.clone();
-                                std::thread::spawn(move || {
-                                    let result = memory.run_fleet_improvement_check(&roster, None);
-                                    send_check_result(&events, FLEET_SCOPE, &result);
-                                });
-                            } else {
-                                // The chat profile is synthetic (no backing
-                                // .json file) — build its config here with the
-                                // LIVE app prompt (the panel holds the config),
-                                // so the check analyzes what the chat actually
-                                // runs, not the static base text.
-                                let cfg = if agent
-                                    .eq_ignore_ascii_case(
-                                        wuffagent_core::agents::improvement::CHAT_PROFILE_NAME
-                                    )
-                                {
-                                    let mut cfg =
-                                        wuffagent_core::agents::improvement::synthetic_chat_config();
-                                    cfg.system_prompt = config.system_prompt.clone();
-                                    Some(cfg)
-                                } else {
-                                    self.agents().iter().find(|a| a.name == agent).cloned()
-                                };
-                                match cfg {
-                                    Some(cfg) => {
-                                        self.run_check_running = true;
-                                        self.run_check_status = format!("Checking '{agent}'…");
-                                        let memory = memory_arc.clone();
-                                        let events = events.clone();
-                                        std::thread::spawn(move || {
-                                            let result = memory.run_improvement_check(&cfg, None);
-                                            send_check_result(&events, &agent, &result);
-                                        });
-                                    }
-                                    None => {
-                                        self.run_check_status =
-                                            format!("Agent '{agent}' not found");
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    if !self.run_check_status.is_empty() {
-                        ui.label(egui::RichText::new(self.run_check_status.clone()).weak());
-                    }
-                }
+                draw_loop_status(ui, memory);
+                draw_run_check(ui, self, memory, memory_arc, events, config);
                 ui.separator();
 
                 if let Some(msg) = &self.message {
@@ -239,590 +116,22 @@ impl ImprovementsPanel {
                     ui.separator();
                 }
 
-                ui.label(
-                    egui::RichText::new("Review the LLM's proposed changes. Approve to apply, dismiss to reject.")
-                        .weak(),
+                // The pending list returns the frame's collected actions +
+                // the prompt histories the revert execution needs; both are
+                // applied by `execute_actions` AFTER the list is drawn (never
+                // mutate `pending` while iterating it).
+                let (actions, item_histories) =
+                    draw_pending_list(ui, self, agents_dirs, config, theme, &skill_store);
+                execute_actions(
+                    self,
+                    actions,
+                    &item_histories,
+                    &skill_store,
+                    config,
+                    agent_manager,
+                    agents_dirs,
+                    memory,
                 );
-                ui.separator();
-
-                ui.label(egui::RichText::new("Pending suggestions:").strong());
-                ui.add_space(4.0);
-
-                // F4: per-item prompt history (newest first) for the Revert
-                // button — only items proposing a prompt change for an
-                // existing agent can be reverted; new-agent items have none.
-                let item_histories: Vec<Vec<agent_history::HistoryEntry>> = self
-                    .pending
-                    .iter()
-                    .map(|p| {
-                        if p.prompt_change.is_some() {
-                            agent_history::list_history(agents_dirs, &p.agent_name)
-                        } else {
-                            Vec::new()
-                        }
-                    })
-                    .collect();
-
-                // The CURRENT system prompt of each pending item's agent (for
-                // the I3 old-vs-new comparison), from the cached agent list
-                // (NOT a fresh disk scan per frame). The chat profile is
-                // synthetic (its prompt lives in the app config, not a
-                // profile file) — for it the LIVE config prompt is shown, so
-                // the diff compares against what the chat actually runs.
-                // Precomputed because the loop below holds a &mut borrow of
-                // `self.pending`.
-                let chat_profile = wuffagent_core::agents::improvement::CHAT_PROFILE_NAME;
-                let current_prompts: Vec<Option<String>> = self
-                    .pending
-                    .iter()
-                    .map(|p| {
-                        if p.agent_name.eq_ignore_ascii_case(chat_profile) {
-                            return Some(config.system_prompt.clone());
-                        }
-                        self.agents()
-                            .iter()
-                            .find(|a| a.name == p.agent_name)
-                            .map(|c| c.system_prompt.clone())
-                    })
-                    .collect();
-
-                // Collect actions to execute AFTER the loop (avoids mutating
-                // `self.pending` while iterating).
-                let mut to_remove: Vec<usize> = Vec::new();
-                let mut to_approve: Vec<usize> = Vec::new();
-                let mut to_revert: Vec<usize> = Vec::new();
-                let mut to_revert_skills: Vec<(usize, String)> = Vec::new();
-                let mut to_dismiss: Vec<usize> = Vec::new();
-
-                for (i, imp) in self.pending.iter_mut().enumerate() {
-                    // F2 can stack several items for the SAME agent (different
-                    // rationales) — a label-derived widget id would then be
-                    // used at two positions in one frame (egui id-clash
-                    // warning: "First/Second use of widget ID"). Push an
-                    // item-scoped id derived from the same (agent, rationale)
-                    // identity the dedupe in `handle_improvement_suggested`
-                    // uses, so every item's header id (and every child
-                    // widget's, via the parent chain) is unique.
-                    ui.push_id((imp.agent_name.as_str(), imp.rationale.as_str()), |ui| {
-                        ui.collapsing(format!("Agent: {}", imp.agent_name), |ui| {
-                        ui.label(egui::RichText::new(format!("Rationale: {}", imp.rationale)).weak());
-                        ui.add_space(4.0);
-
-                        // I3: show the evidence that triggered the suggestion.
-                        if !imp.evidence.is_empty() {
-                            ui.collapsing("Evidence (what the improver saw)", |ui| {
-                                for e in &imp.evidence {
-                                    ui.label(egui::RichText::new(e).weak().size(11.0));
-                                }
-                            });
-                        }
-
-                        if let Some(new_prompt) = &imp.prompt_change {
-                            // I3: old-vs-new comparison — the current prompt
-                            // (read-only) stacked ABOVE the proposed one
-                            // (editable), both height-capped. The previous
-                            // side-by-side layout let a long prompt stretch the
-                            // item to the full text height; the read-only side
-                            // is already capped (ScrollArea), so the editable
-                            // side gets the same cap.
-                            let current_prompt = &current_prompts[i];
-                            // Chat profile ("chat" is synthetic — no backing
-                            // profile file, so `current_prompts[i]` is None):
-                            // the CURRENT prompt IS this profile's prompt, and
-                            // it is persisted in the chat settings (the
-                            // settings dialog's system-prompt field), not in a
-                            // profile file. Show it read-only here so the
-                            // user can see what the proposal replaces and
-                            // where the old text lives.
-                            if imp.agent_name.eq_ignore_ascii_case("chat") {
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("Current (read-only — from chat settings)")
-                                            .strong()
-                                            .weak(),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "'Chat' is a synthetic profile: approving writes the proposed prompt \
-                                             into the chat settings (Settings → Chat → System prompt), not a profile file.",
-                                        )
-                                        .weak()
-                                        .size(11.0),
-                                    );
-                                });
-                            }
-                            if let Some(cur) = &current_prompt {
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("Current (read-only)")
-                                            .strong()
-                                            .weak(),
-                                    );
-                                    // Item-scoped id: a ScrollArea auto-derives
-                                    // its ID from the drawn content, and the
-                                    // current + proposed boxes hold the same
-                                    // prompt text, which trips egui's
-                                    // "First/Second use of widget ID" clash
-                                    // guard (same reason the item header uses
-                                    // an explicit push_id). The push_id scopes
-                                    // the scroll area's content-derived ID per
-                                    // box.
-                                    ui.push_id("imp_prompt_current", |ui| {
-                                        egui::ScrollArea::vertical()
-                                            .max_height(120.0)
-                                            .show(ui, |ui| {
-                                                ui.label(
-                                                    egui::RichText::new(cur)
-                                                        .monospace()
-                                                        .size(11.0),
-                                                );
-                                            });
-                                    });
-                                });
-                            }
-                            {
-                                let title = if current_prompt.is_some() || imp.agent_name.eq_ignore_ascii_case("chat") {
-                                    "Proposed (editable)"
-                                } else {
-                                    "Proposed system prompt (editable)"
-                                };
-                                ui.vertical(|ui| {
-                                    ui.label(egui::RichText::new(title).strong());
-                                    // Item-scoped id (see the "Current" box
-                                    // above): without it the two scroll areas
-                                    // holding the same prompt text would
-                                    // collide on their auto-derived IDs.
-                                    ui.push_id("imp_prompt_proposed", |ui| {
-                                        egui::ScrollArea::vertical()
-                                            .max_height(150.0)
-                                            .show(ui, |ui| {
-                                                let mut buf = imp
-                                                    .edited_prompt
-                                                    .as_deref()
-                                                    .unwrap_or(new_prompt)
-                                                    .to_string();
-                                                ui.add(
-                                                    egui::TextEdit::multiline(&mut buf)
-                                                        .desired_width(f32::INFINITY)
-                                                        .desired_rows(6),
-                                                );
-                                                // F1: persist the edited value
-                                                // in place so the user's
-                                                // changes survive across frames
-                                                // and are what gets applied on
-                                                // Approve.
-                                                imp.edited_prompt = Some(buf);
-                                            });
-                                    });
-                                });
-                            }
-                            ui.checkbox(&mut imp.apply_prompt, "Apply prompt change");
-                        }
-
-                        // 2c: proposed one-line description change (editable,
-                        // same "user edit wins" pattern as the prompt).
-                        if let Some(desc) = imp.description.clone() {
-                            let mut buf = desc;
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Proposed description (editable)").strong(),
-                                );
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut buf)
-                                        .desired_width(f32::INFINITY),
-                                );
-                                ui.checkbox(&mut imp.apply_description, "Apply description change");
-                            });
-                            imp.description = Some(buf);
-                        }
-
-                        for na in imp.new_agents.iter_mut() {
-                            ui.add_space(6.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "New agent: '{}' — {}",
-                                    na.proposal.name, na.proposal.description
-                                ))
-                                .strong(),
-                            );
-                            let mut sp = na.edited_system_prompt.clone();
-                            ui.add(
-                                egui::TextEdit::multiline(&mut sp)
-                                    .desired_width(f32::INFINITY)
-                                    .desired_rows(4),
-                            );
-                            // F1: persist the edited value (see above).
-                            na.edited_system_prompt = sp;
-                        }
-
-                        // 3b: proposed skills (procedural memory) — read-only
-                        // previews; Approve saves each via the SkillStore
-                        // (overwriting an existing name is the versioning
-                        // mechanism, so "update" and "new" both save).
-                        if !imp.skill_updates.is_empty() {
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "Proposed skills ({}):",
-                                        imp.skill_updates.len()
-                                    ))
-                                    .strong(),
-                                );
-                                for sk in &imp.skill_updates {
-                                    let action = sk.action.trim().to_ascii_lowercase();
-                                    let is_delete = action == "delete";
-                                    let verb = if is_delete {
-                                        "retire"
-                                    } else if action == "update" {
-                                        "update"
-                                    } else {
-                                        "new"
-                                    };
-                                    ui.add_space(4.0);
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!("{} ({})", sk.name, verb))
-                                                .strong(),
-                                        );
-                                        // 3c: per-skill Revert (F4 two-click
-                                        // pattern) — restore this skill's
-                                        // latest version snapshot, e.g. undo a
-                                        // previously approved bad rewrite or a
-                                        // retire (available for every verb).
-                                        let canonical = sk.name.trim().to_ascii_lowercase();
-                                        let sk_hist = skill_store.list_skill_history(&canonical);
-                                        if !sk_hist.is_empty() {
-                                            let armed =
-                                                imp.skill_revert_armed.iter().any(|n| n == &canonical);
-                                            let label = if armed {
-                                                let ts = skill_snapshot_ts(&sk_hist[0], &canonical);
-                                                format!("↩ Confirm revert to {}?", agent_history::format_ts(ts))
-                                            } else {
-                                                "↩ Revert".to_string()
-                                            };
-                                            if ui
-                                                .add_enabled(
-                                                    true,
-                                                    egui::Button::new(egui::RichText::new(label).weak()).small(),
-                                                )
-                                                .on_hover_text("Restore this skill to its latest version snapshot (the state before the most recent overwrite/retire). Two clicks: this arms it, the next confirms.")
-                                                .clicked()
-                                            {
-                                                if armed {
-                                                    to_revert_skills.push((i, canonical.clone()));
-                                                } else {
-                                                    imp.skill_revert_armed.push(canonical.clone());
-                                                }
-                                            }
-                                        }
-                                    });
-                                    if is_delete {
-                                        // 3b: a retire carries no (or stale)
-                                        // metadata — just state what it does.
-                                        ui.label(
-                                            egui::RichText::new(
-                                                "Deletes the skill file if approved (usage: never read in the window).",
-                                            )
-                                            .weak(),
-                                        );
-                                        continue;
-                                    }
-                                    if !sk.description.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(sk.description.clone()).weak(),
-                                        );
-                                    }
-                                    if !sk.when_to_use.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "Use: {}",
-                                                sk.when_to_use
-                                            ))
-                                            .weak(),
-                                        );
-                                    }
-                                    let preview: String = sk.body.chars().take(400).collect();
-                                    egui::ScrollArea::vertical()
-                                        .max_height(120.0)
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new(preview)
-                                                    .monospace()
-                                                    .size(11.0),
-                                            );
-                                        });
-                                }
-                                ui.checkbox(
-                                    &mut imp.apply_skills,
-                                    format!(
-                                        "Apply {} proposed skill(s)",
-                                        imp.skill_updates.len()
-                                    ),
-                                );
-                            });
-                        }
-
-                        // I2/I3: per-field changes with approve toggles — the
-                        // user can accept the prompt but reject a tool change
-                        // (or vice versa). Only fields the LLM proposed show.
-                        if let Some(tools) = &imp.allowed_tools {
-                            ui.checkbox(
-                                &mut imp.apply_allowed_tools,
-                                format!(
-                                    "Apply tool allowlist change ({} tools: {})",
-                                    tools.len(),
-                                    tools.join(", ")
-                                ),
-                            );
-                        }
-                        if let Some(re) = &imp.reasoning_effort {
-                            ui.checkbox(
-                                &mut imp.apply_reasoning_effort,
-                                format!("Apply reasoning effort change ({:?})", re),
-                            );
-                        }
-                        if let Some(sc) = &imp.shell_config {
-                            let desc = if sc.shell_enabled {
-                                format!(
-                                    "shell enabled, {} command pattern(s)",
-                                    sc.allowed_commands.len()
-                                )
-                            } else {
-                                "shell disabled".to_string()
-                            };
-                            ui.checkbox(
-                                &mut imp.apply_shell_config,
-                                format!("Apply shell config change ({})", desc),
-                            );
-                        }
-                        if let Some(ht) = &imp.handoff_targets {
-                            ui.checkbox(
-                                &mut imp.apply_handoff_targets,
-                                format!("Apply handoff target change ({})", ht.join(", ")),
-                            );
-                        }
-                        if let Some(ms) = imp.task_timeout_ms {
-                            ui.checkbox(
-                                &mut imp.apply_task_timeout,
-                                format!("Apply task timeout change ({} ms)", ms),
-                            );
-                        }
-
-                        let has_config_change = imp.prompt_change.is_some()
-                            || imp.description.is_some()
-                            || imp.allowed_tools.is_some()
-                            || imp.reasoning_effort.is_some()
-                            || imp.shell_config.is_some()
-                            || imp.handoff_targets.is_some()
-                            || imp.task_timeout_ms.is_some()
-                            || !imp.skill_updates.is_empty();
-                        if has_config_change {
-                            // Existing-agent prompt change → Approve + Dismiss + Revert.
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(true, egui::Button::new("✓ Approve").fill(theme.primary))
-                                    .clicked()
-                                {
-                                    if !to_approve.contains(&i) {
-                                        to_approve.push(i);
-                                    }
-                                }
-                                if ui.add(egui::Button::new("✗ Dismiss")).clicked() {
-                                    if !to_remove.contains(&i) {
-                                        to_remove.push(i);
-                                    }
-                                    if !to_dismiss.contains(&i) {
-                                        to_dismiss.push(i);
-                                    }
-                                }
-                                // F4: revert this agent to its latest prompt
-                                // snapshot. "Click again to confirm" — no
-                                // modal, keeps the per-frame draw simple.
-                                let hist = &item_histories[i];
-                                let has_hist = !hist.is_empty();
-                                let label = if imp.revert_armed && has_hist {
-                                    format!("↩ Confirm revert to {}?", agent_history::format_ts(hist[0].ts))
-                                } else {
-                                    "↩ Revert".to_string()
-                                };
-                                if ui
-                                    .add_enabled(has_hist, egui::Button::new(label))
-                                    .on_hover_text("Restore the previous prompt from the latest history snapshot. Pending suggestions for this agent are dropped (they were reviewed against the now-reverted prompt).")
-                                    .clicked()
-                                {
-                                    if imp.revert_armed {
-                                        to_revert.push(i);
-                                    } else {
-                                        imp.revert_armed = true;
-                                    }
-                                }
-                                if !has_hist {
-                                    ui.label(egui::RichText::new("(no prompt history)").weak());
-                                }
-                            });
-                        } else {
-                            // New-agent proposal → only dismiss makes sense
-                            // (approve applies every bundled proposal).
-                            ui.horizontal(|ui| {
-                                if ui.add(egui::Button::new("✗ Dismiss")).clicked() {
-                                    if !to_remove.contains(&i) {
-                                        to_remove.push(i);
-                                    }
-                                    if !to_dismiss.contains(&i) {
-                                        to_dismiss.push(i);
-                                    }
-                                }
-                            });
-                        }
-                        ui.separator();
-                        });
-                    });
-                }
-
-                // G.1: if anything was acted on this frame, the queue
-                // changed — persist what remains after the removals below.
-                let had_actions =
-                    !to_approve.is_empty() || !to_dismiss.is_empty() || !to_revert.is_empty();
-
-                // F4: execute reverts (file I/O) before approves so both see
-                // the pre-removal list; pending-list removals happen only in
-                // the single pass below, so approve indices stay valid.
-                for i in &to_revert {
-                    let name = self.pending[*i].agent_name.clone();
-                    let entry = item_histories[*i].first().cloned();
-                    match entry {
-                        Some(e) => match agent_history::revert(&e.dir, &name, &e) {
-                            Ok(_) => {
-                                self.message = Some(format!(
-                                    "reverted '{}' to {} — pending suggestions for this agent were dropped",
-                                    name,
-                                    agent_history::format_ts(e.ts)
-                                ));
-                                // Drop ALL pending suggestions for this agent:
-                                // they were reviewed against the now-reverted prompt.
-                                for k in 0..self.pending.len() {
-                                    if self.pending[k].agent_name == name && !to_remove.contains(&k) {
-                                        to_remove.push(k);
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                self.pending[*i].revert_armed = false;
-                                self.message = Some(format!(
-                                    "Error: revert of '{}' failed: {}",
-                                    name, err
-                                ));
-                            }
-                        },
-                        None => {
-                            self.pending[*i].revert_armed = false;
-                            self.message = Some(format!(
-                                "revert of '{}': no history snapshot available",
-                                name
-                            ));
-                        }
-                    }
-                }
-
-                // 3c: execute skill reverts (file I/O) — restore each skill
-                // to its latest version snapshot. The pending item stays (a
-                // skill revert does not invalidate the prompt/tool
-                // proposals), but the user is told the skill suggestion may
-                // now be stale.
-                for (i, name) in to_revert_skills {
-                    if i >= self.pending.len() {
-                        continue; // defensive: indices came from this frame
-                    }
-                    let sk_hist = skill_store.list_skill_history(&name);
-                    let Some(latest) = sk_hist.first().cloned() else {
-                        self.pending[i].skill_revert_armed.retain(|n| n != &name);
-                        self.message =
-                            Some(format!("revert of skill '{name}': no history snapshot available"));
-                        continue;
-                    };
-                    let ts = skill_snapshot_ts(&latest, &name);
-                    match skill_store.revert_skill(&name, &latest) {
-                        Ok(skill) => {
-                            self.pending[i].skill_revert_armed.retain(|n| n != &name);
-                            self.message = Some(format!(
-                                "reverted skill '{}' to {} — the skill suggestion in this item may now be stale",
-                                skill.name,
-                                agent_history::format_ts(ts)
-                            ));
-                        }
-                        Err(e) => {
-                            self.pending[i].skill_revert_armed.retain(|n| n != &name);
-                            self.message = Some(format!("Error: revert of skill '{name}' failed: {e}"));
-                        }
-                    }
-                }
-
-                // Execute collected actions (file I/O + list mutation) after
-                // the loop so we never mutate while iterating.
-                for i in to_approve.into_iter().rev() {
-                    // The chat profile is synthetic (no backing .json file):
-                    // its prompt lives in the app config, so an approval for
-                    // it writes config.json instead of a profile file
-                    // (previously it failed with "profile not found" and
-                    // nothing was written).
-                    let (outcome, prompt_applied) = if self
-                        .pending[i]
-                        .agent_name
-                        .eq_ignore_ascii_case(
-                            wuffagent_core::agents::improvement::CHAT_PROFILE_NAME
-                        )
-                    {
-                        super::memory::apply_chat_improvement(config, agent_manager, &skill_store, &self.pending[i])
-                    } else {
-                        super::memory::apply_improvement_detailed(
-                            agents_dirs,
-                            agent_manager,
-                            &skill_store,
-                            &self.pending[i],
-                        )
-                    };
-                    self.message = Some(outcome);
-                    // I5: an approved prompt change gets a marker so the next
-                    // improvement check can weigh the outcomes since it and
-                    // propose a revert. A store failure is surfaced (F5-style)
-                    // but does not undo the approval itself.
-                    if prompt_applied {
-                        if let Err(err) = super::memory::remember_applied_prompt(memory, &self.pending[i]) {
-                            self.message = Some(format!(
-                                "approved '{}', but remembering the prompt change failed: {}",
-                                self.pending[i].agent_name, err
-                            ));
-                        }
-                    }
-                    if !to_remove.contains(&i) {
-                        to_remove.push(i);
-                    }
-                }
-
-                // F5: remember explicit dismissals as negative evidence for
-                // the improver. The dedup gate in `MemoryManager::add` makes
-                // re-dismissing the same suggestion a no-op. Approves and
-                // reverts do NOT record a lesson (the item was acted on, not
-                // rejected).
-                for i in &to_dismiss {
-                    if let Err(err) = super::memory::remember_dismissal(memory, &self.pending[*i]) {
-                        self.message = Some(format!(
-                            "dismissed '{}', but remembering the rejection failed: {}",
-                            self.pending[*i].agent_name, err
-                        ));
-                    }
-                }
-
-                for i in to_remove.into_iter().rev() {
-                    if i < self.pending.len() {
-                        self.pending.remove(i);
-                    }
-                }
-
-                // G.1: queue shrank (or changed) — persist the remainder.
-                if had_actions {
-                    self.persist();
-                }
 
                 // Close button: the window's own ✕ only collapses it (it is
                 // collapsible), and per-item Dismiss/Approve buttons make no
@@ -836,6 +145,792 @@ impl ImprovementsPanel {
                     self.message = None;
                 }
             });
+    }
+}
+
+/// Per-frame, per-item actions collected while drawing the pending list
+/// (executed after the loop by `execute_actions`, so `pending` is never
+/// mutated while iterating).
+#[derive(Default)]
+struct ItemActions {
+    to_approve: Vec<usize>,
+    to_remove: Vec<usize>,
+    to_revert: Vec<usize>,
+    to_revert_skills: Vec<(usize, String)>,
+    to_dismiss: Vec<usize>,
+}
+
+/// Per-item draw context: the precomputed per-frame data an item needs
+/// (prompt-comparison baseline, prompt history, skill store, theme).
+/// Precomputed outside the loop because the loop holds a &mut borrow of
+/// `panel.pending`.
+struct ItemDrawCtx<'a> {
+    /// The agent's current system prompt (for the I3 old-vs-new comparison);
+    /// `None` = no profile file (the chat profile shows the live config
+    /// prompt instead).
+    current_prompt: &'a Option<String>,
+    /// F4: the agent's prompt history (newest first) for the Revert button —
+    /// only items proposing a prompt change for an existing agent can be
+    /// reverted; new-agent items have none.
+    item_history: &'a [agent_history::HistoryEntry],
+    /// 3b: proposed skills apply through the shared SkillStore.
+    skill_store: &'a wuffagent_core::memory::skills::SkillStore,
+    theme: &'a Theme,
+}
+
+/// 4a: one-line loop-status header (data from 2a's state file, same snapshot
+/// the list_improvement_status tool reads). The panel is fleet-wide, so show
+/// the most recent check across the global + per-agent states.
+fn draw_loop_status(ui: &mut egui::Ui, memory: &MemoryManager) {
+    let loop_status = memory.improvement_status();
+    let status_text = loop_status_header_line(&loop_status);
+    ui.label(egui::RichText::new(status_text).weak());
+    ui.separator();
+}
+
+/// 4b: "run check now" — an on-demand improvement check that bypasses the
+/// cooldown (the same core path the `run_self_improvement` tool uses:
+/// `run_improvement_check`). It runs on a background thread (LLM call, up to
+/// 180s); the result comes back over the AppEvent channel (suggestions →
+/// `ImprovementSuggested`, the always-sent done-signal →
+/// `ImprovementCheckFinished`, which clears the running flag).
+fn draw_run_check(
+    ui: &mut egui::Ui,
+    panel: &mut ImprovementsPanel,
+    memory: &MemoryManager,
+    memory_arc: Arc<MemoryManager>,
+    events: Option<Arc<Mutex<mpsc::Sender<AppEvent>>>>,
+    config: &wuffagent_core::config::Config,
+) {
+    let agents: Vec<String> = panel
+        .agents()
+        .iter()
+        .map(|a| a.name.clone())
+        .collect();
+    // 2d: the selector lists every profile PLUS the special
+    // "fleet" entry (cross-agent review, 2b(b)).
+    let mut selector: Vec<String> = agents.clone();
+    selector.push(FLEET_SCOPE.to_string());
+    let auto_on = memory.config().auto_improve;
+    // Re-resolve the selector if it is empty or the entry
+    // disappeared (fresh agent list each frame). The default
+    // is the FIRST profile (not "fleet") — per-agent checks
+    // are the common case.
+    if panel.run_check_agent.is_empty() || !selector.contains(&panel.run_check_agent) {
+        panel.run_check_agent = agents.first().cloned().unwrap_or_else(|| FLEET_SCOPE.to_string());
+    }
+    ui.horizontal(|ui| {
+        ui.label("Run check for:");
+        // egui 0.36: ComboBox is a widget struct (no Ui::combo_box).
+        // Write into a local, then copy back (matches input/mod.rs).
+        let mut next_agent = panel.run_check_agent.clone();
+        egui::ComboBox::from_id_salt("improvements_run_check_agent")
+            .width(140.0)
+            .selected_text(panel.run_check_agent.clone())
+            .show_ui(ui, |ui| {
+                for name in selector.iter() {
+                    ui.selectable_value(&mut next_agent, name.clone(), name.as_str());
+                }
+            });
+        panel.run_check_agent = next_agent;
+        let label = if panel.run_check_running {
+            "Checking…"
+        } else {
+            "Run check now"
+        };
+        let enabled = auto_on && !panel.run_check_running;
+        let hover = if !auto_on {
+            "auto_improve is off (memory settings)"
+        } else if panel.run_check_running {
+            "A check is already in progress"
+        } else if panel.run_check_agent == FLEET_SCOPE {
+            "Run an on-demand FLEET review now: cross-agent patterns (shared failures → skills / new shared agents, skill maintenance). Bypasses the per-agent cooldowns"
+        } else {
+            "Run an on-demand self-improvement check for this agent now (bypasses the cooldown)"
+        };
+        if ui
+            .add_enabled(enabled, egui::Button::new(label))
+            .on_hover_text(hover)
+            .clicked()
+        {
+            let agent = panel.run_check_agent.clone();
+            if agent == FLEET_SCOPE {
+                // 2d: FLEET review (2b(b)) — roster = name +
+                // description of every known profile (the
+                // MemoryManager does not know about profiles,
+                // so the panel builds it).
+                let roster: Vec<(String, String)> = panel
+                    .agents()
+                    .iter()
+                    .map(|a| (a.name.clone(), a.description.clone()))
+                    .collect();
+                panel.run_check_running = true;
+                panel.run_check_status = "Checking the fleet…".to_string();
+                let memory = memory_arc.clone();
+                let events = events.clone();
+                std::thread::spawn(move || {
+                    let result = memory.run_fleet_improvement_check(&roster, None);
+                    send_check_result(&events, FLEET_SCOPE, &result);
+                });
+            } else {
+                // The chat profile is synthetic (no backing
+                // .json file) — build its config here with the
+                // LIVE app prompt (the panel holds the config),
+                // so the check analyzes what the chat actually
+                // runs, not the static base text.
+                let cfg = if agent
+                    .eq_ignore_ascii_case(wuffagent_core::agents::improvement::CHAT_PROFILE_NAME)
+                {
+                    let mut cfg = wuffagent_core::agents::improvement::synthetic_chat_config();
+                    cfg.system_prompt = config.system_prompt.clone();
+                    Some(cfg)
+                } else {
+                    panel.agents().iter().find(|a| a.name == agent).cloned()
+                };
+                match cfg {
+                    Some(cfg) => {
+                        panel.run_check_running = true;
+                        panel.run_check_status = format!("Checking '{agent}'…");
+                        let memory = memory_arc.clone();
+                        let events = events.clone();
+                        std::thread::spawn(move || {
+                            let result = memory.run_improvement_check(&cfg, None);
+                            send_check_result(&events, &agent, &result);
+                        });
+                    }
+                    None => {
+                        panel.run_check_status = format!("Agent '{agent}' not found");
+                    }
+                }
+            }
+        }
+    });
+    if !panel.run_check_status.is_empty() {
+        ui.label(egui::RichText::new(panel.run_check_status.clone()).weak());
+    }
+}
+
+/// The pending-suggestions list section: the intro labels, the per-frame
+/// precomputation (prompt histories + current prompts), and the per-item
+/// collapsibles (`draw_pending_item`). Returns the frame's collected actions
+/// plus the prompt histories `execute_actions` needs for Reverts.
+fn draw_pending_list(
+    ui: &mut egui::Ui,
+    panel: &mut ImprovementsPanel,
+    agents_dirs: &[PathBuf],
+    config: &wuffagent_core::config::Config,
+    theme: &Theme,
+    skill_store: &wuffagent_core::memory::skills::SkillStore,
+) -> (ItemActions, Vec<Vec<agent_history::HistoryEntry>>) {
+    ui.label(
+        egui::RichText::new("Review the LLM's proposed changes. Approve to apply, dismiss to reject.")
+            .weak(),
+    );
+    ui.separator();
+
+    ui.label(egui::RichText::new("Pending suggestions:").strong());
+    ui.add_space(4.0);
+
+    // F4: per-item prompt history (newest first) for the Revert
+    // button — only items proposing a prompt change for an
+    // existing agent can be reverted; new-agent items have none.
+    let item_histories: Vec<Vec<agent_history::HistoryEntry>> = panel
+        .pending
+        .iter()
+        .map(|p| {
+            if p.prompt_change.is_some() {
+                agent_history::list_history(agents_dirs, &p.agent_name)
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+
+    // The CURRENT system prompt of each pending item's agent (for
+    // the I3 old-vs-new comparison), from the cached agent list
+    // (NOT a fresh disk scan per frame). The chat profile is
+    // synthetic (its prompt lives in the app config, not a
+    // profile file) — for it the LIVE config prompt is shown, so
+    // the diff compares against what the chat actually runs.
+    let chat_profile = wuffagent_core::agents::improvement::CHAT_PROFILE_NAME;
+    let current_prompts: Vec<Option<String>> = panel
+        .pending
+        .iter()
+        .map(|p| {
+            if p.agent_name.eq_ignore_ascii_case(chat_profile) {
+                return Some(config.system_prompt.clone());
+            }
+            panel
+                .agents()
+                .iter()
+                .find(|a| a.name == p.agent_name)
+                .map(|c| c.system_prompt.clone())
+        })
+        .collect();
+
+    let mut actions = ItemActions::default();
+
+    for (i, imp) in panel.pending.iter_mut().enumerate() {
+        let ctx = ItemDrawCtx {
+            current_prompt: &current_prompts[i],
+            item_history: &item_histories[i],
+            skill_store,
+            theme,
+        };
+        draw_pending_item(ui, imp, i, &mut actions, &ctx);
+    }
+
+    (actions, item_histories)
+}
+
+/// ONE pending item: the collapsing with rationale/evidence, the prompt
+/// old-vs-new comparison, the description/new-agent edits, the proposed
+/// skills, the per-field approve toggles, and the Approve/Dismiss/Revert
+/// buttons (which record the frame's actions into `actions`).
+fn draw_pending_item(
+    ui: &mut egui::Ui,
+    imp: &mut super::PendingImprovement,
+    i: usize,
+    actions: &mut ItemActions,
+    ctx: &ItemDrawCtx<'_>,
+) {
+    // F2 can stack several items for the SAME agent (different
+    // rationales) — a label-derived widget id would then be
+    // used at two positions in one frame (egui id-clash
+    // warning: "First/Second use of widget ID"). Push an
+    // item-scoped id derived from the same (agent, rationale)
+    // identity the dedupe in `handle_improvement_suggested`
+    // uses, so every item's header id (and every child
+    // widget's, via the parent chain) is unique.
+    ui.push_id((imp.agent_name.as_str(), imp.rationale.as_str()), |ui| {
+        ui.collapsing(format!("Agent: {}", imp.agent_name), |ui| {
+            ui.label(egui::RichText::new(format!("Rationale: {}", imp.rationale)).weak());
+            ui.add_space(4.0);
+
+            // I3: show the evidence that triggered the suggestion.
+            if !imp.evidence.is_empty() {
+                ui.collapsing("Evidence (what the improver saw)", |ui| {
+                    for e in &imp.evidence {
+                        ui.label(egui::RichText::new(e).weak().size(11.0));
+                    }
+                });
+            }
+
+            if let Some(new_prompt) = &imp.prompt_change {
+                // I3: old-vs-new comparison — the current prompt
+                // (read-only) stacked ABOVE the proposed one
+                // (editable), both height-capped. The previous
+                // side-by-side layout let a long prompt stretch the
+                // item to the full text height; the read-only side
+                // is already capped (ScrollArea), so the editable
+                // side gets the same cap.
+                let current_prompt = ctx.current_prompt;
+                // Chat profile ("chat" is synthetic — no backing
+                // profile file, so `current_prompt` is None):
+                // the CURRENT prompt IS this profile's prompt, and
+                // it is persisted in the chat settings (the
+                // settings dialog's system-prompt field), not in a
+                // profile file. Show it read-only here so the
+                // user can see what the proposal replaces and
+                // where the old text lives.
+                if imp.agent_name.eq_ignore_ascii_case("chat") {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Current (read-only — from chat settings)")
+                                .strong()
+                                .weak(),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "'Chat' is a synthetic profile: approving writes the proposed prompt \
+                                 into the chat settings (Settings → Chat → System prompt), not a profile file.",
+                            )
+                            .weak()
+                            .size(11.0),
+                        );
+                    });
+                }
+                if let Some(cur) = &current_prompt {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Current (read-only)")
+                                .strong()
+                                .weak(),
+                        );
+                        // Item-scoped id: a ScrollArea auto-derives
+                        // its ID from the drawn content, and the
+                        // current + proposed boxes hold the same
+                        // prompt text, which trips egui's
+                        // "First/Second use of widget ID" clash
+                        // guard (same reason the item header uses
+                        // an explicit push_id). The push_id scopes
+                        // the scroll area's content-derived ID per
+                        // box.
+                        ui.push_id("imp_prompt_current", |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(120.0)
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(cur).monospace().size(11.0),
+                                    );
+                                });
+                        });
+                    });
+                }
+                {
+                    let title = if current_prompt.is_some() || imp.agent_name.eq_ignore_ascii_case("chat") {
+                        "Proposed (editable)"
+                    } else {
+                        "Proposed system prompt (editable)"
+                    };
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(title).strong());
+                        // Item-scoped id (see the "Current" box
+                        // above): without it the two scroll areas
+                        // holding the same prompt text would
+                        // collide on their auto-derived IDs.
+                        ui.push_id("imp_prompt_proposed", |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(150.0)
+                                .show(ui, |ui| {
+                                    let mut buf = imp
+                                        .edited_prompt
+                                        .as_deref()
+                                        .unwrap_or(new_prompt)
+                                        .to_string();
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut buf)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(6),
+                                    );
+                                    // F1: persist the edited value
+                                    // in place so the user's
+                                    // changes survive across frames
+                                    // and are what gets applied on
+                                    // Approve.
+                                    imp.edited_prompt = Some(buf);
+                                });
+                        });
+                    });
+                }
+                ui.checkbox(&mut imp.apply_prompt, "Apply prompt change");
+            }
+
+            // 2c: proposed one-line description change (editable,
+            // same "user edit wins" pattern as the prompt).
+            if let Some(desc) = imp.description.clone() {
+                let mut buf = desc;
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Proposed description (editable)").strong(),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut buf).desired_width(f32::INFINITY),
+                    );
+                    ui.checkbox(&mut imp.apply_description, "Apply description change");
+                });
+                imp.description = Some(buf);
+            }
+
+            for na in imp.new_agents.iter_mut() {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "New agent: '{}' — {}",
+                        na.proposal.name, na.proposal.description
+                    ))
+                    .strong(),
+                );
+                let mut sp = na.edited_system_prompt.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut sp)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(4),
+                );
+                // F1: persist the edited value (see above).
+                na.edited_system_prompt = sp;
+            }
+
+            // 3b: proposed skills (procedural memory) — read-only
+            // previews; Approve saves each via the SkillStore
+            // (overwriting an existing name is the versioning
+            // mechanism, so "update" and "new" both save).
+            if !imp.skill_updates.is_empty() {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Proposed skills ({}):",
+                            imp.skill_updates.len()
+                        ))
+                        .strong(),
+                    );
+                    for sk in &imp.skill_updates {
+                        let action = sk.action.trim().to_ascii_lowercase();
+                        let is_delete = action == "delete";
+                        let verb = if is_delete {
+                            "retire"
+                        } else if action == "update" {
+                            "update"
+                        } else {
+                            "new"
+                        };
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} ({})", sk.name, verb)).strong(),
+                            );
+                            // 3c: per-skill Revert (F4 two-click
+                            // pattern) — restore this skill's
+                            // latest version snapshot, e.g. undo a
+                            // previously approved bad rewrite or a
+                            // retire (available for every verb).
+                            let canonical = sk.name.trim().to_ascii_lowercase();
+                            let sk_hist = ctx.skill_store.list_skill_history(&canonical);
+                            if !sk_hist.is_empty() {
+                                let armed = imp.skill_revert_armed.iter().any(|n| n == &canonical);
+                                let label = if armed {
+                                    let ts = skill_snapshot_ts(&sk_hist[0], &canonical);
+                                    format!("↩ Confirm revert to {}?", agent_history::format_ts(ts))
+                                } else {
+                                    "↩ Revert".to_string()
+                                };
+                                if ui
+                                    .add_enabled(
+                                        true,
+                                        egui::Button::new(egui::RichText::new(label).weak())
+                                            .small(),
+                                    )
+                                    .on_hover_text("Restore this skill to its latest version snapshot (the state before the most recent overwrite/retire). Two clicks: this arms it, the next confirms.")
+                                    .clicked()
+                                {
+                                    if armed {
+                                        actions.to_revert_skills.push((i, canonical.clone()));
+                                    } else {
+                                        imp.skill_revert_armed.push(canonical.clone());
+                                    }
+                                }
+                            }
+                        });
+                        if is_delete {
+                            // 3b: a retire carries no (or stale)
+                            // metadata — just state what it does.
+                            ui.label(
+                                egui::RichText::new(
+                                    "Deletes the skill file if approved (usage: never read in the window).",
+                                )
+                                .weak(),
+                            );
+                            continue;
+                        }
+                        if !sk.description.is_empty() {
+                            ui.label(egui::RichText::new(sk.description.clone()).weak());
+                        }
+                        if !sk.when_to_use.is_empty() {
+                            ui.label(
+                                egui::RichText::new(format!("Use: {}", sk.when_to_use)).weak(),
+                            );
+                        }
+                        let preview: String = sk.body.chars().take(400).collect();
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(preview).monospace().size(11.0),
+                                );
+                            });
+                    }
+                    ui.checkbox(
+                        &mut imp.apply_skills,
+                        format!("Apply {} proposed skill(s)", imp.skill_updates.len()),
+                    );
+                });
+            }
+
+            // I2/I3: per-field changes with approve toggles — the
+            // user can accept the prompt but reject a tool change
+            // (or vice versa). Only fields the LLM proposed show.
+            if let Some(tools) = &imp.allowed_tools {
+                ui.checkbox(
+                    &mut imp.apply_allowed_tools,
+                    format!(
+                        "Apply tool allowlist change ({} tools: {})",
+                        tools.len(),
+                        tools.join(", ")
+                    ),
+                );
+            }
+            if let Some(re) = &imp.reasoning_effort {
+                ui.checkbox(
+                    &mut imp.apply_reasoning_effort,
+                    format!("Apply reasoning effort change ({:?})", re),
+                );
+            }
+            if let Some(sc) = &imp.shell_config {
+                let desc = if sc.shell_enabled {
+                    format!(
+                        "shell enabled, {} command pattern(s)",
+                        sc.allowed_commands.len()
+                    )
+                } else {
+                    "shell disabled".to_string()
+                };
+                ui.checkbox(
+                    &mut imp.apply_shell_config,
+                    format!("Apply shell config change ({})", desc),
+                );
+            }
+            if let Some(ht) = &imp.handoff_targets {
+                ui.checkbox(
+                    &mut imp.apply_handoff_targets,
+                    format!("Apply handoff target change ({})", ht.join(", ")),
+                );
+            }
+            if let Some(ms) = imp.task_timeout_ms {
+                ui.checkbox(
+                    &mut imp.apply_task_timeout,
+                    format!("Apply task timeout change ({} ms)", ms),
+                );
+            }
+
+            let has_config_change = imp.prompt_change.is_some()
+                || imp.description.is_some()
+                || imp.allowed_tools.is_some()
+                || imp.reasoning_effort.is_some()
+                || imp.shell_config.is_some()
+                || imp.handoff_targets.is_some()
+                || imp.task_timeout_ms.is_some()
+                || !imp.skill_updates.is_empty();
+            if has_config_change {
+                // Existing-agent prompt change → Approve + Dismiss + Revert.
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(true, egui::Button::new("✓ Approve").fill(ctx.theme.primary))
+                        .clicked()
+                    {
+                        if !actions.to_approve.contains(&i) {
+                            actions.to_approve.push(i);
+                        }
+                    }
+                    if ui.add(egui::Button::new("✗ Dismiss")).clicked() {
+                        if !actions.to_remove.contains(&i) {
+                            actions.to_remove.push(i);
+                        }
+                        if !actions.to_dismiss.contains(&i) {
+                            actions.to_dismiss.push(i);
+                        }
+                    }
+                    // F4: revert this agent to its latest prompt
+                    // snapshot. "Click again to confirm" — no
+                    // modal, keeps the per-frame draw simple.
+                    let hist = ctx.item_history;
+                    let has_hist = !hist.is_empty();
+                    let label = if imp.revert_armed && has_hist {
+                        format!("↩ Confirm revert to {}?", agent_history::format_ts(hist[0].ts))
+                    } else {
+                        "↩ Revert".to_string()
+                    };
+                    if ui
+                        .add_enabled(has_hist, egui::Button::new(label))
+                        .on_hover_text("Restore the previous prompt from the latest history snapshot. Pending suggestions for this agent are dropped (they were reviewed against the now-reverted prompt).")
+                        .clicked()
+                    {
+                        if imp.revert_armed {
+                            actions.to_revert.push(i);
+                        } else {
+                            imp.revert_armed = true;
+                        }
+                    }
+                    if !has_hist {
+                        ui.label(egui::RichText::new("(no prompt history)").weak());
+                    }
+                });
+            } else {
+                // New-agent proposal → only dismiss makes sense
+                // (approve applies every bundled proposal).
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new("✗ Dismiss")).clicked() {
+                        if !actions.to_remove.contains(&i) {
+                            actions.to_remove.push(i);
+                        }
+                        if !actions.to_dismiss.contains(&i) {
+                            actions.to_dismiss.push(i);
+                        }
+                    }
+                });
+            }
+            ui.separator();
+        });
+    });
+}
+
+/// Execute the frame's collected actions (file I/O + list mutation) AFTER
+/// the pending list is drawn, so `pending` is never mutated while iterating.
+fn execute_actions(
+    panel: &mut ImprovementsPanel,
+    actions: ItemActions,
+    item_histories: &[Vec<agent_history::HistoryEntry>],
+    skill_store: &wuffagent_core::memory::skills::SkillStore,
+    config: &mut wuffagent_core::config::Config,
+    agent_manager: &AgentManager,
+    agents_dirs: &[PathBuf],
+    memory: &MemoryManager,
+) {
+    let ItemActions {
+        to_approve,
+        mut to_remove,
+        to_revert,
+        to_revert_skills,
+        to_dismiss,
+    } = actions;
+
+    // G.1: if anything was acted on this frame, the queue
+    // changed — persist what remains after the removals below.
+    let had_actions =
+        !to_approve.is_empty() || !to_dismiss.is_empty() || !to_revert.is_empty();
+
+    // F4: execute reverts (file I/O) before approves so both see
+    // the pre-removal list; pending-list removals happen only in
+    // the single pass below, so approve indices stay valid.
+    for i in &to_revert {
+        let name = panel.pending[*i].agent_name.clone();
+        let entry = item_histories[*i].first().cloned();
+        match entry {
+            Some(e) => match agent_history::revert(&e.dir, &name, &e) {
+                Ok(_) => {
+                    panel.message = Some(format!(
+                        "reverted '{}' to {} — pending suggestions for this agent were dropped",
+                        name,
+                        agent_history::format_ts(e.ts)
+                    ));
+                    // Drop ALL pending suggestions for this agent:
+                    // they were reviewed against the now-reverted prompt.
+                    for k in 0..panel.pending.len() {
+                        if panel.pending[k].agent_name == name && !to_remove.contains(&k) {
+                            to_remove.push(k);
+                        }
+                    }
+                }
+                Err(err) => {
+                    panel.pending[*i].revert_armed = false;
+                    panel.message = Some(format!(
+                        "Error: revert of '{}' failed: {}",
+                        name, err
+                    ));
+                }
+            },
+            None => {
+                panel.pending[*i].revert_armed = false;
+                panel.message = Some(format!(
+                    "revert of '{}': no history snapshot available",
+                    name
+                ));
+            }
+        }
+    }
+
+    // 3c: execute skill reverts (file I/O) — restore each skill
+    // to its latest version snapshot. The pending item stays (a
+    // skill revert does not invalidate the prompt/tool
+    // proposals), but the user is told the skill suggestion may
+    // now be stale.
+    for (i, name) in to_revert_skills {
+        if i >= panel.pending.len() {
+            continue; // defensive: indices came from this frame
+        }
+        let sk_hist = skill_store.list_skill_history(&name);
+        let Some(latest) = sk_hist.first().cloned() else {
+            panel.pending[i].skill_revert_armed.retain(|n| n != &name);
+            panel.message = Some(format!("revert of skill '{name}': no history snapshot available"));
+            continue;
+        };
+        let ts = skill_snapshot_ts(&latest, &name);
+        match skill_store.revert_skill(&name, &latest) {
+            Ok(skill) => {
+                panel.pending[i].skill_revert_armed.retain(|n| n != &name);
+                panel.message = Some(format!(
+                    "reverted skill '{}' to {} — the skill suggestion in this item may now be stale",
+                    skill.name,
+                    agent_history::format_ts(ts)
+                ));
+            }
+            Err(e) => {
+                panel.pending[i].skill_revert_armed.retain(|n| n != &name);
+                panel.message = Some(format!("Error: revert of skill '{name}' failed: {e}"));
+            }
+        }
+    }
+
+    // Execute collected actions (file I/O + list mutation) after
+    // the loop so we never mutate while iterating.
+    for i in to_approve.into_iter().rev() {
+        // The chat profile is synthetic (no backing .json file):
+        // its prompt lives in the app config, so an approval for
+        // it writes config.json instead of a profile file
+        // (previously it failed with "profile not found" and
+        // nothing was written).
+        let (outcome, prompt_applied) =
+            if panel
+                .pending[i]
+                .agent_name
+                .eq_ignore_ascii_case(wuffagent_core::agents::improvement::CHAT_PROFILE_NAME)
+            {
+                super::memory::apply_chat_improvement(
+                    config,
+                    agent_manager,
+                    &skill_store,
+                    &panel.pending[i],
+                )
+            } else {
+                super::memory::apply_improvement_detailed(
+                    agents_dirs,
+                    agent_manager,
+                    &skill_store,
+                    &panel.pending[i],
+                )
+            };
+        panel.message = Some(outcome);
+        // I5: an approved prompt change gets a marker so the next
+        // improvement check can weigh the outcomes since it and
+        // propose a revert. A store failure is surfaced (F5-style)
+        // but does not undo the approval itself.
+        if prompt_applied {
+            if let Err(err) = super::memory::remember_applied_prompt(memory, &panel.pending[i]) {
+                panel.message = Some(format!(
+                    "approved '{}', but remembering the prompt change failed: {}",
+                    panel.pending[i].agent_name,
+                    err
+                ));
+            }
+        }
+        if !to_remove.contains(&i) {
+            to_remove.push(i);
+        }
+    }
+
+    // F5: remember explicit dismissals as negative evidence for
+    // the improver. The dedup gate in `MemoryManager::add` makes
+    // re-dismissing the same suggestion a no-op. Approves and
+    // reverts do NOT record a lesson (the item was acted on, not
+    // rejected).
+    for i in &to_dismiss {
+        if let Err(err) = super::memory::remember_dismissal(memory, &panel.pending[*i]) {
+            panel.message = Some(format!(
+                "dismissed '{}', but remembering the rejection failed: {}",
+                panel.pending[*i].agent_name,
+                err
+            ));
+        }
+    }
+
+    for i in to_remove.into_iter().rev() {
+        if i < panel.pending.len() {
+            panel.pending.remove(i);
+        }
+    }
+
+    // G.1: queue shrank (or changed) — persist the remainder.
+    if had_actions {
+        panel.persist();
     }
 }
 
