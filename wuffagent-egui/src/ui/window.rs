@@ -33,8 +33,18 @@ impl ChatApp {
                 .as_ref()
                 .map(|d| d.config.clone())
                 .unwrap_or_else(|| Arc::new(Mutex::new(self.core.config.clone())));
+            // ONE shared preset store for both dialogs: the settings preset
+            // list and the presets manager read/write the same live handle,
+            // so a preset added/saved/deleted in the manager appears in the
+            // settings list immediately (the settings dialog no longer keeps
+            // a stale open-time snapshot that needs a close/reopen to refresh).
+            let presets = Arc::new(Mutex::new(
+                PresetStore::load(&get_presets_path()).unwrap_or_default(),
+            ));
             self.dialogs.settings_dialog = Some(
-                super::settings::SettingsDialog::new_with_presets_flag(&shared, show_presets),
+                super::settings::SettingsDialog::new_with_presets_flag_and_store(
+                    &shared, show_presets, presets,
+                ),
             );
         }
         // Capture the shared config handle BEFORE the dialog may be dropped:
@@ -65,13 +75,14 @@ impl ChatApp {
                         *f = false;
                     }
                     if self.dialogs.presets_dialog.is_none() {
-                        if let Ok(store) = PresetStore::load(&get_presets_path()) {
-                            // Share the settings dialog's config handle so
-                            // "Load" in presets and the app stay in sync.
-                            let shared = sd.config.clone();
-                            self.dialogs.presets_dialog =
-                                Some(super::presets_dialog::PresetsDialog::new(store, &shared));
-                        }
+                        // Share the settings dialog's config AND preset store:
+                        // "Load" updates the live config, and add/delete/save
+                        // updates the store the settings list renders — no
+                        // reopen needed to see changes in either direction.
+                        let shared = sd.config.clone();
+                        let store = sd.presets.clone();
+                        self.dialogs.presets_dialog =
+                            Some(super::presets_dialog::PresetsDialog::new(store, &shared));
                     }
                 }
             }
@@ -83,7 +94,7 @@ impl ChatApp {
             let handle = dialog.config.clone();
             let closed = dialog.show(ctx);
             if closed {
-                if let Err(e) = dialog.store.save(&get_presets_path()) {
+                if let Err(e) = dialog.store.lock().unwrap().save(&get_presets_path()) {
                     tracing::warn!(error = %e, "Failed to save presets");
                 }
                 self.dialogs.presets_dialog = None;

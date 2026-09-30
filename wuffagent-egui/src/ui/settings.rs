@@ -9,8 +9,11 @@ pub struct SettingsDialog {
     pub system_prompt: String,
     pub theme: String,
     pub max_messages: usize,
-    /// Saved presets (loaded from disk on open).
-    presets: PresetStore,
+    /// Saved presets. A SHARED live handle (not a snapshot): the presets
+    /// manager dialog and this list read/write the same store, so a preset
+    /// added/deleted/saved there appears here on the next frame — no
+    /// close-and-reopen of Settings needed.
+    pub(crate) presets: Arc<Mutex<PresetStore>>,
     /// Name of the preset to apply on Save (if any).
     selected_preset: Option<String>,
     /// Shared flag to signal the app to open the presets dialog.
@@ -26,16 +29,16 @@ pub struct SettingsDialog {
 }
 
 impl SettingsDialog {
-    pub fn new(config: &Arc<Mutex<Config>>) -> Self {
-        Self::new_with_presets_flag(config, Arc::new(Mutex::new(false)))
-    }
-
-    pub fn new_with_presets_flag(
+    /// Full constructor. `presets` is a SHARED handle: window.rs passes the
+    /// same store to the presets manager dialog so both UIs see one live
+    /// store (add/delete/save in either is immediately visible in the other).
+    /// A standalone caller loads the store from disk first.
+    pub fn new_with_presets_flag_and_store(
         config: &Arc<Mutex<Config>>,
         show_presets: Arc<Mutex<bool>>,
+        presets: Arc<Mutex<PresetStore>>,
     ) -> Self {
         let cfg = config.lock().unwrap();
-        let presets = PresetStore::load(&get_presets_path()).unwrap_or_default();
         let (search_backend_label, searxng_url) = match &cfg.search_config.backend {
             SearchBackend::Auto => ("Auto".to_string(), String::new()),
             SearchBackend::Bing => ("Bing".to_string(), String::new()),
@@ -67,13 +70,19 @@ impl SettingsDialog {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.style_mut().spacing.item_spacing.y = 6.0;
+                // One snapshot of the SHARED store per frame: the mutex is
+                // never held across the egui closures, and a preset added in
+                // the presets manager shows up here immediately (no reopen).
+                // `active` marks the preset whose settings match the live
+                // config, so the user sees which stored preset is in effect.
+                let rows = self.preset_rows();
                 // Section: Presets (server/connection settings live here)
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Presets").strong().color(theme.primary));
                     });
                     ui.separator();
-                    if self.presets.presets.is_empty() {
+                    if rows.is_empty() {
                         ui.label(
                             egui::RichText::new(
                                 "No presets saved yet. Click \"Manage Presets…\" to create one.",
@@ -85,18 +94,14 @@ impl SettingsDialog {
                         egui::ScrollArea::vertical()
                             .max_height(140.0)
                             .show(ui, |ui| {
-                                for preset in self.presets.presets.iter() {
-                                    let label =
-                                        format!("{} ({})", preset.name(), preset.preset_type());
-                                    let selected =
-                                        self.selected_preset.as_deref() == Some(preset.name());
-                                    let btn = if selected {
+                                for (name, label, selected, _active) in rows.iter() {
+                                    let btn = if *selected {
                                         egui::Button::new(label).fill(theme.primary)
                                     } else {
                                         egui::Button::new(label)
                                     };
                                     if ui.add(btn).clicked() {
-                                        self.selected_preset = Some(preset.name().to_string());
+                                        self.selected_preset = Some(name.clone());
                                     }
                                 }
                             });
@@ -205,7 +210,14 @@ impl SettingsDialog {
                         )
                         .clicked()
                     {
-                        *self = SettingsDialog::new(&self.config);
+                        // Keep the SHARED preset store and the presets flag:
+                        // a fresh disk snapshot would desync the presets
+                        // manager if it is open.
+                        *self = SettingsDialog::new_with_presets_flag_and_store(
+                            &self.config,
+                            self.show_presets.clone(),
+                            self.presets.clone(),
+                        );
                     }
                     if ui
                         .add(
@@ -222,11 +234,39 @@ impl SettingsDialog {
         closed
     }
 
+    /// One row per preset in the shared store: `(name, label, selected, active)`.
+    ///
+    /// `active` is computed against the LIVE config (`Preset::matches`), so
+    /// the list marks the preset the app is currently running with — it
+    /// updates automatically after a Load (presets dialog) or Save (here).
+    fn preset_rows(&self) -> Vec<(String, String, bool, bool)> {
+        let cfg = self.config.lock().unwrap();
+        let store = self.presets.lock().unwrap();
+        store
+            .presets
+            .iter()
+            .map(|p| {
+                let active = p.matches(&*cfg);
+                let mut label = format!("{} ({})", p.name(), p.preset_type());
+                if active {
+                    label.push_str(" (active)");
+                }
+                (
+                    p.name().to_string(),
+                    label,
+                    self.selected_preset.as_deref() == Some(p.name()),
+                    active,
+                )
+            })
+            .collect()
+    }
+
     pub fn save(&mut self, config: Arc<Mutex<Config>>) {
         let mut cfg = config.lock().unwrap();
         // Apply the selected preset (server/connection settings live in presets).
         if let Some(ref name) = self.selected_preset {
-            if let Err(e) = self.presets.apply(name, &mut cfg) {
+            let err = self.presets.lock().unwrap().apply(name, &mut cfg);
+            if let Err(e) = err {
                 tracing::warn!(preset = %name, error = %e, "Failed to apply preset");
             }
         }
@@ -260,5 +300,87 @@ impl SettingsDialog {
             return;
         }
         self.config_dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wuffagent_core::config::{Config, ConnectionType, LocalPreset, Preset, RemotePreset};
+
+    fn dialog_with(config: Config, presets: Vec<Preset>) -> (SettingsDialog, Arc<Mutex<PresetStore>>) {
+        let store = Arc::new(Mutex::new(PresetStore { presets }));
+        let d = SettingsDialog::new_with_presets_flag_and_store(
+            &Arc::new(Mutex::new(config)),
+            Arc::new(Mutex::new(false)),
+            store.clone(),
+        );
+        (d, store)
+    }
+
+    fn local_config() -> Config {
+        let mut cfg = Config::default();
+        cfg.connection_type = ConnectionType::Local;
+        cfg.server_path = "C:\\llama\\server.exe".to_string();
+        cfg.model_path = "C:\\llama\\model.gguf".to_string();
+        cfg.port = 8081;
+        cfg.n_gpu_layers = 45;
+        cfg.n_ctx = 8192;
+        cfg.threads = 12;
+        cfg
+    }
+
+    fn matching_preset(name: &str) -> Preset {
+        Preset::Local(LocalPreset {
+            name: name.to_string(),
+            server_path: "C:\\llama\\server.exe".to_string(),
+            model_path: "C:\\llama\\model.gguf".to_string(),
+            port: 8081,
+            n_gpu_layers: 45,
+            n_ctx: 8192,
+            threads: 12,
+        })
+    }
+
+    #[test]
+    fn preset_rows_marks_the_active_preset() {
+        let mut inactive = matching_preset("other-server");
+        if let Preset::Local(lp) = &mut inactive {
+            lp.port = 9999; // connection fields must actually differ (name is not compared)
+        }
+        let (d, _store) = dialog_with(local_config(), vec![matching_preset("active-one"), inactive]);
+        let rows = d.preset_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].3, "the matching preset must be marked active");
+        assert!(rows[0].1.ends_with("(active)"), "label carries the marker: {:?}", rows[0].1);
+        assert!(!rows[1].3, "a preset with different connection settings stays inactive");
+        assert!(!rows[1].1.contains("(active)"));
+    }
+
+    #[test]
+    fn preset_rows_reflects_shared_store_without_reopening() {
+        let (mut d, store) = dialog_with(Config::default(), vec![]);
+        assert!(
+            d.preset_rows().is_empty(),
+            "empty store starts empty"
+        );
+        // The presets manager adds a preset to the SHARED store — the
+        // settings list must pick it up on the next frame (the reported bug:
+        // "i only see it when i close and reopen the settings").
+        store
+            .lock()
+            .unwrap()
+            .add(Preset::Remote(RemotePreset {
+                name: "new-remote".to_string(),
+                remote_url: "http://example".to_string(),
+                remote_api_key: None,
+            }))
+            .unwrap();
+        let rows = d.preset_rows();
+        assert_eq!(rows.len(), 1, "new preset must appear without reopening");
+        assert_eq!(rows[0].0, "new-remote");
+        // Selection is stored by name and round-trips into the row state.
+        d.selected_preset = Some("new-remote".to_string());
+        assert!(d.preset_rows()[0].2, "selected row is flagged selected");
     }
 }

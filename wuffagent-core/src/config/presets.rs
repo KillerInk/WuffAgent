@@ -47,6 +47,29 @@ impl Preset {
             Preset::Remote(_) => "remote",
         }
     }
+
+    /// True when the preset's connection settings exactly match `cfg` — i.e.
+    /// this is the preset the app is currently running with. The settings
+    /// dialog uses this to mark the active entry, so the user can tell which
+    /// stored preset is in effect without reopening anything.
+    pub fn matches(&self, cfg: &Config) -> bool {
+        match self {
+            Preset::Local(p) => {
+                cfg.connection_type == super::ConnectionType::Local
+                    && cfg.server_path == p.server_path
+                    && cfg.model_path == p.model_path
+                    && cfg.port == p.port
+                    && cfg.n_gpu_layers == p.n_gpu_layers
+                    && cfg.n_ctx == p.n_ctx
+                    && cfg.threads == p.threads
+            }
+            Preset::Remote(p) => {
+                cfg.connection_type == super::ConnectionType::Remote
+                    && cfg.remote_url == p.remote_url
+                    && cfg.remote_api_key == p.remote_api_key
+            }
+        }
+    }
 }
 
 /// Stores all saved presets.

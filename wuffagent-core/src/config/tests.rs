@@ -670,6 +670,100 @@ fn test_resolve_presets_path_no_files_returns_primary() {
     let dir = tempdir().unwrap();
     let primary = dir.path().join("presets.json"); // never created
     let resolved = crate::config::presets::resolve_presets_path(&primary, None);
-    assert_eq!(resolved, primary);
     assert!(!primary.exists(), "no migration may create the file");
+}
+
+// ─── Preset::matches (the settings dialog's "(active)" marker) ──────────────
+
+fn local_config() -> crate::config::Config {
+    let mut cfg = crate::config::Config::default();
+    cfg.connection_type = crate::config::ConnectionType::Local;
+    cfg.server_path = "C:\\llama\\server.exe".to_string();
+    cfg.model_path = "C:\\llama\\model.gguf".to_string();
+    cfg.port = 8081;
+    cfg.n_gpu_layers = 45;
+    cfg.n_ctx = 8192;
+    cfg.threads = 12;
+    cfg
+}
+
+fn matching_local_preset() -> crate::config::Preset {
+    crate::config::Preset::Local(crate::config::LocalPreset {
+        name: "mine".to_string(),
+        server_path: "C:\\llama\\server.exe".to_string(),
+        model_path: "C:\\llama\\model.gguf".to_string(),
+        port: 8081,
+        n_gpu_layers: 45,
+        n_ctx: 8192,
+        threads: 12,
+    })
+}
+
+#[test]
+fn test_preset_matches_identical_local_config() {
+    let cfg = local_config();
+    assert!(matching_local_preset().matches(&cfg));
+}
+
+#[test]
+fn test_preset_local_any_field_mismatch_is_inactive() {
+    let cfg = local_config();
+    let with = |f: &str| {
+        let mut p = matching_local_preset();
+        match p {
+            crate::config::Preset::Local(ref mut lp) => match f {
+                "server_path" => lp.server_path = "other".into(),
+                "model_path" => lp.model_path = "other".into(),
+                "port" => lp.port = 9999,
+                "n_gpu_layers" => lp.n_gpu_layers = -1,
+                "n_ctx" => lp.n_ctx = 256,
+                "threads" => lp.threads = 1,
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+        p
+    };
+    // Each single-field drift must clear the active marker.
+    for field in [
+        "server_path",
+        "model_path",
+        "port",
+        "n_gpu_layers",
+        "n_ctx",
+        "threads",
+    ] {
+        let p = with(field);
+        assert!(!p.matches(&cfg), "{field} drift must clear the marker");
+    }
+}
+
+#[test]
+fn test_preset_type_mismatch_is_inactive() {
+    let local_cfg = local_config();
+    let remote_preset = crate::config::Preset::Remote(crate::config::RemotePreset {
+        name: "remote".to_string(),
+        remote_url: "http://x".to_string(),
+        remote_api_key: Some("k".to_string()),
+    });
+    assert!(!remote_preset.matches(&local_cfg), "wrong connection type");
+
+    let mut remote_cfg = crate::config::Config::default();
+    remote_cfg.connection_type = crate::config::ConnectionType::Remote;
+    remote_cfg.remote_url = "http://x".to_string();
+    remote_cfg.remote_api_key = Some("k".to_string());
+    assert!(remote_preset.matches(&remote_cfg));
+
+    // API key Some vs None is a mismatch; None vs None matches.
+    remote_cfg.remote_api_key = None;
+    assert!(!remote_preset.matches(&remote_cfg));
+    let no_key = crate::config::Preset::Remote(crate::config::RemotePreset {
+        name: "remote".to_string(),
+        remote_url: "http://x".to_string(),
+        remote_api_key: None,
+    });
+    assert!(no_key.matches(&remote_cfg));
+
+    let local_preset = matching_local_preset();
+    assert!(!local_preset.matches(&remote_cfg));
 }

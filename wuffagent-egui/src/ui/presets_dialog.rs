@@ -32,14 +32,16 @@ pub struct PresetsDialog {
     pub new_remote_api_key: String,
     /// Error/success message to display.
     pub message: Option<String>,
-    /// The store (loaded from disk on open).
-    pub store: PresetStore,
+    /// The store — SHARED with the settings dialog (one live handle):
+    /// add/delete/save here is immediately visible in the settings preset
+    /// list, and vice versa, without closing anything.
+    pub store: Arc<Mutex<PresetStore>>,
     /// Shared config handle (written back when a preset is applied).
     pub(crate) config: Arc<Mutex<Config>>,
 }
 
 impl PresetsDialog {
-    pub fn new(store: PresetStore, config: &Arc<Mutex<Config>>) -> Self {
+    pub fn new(store: Arc<Mutex<PresetStore>>, config: &Arc<Mutex<Config>>) -> Self {
         Self {
             selected_index: None,
             show_add_form: false,
@@ -90,10 +92,10 @@ impl PresetsDialog {
                         // saved store is never written where the next load
                         // won't look.
                         let presets_path = get_presets_path();
-                        if let Err(e) = self.store.save(&presets_path) {
-                            self.message = Some(format!("Error saving presets: {}", e));
-                        } else {
-                            self.message = Some("Presets saved to disk".to_string());
+                        let err = self.store.lock().unwrap().save(&presets_path);
+                        match err {
+                            Err(e) => self.message = Some(format!("Error saving presets: {}", e)),
+                            Ok(()) => self.message = Some("Presets saved to disk".to_string()),
                         }
                     }
                     if ui.button("Close").clicked() {
@@ -114,7 +116,18 @@ impl PresetsDialog {
             }
         });
 
-        if self.store.presets.is_empty() {
+        // Snapshot the shared store so the mutex is never held across the
+        // egui closures below.
+        let rows: Vec<(String, String)> = self
+            .store
+            .lock()
+            .unwrap()
+            .presets
+            .iter()
+            .map(|p| (p.name().to_string(), p.preset_type().to_string()))
+            .collect();
+
+        if rows.is_empty() {
             ui.label("No presets saved yet.");
             return;
         }
@@ -122,9 +135,7 @@ impl PresetsDialog {
         egui::ScrollArea::vertical()
             .max_height(160.0)
             .show(ui, |ui| {
-                for (i, preset) in self.store.presets.iter().enumerate() {
-                    let name = preset.name();
-                    let ptype = preset.preset_type();
+                for (i, (name, ptype)) in rows.iter().enumerate() {
                     let label = format!("{} ({})", name, ptype);
                     let selected = self.selected_index == Some(i);
                     if ui
@@ -153,9 +164,10 @@ impl PresetsDialog {
                 .clicked()
             {
                 if let Some(i) = self.selected_index {
-                    let name = self.store.presets[i].name().to_string();
+                    let name = self.store.lock().unwrap().presets[i].name().to_string();
                     let mut cfg = config.lock().unwrap();
-                    if let Err(e) = self.store.apply(&name, &mut cfg) {
+                    let err = self.store.lock().unwrap().apply(&name, &mut cfg);
+                    if let Err(e) = err {
                         self.message = Some(format!("Error loading preset: {}", e));
                     } else {
                         if let Err(e) = cfg.save() {
@@ -171,8 +183,9 @@ impl PresetsDialog {
                 .clicked()
             {
                 if let Some(i) = self.selected_index {
-                    let name = self.store.presets[i].name().to_string();
-                    if let Err(e) = self.store.remove(&name) {
+                    let name = self.store.lock().unwrap().presets[i].name().to_string();
+                    let err = self.store.lock().unwrap().remove(&name);
+                    if let Err(e) = err {
                         self.message = Some(format!("Error deleting preset: {}", e));
                     } else {
                         self.selected_index = None;
@@ -281,7 +294,8 @@ impl PresetsDialog {
             }),
         };
 
-        if let Err(e) = self.store.add(preset) {
+        let err = self.store.lock().unwrap().add(preset);
+        if let Err(e) = err {
             self.message = Some(format!("Error: {}", e));
         } else {
             self.message = Some(format!("Added preset: {}", self.new_name));
