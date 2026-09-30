@@ -6,6 +6,7 @@
 //! reasoning, timestamp); all items are re-exported here so
 //! `crate::types::X` paths are unchanged for callers.
 
+mod activity;
 mod chat_ui;
 mod events;
 mod message;
@@ -21,6 +22,7 @@ pub use policy::{
     ChatToolPolicy, ImprovementSuggestion, NewAgentProposal, QueuedMessage, ShellConfig,
     SkillUpdate, TrimConfig,
 };
+pub use activity::{ActivityPhase, LlmActivityInfo};
 pub use reasoning::{ReasoningEffort, ReasoningMode};
 pub use timestamp::{format_timestamp, timestamp_day, timestamp_time};
 pub use usage::{LlamaTimings, PromptProgress, Usage};

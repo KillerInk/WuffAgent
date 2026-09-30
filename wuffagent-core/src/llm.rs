@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
+use crate::activity::{ActivityTracker, LabeledLlm};
 use crate::client::ChatClient;
 use crate::types::{Message, Usage};
 
@@ -39,15 +40,42 @@ pub trait LlmClient: Send + Sync {
 /// Adapter that wraps `ChatClient` to implement `LlmClient`.
 /// `ChatClient` is `Clone` (its shared state is behind `Arc`), so we clone a handle
 /// before each call to avoid holding a lock across an `.await` boundary.
+#[derive(Clone)]
 pub struct ChatClientAdapter {
     client: Arc<ChatClient>,
+    /// Optional activity instrumentation (status-bar visibility). The
+    /// adapter itself does NOT instrument — call sites opt in via
+    /// [`Self::labeled`], so coverage is explicit and nothing is
+    /// double-counted.
+    activity: Option<Arc<ActivityTracker>>,
 }
 
 impl ChatClientAdapter {
     pub fn new(client: ChatClient) -> Self {
         Self {
             client: Arc::new(client),
+            activity: None,
         }
+    }
+
+    /// Attach the shared [`ActivityTracker`] (bootstrap only; the adapter is
+    /// cloned everywhere, so the tracker travels with the clones).
+    pub fn with_activity(mut self, tracker: Arc<ActivityTracker>) -> Self {
+        self.activity = Some(tracker);
+        self
+    }
+
+    /// An instrumented view of this adapter for one labeled call
+    /// (begin → tg per chunk → finish → drop). `None` when no tracker was
+    /// attached via [`Self::with_activity`].
+    pub fn labeled(
+        &self,
+        label: &str,
+        session_id: Option<String>,
+    ) -> Option<Arc<LabeledLlm>> {
+        let tracker = self.activity.as_ref()?;
+        let inner: Arc<dyn LlmClient> = Arc::new(self.clone());
+        Some(LabeledLlm::new(inner, tracker.clone(), label, session_id))
     }
 }
 

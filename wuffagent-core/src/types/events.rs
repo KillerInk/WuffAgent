@@ -1,6 +1,8 @@
 //! Events that flow from the client engine to the UI.
 
-use super::{ImprovementSuggestion, PromptProgress, QueuedMessage, Usage};
+use super::{
+    ImprovementSuggestion, LlmActivityInfo, PromptProgress, QueuedMessage, Usage,
+};
 
 /// Events that flow from the client engine to the UI.
 ///
@@ -146,6 +148,15 @@ pub enum AppEvent {
     /// MCP panel so the panel and the live manager state stay in sync.
     McpConfigChanged {
         session_id: String,
+    },
+    /// A live snapshot of every LLM activity currently in flight
+    /// (foreground or background), emitted by `ActivityTracker`
+    /// (throttled to ~5 Hz per activity; one snapshot also on every
+    /// activity's finish/drop). The UI replaces its whole list on receipt —
+    /// no incremental bookkeeping. No `session_id`: activities carry their
+    /// own (a background activity's is `None`).
+    LlmActivity {
+        activities: Vec<LlmActivityInfo>,
     },
     /// The agent asked to restart the WuffAgent process (optionally after a
     /// build). The UI saves the session, writes a restart marker, relaunches

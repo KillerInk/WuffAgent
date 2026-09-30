@@ -6,7 +6,10 @@
 //! lib
 //! ├── types          (base types: Message, AppEvent, QueuedMessage, ChatToolPolicy)
 //! │                  → no internal dependencies
-//! ├── llm            (LlmClient trait, ChatClientAdapter) → client, types
+//! ├── activity       (ActivityTracker, ActivityHandle RAII, LabeledLlm)
+//! │                  → llm (LlmClient for LabeledLlm), types
+//! ├── llm            (LlmClient trait, ChatClientAdapter) → client, types,
+//! │                  activity (LabeledLlm for the labeled() factory)
 //! ├── client         (ChatClient: HTTP/SSE streaming) → types, trimming, usage,
 //! │                  sessions::persist (save/load), sessions::state
 //! │                  (carries a SessionState handle), tools (ToolDefinition
@@ -55,9 +58,14 @@
 //!   between top-level modules.
 //! - `client` never depends on `agents` (ChatPipeline lives in
 //!   `agents::chat_pipeline`); only `agents` may depend on `client`.
+//! - The one thin 2-cycle is `llm ↔ activity`: the adapter's `labeled()`
+//!   factory names `LabeledLlm`, and `LabeledLlm` names the `LlmClient`
+//!   trait. Neither side uses the other's state; both stay stateless
+//!   pass-throughs.
 //! - `config` re-exports from `agents::config` and `memory::types`.
 //! - `usage` depends only on `config`, so `client → usage` creates no cycle.
 
+pub mod activity;
 pub mod agents;
 pub mod client;
 pub mod config;
