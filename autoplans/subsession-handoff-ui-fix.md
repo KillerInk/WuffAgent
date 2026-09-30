@@ -1,5 +1,15 @@
 # Sub-session handoff: wire the UI handlers (steps 16 & 17)
 
+## Status: IMPLEMENTED (commit `ea61eb5`, 2026-07)
+Both arms wired in `wuffagent-egui/src/ui/event_handler/mod.rs`; resolvers widened
+`pub(super)` -> `pub(crate)` in `ui/input/agent_profile.rs`. Build green (workspace),
+tests green (core lib 835 + integration suites + egui 51, all `ok`, exit 0), clippy
+clean on touched files, rustfmt clean on touched files. Minor deviations from the plan
+below: sub-session name is `Sub: {agent}` (not a task-truncated name), and the
+parent-existence guard was dropped (the event always follows the parent's own
+terminal StreamComplete, so the parent is guaranteed present). PENDING: live UI
+verification of a real `handoff(sub_session: true)` round-trip (incl. `hand_back`).
+
 ## Symptom
 `handoff(agent, task, sub_session: true)` returns "Handoff queued successfully", the
 parent session shows the `[Handed off to 'X' (sub-session)] ...` marker — and then
