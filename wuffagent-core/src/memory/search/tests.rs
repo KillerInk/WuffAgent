@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// Convenience for the tests: prepare the query (lowercase + tokenize) and
+/// score the entry, mirroring what `keyword_search` does once per search.
+/// (The scorer itself now takes the prepared query so the search path does
+/// not re-prepare it per entry.)
+fn score_entry(entry: &MemoryEntry, query: &str) -> f64 {
+    let query_lower = query.to_lowercase();
+    let query_tokens = tokenize(query);
+    keyword_score_prepared(entry, &query_lower, &query_tokens)
+}
+
 #[test]
 fn test_tokenize() {
     let tokens = tokenize("Hello world! This is a test.");
@@ -17,10 +27,10 @@ fn test_keyword_score() {
         &["project", "architecture"],
     );
 
-    let score = keyword_score(&entry, "wuffagent cargo workspace");
+    let score = score_entry(&entry, "wuffagent cargo workspace");
     assert!(score > 0.0);
 
-    let score2 = keyword_score(&entry, "completely unrelated topic");
+    let score2 = score_entry(&entry, "completely unrelated topic");
     assert!(score2 < score);
 }
 
@@ -85,7 +95,7 @@ fn test_stopword_only_query_scores_zero() {
         &[],
     );
     // "the of and" has no signal tokens left after stopword filtering.
-    assert_eq!(keyword_score(&entry, "the of and"), 0.0);
+    assert_eq!(score_entry(&entry, "the of and"), 0.0);
 }
 
 #[test]
@@ -97,7 +107,7 @@ fn test_tag_prefix_match() {
         &["rust"],
     );
     // Query contains a word with the tag as a prefix ("rustc") -> tag bonus.
-    assert!(keyword_score(&entry, "how does rustc work") > 0.0);
+    assert!(score_entry(&entry, "how does rustc work") > 0.0);
     // A word containing the tag but not as a prefix should not match the tag.
     let entry2 = MemoryEntry::new(
         super::super::types::MemoryType::Fact,
@@ -105,5 +115,5 @@ fn test_tag_prefix_match() {
         "test",
         &["rust"],
     );
-    assert_eq!(keyword_score(&entry2, "a trust fund plan"), 0.0);
+    assert_eq!(score_entry(&entry2, "a trust fund plan"), 0.0);
 }

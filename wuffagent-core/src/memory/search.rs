@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use super::types::{MemoryConfig, MemoryEntry};
 
@@ -22,8 +23,17 @@ const STOPWORDS: &[&str] = &[
     "worum", "wollte", "kann", "muss",
 ];
 
+/// The stopwords as a set for O(1) membership tests, built once on first
+/// use. `tokenize` filters every token through this, so the old linear
+/// `contains` over ~100 words was a per-token cost paid for every query and
+/// every memory entry in each search.
+fn stopword_set() -> &'static HashSet<&'static str> {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| STOPWORDS.iter().copied().collect())
+}
+
 fn is_stopword(token: &str) -> bool {
-    STOPWORDS.contains(&token)
+    stopword_set().contains(token)
 }
 
 /// Tokenize text into words for keyword matching.
@@ -38,9 +48,17 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Score a memory entry against a query using keyword matching.
-fn keyword_score(entry: &MemoryEntry, query: &str) -> f64 {
-    let query_tokens = tokenize(query);
+/// Score a memory entry against an already-prepared query (the lowercased
+/// query text + its tokens). This is the per-entry hot path: `keyword_search`
+/// prepares the query ONCE and scores every entry against the same values, so
+/// nothing query-derived is recomputed per entry (the old code re-ran
+/// `tokenize(query)` and `query.to_lowercase()` inside the scorer for every
+/// entry in the store).
+fn keyword_score_prepared(
+    entry: &MemoryEntry,
+    query_lower: &str,
+    query_tokens: &[String],
+) -> f64 {
     let entry_text = format!("{} {}", entry.content, entry.tags.join(" "));
     let entry_tokens = tokenize(&entry_text);
 
@@ -60,7 +78,7 @@ fn keyword_score(entry: &MemoryEntry, query: &str) -> f64 {
     let total_tokens = entry_tokens.len() as f64;
     let mut score = 0.0;
 
-    for q_token in &query_tokens {
+    for q_token in query_tokens {
         if let Some(&count) = entry_freq.get(q_token.as_str()) {
             // Term frequency weighted by entry confidence.
             score += (count as f64 / total_tokens) * entry.confidence as f64;
@@ -69,7 +87,6 @@ fn keyword_score(entry: &MemoryEntry, query: &str) -> f64 {
 
     // Bonus for tag matches: exact tag match on a query token, or the tag is a
     // prefix of a query token (so tag "rust" matches query "rustc").
-    let query_lower = query.to_lowercase();
     for tag in &entry.tags {
         let tag_lower = tag.to_lowercase();
         let is_exact = query_tokens.iter().any(|t| *t == tag_lower);
@@ -96,10 +113,17 @@ pub fn keyword_search<'a>(
         return Vec::new();
     }
 
+    // Prepare the query ONCE, not per entry: the scorer used to be reached as
+    // `keyword_score(e, query)`, which re-tokenized and re-lowercased the
+    // (short, identical) query for every entry — O(entries) redundant work
+    // per search.
+    let query_lower = query.to_lowercase();
+    let query_tokens = tokenize(query);
+
     let mut scored: Vec<(&MemoryEntry, f64)> = entries
         .iter()
         .filter(|e| !e.is_expired() && e.supersedes.is_none())
-        .map(|e| (e, keyword_score(e, query)))
+        .map(|e| (e, keyword_score_prepared(e, &query_lower, &query_tokens)))
         .filter(|(_, score)| *score > 0.0)
         .collect();
 
