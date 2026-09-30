@@ -169,6 +169,7 @@ impl ChatApp {
                 stream_snapshot: std::sync::Arc::new(((String::new(), String::new()), Vec::new(), false)),
                 stream_snapshot_key: (None, false, 0, 0, 0),
                 status: AppStatus::Stopped,
+                llm_activities: Vec::new(),
             },
             restart: groups::RestartState {
                 pending_restart: false,

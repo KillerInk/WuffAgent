@@ -141,6 +141,10 @@ pub struct DisplayState {
     pub stream_snapshot_key: StreamSnapshotKey,
     /// Status bar state.
     pub status: AppStatus,
+    /// Live LLM-activity snapshot from the core `ActivityTracker`
+    /// (`AppEvent::LlmActivity`); replaced wholesale on every event. Drives
+    /// the status bar's dynamic label + background-activity pills.
+    pub llm_activities: Vec<wuffagent_core::types::LlmActivityInfo>,
 }
 
 /// P4: staleness key for the streaming snapshot:

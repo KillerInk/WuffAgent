@@ -36,12 +36,67 @@ impl ChatApp {
                     .size(11.0),
             );
 
-            if chat.is_generating {
+            // Dynamic LLM-activity label: what is actually running right now
+            // (core ActivityTracker snapshot — the displayed session's LLM
+            // round, or background work such as the judge, memory maintenance,
+            // improvement checks, or eval agents).
+            let activities = &self.display.llm_activities;
+            let displayed_sid = self.displayed_session_id();
+            if chat.is_generating || !activities.is_empty() {
+                let current = activities
+                    .iter()
+                    .find(|a| a.session_id.as_deref() == displayed_sid);
+                let label: String = if let Some(a) = current {
+                    // The displayed session's own LLM call: the precise phase.
+                    a.phase.describe()
+                } else if chat.is_generating {
+                    // Generating but between LLM rounds (tools running,
+                    // queueing): keep a generic label.
+                    "working…".to_string()
+                } else if let Some(a) = activities.first() {
+                    // Only background work is running.
+                    format!("{} · {}", a.label, a.phase.describe())
+                } else {
+                    "idle".to_string()
+                };
                 ui.label(
-                    egui::RichText::new("Streaming")
-                        .color(theme.accent)
-                        .size(11.0),
+                    egui::RichText::new(label).color(theme.accent).size(11.0),
                 );
+
+                // Background-activity pills (activities that are NOT the
+                // displayed session's): capped at 3 + "+N", tooltip shows the
+                // full snapshot.
+                let background: Vec<&wuffagent_core::types::LlmActivityInfo> = activities
+                    .iter()
+                    .filter(|a| a.session_id.as_deref() != displayed_sid)
+                    .collect();
+                const MAX_PILLS: usize = 3;
+                for a in background.iter().take(MAX_PILLS) {
+                    let tps = a.tps.map(|t| format!(" · {:.0} t/s", t)).unwrap_or_default();
+                    ui.label(
+                        egui::RichText::new(format!("⚙ {}{}", a.label, tps))
+                            .color(theme.text_secondary)
+                            .size(11.0),
+                    )
+                    .on_hover_text(activity_tooltip(a));
+                }
+                let extra = background.len().saturating_sub(MAX_PILLS);
+                if extra > 0 {
+                    ui.label(
+                        egui::RichText::new(format!("+{extra}"))
+                            .color(theme.text_dim)
+                            .size(11.0),
+                    )
+                    .on_hover_text(
+                        background
+                            .iter()
+                            .copied()
+                            .skip(MAX_PILLS)
+                            .map(activity_tooltip)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
             }
 
             // Tools executing right now (live cards are in the chat area; this
@@ -246,4 +301,27 @@ impl ChatApp {
             ).wrap());
         });
     }
+}
+
+/// Full-snapshot tooltip text for one background LLM activity (pills are
+/// capped, so this is where the detail lives).
+fn activity_tooltip(a: &wuffagent_core::types::LlmActivityInfo) -> String {
+    let tps = a
+        .tps
+        .map(|t| format!("\nSpeed: {:.1} tok/s", t))
+        .unwrap_or_default();
+    let session = a
+        .session_id
+        .as_deref()
+        .map(|s| format!("\nSession: {s}"))
+        .unwrap_or_else(|| "\nSession: — (background)".to_string());
+    format!(
+        "{} — {}\nTokens out: {}{}\nDuration: {:.1}s{}",
+        a.label,
+        a.phase.describe(),
+        a.tokens_out,
+        tps,
+        a.duration.as_secs_f64(),
+        session
+    )
 }

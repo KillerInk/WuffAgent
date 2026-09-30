@@ -45,6 +45,9 @@ impl ChatApp {
             // 2d: manual "Run evals" finished — not session-bound (the agent
             // editor's eval panel is global).
             AppEvent::EvalsRunFinished { .. } => String::new(),
+            // Status bar: LLM-activity snapshot — not session-bound (it is a
+            // global view of everything running).
+            AppEvent::LlmActivity { .. } => String::new(),
         };
         match event {
             // Stream lifecycle arms: see `stream.rs`.
@@ -299,6 +302,12 @@ impl ChatApp {
                 if let Some(d) = self.dialogs.agent_config_dialog.as_mut() {
                     d.mark_evals_finished(&agent_name, &summary);
                 }
+            }
+            // Status bar: whole-snapshot replacement of the live LLM activities
+            // (the tracker emits the full list on every event; an empty list
+            // means nothing is running anymore).
+            AppEvent::LlmActivity { activities } => {
+                self.display.llm_activities = activities;
             }
             AppEvent::McpConfigChanged { .. } => {
                 // An MCP management tool rewrote config.json's mcp_servers
