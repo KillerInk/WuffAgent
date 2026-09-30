@@ -86,12 +86,21 @@ pub fn bootstrap() -> AppContext {
         &config.base_url(),
         config.remote_api_key.as_deref(),
     ));
-    let clients = build_clients(&config, &connection);
-    let tooling = build_tooling(&config);
 
     // Shared event channel: the UI polls the receiver each frame; the pipeline
     // (and client tool events) write into the sender.
     let (event_tx, event_rx) = std::sync::mpsc::channel::<AppEvent>();
+
+    // Live LLM-activity tracker (status bar): every instrumented LLM call
+    // (agent rounds, judge, memory, improvement checks, eval agents) emits
+    // snapshots here; the UI replaces `display.llm_activities` wholesale on
+    // each event.
+    let activity = Arc::new(wuffagent_core::activity::ActivityTracker::new(
+        event_tx.clone(),
+    ));
+
+    let clients = build_clients(&config, &connection, &activity);
+    let tooling = build_tooling(&config);
 
     // Register MCP management tools (`mcp_list` / `mcp_add_server` /
     // `mcp_connect` / `mcp_disconnect` / `mcp_remove_server` /
@@ -124,6 +133,7 @@ pub fn bootstrap() -> AppContext {
         config.memory_config.clone(),
         clients.memory_llm_client.clone(),
     )
+    .map(|m| m.with_activity(activity.clone()))
     .unwrap_or_else(|e| {
         tracing::warn!(
             "Failed to initialize memory manager with LLM: {}, falling back",
@@ -200,6 +210,7 @@ pub fn bootstrap() -> AppContext {
             clients.session_client.clone(),
             tooling.tool_manager.clone(),
             config.model_prices.clone(),
+            Some(activity.clone()),
         )
         .expect("Failed to register self-improvement tools");
     }
@@ -218,6 +229,7 @@ pub fn bootstrap() -> AppContext {
         clients.session_client,
     )
     .with_memory(memory_manager.clone())
+    .with_activity(activity.clone())
     .with_agents_dir(agents_dir)
     .with_agents_search_dirs(agents_search_dirs)
     .with_model_prices(config.model_prices.clone());
@@ -278,7 +290,11 @@ fn load_config() -> Config {
 /// here, so a settings/preset change propagates to all of them with one
 /// `update()` call (previously the app had to push `set_url` to every live
 /// client and stale clones could still go out of sync).
-fn build_clients(config: &Config, connection: &ConnectionSettings) -> ClientSet {
+fn build_clients(
+    config: &Config,
+    connection: &ConnectionSettings,
+    activity: &std::sync::Arc<wuffagent_core::activity::ActivityTracker>,
+) -> ClientSet {
     // Session-specific client for the bootstrap engine
     let mut client = ChatClient::from_settings(connection.clone());
     client.set_session(config.session_id.clone(), config.sessions_dir.clone());
@@ -297,7 +313,9 @@ fn build_clients(config: &Config, connection: &ConnectionSettings) -> ClientSet 
     let non_streaming = ChatClient::from_settings(connection.clone());
     non_streaming.set_reasoning_effort(config.reasoning_effort);
     non_streaming.set_n_ctx(config.n_ctx);
-    let llm_client = Arc::new(ChatClientAdapter::new(non_streaming));
+    let llm_client = Arc::new(
+        ChatClientAdapter::new(non_streaming).with_activity(activity.clone()),
+    );
     let session_client = Arc::new(client);
 
     // Dedicated non-streaming client for the memory subsystem (maintenance,
@@ -317,7 +335,7 @@ fn build_clients(config: &Config, connection: &ConnectionSettings) -> ClientSet 
         ChatClient::from_settings_with_timeout(connection.clone(), MEMORY_LLM_TIMEOUT_SECS);
     memory_llm.set_reasoning_effort(config.reasoning_effort);
     memory_llm.set_n_ctx(config.n_ctx);
-    let memory_llm_client = Arc::new(ChatClientAdapter::new(memory_llm));
+    let memory_llm_client = Arc::new(ChatClientAdapter::new(memory_llm).with_activity(activity.clone()));
 
     ClientSet {
         session_client,
