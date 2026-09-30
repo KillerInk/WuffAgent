@@ -1,21 +1,6 @@
-**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3), P2 done (commit e4dc423, all 823 core tests pass incl. new golden test).
-
-Audit of wuffagent-core + wuffagent-egui hot paths
-=======
-
-Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
-=======
 # Performance optimizations (2026-11-04, wuffagent)
 
-**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3), P2 done (commit e4dc423), P5 done (commit 0175d36), P4 done (commit 2d65a83; core 825 + egui 44 tests green).
-
-Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
-=======
-**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3), P2 done (commit e4dc423, all 823 core tests pass incl. new golden test).
-
-Audit of wuffagent-core + wuffagent-egui hot paths
-=======
-
+**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (ad061e3), P2 done (e4dc423), P5 done (0175d36), P4 done (2d65a83), P6 done (47611e0; off-thread turn-end save + per-session save lock + narrowed conversation lock; core 827 + egui 44 tests green).
 Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
 loop, the per-chunk SSE stream, and the per-frame egui render. All findings
 below are confirmed in code with file:line evidence. Ranked P1 > P2 > P3 by
@@ -153,6 +138,23 @@ user expects the response to finish.
 - **Verify:** manual: send a turn in a large session, confirm no frame
   drop at completion (WUFF_LAYOUT_DBG or the egui frame profiler); existing
   save tests.
+ - **Done (47611e0):** `ChatClient::save_session_async` (client/persist.rs)
+   spawns a detached `session-save` worker running the unchanged
+   `sessions::persist::save_session` (thread-spawn failure falls back to a
+   sync save); egui `save_session_for_async` (state.rs) is called from the
+   two turn-end sites (stream.rs StreamComplete/StreamError) — edit/delete/
+   sweep/stop/switch/exit `save_session_for` call sites stay synchronous.
+   Two supporting core changes: (1) per-session `save_lock: Arc<Mutex<()>>`
+   on `SessionState`, acquired at the top of `save_session`, serializes
+   concurrent saves of the same session so an async worker and a UI-thread
+   save cannot tear the shared `<id>.json.tmp` (verified
+   `retry_pending_saves` drops its queue lock before the save call — no
+   lock-order inversion); (2) the conversation lock in `save_session` is
+   narrowed to the snapshot clone, so disk I/O + retry backoff sleeps no
+   longer block streaming/agent threads. 2 new tests (async persist;
+   sync+async serialization of a 2000-message session); core 827 + egui 44
+   tests green. Manual frame-drop check left to the user (needs a real
+   large session in the UI).
 
 ### P7. Memory search re-tokenizes the query per entry (LOW)
 `wuffagent-core/src/memory/search.rs:42-45` — `keyword_score` tokenizes the
