@@ -69,6 +69,7 @@ pub mod stats;
 pub mod tools;
 pub mod trimming;
 pub mod types;
+pub mod util;
 pub mod usage;
 
 // Common UI-facing types re-exported for convenient access from egui consumers.

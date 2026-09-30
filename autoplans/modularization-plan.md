@@ -174,8 +174,26 @@ Single concern (render improvement status). Borderline; only split if it grows. 
   - Sub-files sit one level deeper than the original file: sibling imports must go up two levels
     (`crate::ui::theme`, `crate::ui::agent_history`, `crate::ui::charts` instead of `super::…`).
   - 41/41 egui tests ok; only the 2 pre-existing wuffagent-core warnings remain.
-- [ ] Phase 9 — F8/F10: brief tests move-out + `util/text.rs` truncate consolidation
-- [ ] Phase 10 — `cargo test` full run + update this plan with results + README/BUILD notes if module layout changed
+- [x] Phase 9 — F8/F10: brief tests move-out + `util/text.rs` truncate consolidation
+  - F8: `trimming/brief.rs` inline tests → `trimming/brief/tests.rs` (401 L, `mod tests;` in parent),
+    following the `classifier/` convention. All 22 `brief::tests` pass. (A `.` vs `…` "discrepancy"
+    turned out to be a PowerShell 5.1 console display artifact — bytes on disk are correct UTF-8.)
+  - F10: new `wuffagent-core/src/util/text.rs` consolidates the truly-equivalent char-aware truncate
+    variants into a shared `truncate`: `truncate_chars(s, max)` + `truncate_to`/`truncate_for_evidence`
+    delegates. Byte-aware `truncate_bytes(s, max)` (char-boundary back-off) takes over
+    `search::truncate_line`. Deliberately NOT consolidated: `truncate_note`/`truncate_to_bytes`/
+    `truncate_output`/`truncate_line` (different semantics/markers — kept local).
+  - Call-site migrations (F10): `agents/improvement/fleet.rs` `truncate_to` → `util::text::truncate_chars`
+    (local helper deleted), `agents/improvement.rs` `truncate_for_evidence` → delegate,
+    `agents/agent/mod.rs` `truncate_chars` → `pub use crate::util::text::truncate_chars` (old
+    `agents::agent::truncate_chars` path preserved), `tools/builtin/search.rs` `truncate_line` →
+    `truncate_bytes` delegate. New `pub mod util;` in `lib.rs`.
+- [x] Phase 10 — `cargo test` full run + update this plan with results + README/BUILD notes
+  - Full workspace: `cargo test --workspace` EXIT=0 → wuffagent-core `test result: ok. 822 passed; 0
+    failed` (+2 metrics-store, +41 egui, +1 doctest), finished 5.02s.
+  - No README/BUILD file documents the module layout (checked `wuffagent-core/README*`, no matches),
+    so no doc updates needed.
+- DONE — all phases complete; workspace clean, 822+2+41+1 tests green.
 
 Risks / invariants:
 - Public API of `wuffagent-core` (re-exports from `agents/mod.rs`, `memory/mod.rs`) must not change; use

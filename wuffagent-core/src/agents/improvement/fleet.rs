@@ -7,6 +7,8 @@ use crate::memory::manager::MemoryManager;
 use crate::memory::types::MemoryEntry;
 use crate::types::{ImprovementSuggestion, Message};
 
+use crate::util::text::truncate_chars;
+
 use super::{CHAT_PROFILE_NAME, truncate_for_evidence};
 
 /// 2d: character budget for the fleet evidence block (~2k tokens — the
@@ -74,7 +76,7 @@ pub fn fleet_evidence_json(
         let lessons: Vec<String> = tagged
             .into_iter()
             .take(FLEET_TOP_LESSONS)
-            .map(|m| truncate_to(&m.content, FLEET_LESSON_CHARS))
+            .map(|m| truncate_chars(&m.content, FLEET_LESSON_CHARS))
             .collect();
         if s.runs == 0 && lessons.is_empty() {
             continue;
@@ -152,17 +154,6 @@ pub fn fleet_evidence_json(
     json
 }
 
-/// 2d: hard character cap (the fleet evidence block's lesson excerpts).
-pub(crate) fn truncate_to(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let mut t: String = s.chars().take(max_chars).collect();
-        t.push('…');
-        t
-    }
-}
-
 /// 2d: the fleet-wide review (2b(b)) — the cross-agent counterpart of
 /// `suggest_improvements`.
 ///
@@ -203,7 +194,7 @@ pub async fn suggest_fleet_improvements(
             .iter()
             .map(|(n, d)| {
                 let d: String = d.split_whitespace().collect::<Vec<_>>().join(" ");
-                format!("{n} ({})", truncate_to(&d, 160))
+                format!("{n} ({})", truncate_chars(&d, 160))
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -211,7 +202,7 @@ pub async fn suggest_fleet_improvements(
             .iter()
             .map(|(n, d)| {
                 let d: String = d.split_whitespace().collect::<Vec<_>>().join(" ");
-                format!("{n}: {}", truncate_to(&d, 160))
+                format!("{n}: {}", truncate_chars(&d, 160))
             })
             .collect::<Vec<_>>()
             .join("\n");

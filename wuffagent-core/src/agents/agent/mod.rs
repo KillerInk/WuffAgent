@@ -27,15 +27,9 @@ pub(crate) mod verify;
 /// re-extracted after the nudge exists (see `run_llm_loop`).
 pub(crate) const VERIFICATION_NUDGE: &str = "Your previous response did not fully satisfy the request. Improve it based on the tool outputs, or correct your tool calls and try again.";
 
-/// Character-aware truncation for S1 outcome content.
-pub fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max).collect();
-    out.push('…');
-    out
-}
+// F10: the shared char-aware truncation lives in `util::text`; re-exported
+// here so the old `agents::agent::truncate_chars` path keeps working.
+pub use crate::util::text::truncate_chars;
 
 
 /// A configurable agent that runs an LLM loop with tool calls.

@@ -70,16 +70,9 @@ fn make_matcher(
 }
 
 /// Truncate a match line to a bounded length for output.
+/// F10: delegates to the shared byte-aware truncation.
 fn truncate_line(line: &str) -> String {
-    if line.len() <= MAX_LINE_LEN {
-        line.to_string()
-    } else {
-        let mut end = MAX_LINE_LEN;
-        while !line.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &line[..end])
-    }
+    crate::util::text::truncate_bytes(line, MAX_LINE_LEN)
 }
 
 /// Search a single text file line by line.

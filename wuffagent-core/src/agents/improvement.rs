@@ -80,14 +80,9 @@ fn fleet_summary_line(window_days: u64) -> String {
 }
 
 /// I3: keep evidence strings short (they are displayed in the review panel).
+/// F10: delegates to the shared char-aware truncation.
 fn truncate_for_evidence(s: &str) -> String {
-    if s.chars().count() > 300 {
-        let mut t: String = s.chars().take(300).collect();
-        t.push('…');
-        t
-    } else {
-        s.to_string()
-    }
+    crate::util::text::truncate_chars(s, 300)
 }
 
 #[cfg(test)]
