@@ -129,8 +129,45 @@ pub struct DisplayState {
     pub snapshot_len: usize,
     /// Set on in-place message edits (which keep the count unchanged) to force a rebuild.
     pub display_dirty: bool,
+    /// P4: shared snapshot of `(current_thinking, stream_buffer, active_tools,
+    /// is_generating)` for the displayed session. Rebuilt only when
+    /// `stream_snapshot_key` changes, so a steady-state frame is an O(1)
+    /// `Arc::clone` instead of a per-frame deep clone of the (multi-MB)
+    /// growing thinking/stream buffers. Field 0 is the `(current_thinking,
+    /// stream_buffer)` pair so draw code receives a `&(String, String)`
+    /// unchanged.
+    pub stream_snapshot: Arc<((String, String), Vec<wuffagent_core::sessions::ActiveTool>, bool)>,
+    /// Key the streaming snapshot was last built from (see [`stream_snapshot_key`]).
+    pub stream_snapshot_key: StreamSnapshotKey,
     /// Status bar state.
     pub status: AppStatus,
+}
+
+/// P4: staleness key for the streaming snapshot:
+/// `(session, is_generating, thinking_len, buffer_len, active_tools_revision)`.
+/// The text buffers only GROW while generating (a reset passes through a
+/// different length), so their lengths are a sufficient staleness key. The
+/// live tool cards are keyed on the monotonically increasing revision because
+/// their content can be REPLACED with same-length content (live output tail).
+pub type StreamSnapshotKey = (Option<String>, bool, usize, usize, u64);
+
+/// P4: Build the streaming-snapshot key from the displayed session's state.
+/// The text-buffer lengths are zeroed when not generating (the snapshot stores
+/// empty buffers in that case).
+pub fn stream_snapshot_key(
+    session: &Option<String>,
+    is_generating: bool,
+    current_thinking_len: usize,
+    stream_buffer_len: usize,
+    active_tools_revision: u64,
+) -> StreamSnapshotKey {
+    (
+        session.clone(),
+        is_generating,
+        if is_generating { current_thinking_len } else { 0 },
+        if is_generating { stream_buffer_len } else { 0 },
+        active_tools_revision,
+    )
 }
 
 /// Restart / auto-resume lifecycle state.
@@ -148,4 +185,48 @@ pub struct RestartState {
     /// one-shot dismissible banner explaining why the window started empty.
     /// `(session_id, restart_reason)`. Cleared when the user dismisses it.
     pub resume_failed: Option<(String, String)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_snapshot_key_stable_when_state_unchanged() {
+        let session = Some("s1".to_string());
+        let a = stream_snapshot_key(&session, true, 10, 20, 3);
+        let b = stream_snapshot_key(&session, true, 10, 20, 3);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn stream_snapshot_key_detects_each_single_change() {
+        let session = Some("s1".to_string());
+        let base = stream_snapshot_key(&session, true, 10, 20, 3);
+        // Session switch (or to none).
+        let other = Some("s2".to_string());
+        assert_ne!(stream_snapshot_key(&other, true, 10, 20, 3), base);
+        let none = None;
+        assert_ne!(stream_snapshot_key(&none, true, 10, 20, 3), base);
+        // A new chunk grows one of the buffers.
+        assert_ne!(stream_snapshot_key(&session, true, 11, 20, 3), base);
+        assert_ne!(stream_snapshot_key(&session, true, 10, 21, 3), base);
+        // A tool-card mutation bumps the revision (catches same-length
+        // content replacement, which lengths alone would miss).
+        assert_ne!(stream_snapshot_key(&session, true, 10, 20, 4), base);
+        // The generating flag flips while all lengths are zero.
+        assert_ne!(
+            stream_snapshot_key(&session, false, 0, 0, 3),
+            stream_snapshot_key(&session, true, 0, 0, 3)
+        );
+    }
+
+    #[test]
+    fn stream_snapshot_key_zeroes_text_lengths_when_not_generating() {
+        let session = Some("s1".to_string());
+        assert_eq!(
+            stream_snapshot_key(&session, false, 99, 99, 5),
+            (Some("s1".to_string()), false, 0, 0, 5)
+        );
+    }
 }

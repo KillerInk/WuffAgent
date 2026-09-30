@@ -87,28 +87,57 @@ impl ChatApp {
 
         // Snapshot streaming state up front so the scroll closure can call
         // `&mut self` helpers without holding an immutable borrow of the store.
-        let (streaming, is_streaming) = selected
-            .as_deref()
-            .and_then(|sid| self.sessions.session_store.get(sid))
-            .filter(|r| r.chat_state.is_generating)
-            .map(|r| {
-                (
+        // P4: served from a shared `Arc` that is only rebuilt when its
+        // staleness key changes (see `groups::stream_snapshot_key`) — a
+        // steady-state frame is an O(1) `Arc::clone` instead of a per-frame
+        // deep clone of the (multi-MB) growing thinking/stream buffers plus
+        // the live tool cards.
+        let stream_key = {
+            let (is_gen, t_len, b_len, t_rev) = selected
+                .as_deref()
+                .and_then(|sid| self.sessions.session_store.get(sid))
+                .map(|r| {
                     (
-                        r.chat_state.current_thinking.clone(),
-                        r.chat_state.stream_buffer.clone(),
-                    ),
-                    true,
-                )
-            })
-            .unwrap_or_default();
-
-        // Live tool cards (small: name + args preview + output tail) — snapshotted
-        // for the same reason as the streaming state above.
-        let active_tools: Vec<wuffagent_core::sessions::ActiveTool> = selected
-            .as_deref()
-            .and_then(|sid| self.sessions.session_store.get(sid))
-            .map(|r| r.chat_state.active_tools.clone())
-            .unwrap_or_default();
+                        r.chat_state.is_generating,
+                        r.chat_state.current_thinking.len(),
+                        r.chat_state.stream_buffer.len(),
+                        r.chat_state.active_tools_revision,
+                    )
+                })
+                .unwrap_or((false, 0, 0, 0));
+            super::state::groups::stream_snapshot_key(&selected, is_gen, t_len, b_len, t_rev)
+        };
+        if self.display.stream_snapshot_key != stream_key {
+            let snap = selected
+                .as_deref()
+                .and_then(|sid| self.sessions.session_store.get(sid))
+                .map(|r| {
+                    let gen = r.chat_state.is_generating;
+                    (
+                        (
+                            if gen {
+                                r.chat_state.current_thinking.clone()
+                            } else {
+                                String::new()
+                            },
+                            if gen {
+                                r.chat_state.stream_buffer.clone()
+                            } else {
+                                String::new()
+                            },
+                        ),
+                        r.chat_state.active_tools.clone(),
+                        gen,
+                    )
+                })
+                .unwrap_or_default();
+            self.display.stream_snapshot = std::sync::Arc::new(snap);
+            self.display.stream_snapshot_key = stream_key;
+        }
+        let stream_snapshot = self.display.stream_snapshot.clone();
+        let streaming = &stream_snapshot.0;
+        let is_streaming = stream_snapshot.2;
+        let active_tools = &stream_snapshot.1;
 
         // Stick to bottom when the user is already there or forced the button.
         let scroll_output = egui::ScrollArea::vertical()
@@ -174,10 +203,10 @@ impl ChatApp {
                             // Only while a response is actually in flight — otherwise the
                             // empty-buffer branch would draw a stray "AI:" + spinner.
                             if is_streaming {
-                                self.draw_streaming_line(ui, &theme, &streaming);
+                                self.draw_streaming_line(ui, &theme, streaming);
                             }
                             // Live tool cards for calls that are executing right now.
-                            for tool in &active_tools {
+                            for tool in active_tools {
                                 self.draw_active_tool_card(ui, tool, &theme);
                             }
                         });

@@ -34,6 +34,8 @@ impl ChatApp {
                         started_at: std::time::Instant::now(),
                         live_output: String::new(),
                     });
+                // P4: bump the snapshot revision (live card appeared).
+                runtime.chat_state.active_tools_revision += 1;
             }
         }
     }
@@ -56,6 +58,9 @@ impl ChatApp {
                 .find(|t| t.call_id == call_id)
             {
                 active.live_output = text;
+                // P4: bump the snapshot revision (content REPLACED, possibly
+                // with same length — lengths alone can't detect it).
+                runtime.chat_state.active_tools_revision += 1;
             }
             let _ = tool_name;
         }
@@ -94,6 +99,8 @@ impl ChatApp {
                 .chat_state
                 .active_tools
                 .retain(|t| t.call_id != call_id);
+            // P4: bump the snapshot revision (live card closed).
+            runtime.chat_state.active_tools_revision += 1;
             let header = if args_preview.is_empty() {
                 wuffagent_core::tools::tool_call_header(tool_name, &result)
             } else {
@@ -142,6 +149,8 @@ impl ChatApp {
                 .chat_state
                 .active_tools
                 .retain(|t| t.call_id != call_id);
+            // P4: bump the snapshot revision (live card closed).
+            runtime.chat_state.active_tools_revision += 1;
             let header = if args_preview.is_empty() {
                 format!("Tool '{}' error: {}", tool_name, error)
             } else {

@@ -166,6 +166,8 @@ impl ChatApp {
                 snapshot_session: None,
                 snapshot_len: 0,
                 display_dirty: true,
+                stream_snapshot: std::sync::Arc::new(((String::new(), String::new()), Vec::new(), false)),
+                stream_snapshot_key: (None, false, 0, 0, 0),
                 status: AppStatus::Stopped,
             },
             restart: groups::RestartState {

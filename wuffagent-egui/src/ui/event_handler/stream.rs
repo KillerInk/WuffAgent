@@ -90,6 +90,8 @@ impl ChatApp {
             // The run ended: any live tool card still open (e.g. a tool
             // aborted before it emitted its completion) is stale now.
             runtime.chat_state.active_tools.clear();
+            // P4: bump the snapshot revision (live cards dropped).
+            runtime.chat_state.active_tools_revision += 1;
             if is_selected {
                 self.display.status = AppStatus::Ready;
             }
@@ -135,6 +137,8 @@ impl ChatApp {
             // Aborted tools never emit their completion — drop their
             // live cards so the transcript doesn't spin forever.
             runtime.chat_state.active_tools.clear();
+            // P4: bump the snapshot revision (live cards dropped).
+            runtime.chat_state.active_tools_revision += 1;
             if is_selected {
                 self.display.status = AppStatus::Error(error.to_string());
             }

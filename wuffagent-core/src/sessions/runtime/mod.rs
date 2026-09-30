@@ -87,6 +87,12 @@ pub struct ChatAreaState {
     /// `ToolCallStart`, updated by `ToolCallProgress`, drained on
     /// `ToolCallComplete`/`ToolCallError` (or when the run ends).
     pub active_tools: Vec<ActiveTool>,
+    /// Monotonically increasing counter bumped on every `active_tools`
+    /// mutation (push/replace/retain/clear). Serves as the UI's streaming
+    /// snapshot cache key: lengths alone can't detect a live-output tail
+    /// being REPLACED with same-length content, so the UI re-snapshots on
+    /// revision change instead of per frame.
+    pub active_tools_revision: u64,
 }
 
 impl Default for ChatAreaState {
@@ -119,6 +125,7 @@ impl Default for ChatAreaState {
             status: crate::types::AppStatus::Stopped,
             queued_messages: Vec::new(),
             active_tools: Vec::new(),
+            active_tools_revision: 0,
         }
     }
 }
