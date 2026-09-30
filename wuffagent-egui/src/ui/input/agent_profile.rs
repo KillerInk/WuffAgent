@@ -55,7 +55,10 @@ impl ChatApp {
     /// Resolve the tool policy for an agent profile by name. An empty name
     /// ("Auto") or a profile not found yields an unrestricted policy (all tools
     /// + allow-all shell, no handoff).
-    pub(super) fn resolve_tool_policy(
+    ///
+    /// `pub(crate)`: the event handler's `SubSessionHandoff` arm resolves the
+    /// handoff target's policy the same way the input box does at send time.
+    pub(crate) fn resolve_tool_policy(
         &self,
         agent_name: &str,
     ) -> wuffagent_core::types::ChatToolPolicy {
@@ -82,7 +85,10 @@ impl ChatApp {
 
     /// Resolve the system prompt for an agent profile by name (empty = "Auto"
     /// -> the general profile).
-    pub(super) fn resolve_agent_prompt(&self, agent_name: &str) -> String {
+    ///
+    /// `pub(crate)`: the event handler's `SubSessionHandoff` arm resolves the
+    /// handoff target's prompt the same way the input box does at send time.
+    pub(crate) fn resolve_agent_prompt(&self, agent_name: &str) -> String {
         let names: Vec<&str> = if agent_name.is_empty() {
             vec!["general", "generalist"]
         } else {

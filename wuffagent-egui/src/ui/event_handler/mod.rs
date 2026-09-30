@@ -127,28 +127,141 @@ impl ChatApp {
                 agent,
                 task,
             } => {
-                // Placeholder (step 16 wires the full handler: create the sub
-                // runtime, open its tab, post the first turn).
+                // Fork the clean sub-session: create its session file and a
+                // FRESH runtime (a new ChatClient whose session meta carries
+                // `parent_session_id` back to the forking session — so its
+                // first save persists the parent link and the core
+                // advertises `hand_back` to it), open its tab, and start its
+                // first turn with the handoff task. The parent is already
+                // idle + saved: the core sent its terminal StreamComplete
+                // before this event.
                 tracing::info!(
-                    parent_session_id,
-                    agent,
-                    "Sub-session handoff (handler pending, step 16)"
+                    %parent_session_id,
+                    %agent,
+                    "Sub-session handoff: forking sub-session"
                 );
-                let _ = task;
+                let sessions_dir = self.core.config.sessions_dir.clone();
+                let sub_name = format!("Sub: {}", agent);
+                let session = wuffagent_core::sessions::create_session(&sessions_dir, &sub_name);
+                let event_tx = self
+                    .relay
+                    .pending_tx
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .clone();
+                let mut runtime = wuffagent_core::sessions::SessionRuntime::create_from_config(
+                    &self.core.config,
+                    &self.core.connection,
+                    &self.core.agent_engine,
+                    session.id.clone(),
+                    session.name.clone(),
+                    event_tx,
+                );
+                runtime.selected_agent = Some(agent.clone());
+                runtime
+                    .client
+                    .set_session_meta(wuffagent_core::sessions::SessionMeta {
+                        selected_agent: runtime.selected_agent.clone(),
+                        reasoning_mode: runtime.reasoning_mode,
+                        parent_session_id: Some(parent_session_id),
+                    });
+                self.sessions
+                    .session_store
+                    .insert(session.id.clone(), runtime);
+                // Open the sub-session tab and make it active; the main tab
+                // (the parent, still the selected session) stays available.
+                self.sessions.sub_session_tabs.push(session.id.clone());
+                self.sessions.active_tab = Some(session.id.clone());
+                if let Some(panel) = self.sessions_panel.as_mut() {
+                    panel.refresh();
+                    panel.show_notification(
+                        &format!(
+                            "Sub-session '{}' started for agent '{}'",
+                            session.name, agent
+                        ),
+                        true,
+                    );
+                }
+                // Start the first turn in the sub-session: fresh context — the
+                // handoff task is the only message it starts with.
+                self.start_pipeline_for_session(
+                    &session.id,
+                    &task,
+                    None,
+                    self.resolve_agent_prompt(&agent),
+                    self.resolve_tool_policy(&agent),
+                    false,
+                );
             }
             AppEvent::AgentHandBack {
                 from_session_id,
                 to_session_id,
                 task,
             } => {
-                // Placeholder (step 17 wires the full handler: focus the
-                // parent tab, post the hand-back turn into the parent).
+                // The sub-session finished and handed the session back to its
+                // parent: focus the parent (main tab + sidebar selection) and
+                // post the hand-back task as the parent's next turn — queued
+                // (displayed immediately, run when the current turn ends) if
+                // the parent is still generating.
                 tracing::info!(
-                    from_session_id,
-                    to_session_id,
-                    "Agent hand-back (handler pending, step 17)"
+                    %from_session_id,
+                    %to_session_id,
+                    "Agent hand-back: returning session to parent"
                 );
-                let _ = task;
+                self.sessions.active_tab = None;
+                self.sessions.selected_session_id = Some(to_session_id.clone());
+                if let Some(panel) = self.sessions_panel.as_mut() {
+                    *panel.selected_id_mut() = Some(to_session_id.clone());
+                    panel.refresh();
+                }
+                // Resolve prompt/policy from the PARENT's selected agent (the
+                // same resolution the input box uses at send time).
+                let agent = self
+                    .sessions
+                    .session_store
+                    .get(&to_session_id)
+                    .and_then(|r| r.selected_agent.clone())
+                    .unwrap_or_default();
+                let (agent_prompt, tool_policy) = (
+                    self.resolve_agent_prompt(&agent),
+                    self.resolve_tool_policy(&agent),
+                );
+                let generating = self
+                    .sessions
+                    .session_store
+                    .get(&to_session_id)
+                    .map(|r| r.chat_state.is_generating)
+                    .unwrap_or(false);
+                if generating {
+                    if let Some(rt) = self.sessions.session_store.get_mut(&to_session_id) {
+                        // Displayed at queue time; the drain starts it with
+                        // `already_displayed = true`.
+                        rt.chat_state.push_message(
+                            MessageKind::Normal,
+                            "user",
+                            &format!("🔁 Hand-back: {}", task),
+                        );
+                        rt.chat_state
+                            .queued_messages
+                            .push(wuffagent_core::types::QueuedMessage {
+                                text: task,
+                                image: None,
+                                agent_prompt,
+                                tool_policy,
+                            });
+                    }
+                } else {
+                    self.start_pipeline_for_session(
+                        &to_session_id,
+                        &task,
+                        None,
+                        agent_prompt,
+                        tool_policy,
+                        false,
+                    );
+                }
             }
             AppEvent::ImprovementSuggested {
                 agent_name,
