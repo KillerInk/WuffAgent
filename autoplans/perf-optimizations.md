@@ -1,7 +1,15 @@
-# Performance optimizations (2026-11-04, wuffagent)
-
+**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3), P2 done (commit e4dc423, all 823 core tests pass incl. new golden test).
 
 Audit of wuffagent-core + wuffagent-egui hot paths
+=======
+
+Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
+=======
+# Performance optimizations (2026-11-04, wuffagent)
+
+**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3), P2 done (commit e4dc423), P5 done (commit 0175d36; core suite green at 825 tests).
+
+Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
 =======
 **Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3), P2 done (commit e4dc423, all 823 core tests pass incl. new golden test).
 
