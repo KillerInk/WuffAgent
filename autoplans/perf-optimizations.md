@@ -7,7 +7,7 @@ Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
 =======
 # Performance optimizations (2026-11-04, wuffagent)
 
-**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3), P2 done (commit e4dc423), P5 done (commit 0175d36; core suite green at 825 tests).
+**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3), P2 done (commit e4dc423), P5 done (commit 0175d36), P4 done (commit 2d65a83; core 825 + egui 44 tests green).
 
 Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
 =======
@@ -100,6 +100,17 @@ gating — the streaming state just wasn't given the same treatment.
   `live_output.len()`).
 - **Verify:** existing UI tests + manual stream of a long thinking
   response; the WUFF_LAYOUT_DBG instrumentation already exists if needed.
+ - **Done (2d65a83):** extended `DisplayState` with
+   `stream_snapshot: Arc<((String, String), Vec<ActiveTool>, bool)>` +
+   `stream_snapshot_key` (session, is_generating, thinking_len, buffer_len,
+   revision) via `groups::stream_snapshot_key`. Because the live-output tail
+   is REPLACED (not appended) and can keep the same length, `active_tools`
+   is keyed on a new monotonically increasing `active_tools_revision`
+   (wuffagent-core `ChatAreaState`) bumped at all 6 UI mutation sites
+   (start push, progress replace, complete/error retain, complete/error
+   clear); the text buffers grow-only while generating, so lengths suffice
+   (zeroed when not generating). 3 new unit tests for the key; core 825 +
+   egui 44 tests green.
 
 ### P5. SSE tool-ready check clones the growing tool call per delta (MEDIUM)
 `wuffagent-core/src/client/sse.rs:65-88` — `fire_tool_ready_if_complete`
