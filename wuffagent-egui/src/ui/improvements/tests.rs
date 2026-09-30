@@ -468,10 +468,21 @@ fn test_apply_improvement_all_toggles_off_is_noop() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A panel whose persistence store is a scratch file (NOT the real
+/// `~/.wuffagent/pending_improvements.json`). `handle_improvement_suggested`
+/// persists on arrival, so a default store would leak the test fixtures into
+/// the live app's pending queue — visible after the next app start as bogus
+/// pending suggestions ("newer prompt" for coder, "p3" for researcher).
+fn panel_with_temp_store(tag: &str) -> ImprovementsPanel {
+    let mut panel = ImprovementsPanel::new();
+    panel.store = PendingStore::at(pending_file(tag));
+    panel
+}
+
 /// F2: a new suggestion batch must not drop previously unreviewed entries.
 #[test]
 fn test_new_batch_preserves_unreviewed_suggestions() {
-    let mut panel = ImprovementsPanel::new();
+    let mut panel = panel_with_temp_store("f2-batch");
     panel.handle_improvement_suggested("coder", vec![suggestion("coder", "first", "p1")]);
     panel.handle_improvement_suggested("coder", vec![suggestion("coder", "second", "p2")]);
 
@@ -479,13 +490,14 @@ fn test_new_batch_preserves_unreviewed_suggestions() {
     assert_eq!(panel.pending[0].rationale, "first");
     assert_eq!(panel.pending[1].rationale, "second");
     assert!(panel.show_panel);
+    let _ = std::fs::remove_file(panel.store.path());
 }
 
 /// F2: a duplicate suggestion (same agent_name + rationale) replaces the
 /// existing pending entry instead of appending a second copy.
 #[test]
 fn test_duplicate_suggestion_replaces_existing() {
-    let mut panel = ImprovementsPanel::new();
+    let mut panel = panel_with_temp_store("f2-dup");
     panel.handle_improvement_suggested("coder", vec![suggestion("coder", "same", "old prompt")]);
     panel.handle_improvement_suggested("coder", vec![suggestion("coder", "same", "new prompt")]);
 
@@ -509,6 +521,7 @@ fn test_duplicate_suggestion_replaces_existing() {
     // Same rationale for a DIFFERENT agent is not a duplicate.
     panel.handle_improvement_suggested("coder", vec![suggestion("researcher", "same", "p3")]);
     assert_eq!(panel.pending.len(), 2);
+    let _ = std::fs::remove_file(panel.store.path());
 }
 
 /// F5: the rejection lesson must be a Lesson entry that names the agent in
