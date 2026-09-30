@@ -44,13 +44,13 @@ fn test_request_overhead_counts_tool_schemas_and_images() {
         image: None,
     }];
 
-    // No tools, no images: zero overhead.
-    assert_eq!(super::r#loop::request_overhead_chars(None, &msgs), 0);
+    // No tools (schema_chars = 0), no images: zero overhead.
+    assert_eq!(super::r#loop::request_overhead_chars(0, &msgs), 0);
 
     // Each attached image adds the fixed allowance (NOT the payload size).
     msgs[0].image = Some("data:image/png;base64,QUJD".to_string());
     assert_eq!(
-        super::r#loop::request_overhead_chars(None, &msgs),
+        super::r#loop::request_overhead_chars(0, &msgs),
         super::r#loop::ESTIMATED_IMAGE_CHARS
     );
 
@@ -70,8 +70,12 @@ fn test_request_overhead_counts_tool_schemas_and_images() {
         })
         .collect();
     let expected_schema = serde_json::to_string(&defs).unwrap().chars().count();
+    // The cached schema count is the serialized JSON length (the value the
+    // run computes ONCE up front and reuses every round).
+    assert_eq!(super::r#loop::tool_schema_chars(Some(&defs)), expected_schema);
+    assert_eq!(super::r#loop::tool_schema_chars(None), 0);
     assert_eq!(
-        super::r#loop::request_overhead_chars(Some(&defs), &msgs),
+        super::r#loop::request_overhead_chars(expected_schema, &msgs),
         expected_schema + super::r#loop::ESTIMATED_IMAGE_CHARS
     );
     assert!(

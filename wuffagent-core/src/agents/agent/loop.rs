@@ -29,19 +29,26 @@ pub(crate) const MAX_VERIFICATION_ATTEMPTS: u32 = 2;
 /// allowance is reserved per image instead of counting the payload.
 pub(crate) const ESTIMATED_IMAGE_CHARS: usize = 8_000;
 
+/// Serialized char count of the tool schemas sent with every request.
+/// Computed ONCE per run: the per-agent tool list is static for the run's
+/// lifetime, so re-serializing it on every LLM round (100s of KB of JSON
+/// for a 40+ tool agent) is pure waste.
+pub(crate) fn tool_schema_chars(tool_defs: Option<&[crate::tools::ToolDefinition]>) -> usize {
+    tool_defs
+        .map(|defs| serde_json::to_string(defs).map(|s| s.chars().count()).unwrap_or(0))
+        .unwrap_or(0)
+}
+
 /// Per-request char overhead that `message_char_count` never sees: the
 /// serialized tool schemas (sent with EVERY request) plus a fixed allowance
 /// per attached image. The trim budget is a percentage of n_ctx in char
 /// units, so it must reserve this — otherwise the request can exceed n_ctx
 /// while the message list alone is still below the 90% trigger (and even
 /// after trimming to the 50% target or the 85% overflow-retry budget).
-pub(crate) fn request_overhead_chars(
-    tool_defs: Option<&[crate::tools::ToolDefinition]>,
-    messages: &[Message],
-) -> usize {
-    let schema_chars = tool_defs
-        .map(|defs| serde_json::to_string(defs).map(|s| s.chars().count()).unwrap_or(0))
-        .unwrap_or(0);
+///
+/// `schema_chars` is the run-cached [`tool_schema_chars`] result; only the
+/// image count is still scanned per round (a cheap `is_some()` filter).
+pub(crate) fn request_overhead_chars(schema_chars: usize, messages: &[Message]) -> usize {
     let images = messages.iter().filter(|m| m.image.is_some()).count();
     schema_chars + images * ESTIMATED_IMAGE_CHARS
 }
@@ -127,6 +134,11 @@ impl Agent {
                 Some(defs)
             }
         };
+        // P1: the tool schemas are static for the run, so their serialized
+        // char count is computed ONCE here and reused by every round's
+        // trim-budget check (previously `request_overhead_chars` re-serialized
+        // the whole tool list — 100s of KB of JSON — on every LLM round).
+        let schema_chars = tool_schema_chars(tool_defs.as_deref());
 
         // Capture the turn's original request ONCE, before any verification
         // nudge is pushed: after a NEEDS_FIX the last user message in
@@ -287,8 +299,13 @@ impl Agent {
                 // The request also carries the tool schemas and attached
                 // images, which `message_char_count` does not count — reserve
                 // that overhead so the budget covers the ACTUAL request size.
-                let overhead_chars = request_overhead_chars(tool_defs.as_deref(), messages);
-                let total_chars = crate::trimming::message_char_count(messages) + overhead_chars;
+                // (`schema_chars` is the run-cached tool-schema count; see
+                // `tool_schema_chars` above.)
+                let overhead_chars = request_overhead_chars(schema_chars, messages);
+                // P3: ONE full-history char scan per round, reused for both
+                // the trigger check below and the `chars_before` metric.
+                let msg_chars = crate::trimming::message_char_count(messages);
+                let total_chars = msg_chars + overhead_chars;
                 if msg_count > 4 && total_chars > self.client.trim_trigger_chars() {
                     // Target in char units: the configured target percentage
                     // of n_ctx (default 50) converted to chars via the
@@ -296,7 +313,7 @@ impl Agent {
                     // per-request overhead so messages + overhead together
                     // stay under the target.
                     let target_chars = self.client.trim_target_chars().saturating_sub(overhead_chars);
-                    let chars_before = crate::trimming::message_char_count(messages);
+                    let chars_before = msg_chars;
                     let (removed, dropped) = self.trimming.trim_messages_detailed(
                         messages,
                         target_chars,
@@ -462,7 +479,7 @@ impl Agent {
                                 .client
                                 .overflow_retry_char_budget(&ov)
                                 .saturating_sub(request_overhead_chars(
-                                    tool_defs.as_deref(),
+                                    schema_chars,
                                     messages,
                                 ));
                             let chars_before = crate::trimming::message_char_count(messages);
