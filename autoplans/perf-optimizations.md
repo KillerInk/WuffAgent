@@ -1,6 +1,7 @@
 # Performance optimizations (2026-11-04, wuffagent)
 
-**Status:** 📋 PLANNED (created 2026-11-04). Not started.
+**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (commit ad061e3, all 822 core tests pass).
+=======
 
 Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
 loop, the per-chunk SSE stream, and the per-frame egui render. All findings

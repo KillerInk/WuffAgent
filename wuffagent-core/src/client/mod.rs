@@ -51,8 +51,8 @@ impl ConnectionSettings {
 
 // Re-export key types so the public API surface is unchanged
 pub use http::{
-    build_request, build_stream_request, send_message, ChatRequest, Choice, NonStreamResult,
-    Response,
+    build_request, build_stream_request, send_message, ChatRequest, ChatRequestRef, Choice,
+    NonStreamResult, Response,
 };
 
 // Session persistence orchestrators moved to `crate::sessions::persist`

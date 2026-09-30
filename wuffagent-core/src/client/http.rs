@@ -31,6 +31,38 @@ pub struct ChatRequest {
     pub return_progress: Option<bool>,
 }
 
+/// Borrowed view of [`ChatRequest`]: the same wire fields in the same order,
+/// but `messages` and `tools` are borrowed slices, so the request body can be
+/// serialized without first deep-cloning the whole conversation history +
+/// tool definitions (perf P2 — the agent loop rebuilt an owned request every
+/// LLM round, cloning the entire history just to serialize it again). The
+/// serde attributes mirror the owned struct, so `serde_json::to_string`
+/// output is byte-identical (golden test: `test_chat_request_ref_matches_owned`).
+#[derive(Serialize, Debug)]
+pub struct ChatRequestRef<'a> {
+    pub model: &'a str,
+    pub messages: &'a [Message],
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<&'a [crate::tools::ToolDefinition]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'a str>,
+    /// Copy-able, kept by value — same wire output as the owned struct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<ChatTemplateKwargs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<&'a StreamOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_progress: Option<bool>,
+}
+
+impl ChatRequestRef<'_> {
+    /// Serialize to the request body (no prior deep clone of messages/tools).
+    pub fn to_json(&self) -> Result<String, Error> {
+        Ok(serde_json::to_string(self)?)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChatTemplateKwargs {
     /// Qwen3 chat-template switch: `true` = thinking mode on,
@@ -166,11 +198,14 @@ pub fn build_request(
 /// Send a non-streaming HTTP request and return the completed call's
 /// results (content, server-reported usage + model, tool-call count and
 /// thinking-character count — see [`NonStreamResult`]).
-pub async fn send_message(
+///
+/// Generic over the request shape so callers can serialize either the owned
+/// [`ChatRequest`] or the borrowed [`ChatRequestRef`] (perf P2).
+pub async fn send_message<R: Serialize>(
     http_client: &reqwest::Client,
     base_url: &str,
     api_key: Option<&str>,
-    request: &ChatRequest,
+    request: &R,
 ) -> Result<NonStreamResult, Error> {
     let body = serde_json::to_string(request)?;
 

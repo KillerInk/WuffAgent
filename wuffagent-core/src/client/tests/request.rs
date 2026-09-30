@@ -555,3 +555,120 @@ fn test_build_request_return_progress() {
     );
     assert_eq!(non_stream_req.return_progress, None);
 }
+
+// ── P2: ChatRequestRef (borrowed view) golden test ────────────────────────────
+
+fn p2_sample_messages() -> Vec<crate::types::Message> {
+    vec![
+        crate::types::Message {
+            role: "system".to_string(),
+            content: "You are WuffAgent. ünïcødé ✓ survives.".to_string(),
+            timestamp: "2026-07-26T10:00:00Z".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: None,
+        },
+        crate::types::Message {
+            role: "assistant".to_string(),
+            content: String::new(),
+            timestamp: "2026-07-26T10:00:01Z".to_string(),
+            tool_calls: Some(vec![crate::types::ToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: crate::types::ToolFunction {
+                    name: "write_file".to_string(),
+                    arguments: r#"{"path":"/tmp/a.txt","content":"hi"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning_content: Some("let me think…".to_string()),
+            image: None,
+        },
+        crate::types::Message {
+            role: "tool".to_string(),
+            content: "ok".to_string(),
+            timestamp: "2026-07-26T10:00:02Z".to_string(),
+            tool_calls: None,
+            tool_call_id: Some("call_1".to_string()),
+            reasoning_content: None,
+            image: None,
+        },
+        // Image message: serializes content as the multimodal parts array.
+        crate::types::Message {
+            role: "user".to_string(),
+            content: "look at this".to_string(),
+            timestamp: "2026-07-26T10:00:03Z".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            image: Some("data:image/png;base64,AAAA".to_string()),
+        },
+    ]
+}
+
+fn p2_sample_tools() -> Vec<crate::tools::ToolDefinition> {
+    vec![crate::tools::ToolDefinition {
+        type_name: "function".to_string(),
+        function: crate::tools::ToolFunctionSpec {
+            name: "test_tool".to_string(),
+            description: "A test tool".to_string(),
+            parameters: crate::tools::JsonSchema {
+                type_name: "object".to_string(),
+                properties: None,
+                required: vec![],
+            },
+        },
+    }]
+}
+
+/// P2 golden test: the borrowed [`http::ChatRequestRef`] must serialize
+/// BYTE-IDENTICAL to the owned [`http::ChatRequest`], for every field
+/// combination (tools on/off, reasoning on/off, stream_options on/off,
+/// return_progress on/off, image/multimodal content).
+#[test]
+fn test_chat_request_ref_matches_owned() {
+    let messages = p2_sample_messages();
+    let tools = p2_sample_tools();
+
+    for with_tools in [false, true] {
+        for (reasoning, kwargs) in [
+            (None::<&str>, None::<http::ChatTemplateKwargs>),
+            (Some("xhigh"), Some(http::ChatTemplateKwargs { enable_thinking: true })),
+        ] {
+            for (with_stream_opts, return_progress) in [(true, Some(true)), (false, None)] {
+                // Build the owned request first, then borrow its fields for
+                // the ref view (borrowing from owned avoids move/borrow
+                // conflicts on the same local values).
+                let owned = http::ChatRequest {
+                    model: "local".to_string(),
+                    messages: messages.clone(),
+                    stream: true,
+                    tools: with_tools.then(|| tools.clone()),
+                    reasoning_effort: reasoning.map(str::to_string),
+                    chat_template_kwargs: kwargs,
+                    stream_options: with_stream_opts
+                        .then_some(http::StreamOptions { include_usage: true }),
+                    return_progress,
+                };
+                let borrowed = http::ChatRequestRef {
+                    model: "local",
+                    messages: &owned.messages,
+                    stream: true,
+                    tools: owned.tools.as_deref(),
+                    reasoning_effort: owned.reasoning_effort.as_deref(),
+                    chat_template_kwargs: kwargs,
+                    stream_options: owned.stream_options.as_ref(),
+                    return_progress,
+                };
+                let owned_json = serde_json::to_string(&owned).unwrap();
+                let borrowed_json = borrowed.to_json().unwrap();
+                assert_eq!(
+                    owned_json, borrowed_json,
+                    "P2 wire mismatch: tools={} reasoning={:?} stream_opts={} progress={:?}",
+                    with_tools, reasoning, with_stream_opts, return_progress
+                );
+            }
+        }
+    }
+}

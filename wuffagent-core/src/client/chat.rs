@@ -9,7 +9,7 @@ use crate::trimming::message_char_count;
 use crate::types::{Message, ToolCall, Usage};
 
 use super::estimate_conversation_tokens;
-use super::http::{self, build_request, ChatRequest, send_message};
+use super::http::{self, build_request, send_message};
 use super::sse::{self, ToolCallTracker};
 use super::{parse_context_overflow, ChatClient, Error};
 
@@ -33,16 +33,18 @@ impl ChatClient {
     ) -> Result<(String, Option<Usage>), Error> {
         let mut msgs = messages.to_vec();
         let (reasoning_effort, chat_template_kwargs) = http::reasoning_wire(self.reasoning_effort());
-        let request = ChatRequest {
-            model: "local".to_string(),
-            messages: msgs.clone(),
+        let stream_options = http::StreamOptions { include_usage: true };
+        // P2: serialize the BORROWED view — the owned ChatRequest deep-cloned
+        // the whole history + tools into fields that were serialized and
+        // dropped immediately (and re-cloned again on the overflow retry).
+        let request = http::ChatRequestRef {
+            model: "local",
+            messages: &msgs,
             stream: false,
-            tools: tools.map(|t| t.to_vec()),
-            reasoning_effort,
+            tools,
+            reasoning_effort: reasoning_effort.as_deref(),
             chat_template_kwargs,
-            stream_options: Some(http::StreamOptions {
-                include_usage: true,
-            }),
+            stream_options: Some(&stream_options),
             return_progress: None,
         };
         self.note_prompt_chars(message_char_count(&msgs));
@@ -68,16 +70,15 @@ impl ChatClient {
                     Self::trim_to_token_budget_messages(&mut msgs, target);
                     let (reasoning_effort, chat_template_kwargs) =
                         http::reasoning_wire(self.reasoning_effort());
-                    let request2 = ChatRequest {
-                        model: "local".to_string(),
-                        messages: msgs.clone(),
+                    // P2: borrowed view again (see first request above).
+                    let request2 = http::ChatRequestRef {
+                        model: "local",
+                        messages: &msgs,
                         stream: false,
-                        tools: tools.map(|t| t.to_vec()),
-                        reasoning_effort,
+                        tools,
+                        reasoning_effort: reasoning_effort.as_deref(),
                         chat_template_kwargs,
-                        stream_options: Some(http::StreamOptions {
-                            include_usage: true,
-                        }),
+                        stream_options: Some(&stream_options),
                         return_progress: None,
                     };
                     self.note_prompt_chars(message_char_count(&msgs));
@@ -269,20 +270,22 @@ impl ChatClient {
 
         let (reasoning_effort, chat_template_kwargs) =
             http::reasoning_wire(client.reasoning_effort());
-        let request = ChatRequest {
-            model: "local".to_string(),
-            messages: messages.to_vec(),
+        let stream_options = http::StreamOptions { include_usage: true };
+        // P2: serialize the BORROWED view — no per-round deep clone of the
+        // full `messages` history or the `tools` definitions (the owned
+        // request cloned both, then was serialized and dropped).
+        let request = http::ChatRequestRef {
+            model: "local",
+            messages,
             stream: true,
-            tools: tools.map(|t| t.to_vec()),
-            reasoning_effort,
+            tools,
+            reasoning_effort: reasoning_effort.as_deref(),
             chat_template_kwargs,
-            stream_options: Some(http::StreamOptions {
-                include_usage: true,
-            }),
+            stream_options: Some(&stream_options),
             // Ask llama.cpp for live prompt-processing progress chunks.
             return_progress: Some(true),
         };
-        let body = serde_json::to_string(&request)?;
+        let body = request.to_json()?;
 
         let mut builder = http_client
             .post(format!("{}/v1/chat/completions", base_url))
