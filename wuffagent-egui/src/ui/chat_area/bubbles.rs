@@ -29,6 +29,8 @@ impl ChatApp {
             self.draw_avatar(ui, theme, false, 28.0);
             ui.add_space(8.0);
             ui.scope(|ui| {
+                // Dock to the full remaining row width (mirrors draw_message).
+                ui.take_available_width();
                 ui.vertical(|ui| {
                     // Thinking: dim italic text in a quiet framed card.
                     if !current_thinking.is_empty() {
@@ -38,6 +40,7 @@ impl ChatApp {
                             .corner_radius(10)
                             .inner_margin(egui::Margin::same(8))
                             .show(ui, |ui| {
+                                ui.take_available_width();
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
                                     ui.label(
@@ -66,6 +69,7 @@ impl ChatApp {
                             .corner_radius(12)
                             .inner_margin(egui::Margin::same(10))
                             .show(ui, |ui| {
+                                ui.take_available_width();
                                 ui.add(Self::breaking_label(
                                     stream_buffer,
                                     egui::FontId::proportional(13.5),
@@ -81,6 +85,7 @@ impl ChatApp {
                             .corner_radius(12)
                             .inner_margin(egui::Margin::same(10))
                             .show(ui, |ui| {
+                                ui.take_available_width();
                                 let t = ui.ctx().input(|i| i.time) as f32;
                                 let base = ui.cursor().min;
                                 let dot = 5.0;
@@ -145,6 +150,7 @@ impl ChatApp {
                     .corner_radius(8)
                     .inner_margin(egui::Margin::symmetric(10, 6))
                     .show(ui, |ui| {
+                        ui.take_available_width();
                         // Header row: spinner + icon+name + args + elapsed.
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
@@ -275,6 +281,7 @@ impl ChatApp {
                 // Bubbles span the full chat width, docked edge-to-edge like
                 // the input field (user bubbles still sit at the right edge
                 // because the row flows right-to-left).
+                ui.take_available_width();
                 // Handle right-click context menu for edit/delete
                 let response = ui.interact(
                     ui.max_rect(),
@@ -306,6 +313,7 @@ impl ChatApp {
                         .corner_radius(12)
                         .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
+                            ui.take_available_width();
                             if layout_dbg_enabled() {
                                 eprintln!(
                                     "[ldbg] msg {:>3} frame avail_w={:.1}",

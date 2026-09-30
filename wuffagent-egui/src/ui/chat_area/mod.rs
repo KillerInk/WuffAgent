@@ -166,52 +166,50 @@ impl ChatApp {
                         .unwrap_or(false),
             )
             .show(ui, |ui| {
-                // Centered content column with a max width so very wide
-                // windows don't stretch bubbles edge to edge.
-                ui.horizontal_centered(|ui| {
-                    ui.scope(|ui| {
-                        ui.set_max_width(880.0);
-                        ui.add_space(10.0);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                            if layout_dbg_enabled() {
-                                eprintln!(
-                                    "[ldbg] list avail_w={:.1} max_rect={:?}",
-                                    ui.available_width(),
-                                    ui.max_rect()
-                                );
-                            }
-                            if messages.is_empty() && !is_streaming {
-                                Self::draw_empty_state(ui, &theme);
-                                return;
-                            }
-                            let mut prev_day: Option<&str> = None;
-                            for (i, msg) in messages.iter().enumerate() {
-                                if let Some(day) =
-                                    wuffagent_core::types::timestamp_day(&msg.timestamp)
-                                {
-                                    if prev_day != Some(day) {
-                                        if prev_day.is_some() {
-                                            Self::draw_date_separator(ui, day, &theme);
-                                        }
-                                        prev_day = Some(day);
-                                    }
+                // Bubbles dock edge-to-edge across the full chat width, like
+                // the input field: no centered max-width column. (In egui 0.36
+                // `horizontal_centered` only centers VERTICALLY, and a plain
+                // scope shrinks to the widest content's desired width — so
+                // each row stretches to the available width itself; see
+                // draw_message / draw_tool_card / draw_streaming_line.)
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    if layout_dbg_enabled() {
+                        eprintln!(
+                            "[ldbg] list avail_w={:.1} max_rect={:?}",
+                            ui.available_width(),
+                            ui.max_rect()
+                        );
+                    }
+                    if messages.is_empty() && !is_streaming {
+                        Self::draw_empty_state(ui, &theme);
+                        return;
+                    }
+                    let mut prev_day: Option<&str> = None;
+                    for (i, msg) in messages.iter().enumerate() {
+                        if let Some(day) =
+                            wuffagent_core::types::timestamp_day(&msg.timestamp)
+                        {
+                            if prev_day != Some(day) {
+                                if prev_day.is_some() {
+                                    Self::draw_date_separator(ui, day, &theme);
                                 }
-                                self.draw_message(ui, msg, i, &theme);
+                                prev_day = Some(day);
                             }
-                            // Draw streaming line (values snapshotted before the scroll area).
-                            // Only while a response is actually in flight — otherwise the
-                            // empty-buffer branch would draw a stray "AI:" + spinner.
-                            if is_streaming {
-                                self.draw_streaming_line(ui, &theme, streaming);
-                            }
-                            // Live tool cards for calls that are executing right now.
-                            for tool in active_tools {
-                                self.draw_active_tool_card(ui, tool, &theme);
-                            }
-                        });
-                        ui.add_space(12.0);
-                    });
+                        }
+                        self.draw_message(ui, msg, i, &theme);
+                    }
+                    // Draw streaming line (values snapshotted before the scroll area).
+                    // Only while a response is actually in flight — otherwise the
+                    // empty-buffer branch would draw a stray "AI:" + spinner.
+                    if is_streaming {
+                        self.draw_streaming_line(ui, &theme, streaming);
+                    }
+                    // Live tool cards for calls that are executing right now.
+                    for tool in active_tools {
+                        self.draw_active_tool_card(ui, tool, &theme);
+                    }
+                    ui.add_space(12.0);
                 });
             });
 

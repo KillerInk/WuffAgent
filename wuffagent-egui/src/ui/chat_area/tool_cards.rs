@@ -80,6 +80,7 @@ impl ChatApp {
                     .corner_radius(8)
                     .inner_margin(egui::Margin::symmetric(10, 6))
                     .show(ui, |ui| {
+                        ui.take_available_width();
                         // Header row: chevron + tool icon+name + args preview +
                         // result/error summary + duration + timestamp. The whole
                         // row is clickable (expand/collapse) and
@@ -126,15 +127,25 @@ impl ChatApp {
                             } else {
                                 theme.text_dim
                             };
-                            ui.label(
-                                egui::RichText::new(if is_error && !summary.is_empty() {
-                                    format!("✗ {}", summary)
-                                } else {
-                                    summary.clone()
-                                })
-                                .color(summary_color)
-                                .size(10.5),
-                            );
+                            // Wrap the summary within the leftover header width (reserving
+                            // 200px for the duration/timestamp cluster) so a long summary
+                            // wraps instead of overflowing the now full-width card.
+                            if !summary.is_empty() {
+                                let summary_max = (ui.available_width() - 200.0).max(120.0);
+                                ui.scope(|ui| {
+                                    ui.set_max_width(summary_max);
+                                    ui.add(Self::breaking_label(
+                                        if is_error {
+                                            format!("✗ {}", summary)
+                                        } else {
+                                            summary.clone()
+                                        },
+                                        egui::FontId::proportional(10.5),
+                                        summary_color,
+                                        false,
+                                    ));
+                                });
+                            }
                             // Right cluster: duration chip + timestamp.
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
