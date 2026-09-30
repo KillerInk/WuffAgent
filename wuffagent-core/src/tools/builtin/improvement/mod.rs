@@ -48,6 +48,7 @@ pub fn register_improvement_tools(
     session_client: Arc<ChatClient>,
     tool_manager: Arc<ToolManager>,
     model_prices: Vec<crate::config::ModelPrice>,
+    activity: Option<Arc<crate::activity::ActivityTracker>>,
 ) -> ToolResult<()> {
     // 2e: read_metrics' default window follows the config knob.
     let window_days = memory.config().improvement_metrics_window_days.max(1) as u64;
@@ -100,6 +101,7 @@ pub fn register_improvement_tools(
                 session_client,
                 tool_manager,
                 model_prices,
+                activity,
             )) as Arc<dyn Tool>,
         ),
     ] {

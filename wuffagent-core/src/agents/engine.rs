@@ -30,6 +30,10 @@ pub struct AgentEngine {
     /// 1b: the app config's model price table (cost_usd estimates on run
     /// lines; empty = all runs "recorded but unpriced").
     model_prices: Vec<crate::config::ModelPrice>,
+    /// Shared LLM-activity tracker (status bar; None = no activity events,
+    /// e.g. tests): attached to built agents and labels post-task
+    /// improvement checks.
+    activity: Option<Arc<crate::activity::ActivityTracker>>,
 }
 
 /// Run-scoped values for one `execute_with_tools` call, passed by the caller
@@ -76,6 +80,7 @@ impl AgentEngine {
             agents_search_dirs: Vec::new(),
             tasks_completed: Arc::new(AtomicUsize::new(0)),
             model_prices: Vec::new(),
+            activity: None,
         }
     }
 
@@ -106,6 +111,17 @@ impl AgentEngine {
     /// Attach a memory manager to the engine.
     pub fn with_memory(mut self, memory: Arc<crate::memory::MemoryManager>) -> Self {
         self.memory = Some(memory);
+        self
+    }
+
+    /// Shared LLM-activity tracker (status bar): attached to every agent the
+    /// engine builds and used to label post-task improvement checks
+    /// (None = no activity events).
+    pub fn with_activity(
+        mut self,
+        activity: Arc<crate::activity::ActivityTracker>,
+    ) -> Self {
+        self.activity = Some(activity);
         self
     }
 
@@ -195,13 +211,18 @@ impl AgentEngine {
             crate::types::ReasoningMode::Auto => Arc::clone(&self.client),
         };
 
-        let mut agent = Agent::builder(chat_config, self.llm_client.clone(), run_client)
+        let mut agent_builder = Agent::builder(chat_config, self.llm_client.clone(), run_client)
             .tool_manager(self.tool_manager.clone())
             .event_tx(params.event_tx.clone())
             .memory(self.memory.clone())
             .agent_session_id(params.session_id.clone())
-            .model_prices(self.model_prices.clone())
-            .build();
+            .model_prices(self.model_prices.clone());
+        // Status bar: attach the shared activity tracker (the agent's default
+        // label `agent: <name>` applies).
+        if let Some(t) = &self.activity {
+            agent_builder = agent_builder.activity(t.clone());
+        }
+        let mut agent = agent_builder.build();
         // Mid-run injection channel: the agent loop drains it at LLM round
         // boundaries (user messages sent while this run is active are
         // injected into the current turn as soon as the model can see them).
@@ -289,6 +310,18 @@ impl AgentEngine {
             if memory.agent_improvement_due(&name, mconfig.improvement_cooldown_tasks)
                 && memory.has_new_agent_improvement_evidence(&name)
             {
+                // Status bar: label the improvement check's LLM call
+                // ("improvement"; no tracker → plain client, e.g. tests).
+                let imp_llm = crate::activity::LabeledLlm::wrap(
+                    Arc::clone(&self.llm_client),
+                    self.activity.clone(),
+                    "improvement",
+                    None,
+                );
+                let imp_client: &dyn LlmClient = match &imp_llm {
+                    Some(l) => l.as_ref(),
+                    None => self.llm_client.as_ref(),
+                };
                 let produced =
                     match crate::memory::suggest_improvements(
                         &memory,
@@ -296,7 +329,7 @@ impl AgentEngine {
                         task,
                         &task_result,
                         &stats,
-                        &*self.llm_client,
+                        imp_client,
                     )
                     .await
                     {

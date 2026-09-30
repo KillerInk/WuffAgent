@@ -241,9 +241,22 @@ impl Agent {
         // flowing for 5 min). An earlier fixed 60 s-per-attempt cap was
         // removed for the same slow-local-model reason.
         let judge_started = Instant::now();
+        // Status bar: the judge is its own activity ("judge"). LabeledLlm
+        // wraps the shared client; without a tracker (tests, headless) it
+        // falls back to the plain client so mock-based tests keep working.
+        let judge_llm = crate::activity::LabeledLlm::wrap(
+            std::sync::Arc::clone(&self.llm_client),
+            self.activity.clone(),
+            "judge",
+            Some(self.session_id()),
+        );
+        let judge_client: &dyn crate::llm::LlmClient = match &judge_llm {
+            Some(l) => l.as_ref(),
+            None => self.llm_client.as_ref(),
+        };
         let cancel_clone = cancel_token.clone();
         let result = tokio::select! {
-            result = self.llm_client.stream(&verification_messages, Box::new(|_chunk: String| {})) => result,
+            result = judge_client.stream(&verification_messages, Box::new(|_chunk: String| {})) => result,
             _ = cancel_clone.cancelled() => Err("Verification cancelled".to_string()),
         };
         tracing::debug!(

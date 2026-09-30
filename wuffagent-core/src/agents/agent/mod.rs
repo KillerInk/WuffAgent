@@ -77,6 +77,13 @@ pub struct Agent {
     /// and seen by the model on the very next LLM call. Moved to the next
     /// agent on a `handoff` so the whole chain keeps receiving injections.
     injection_rx: Option<Arc<Mutex<std::sync::mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
+    /// Shared LLM-activity tracker (status bar): when set, the main round,
+    /// verification judge and brief polish stream their progress under
+    /// `activity_label` (session-bound activities).
+    activity: Option<Arc<crate::activity::ActivityTracker>>,
+    /// Status-bar label for this agent's activity (default: `agent:
+    /// <config.name>`; the eval harness overrides it with `eval: <id>`).
+    activity_label: Option<String>,
 }
 
 /// Builder for [`Agent`] (see [`Agent::builder`]).
@@ -99,6 +106,8 @@ pub struct AgentBuilder {
     memory: Option<Arc<crate::memory::MemoryManager>>,
     agent_session_id: Option<String>,
     model_prices: Vec<crate::config::ModelPrice>,
+    activity: Option<Arc<crate::activity::ActivityTracker>>,
+    activity_label: Option<String>,
 }
 
 impl AgentBuilder {
@@ -117,6 +126,8 @@ impl AgentBuilder {
             memory: None,
             agent_session_id: None,
             model_prices: Vec::new(),
+            activity: None,
+            activity_label: None,
         }
     }
 
@@ -154,6 +165,23 @@ impl AgentBuilder {
         self
     }
 
+    /// Shared LLM-activity tracker (status bar); None = no activity events
+    /// (tests, headless runs without a UI).
+    pub fn activity(
+        mut self,
+        activity: Arc<crate::activity::ActivityTracker>,
+    ) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
+    /// Status-bar label for this agent's activity (default: `agent:
+    /// <config.name>`).
+    pub fn activity_label(mut self, activity_label: impl Into<String>) -> Self {
+        self.activity_label = Some(activity_label.into());
+        self
+    }
+
     /// Build the agent.
     ///
     /// Applies the per-agent policy:
@@ -188,6 +216,8 @@ impl AgentBuilder {
             memory,
             agent_session_id,
             model_prices,
+            activity,
+            activity_label,
         } = self;
         let client = if config.reasoning_effort != crate::types::ReasoningEffort::Off {
             let c = (*client).clone();
@@ -284,11 +314,23 @@ impl AgentBuilder {
             run_tokens_in: 0,
             run_tokens_out: 0,
             injection_rx: None,
+            activity,
+            activity_label,
         }
     }
 }
 
 impl Agent {
+    /// The status-bar label for this agent's LLM activity (`agent: <name>` by
+    /// default; overridden by the builder, e.g. `eval: <id>` for the eval
+    /// harness).
+    pub(crate) fn activity_label_str(&self) -> String {
+        self
+            .activity_label
+            .clone()
+            .unwrap_or_else(|| format!("agent: {}", self.config.name))
+    }
+
     /// Start building an agent (see [`AgentBuilder`] for the optional inputs
     /// and the per-agent policy `build` applies).
     pub fn builder(

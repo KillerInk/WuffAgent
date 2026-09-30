@@ -53,7 +53,18 @@ impl MemoryManager {
             Some(c) => c.clone(),
             None => return Ok(Vec::new()),
         };
-        suggest_improvements(self, agent_config, task, result, stats, llm.as_ref()).await
+        // Status bar: label the improvement check ("improvement").
+        let labeled = crate::activity::LabeledLlm::wrap(
+            std::sync::Arc::clone(&llm),
+            self.activity.clone(),
+            "improvement",
+            None,
+        );
+        let llm_ref: &dyn crate::llm::LlmClient = match &labeled {
+            Some(l) => l.as_ref(),
+            None => llm.as_ref(),
+        };
+        suggest_improvements(self, agent_config, task, result, stats, llm_ref).await
     }
 
     /// 4b: run ONE on-demand self-improvement check for `agent_config`,
@@ -130,7 +141,18 @@ impl MemoryManager {
             Some(c) => c.clone(),
             None => return Ok(Vec::new()),
         };
-        crate::agents::improvement::suggest_fleet_improvements(self, roster, focus, llm.as_ref()).await
+        // Status bar: label the fleet improvement check ("improvement").
+        let labeled = crate::activity::LabeledLlm::wrap(
+            std::sync::Arc::clone(&llm),
+            self.activity.clone(),
+            "improvement",
+            None,
+        );
+        let llm_ref: &dyn crate::llm::LlmClient = match &labeled {
+            Some(l) => l.as_ref(),
+            None => llm.as_ref(),
+        };
+        crate::agents::improvement::suggest_fleet_improvements(self, roster, focus, llm_ref).await
     }
 
     /// 2d: fleet-wide variant of [`Self::run_improvement_check`] — the

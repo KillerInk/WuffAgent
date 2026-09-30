@@ -297,6 +297,18 @@ impl LabeledLlm {
             session_id,
         })
     }
+
+    /// Wrap `inner` when `tracker` is `Some`; returns `None` when it isn't
+    /// (callers then fall back to calling `inner` directly — e.g. tests and
+    /// headless paths where no tracker exists).
+    pub fn wrap(
+        inner: Arc<dyn LlmClient>,
+        tracker: Option<Arc<ActivityTracker>>,
+        label: impl Into<String>,
+        session_id: Option<String>,
+    ) -> Option<Arc<Self>> {
+        tracker.map(|tracker| Self::new(inner, tracker, label, session_id))
+    }
 }
 
 #[async_trait]

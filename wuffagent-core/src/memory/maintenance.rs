@@ -174,6 +174,18 @@ impl MemoryManager {
             Some(c) => c.clone(),
             None => return Err("No LLM client attached for memory maintenance".to_string()),
         };
+        // Status bar: label the maintenance LLM call ("memory"); no tracker
+        // (tests, headless) → plain client.
+        let labeled = crate::activity::LabeledLlm::wrap(
+            std::sync::Arc::clone(&llm),
+            self.activity.clone(),
+            "memory",
+            None,
+        );
+        let llm_ref: &dyn crate::llm::LlmClient = match &labeled {
+            Some(l) => l.as_ref(),
+            None => llm.as_ref(),
+        };
 
         let mut lines = Vec::new();
         for e in chunk {
@@ -230,7 +242,7 @@ impl MemoryManager {
         // multi-batch sweep nor hold a task completion hostage.
         let per_step =
             std::time::Duration::from_secs(self.config().memory_maintenance_timeout_secs.max(10));
-        let response = tokio::time::timeout(per_step, llm.complete(&messages))
+        let response = tokio::time::timeout(per_step, llm_ref.complete(&messages))
             .await
             .map_err(|_| {
                 format!(

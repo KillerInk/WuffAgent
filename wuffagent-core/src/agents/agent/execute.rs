@@ -141,7 +141,7 @@ impl Agent {
             // across every hop. Otherwise a profile default (e.g. 60s for
             // coder) would force-kill long tasks after a handoff.
             req.config.task_timeout_ms = self.config.task_timeout_ms;
-            let mut next = Self::builder(
+            let mut next_builder = Self::builder(
                 req.config.clone(),
                 self.llm_client.clone(),
                 self.client.clone(),
@@ -150,8 +150,13 @@ impl Agent {
             .event_tx(self.event_tx.clone())
             .memory(self.memory.clone())
             .agent_session_id(self.agent_session_id.clone())
-            .model_prices(self.model_prices.clone())
-            .build();
+            .model_prices(self.model_prices.clone());
+            // Status bar: carry the shared activity tracker into the next
+            // agent (the target keeps its own default label, `agent: <name>`).
+            if let Some(t) = &self.activity {
+                next_builder = next_builder.activity(t.clone());
+            }
+            let mut next = next_builder.build();
             // The whole handoff chain is still the same turn: keep receiving
             // user injections on the next agent too.
             next.injection_rx = self.injection_rx.take();

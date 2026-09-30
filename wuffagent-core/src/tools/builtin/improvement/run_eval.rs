@@ -89,6 +89,8 @@ async fn run_eval_once(
     tool_manager: Arc<ToolManager>,
     task: &str,
     expect: &str,
+    activity: Option<Arc<crate::activity::ActivityTracker>>,
+    eval_id: &str,
 ) -> Result<EvalOnce, String> {
     // Headless policy: no handoff/restart/hand_back/session-note (those drive
     // UI events / session swaps), no per-run metrics line (this is a synthetic
@@ -105,9 +107,15 @@ async fn run_eval_once(
     // 1b: keep a handle for the shared model stamp (the builder takes
     // `client` by value below, but the stamp is shared interior state).
     let model_probe = client.clone();
-    let mut agent = AgentBuilder::new(cfg, llm_client, client)
-        .tool_manager(tool_manager)
-        .build();
+    let mut agent_builder = AgentBuilder::new(cfg, llm_client, client).tool_manager(tool_manager);
+    // Status bar: track the eval agent's rounds under "eval: <id>" (the
+    // judge and brief polish use their own labels); None = headless/no UI.
+    if let Some(t) = activity {
+        agent_builder = agent_builder
+            .activity(t)
+            .activity_label(format!("eval: {eval_id}"));
+    }
+    let mut agent = agent_builder.build();
 
     let cancel = CancellationToken::new();
     let started = std::time::Instant::now();
@@ -167,6 +175,9 @@ pub struct RunEvalTool {
     tool_manager: Arc<ToolManager>,
     /// 1b: the app config's model price table (Eval lines' cost_usd).
     model_prices: Vec<crate::config::ModelPrice>,
+    /// Shared LLM-activity tracker (status bar; None = no activity events):
+    /// the eval agent's rounds stream under "eval: <id>".
+    activity: Option<Arc<crate::activity::ActivityTracker>>,
 }
 
 impl RunEvalTool {
@@ -177,6 +188,7 @@ impl RunEvalTool {
         session_client: Arc<ChatClient>,
         tool_manager: Arc<ToolManager>,
         model_prices: Vec<crate::config::ModelPrice>,
+        activity: Option<Arc<crate::activity::ActivityTracker>>,
     ) -> Self {
         Self {
             evals,
@@ -185,6 +197,7 @@ impl RunEvalTool {
             session_client,
             tool_manager,
             model_prices,
+            activity,
         }
     }
 }
@@ -322,6 +335,8 @@ impl Tool for RunEvalTool {
                         self.tool_manager.clone(),
                         &eval.task,
                         &eval.expect,
+                        self.activity.clone(),
+                        &eval.id,
                     ),
                 )
                 .await
@@ -557,6 +572,8 @@ mod tests {
             empty_tool_manager(),
             "Return the exact word: HELLO",
             "The response must contain HELLO",
+            None,
+            "t1",
         ))
         .expect("run_eval_once should succeed");
         assert!(r.verified, "no tool calls -> verified shortcut");
@@ -597,8 +614,15 @@ mod tests {
         let llm: Arc<dyn LlmClient> = Arc::new(MockLlm {
             response: "HELLO".to_string(),
         });
-        let tool =
-            RunEvalTool::new(store, agents, llm, client, empty_tool_manager(), Vec::new());
+        let tool = RunEvalTool::new(
+            store,
+            agents,
+            llm,
+            client,
+            empty_tool_manager(),
+            Vec::new(),
+            None,
+        );
 
         let mut values = HashMap::new();
         values.insert("agent".to_string(), serde_json::json!("coder"));
@@ -650,8 +674,15 @@ mod tests {
             "http://127.0.0.1:1",
             None,
         )));
-        let tool =
-            RunEvalTool::new(store, agents, llm, client, empty_tool_manager(), Vec::new());
+        let tool = RunEvalTool::new(
+            store,
+            agents,
+            llm,
+            client,
+            empty_tool_manager(),
+            Vec::new(),
+            None,
+        );
         let mut values = HashMap::new();
         values.insert("agent".to_string(), serde_json::json!("coder"));
         let (ok, msg) = outcome(tool.execute(ToolParams { values }));

@@ -407,6 +407,12 @@ impl Agent {
             // 1d: time this round's LLM call (the main-round part of
             // llm_ms; the judge's time is folded in at run end).
             let llm_round_started = Instant::now();
+            // Status bar: track the whole round (including a force-trim retry)
+            // as one activity under this agent's label; the handle is RAII and
+            // drops on every exit path (success, error, cancellation).
+            let activity = self.activity.as_ref().map(|t| {
+                t.begin(&self.activity_label_str(), Some(self.session_id()))
+            });
             let (assistant_msg, usage) = {
                 self.client
                     .note_prompt_chars(crate::trimming::message_char_count(messages));
@@ -420,6 +426,13 @@ impl Agent {
                     let pp_tx = self.event_tx.clone();
                     let pp_sid = self.session_id();
                     let ready = pending_tool_runs.ready();
+                    // Per-closure copies: the chunk and PP callbacks are both
+                    // `move` closures (each needs ownership); the handle's
+                    // refcount ends the activity only when every copy is gone.
+                    let act_chunk_tracker = self.activity.clone();
+                    let act_chunk_handle = activity.clone();
+                    let act_pp_tracker = self.activity.clone();
+                    let act_pp_handle = activity.clone();
                     match ChatClient::stream_with_messages_arc(
                         &self.client,
                         messages,
@@ -437,12 +450,21 @@ impl Agent {
                                     });
                                 }
                             }
+                            // Status bar: count the generated token (TG event).
+                            if let (Some(t), Some(h)) = (&act_chunk_tracker, &act_chunk_handle) {
+                                t.tg(&h, 1);
+                            }
                             Ok(())
                         },
                         ready,
                         move |pp: crate::types::PromptProgress| {
                             // Live prompt-processing progress (llama.cpp):
                             // forward to the UI for the status bar PP speed.
+                            // Status bar activity: feed the same event into the
+                            // shared tracker (PP event).
+                            if let (Some(t), Some(h)) = (&act_pp_tracker, &act_pp_handle) {
+                                t.pp(&h, &pp);
+                            }
                             if let Some(ref tx) = pp_tx {
                                 if let Ok(g) = tx.lock() {
                                     let _ = g.send(
@@ -458,7 +480,14 @@ impl Agent {
                     )
                     .await
                     {
-                        Ok((msg, usage)) => break (msg, usage),
+                        Ok((msg, usage)) => {
+                            // Status bar: round complete — finish with the exact
+                            // completion-token count (forced snapshot).
+                            if let (Some(t), Some(h)) = (&self.activity, &activity) {
+                                t.finish(&h, usage.as_ref().map(|u| u.completion_tokens));
+                            }
+                            break (msg, usage);
+                        }
                         Err(crate::client::Error::Cancelled) => {
                             pending_tool_runs.abort_all();
                             return Err("Cancelled".to_string());
@@ -723,7 +752,16 @@ impl Agent {
             .clone();
         let prev = crate::trimming::brief::from_rendered(&prev_text)?;
         let req = crate::trimming::brief::polish_request(Some(&prev_text), dropped);
-        let (out, _usage) = self.client.complete_messages(&req, None).await.ok()?;
+        // Status bar: track this call (non-streaming → TG-only activity); the
+        // handle drops (RAII) on every `?` / `return None` exit path.
+        let activity = self
+            .activity
+            .as_ref()
+            .map(|t| t.begin("brief polish", Some(self.session_id())));
+        let (out, usage) = self.client.complete_messages(&req, None).await.ok()?;
+        if let (Some(t), Some(h)) = (&self.activity, &activity) {
+            t.finish(&h, usage.as_ref().map(|u| u.completion_tokens));
+        }
         let mut polished = crate::trimming::brief::parse_polish(&out)?;
         // The task is never lost: keep the deterministic brief's task when
         // the model dropped it.

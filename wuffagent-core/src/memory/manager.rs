@@ -29,6 +29,10 @@ pub struct MemoryManager {
     /// pub(crate): the maintenance impl block lives in the sibling
     /// `maintenance` module and checks/uses the client directly.
     pub(crate) llm_client: Option<Arc<dyn LlmClient>>,
+    /// Shared LLM-activity tracker (status bar; None = no activity events):
+    /// maintenance + improvement checks label their LLM calls ("memory",
+    /// "improvement").
+    pub(crate) activity: Option<Arc<crate::activity::ActivityTracker>>,
 }
 
 impl Clone for MemoryManager {
@@ -38,6 +42,7 @@ impl Clone for MemoryManager {
             config: Mutex::new(self.config()),
             storage_path: self.storage_path.clone(),
             llm_client: self.llm_client.clone(),
+            activity: self.activity.clone(),
         }
     }
 }
@@ -63,6 +68,7 @@ impl MemoryManager {
             config: Mutex::new(config),
             storage_path,
             llm_client: None,
+            activity: None,
         })
     }
 
@@ -74,6 +80,16 @@ impl MemoryManager {
         let mut m = Self::new(config)?;
         m.llm_client = Some(llm_client);
         Ok(m)
+    }
+
+    /// Shared LLM-activity tracker (status bar): maintenance + improvement
+    /// checks stream their LLM calls under "memory" / "improvement".
+    pub fn with_activity(
+        mut self,
+        activity: Arc<crate::activity::ActivityTracker>,
+    ) -> Self {
+        self.activity = Some(activity);
+        self
     }
 
     /// Get a clone of the current config.
