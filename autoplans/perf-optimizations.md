@@ -1,6 +1,6 @@
 # Performance optimizations (2026-11-04, wuffagent)
 
-**Status:** 🔨 IN PROGRESS (created 2026-11-04). P1+P3 done (ad061e3), P2 done (e4dc423), P5 done (0175d36), P4 done (2d65a83), P6 done (47611e0; off-thread turn-end save + per-session save lock + narrowed conversation lock; core 827 + egui 44 tests green).
+**Status:** ✅ COMPLETE (created 2026-11-04). P1+P3 done (ad061e3), P2 done (e4dc423), P5 done (0175d36), P4 done (2d65a83), P6 done (47611e0; off-thread turn-end save + per-session save lock + narrowed conversation lock), P7 done (5e19b54; query tokenized once per search + O(1) stopword lookup). Core 827 + egui 44 tests green, `cargo check --workspace --all-targets` clean.
 Audit of wuffagent-core + wuffagent-egui hot paths: the per-round agent LLM
 loop, the per-chunk SSE stream, and the per-frame egui render. All findings
 below are confirmed in code with file:line evidence. Ranked P1 > P2 > P3 by
@@ -164,7 +164,16 @@ a linear `contains` over ~100 stopwords per token.
 - **Fix:** tokenize the query once before the `entries.iter().map(...)`;
   build the stopwords as a `&[&str]` → `std::collections::HashSet` (lazy
   `OnceLock`) or a sorted slice + `binary_search`.
-- **Verify:** existing `search::tests` (score equality before/after).
+ - **Verify:** existing `search::tests` (score equality before/after).
+ - **Done (5e19b54):** the scorer is now `keyword_score_prepared(entry,
+   query_lower, query_tokens)`; `keyword_search` lowercases + tokenizes
+   the query ONCE before the `entries.iter().map(...)` and scores every
+   entry with the prepared values (score math unchanged — `search::tests`
+   pass with their original assertions, now routed through a `score_entry`
+   helper that mirrors the one-time preparation). `is_stopword` is O(1):
+   the ~100-word `STOPWORDS` slice feeds a lazy
+   `OnceLock<HashSet<&'static str>>` built on first use. core 827 tests
+   green; `cargo check --workspace --all-targets` clean.
 
 ### P8. (Watchlist, no action)
 - SSE per-line `serde_json::from_str::<Value>` (sse.rs:134): standard
