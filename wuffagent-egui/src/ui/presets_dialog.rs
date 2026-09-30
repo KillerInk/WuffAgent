@@ -1,7 +1,9 @@
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 
-use wuffagent_core::config::{Config, LocalPreset, Preset, PresetStore, RemotePreset};
+use wuffagent_core::config::{
+    get_presets_path, Config, LocalPreset, Preset, PresetStore, RemotePreset,
+};
 
 /// Which kind of preset is currently being created/edited.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,15 +86,14 @@ impl PresetsDialog {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Save Store").clicked() {
-                        if let Ok(path) = std::env::current_exe() {
-                            if let Some(dir) = path.parent() {
-                                let presets_path = dir.join("presets.json");
-                                if let Err(e) = self.store.save(&presets_path) {
-                                    self.message = Some(format!("Error saving presets: {}", e));
-                                } else {
-                                    self.message = Some("Presets saved to disk".to_string());
-                                }
-                            }
+                        // Same location as load/close-persist (app home), so a
+                        // saved store is never written where the next load
+                        // won't look.
+                        let presets_path = get_presets_path();
+                        if let Err(e) = self.store.save(&presets_path) {
+                            self.message = Some(format!("Error saving presets: {}", e));
+                        } else {
+                            self.message = Some("Presets saved to disk".to_string());
                         }
                     }
                     if ui.button("Close").clicked() {

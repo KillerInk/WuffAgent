@@ -593,3 +593,83 @@ fn test_consume_restart_marker_absent_returns_none() {
     assert!(crate::config::consume_restart_marker().is_none());
     crate::config::set_restart_marker_path_for_testing(None);
 }
+
+// ─── Presets path resolution (app home + legacy exe-dir migration) ──────────
+
+/// Regression: presets used to live next to the executable, so they "vanished"
+/// when the build dir changed (target/debug ↔ target/relaunch/debug). They now
+/// live in the app home next to config.json, with one-time migration.
+#[test]
+fn test_resolve_presets_path_primary_exists_wins() {
+    let dir = tempdir().unwrap();
+    let primary = dir.path().join("presets.json");
+    let legacy = dir.path().join("legacy-presets.json");
+    std::fs::write(&primary, r#"{"presets":[]}"#).unwrap();
+    std::fs::write(
+        &legacy,
+        r#"{"presets":[{"type":"remote","name":"old","remote_url":"http://x"}]}"#,
+    )
+    .unwrap();
+    let resolved = crate::config::presets::resolve_presets_path(&primary, Some(&legacy));
+    assert_eq!(resolved, primary);
+    // The existing primary file must not be clobbered by the legacy one.
+    assert_eq!(
+        std::fs::read_to_string(&primary).unwrap(),
+        r#"{"presets":[]}"#
+    );
+}
+
+#[test]
+fn test_resolve_presets_path_migrates_non_empty_legacy() {
+    let dir = tempdir().unwrap();
+    let primary = dir.path().join("presets.json"); // absent
+    let legacy = dir.path().join("legacy-presets.json");
+    let legacy_json =
+        r#"{"presets":[{"type":"remote","name":"my","remote_url":"http://x"}]}"#;
+    std::fs::write(&legacy, legacy_json).unwrap();
+    let resolved = crate::config::presets::resolve_presets_path(&primary, Some(&legacy));
+    assert_eq!(resolved, primary);
+    assert!(
+        primary.exists(),
+        "legacy content must be migrated to the primary location"
+    );
+    assert_eq!(std::fs::read_to_string(&primary).unwrap(), legacy_json);
+    assert!(legacy.exists(), "the legacy file is kept (copy, not move)");
+}
+
+#[test]
+fn test_resolve_presets_path_empty_legacy_not_migrated() {
+    let dir = tempdir().unwrap();
+    let primary = dir.path().join("presets.json"); // absent
+    let legacy = dir.path().join("legacy-presets.json");
+    std::fs::write(&legacy, r#"{"presets": []}"#).unwrap();
+    let resolved = crate::config::presets::resolve_presets_path(&primary, Some(&legacy));
+    assert_eq!(resolved, primary);
+    assert!(
+        !primary.exists(),
+        "an empty legacy store carries no data and must not shadow the primary"
+    );
+}
+
+#[test]
+fn test_resolve_presets_path_corrupt_legacy_not_migrated() {
+    let dir = tempdir().unwrap();
+    let primary = dir.path().join("presets.json"); // absent
+    let legacy = dir.path().join("legacy-presets.json");
+    std::fs::write(&legacy, "not json at all").unwrap();
+    let resolved = crate::config::presets::resolve_presets_path(&primary, Some(&legacy));
+    assert_eq!(resolved, primary);
+    assert!(
+        !primary.exists(),
+        "invalid legacy content must not be copied (would break PresetStore::load)"
+    );
+}
+
+#[test]
+fn test_resolve_presets_path_no_files_returns_primary() {
+    let dir = tempdir().unwrap();
+    let primary = dir.path().join("presets.json"); // never created
+    let resolved = crate::config::presets::resolve_presets_path(&primary, None);
+    assert_eq!(resolved, primary);
+    assert!(!primary.exists(), "no migration may create the file");
+}

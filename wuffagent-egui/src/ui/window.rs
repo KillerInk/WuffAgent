@@ -37,14 +37,23 @@ impl ChatApp {
                 super::settings::SettingsDialog::new_with_presets_flag(&shared, show_presets),
             );
         }
-        if let Some(dialog) = self.dialogs.settings_dialog.as_mut() {
+        // Capture the shared config handle BEFORE the dialog may be dropped:
+        // the Save click persists and closes the dialog in the SAME frame, so
+        // the close frame must still sync (see sync_config_from_dialogs).
+        let just_closed = if let Some(dialog) = self.dialogs.settings_dialog.as_mut() {
+            let handle = dialog.config.clone();
             let closed = dialog.show(ctx);
             if closed {
                 self.dialogs.show_settings = false;
                 self.dialogs.settings_dialog = None;
+                Some(handle)
+            } else {
+                None
             }
-        }
-        self.sync_config_from_dialogs();
+        } else {
+            None
+        };
+        self.sync_config_from_dialogs(just_closed);
     }
 
     pub fn show_presets_dialog(&mut self, ctx: &egui::Context) {
@@ -68,27 +77,43 @@ impl ChatApp {
             }
         }
 
-        if let Some(dialog) = self.dialogs.presets_dialog.as_mut() {
+        // Same close-frame capture as the settings dialog: a Load+Close in
+        // one frame must still sync the loaded preset into the live config.
+        let just_closed = if let Some(dialog) = self.dialogs.presets_dialog.as_mut() {
+            let handle = dialog.config.clone();
             let closed = dialog.show(ctx);
             if closed {
                 if let Err(e) = dialog.store.save(&get_presets_path()) {
                     tracing::warn!(error = %e, "Failed to save presets");
                 }
                 self.dialogs.presets_dialog = None;
+                Some(handle)
+            } else {
+                None
             }
-        }
-        self.sync_config_from_dialogs();
+        } else {
+            None
+        };
+        self.sync_config_from_dialogs(just_closed);
     }
 
-    /// Copy the shared dialog config back into `self.core.config` if any dialog is
-    /// open. Dialogs mutate their (shared) config on Save/Load and persist it
-    /// to disk; without this sync the running app would keep using stale values.
-    fn sync_config_from_dialogs(&mut self) {
-        if let Some(handle) = self.active_config_handle() {
-            if let Ok(cfg) = handle.try_lock() {
-                self.core.config = (*cfg).clone();
-            }
-        }
+    /// Copy the shared dialog config back into `self.core.config`.
+    ///
+    /// `just_closed` is the handle of a dialog that was dropped on this very
+    /// frame: the settings Save click (and a presets Load+Close) persist to
+    /// disk and close the dialog in the SAME frame, so without the fallback
+    /// the close frame would sync nothing — the app would keep the pre-save
+    /// values, and the exit-time `save()` would overwrite the freshly saved
+    /// `config.json` with the stale in-memory copy (the "settings don't
+    /// restore" bug).
+    fn sync_config_from_dialogs(
+        &mut self,
+        just_closed: Option<Arc<Mutex<wuffagent_core::config::Config>>>,
+    ) {
+        // The handle is an owned clone, so no borrow of self is left open for
+        // the &mut self.core.config argument below.
+        let open = self.active_config_handle();
+        sync_live_config(&mut self.core.config, open.as_ref(), just_closed.as_ref());
         self.sync_base_url();
     }
 
@@ -444,5 +469,93 @@ impl eframe::App for ChatApp {
         if let Err(e) = self.save_session() {
             tracing::warn!(error = %e, "Failed to save session");
         }
+    }
+}
+
+/// Copy the shared dialog config into the app's live config (the per-frame
+/// sync that makes dialog Save/Load take effect in the running app).
+///
+/// `open` is the handle of a dialog still open this frame (wins); `just_closed`
+/// is the handle of a dialog that was dropped on this frame (its Save/Load
+/// persisted on the close frame, so it must still be synced). Returns true
+/// when the live config was replaced.
+pub(crate) fn sync_live_config(
+    live: &mut wuffagent_core::config::Config,
+    open: Option<&Arc<Mutex<wuffagent_core::config::Config>>>,
+    just_closed: Option<&Arc<Mutex<wuffagent_core::config::Config>>>,
+) -> bool {
+    let Some(handle) = open.or(just_closed) else {
+        return false;
+    };
+    match handle.try_lock() {
+        Ok(cfg) => {
+            *live = (*cfg).clone();
+            true
+        }
+        // The dialog is mid-write; the next frame syncs again.
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_live_config;
+    use std::sync::{Arc, Mutex};
+    use wuffagent_core::config::Config;
+
+    #[test]
+    fn sync_live_config_no_dialog_is_noop() {
+        let mut live = Config::default();
+        assert!(!sync_live_config(&mut live, None, None));
+        assert_eq!(live.system_prompt, String::new());
+    }
+
+    #[test]
+    fn sync_live_config_open_dialog_replaces_stale_live_config() {
+        let mut live = Config::default();
+        live.system_prompt = "stale".to_string();
+        let shared = Arc::new(Mutex::new(Config::default()));
+        shared.lock().unwrap().system_prompt = "from dialog".to_string();
+        assert!(sync_live_config(&mut live, Some(&shared), None));
+        assert_eq!(live.system_prompt, "from dialog");
+    }
+
+    #[test]
+    fn sync_live_config_just_closed_dialog_still_syncs() {
+        // The regression case: the Save click persists AND closes the dialog
+        // in the same frame. The open handle is gone (dialog dropped); the
+        // captured just-closed handle must still sync the new values into the
+        // live config, or the exit-time save() overwrites the saved file.
+        let mut live = Config::default();
+        live.system_prompt = "stale".to_string();
+        let shared = Arc::new(Mutex::new(Config::default()));
+        shared.lock().unwrap().system_prompt = "saved on close frame".to_string();
+        assert!(sync_live_config(&mut live, None, Some(&shared)));
+        assert_eq!(live.system_prompt, "saved on close frame");
+    }
+
+    #[test]
+    fn sync_live_config_open_wins_over_just_closed() {
+        let mut live = Config::default();
+        let open = Arc::new(Mutex::new(Config::default()));
+        open.lock().unwrap().system_prompt = "open".to_string();
+        let closed = Arc::new(Mutex::new(Config::default()));
+        closed.lock().unwrap().system_prompt = "closed".to_string();
+        assert!(sync_live_config(&mut live, Some(&open), Some(&closed)));
+        assert_eq!(live.system_prompt, "open");
+    }
+
+    #[test]
+    fn sync_live_config_locked_handle_is_noop_not_deadlock() {
+        let mut live = Config::default();
+        let shared = Arc::new(Mutex::new(Config::default()));
+        {
+            let mut guard = shared.lock().unwrap();
+            guard.system_prompt = "held by dialog".to_string();
+            // try_lock from the same thread fails (std Mutex is not
+            // reentrant) — the sync must skip this frame, not deadlock.
+            assert!(!sync_live_config(&mut live, Some(&shared), None));
+        }
+        assert_eq!(live.system_prompt, String::new());
     }
 }
