@@ -69,7 +69,8 @@ tools-tree L22–155 + L1288–1392, save/delete L1055–1218, form state L1235�
 → Split into `ui/agent_config/`: `mod.rs` (struct + show + save/delete), `tools.rs` (ToolNode tree),
 `metrics_view.rs` (cached_metrics_lines, draw_tools_and_metrics, draw_agent_metrics_block, draw_run_detail),
 `evals.rs` (draw_evals, start_eval_run, mark_evals_finished), `editor.rs` (basic/shell/handoff groups + form state).
-Methods become free fns taking `&mut AgentConfigDialog` (Rust allows private-field access within the parent module tree).
+Methods stay `impl AgentConfigDialog` blocks in the sub-files (F14 pattern: a child module can use the
+parent's private fields/methods, so NO visibility changes and NO free-fn conversion were needed).
 
 ### F7. `egui/ui/improvements/draw.rs` (53 KB) — `ImprovementsPanel::draw` is ONE 780-line fn (L66–844)
 No internal section markers; inline UI drawing only. → Break `draw` into per-panel-section fns
@@ -158,7 +159,21 @@ Single concern (render improvement status). Borderline; only split if it grows. 
   - `draw` 774 L → 85 L orchestrator; `ItemActions`/`ItemDrawCtx` structs + 5 section fns
     (loop status, run-check, pending list, per-item, execute-actions); 41/41 egui tests ok,
     workspace check EXIT=0.
-- [ ] Phase 8 — F6: split `agent_config.rs` dialog into sub-files (UI, no API change)
+- [x] Phase 8 — F6: split `agent_config.rs` dialog into sub-files (UI, no API change) — @c59aba2
+  - 1440 L → 6 files: `mod.rs` 472 (struct + new/show/draw_header/save/select/load/clear/sync_tools +
+    tree tests), `tools.rs` 209 (ToolNode, BUILTIN_CATEGORIES, mcp_server_tool, build_tools_tree,
+    draw_tool_node/group_stats/set_group_checked), `list.rs` 95, `metrics_view.rs` 370
+    (MetricsWindow, cached_metrics_lines, draw_tools_and_metrics, draw_agent_metrics_block,
+    draw_run_detail), `evals.rs` 127, `editor.rs` 258 (draw_editor, field groups, prompt history,
+    save row, execute_revert).
+  - Methods kept as `impl` blocks in sub-files (child-module privacy reaches the parent's private
+    fields — same F14 pattern as Phase 7); only `tools.rs`'s tree builders are `pub(super)` free fns.
+  - FINDING F15: `pub(super) use child::item` in a file-module RE-EXPORTS the item to the parent's
+    parent — fails with E0364/E0365 when the item is only `pub(super)` in the child. Use a plain
+    `use child::item;` in the file-module (tests reach it via `use super::*`).
+  - Sub-files sit one level deeper than the original file: sibling imports must go up two levels
+    (`crate::ui::theme`, `crate::ui::agent_history`, `crate::ui::charts` instead of `super::…`).
+  - 41/41 egui tests ok; only the 2 pre-existing wuffagent-core warnings remain.
 - [ ] Phase 9 — F8/F10: brief tests move-out + `util/text.rs` truncate consolidation
 - [ ] Phase 10 — `cargo test` full run + update this plan with results + README/BUILD notes if module layout changed
 
