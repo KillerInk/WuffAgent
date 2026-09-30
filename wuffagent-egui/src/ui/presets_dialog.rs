@@ -217,8 +217,11 @@ impl PresetsDialog {
             ui.horizontal(|ui| {
                 ui.label("Server path:");
                 if ui.button("Browse...").clicked() {
+                    // "exe" → "*.exe" in the native dialog. The old pattern
+                    // &[""] built "*." which matches NOTHING, so llama-server
+                    // .exe was invisible in the file browser.
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("executable", &[""])
+                        .add_filter("Executables", &["exe"])
                         .pick_file()
                     {
                         self.new_server_path = path.to_string_lossy().to_string();
