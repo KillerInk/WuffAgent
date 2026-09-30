@@ -111,10 +111,10 @@ impl ChatApp {
                 runtime.refresh_token_gauge(n_ctx);
             }
         }
-        // Persist the session after each complete response.
-        if let Err(e) = self.save_session_for(sid) {
-            tracing::warn!("Failed to save session: {}", e);
-        }
+        // Persist the session after each complete response — OFF the UI
+        // thread (P6): a large conversation's serialize+write runs on a
+        // worker so the frame that finishes the turn does not hitch.
+        self.save_session_for_async(&sid);
         // Start the next queued message (sent while this run was active).
         self.drain_next_queued_message(sid);
         // Token tracker: the run finished and its final round was logged.
@@ -149,9 +149,8 @@ impl ChatApp {
         // agent writes the user turn and each assistant/tool round into
         // the shared conversation store as it runs; saving captures
         // whatever completed so the turn is not lost on reload.
-        if let Err(e) = self.save_session_for(sid) {
-            tracing::warn!("Failed to save session after error: {}", e);
-        }
+        // OFF the UI thread (P6), same as the complete path.
+        self.save_session_for_async(&sid);
         // Keep the queue alive: the failed turn is retried as the next
         // turn after an earlier queued message, if any remain. An
         // explicit Stop surfaces as error "Cancelled" — don't resume

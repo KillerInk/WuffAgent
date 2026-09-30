@@ -18,6 +18,33 @@ impl ChatClient {
         save_session(&self.session)
     }
 
+    /// Save the session on a detached worker thread (off-thread turn-end
+    /// saves, perf-optimizations P6).
+    ///
+    /// `SessionState` is a cheaply cloneable `Arc<Mutex<..>>` handle, so the
+    /// whole save — conversation snapshot, pretty-JSON serialize, atomic file
+    /// write, retry with backoff — runs off the calling thread and a
+    /// multi-MB session never hitches the UI exactly when a turn completes.
+    /// Failures are logged here and still surface through the shared
+    /// `save_failed` flag (UI notification + `retry_pending_saves`). The
+    /// per-session save lock inside `save_session` serializes this with any
+    /// concurrent sync save of the same session.
+    pub fn save_session_async(&self) {
+        let state = self.session.clone();
+        let spawn = std::thread::Builder::new()
+            .name("session-save".into())
+            .spawn(move || {
+                if let Err(e) = save_session(&state) {
+                    tracing::warn!("off-thread session save failed: {e}");
+                }
+            });
+        if spawn.is_err() {
+            // Thread creation failed (OS thread limit): save synchronously
+            // rather than silently losing the turn.
+            let _ = save_session(&self.session);
+        }
+    }
+
     /// Enqueue a pending save and set the failure flag for UI notification.
     pub fn enqueue_save_failure(&self, error: &anyhow::Error) {
         enqueue_save_failure(&self.session, error);

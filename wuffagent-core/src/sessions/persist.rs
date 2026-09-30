@@ -33,6 +33,12 @@ use super::{
 /// mode, in `state.session_meta()`) are stamped onto the session so both
 /// survive with the file (old files without the fields load as `None`/Auto).
 pub fn save_session(state: &SessionState) -> Result<(), anyhow::Error> {
+    // Serialize saves of THIS session: an off-thread turn-end save worker
+    // may run in parallel with a sync save / retry from the UI thread, and
+    // both write the same `<id>.json.tmp` — interleaved writes would tear
+    // the file. Held for the whole save (incl. retry backoff); waiters
+    // block in their own thread, never on the conversation lock.
+    let _save_guard = state.save_lock().lock().unwrap();
     let id = state.session_id().ok_or_else(|| anyhow::anyhow!("no session id"))?;
     let session_dir = state.session_dir();
     let conv = state.conversation();
@@ -41,7 +47,13 @@ pub fn save_session(state: &SessionState) -> Result<(), anyhow::Error> {
     let encryption_key = state.encryption_key();
     let save_queue = state.save_queue();
 
-    let conv = conv.lock().unwrap();
+    // Snapshot the conversation and release the lock immediately: the rest
+    // of the save (disk load, serialize, atomic write, retry backoff) does
+    // not need the conversation, and holding the lock across disk I/O plus
+    // up to ~3.5s of backoff sleeps blocked every other conversation
+    // reader/writer (streaming token callbacks, the agent loop) for the
+    // whole save.
+    let messages = conv.lock().unwrap().clone();
     // Try loading the session; if it's encrypted, fall back to creating a new one
     // (the key will be used to re-encrypt on the next save).
     // If the file doesn't exist at all, create a new session so saves work.
@@ -68,7 +80,7 @@ pub fn save_session(state: &SessionState) -> Result<(), anyhow::Error> {
         tracing::warn!("Session file not found for id={}, creating new session", id);
         Session::new("Untitled")
     };
-    session.messages = conv.clone();
+    session.messages = messages;
     session.sanitize();
     // Keep the persisted system prompt in sync with the in-memory one, but
     // prefer a prompt recovered from a legacy file (sanitize) when the

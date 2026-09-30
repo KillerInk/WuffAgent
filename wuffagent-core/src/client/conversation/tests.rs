@@ -5,7 +5,7 @@
 //! value (D1a).
 
 use super::*;
-use crate::client::{estimate_conversation_tokens, trim_to_token_budget};
+use crate::client::{estimate_conversation_tokens, trim_to_token_budget, ChatClient};
 use crate::sessions::persist::{load_session, retry_pending_saves, save_session};
 use crate::sessions::{session_exists, SessionState};
 use crate::trimming::message_char_count;
@@ -386,4 +386,87 @@ async fn test_save_load_roundtrip_preserves_prompt_and_order() {
         ]
     );
     assert!(!*loaded_state.save_failed().lock().unwrap());
+}
+
+/// The off-UI-thread turn-end save (perf-optimizations P6) must persist the
+/// full conversation: `save_session_async` spawns a worker that runs the same
+/// save as the sync path, so the session file must appear with the snapshot.
+#[test]
+fn test_save_session_async_persists() {
+    let dir = tempdir().unwrap();
+    let session_id = "test_async_save";
+    let client = ChatClient::new("http://localhost:8080");
+    client.set_session(Some(session_id.to_string()), dir.path().to_path_buf());
+    client.conversation().lock().unwrap().extend(vec![
+        make_message("user", "Hello"),
+        make_message("assistant", "Hi there!"),
+    ]);
+
+    client.save_session_async();
+
+    // The save runs on a worker thread — poll for the file (bounded wait).
+    let target = dir.path().join(format!("{session_id}.json"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !target.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "async save did not persist the session file in time"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !*client.session().save_failed().lock().unwrap(),
+        "async save must not leave the failure flag set"
+    );
+    let raw = std::fs::read_to_string(&target).unwrap();
+    assert!(raw.contains("Hello"), "user turn must be saved");
+    assert!(raw.contains("Hi there!"), "assistant turn must be saved");
+}
+
+/// Concurrent saves of the SAME session (off-thread turn-end save racing a
+/// sync save from the UI thread) must serialize on the per-session save lock:
+/// every save completes and the final file is valid, un-torn JSON.
+#[test]
+fn test_save_session_sync_and_async_serialize() {
+    let dir = tempdir().unwrap();
+    let session_id = "test_concurrent_save";
+    let client = ChatClient::new("http://localhost:8080");
+    client.set_session(Some(session_id.to_string()), dir.path().to_path_buf());
+    // A few thousand messages: each save serializes a sizable document, so
+    // unsynchronized writers would genuinely overlap.
+    for i in 0..2000 {
+        client
+            .conversation()
+            .lock()
+            .unwrap()
+            .push(make_message("user", &format!("message number {i} with some padding")));
+    }
+
+    // Fire async and sync saves of the same session at the same time.
+    for _ in 0..5 {
+        client.save_session_async();
+        client.save_session().unwrap();
+    }
+
+    let target = dir.path().join(format!("{session_id}.json"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !target.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "saves did not produce the session file in time"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Let the queued saves (serialized behind the save lock) settle.
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    assert!(
+        !*client.session().save_failed().lock().unwrap(),
+        "no save may end up failed after settling"
+    );
+    // A torn `.tmp` write would leave invalid JSON.
+    let raw = std::fs::read_to_string(&target).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).expect("session file must be valid JSON");
+    let messages = value.get("messages").and_then(|m| m.as_array()).expect("messages array");
+    assert_eq!(messages.len(), 2000, "full snapshot must be saved");
 }

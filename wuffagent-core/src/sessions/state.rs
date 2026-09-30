@@ -35,6 +35,11 @@ pub struct SessionState {
     encryption_key: Arc<Mutex<Option<[u8; 32]>>>,
     save_queue: Arc<Mutex<VecDeque<()>>>,
     save_failed: Arc<Mutex<bool>>,
+    /// Serializes concurrent saves of this session: the off-thread turn-end
+    /// save worker may run in parallel with a sync save / retry from the UI
+    /// thread, and two saves writing the same `<id>.json.tmp` must not
+    /// interleave (torn file).
+    save_lock: Arc<Mutex<()>>,
 }
 
 impl SessionState {
@@ -109,5 +114,10 @@ impl SessionState {
     /// Set when a save failed and was enqueued for retry (UI notification).
     pub fn save_failed(&self) -> &Arc<Mutex<bool>> {
         &self.save_failed
+    }
+
+    /// Per-session save serialization lock (see the field docs).
+    pub fn save_lock(&self) -> &Arc<Mutex<()>> {
+        &self.save_lock
     }
 }

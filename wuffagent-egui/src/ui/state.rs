@@ -234,6 +234,19 @@ impl ChatApp {
         }
     }
 
+    /// Save a specific session's conversation by id, OFF the UI thread.
+    ///
+    /// Turn-end saves (StreamComplete/StreamError) use this: serializing and
+    /// writing a large conversation runs on a worker thread, so the UI does
+    /// not hitch exactly when the response finishes (perf-optimizations P6).
+    /// Failures still surface via the shared `save_failed` flag; a thread
+    /// spawn failure falls back to a synchronous save.
+    pub fn save_session_for_async(&self, id: &str) {
+        if let Some(runtime) = self.sessions.session_store.get(id) {
+            runtime.client.save_session_async();
+        }
+    }
+
     /// Apply a pending sessions-panel action (create/delete/rename/export/import).
     ///
     /// Thin shim delegating to `sessions_actions::apply_sessions_action` (U2);
