@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
@@ -21,6 +21,14 @@ pub struct ToolCallTracker {
     active: Option<String>,
     /// Ids already reported to the ready callback.
     ready: HashSet<String>,
+    /// Args `len()` at the last (failing) `looks_like_complete_json` check,
+    /// per tool-call id. A text/thinking delta re-fires the ready check for
+    /// the ACTIVE id without its arguments having grown — the cached "not
+    /// complete yet" result is still valid, so the O(args) balance scan (and
+    /// the `ToolCall` clone it used to require) is skipped until the args
+    /// actually grow. (P5: reasoning models interleave thinking deltas with
+    /// arg deltas, which made this O(args²) per large tool call.)
+    checked_len: HashMap<String, usize>,
 }
 
 /// Cheap structural check that a JSON object string is complete: braces and
@@ -34,14 +42,13 @@ pub fn looks_like_complete_json(s: &str) -> bool {
     }
     let mut depth = 0i32;
     let mut in_string = false;
-    let mut escape = false;
-    for ch in s.chars() {
-        if escape {
-            escape = false;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_string && ch == '\\' {
+            chars.next(); // skip the escaped char (whatever it is)
             continue;
         }
         match ch {
-            '\\' if in_string => escape = true,
             '"' => in_string = !in_string,
             // Braces/brackets only count OUTSIDE strings: arguments like
             // `{"s": "x}"}` are complete even though the in-string brace
@@ -71,19 +78,28 @@ fn fire_tool_ready_if_complete<G: FnMut(ToolCall)>(
     if tracker.ready.contains(id) {
         return;
     }
+    // Borrow, don't clone (P5): run the completeness check on the args
+    // string under the lock; only clone the whole `ToolCall` when it passes
+    // (it then fires exactly once per id). `checked_len` skips the scan
+    // entirely while the args are unchanged since the last failing check.
     let call = conversation.lock().ok().and_then(|conv| {
-        conv.iter()
+        let tc = conv
+            .iter()
             .rev()
             .find(|m| m.role == "assistant")
             .and_then(|m| m.tool_calls.as_ref())
-            .and_then(|tcs| tcs.iter().find(|c| c.id == id))
-            .cloned()
+            .and_then(|tcs| tcs.iter().find(|c| c.id == id))?;
+        let args_len = tc.function.arguments.len();
+        if tracker.checked_len.get(id) == Some(&args_len) {
+            return None; // same args already checked (and not complete)
+        }
+        tracker.checked_len.insert(id.to_string(), args_len);
+        looks_like_complete_json(&tc.function.arguments)
+            .then(|| tc.clone())
     });
     if let Some(c) = call {
-        if looks_like_complete_json(&c.function.arguments) {
-            tracker.ready.insert(id.to_string());
-            on_tool_call_ready(c);
-        }
+        tracker.ready.insert(id.to_string());
+        on_tool_call_ready(c);
     }
 }
 
