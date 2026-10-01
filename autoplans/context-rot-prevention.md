@@ -1,6 +1,6 @@
 # Context-Rot Prevention After Trimming
 
-Created: 2026-09-27. Status: **S1+S2+S3 DONE** (2026-09-27), **S4a DONE** (2026-09-28, session_note tool + anchored notes), S4b pending (stretch).
+Created: 2026-09-27. Status: **S1+S2+S3 DONE** (2026-09-27), **S4a DONE** (2026-09-28, session_note tool + anchored notes), **S4b DONE** (2026-09-27, LLM brief polish, 1537247) — all S1–S4b on master as of 1913907. S5 (pre-trim note update) sketched below, pending.
 
 Goal: stop the model from "going off the rails" after the context window is
 reached and history is trimmed — it should keep the TASK, the user's
@@ -147,7 +147,7 @@ regardless.)
       (e.g. 90→65 first cut, 50 hard floor) with evidence instead of
       guessing — the overflow=true share of Trim lines is the miscalibration
       signal to watch.
-- [ ] **S4 — Stretch: agent-side scratchpad + LLM polish.**
+- [x] **S4 — Stretch: agent-side scratchpad + LLM polish.** (a) DONE 2026-09-28; (b) DONE 2026-09-27 (1537247, as-built notes below)
       a) `session_note` tool: the agent explicitly records "state / next step";
          the loop re-injects the note right after the system prompt on every
          call (capped); the brief merges it with top priority. Strongest
@@ -314,7 +314,36 @@ regardless.)
 - Not covered (deferred): the backstop (overflow-retry) trim site does not
   polish (the emergency path should not pay for an extra round-trip); no
   loop-level test of the polish call itself (needs a scripted LLM harness);
-  the polish request uses the agent's configured reasoning_effort.
+   the polish request uses the agent's configured reasoning_effort.
+
+### S5 — Pre-trim session-note update (sketch, pending)
+
+Problem: the anchored session note is the strongest rot guarantee, but it is
+only as fresh as the agent's LAST `session_note` call. When the proactive trim
+fires in the middle of a long tool-heavy stretch, the newest state sits in the
+about-to-be-dropped tail — the brief captures it deterministically, but the
+note the model reads first (before the task) stays stale.
+
+Design (deterministic, synchronous, no extra LLM round):
+- At the PROACTIVE trim site (agents/agent/loop.rs, after
+  `trim_messages_detailed` returns `dropped`), when `session_note_enabled`:
+  extract the fresh state line from the dropped span (reuse the brief's
+  `in_progress`/last-assistant heuristic) and, when it differs from the
+  current note, refresh the note via `brief::apply_note` with
+  `<existing note> || <state line as of this compaction>` (capped at
+  NOTE_MAX on fold / NOTE_INPUT_MAX on store). `apply_note` dedupe keeps it
+  idempotent; the >3 cap folds the oldest note into the brief's `Notes:`
+  section, so no state is lost.
+- Runs BEFORE `reconcile_store` so the refreshed note lands in the session
+  file; record it in the store like the tool path does (visible in the
+  transcript).
+- The overflow backstop site (loop.rs ~line 515) does NOT refresh the note
+  (emergency path, same rationale as the polish skip).
+- Metrics: piggyback on the existing Trim line (no new kind); log
+  `[AGENT] Agent '<name>' session note refreshed pre-trim`.
+- Tests: brief.rs (refresh dedupe/idempotent, cap-fold on repeated trims),
+  loop-level unit via the existing scripted harness if available, else
+  covered by the brief unit tests.
 
 ## Constraints / notes
 
