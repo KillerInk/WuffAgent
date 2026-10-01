@@ -370,12 +370,25 @@ impl ChatApp {
                                     } else {
                                         message.content.clone()
                                     };
-                                    ui.add(Self::breaking_label(
-                                        display_content,
-                                        egui::FontId::proportional(13.5),
-                                        text_color,
-                                        false,
-                                    ));
+                                    if is_user {
+                                        // User messages stay plain text.
+                                        ui.add(Self::breaking_label(
+                                            display_content,
+                                            egui::FontId::proportional(13.5),
+                                            text_color,
+                                            false,
+                                        ));
+                                    } else {
+                                        // AI messages render as markdown
+                                        // (bold, code blocks, lists, tables…).
+                                        super::markdown::draw_markdown(
+                                            ui,
+                                            &display_content,
+                                            13.5,
+                                            text_color,
+                                            theme,
+                                        );
+                                    }
                                 }
                             }
                         });

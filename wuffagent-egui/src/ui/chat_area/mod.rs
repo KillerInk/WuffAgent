@@ -13,6 +13,7 @@ fn layout_dbg_enabled() -> bool {
 // ────────────────────────────────────────────────────────────────────────
 
 mod bubbles;
+mod markdown;
 mod tool_cards;
 mod tool_json;
 
