@@ -59,7 +59,7 @@ pub(super) fn draw_markdown(
     let mut parser = Parser::new_ext(text, options());
     let mut lists = Vec::new();
     let mut queue = VecDeque::new();
-    draw_blocks(&mut parser, ui, theme, size, color, &mut lists, &mut queue);
+    draw_blocks(&mut parser, ui, theme, size, color, &mut lists, &mut queue, false);
 }
 
 fn heading_font_size(level: HeadingLevel) -> f32 {
@@ -87,6 +87,9 @@ fn flush_job(job: &mut Option<egui::epaint::text::LayoutJob>, ui: &mut egui::Ui)
 /// Render the stream of block-level events until the parser/queue runs out.
 /// `queue` holds events the caller already pulled (e.g. an item's first
 /// inline event when sniffing for a task-list marker).
+/// `in_item`: when true, stop at the current list item's boundary
+/// (`End(Item)`) so the item's content cannot swallow sibling items and
+/// later blocks (they would be drawn inside the item's scope).
 fn draw_blocks<'a>(
     parser: &mut Parser<'a>,
     ui: &mut egui::Ui,
@@ -95,6 +98,7 @@ fn draw_blocks<'a>(
     color: egui::Color32,
     lists: &mut Vec<ListInfo>,
     queue: &mut VecDeque<Event<'a>>,
+    in_item: bool,
 ) {
     let mut job: Option<egui::epaint::text::LayoutJob> = None;
     let mut style = InlineStyle::default();
@@ -169,6 +173,7 @@ fn draw_blocks<'a>(
                             theme.text_secondary,
                             lists,
                             queue,
+                            in_item,
                         );
                     });
                     let r = inner.response.rect;
@@ -203,6 +208,9 @@ fn draw_blocks<'a>(
                     flush_job(&mut job, ui);
                     ui.add_space(4.0);
                 }
+                // Item content is drawn inside the item's own scope; stop
+                // here so the next item / following blocks stay outside.
+                TagEnd::Item if in_item => break,
                 TagEnd::List(_) => {
                     lists.pop();
                     ui.add_space(3.0);
@@ -287,10 +295,20 @@ fn draw_list_item<'a>(
         inner.add(egui::Label::new(
             egui::RichText::new(&marker).color(mcolor).size(size - 1.0),
         ));
-        inner.scope(|ui| {
-            ui.set_width(ui.available_width().max(20.0));
-            draw_blocks(parser, ui, theme, size, color, lists, queue);
-        });
+        // Vertical scope with an exact width: a plain `scope` would inherit
+        // the row's HORIZONTAL layout, letting the item's content
+        // (paragraphs, nested lists, code blocks, tables) flow
+        // left-to-right inside the item instead of stacking under it.
+        let w = inner.available_width().max(20.0);
+        inner.scope_builder(
+            egui::UiBuilder::new()
+                .layout(egui::Layout::top_down_justified(egui::Align::LEFT))
+                .max_rect(egui::Rect::from_min_size(
+                    inner.cursor().min,
+                    egui::vec2(w, f32::INFINITY),
+                )),
+            |v| draw_blocks(parser, v, theme, size, color, lists, queue, true),
+        );
     });
     ui.add_space(2.0);
 }
@@ -363,7 +381,10 @@ fn render_table(
         .len()
         .max(rows.iter().map(|r| r.len()).max().unwrap_or(1))
         .max(1);
-    let col_w = ((ui.available_width() - 8.0) / n as f32).max(48.0);
+    // Subtract the between-cell spacing: a row is n*col_w + (n-1)*spacing
+    // wide, so without this it exceeds the column by (n-2)*spacing.
+    let spacing = 8.0;
+    let col_w = ((ui.available_width() - (n as f32 - 1.0) * spacing) / n as f32).max(48.0);
 
     let draw_row = |ui: &mut egui::Ui, cells: &[egui::epaint::text::LayoutJob]| {
         ui.horizontal(|ui| {
@@ -371,10 +392,16 @@ fn render_table(
             for c in cells {
                 let mut cc = c.clone();
                 cc.wrap.break_anywhere = true;
-                ui.scope(|ui| {
-                    ui.set_width(col_w);
-                    ui.add(egui::Label::new(cc).wrap());
-                });
+                // Explicit max_rect: `set_width` only extends, never shrinks,
+                // so a scope inheriting the row's full width would wrap at
+                // that width and push the following cells past the column.
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(col_w, f32::INFINITY),
+                    )),
+                    |ui| ui.add(egui::Label::new(cc).wrap()),
+                );
             }
         });
         ui.add_space(2.0);
@@ -526,4 +553,353 @@ fn append_inline(
             ..Default::default()
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui;
+
+    /// Render `text` through [`draw_markdown`] in a headless egui context and
+    /// collect (text, height) for every produced text shape (galley).
+    fn rendered(text: &str) -> Vec<(String, f32)> {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::emoji_fonts());
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_width(560.0);
+            draw_markdown(
+                ui,
+                text,
+                13.5,
+                egui::Color32::from_rgb(235, 238, 242),
+                &Theme::dark(),
+            );
+        });
+        let mut out_shapes = Vec::new();
+        for shape in &out.shapes {
+            if let egui::epaint::ClippedShape {
+                shape: egui::Shape::Text(ts),
+                ..
+            } = shape
+            {
+                out_shapes.push((ts.galley.job.text.clone(), ts.galley.rect.height()));
+            }
+        }
+        out.drop_without_applying_deltas();
+        out_shapes
+    }
+
+    fn joined(rendered: &[(String, f32)]) -> String {
+        rendered
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\u{1}")
+    }
+
+    #[test]
+    fn plain_paragraph_renders() {
+        let r = rendered("Hello markdown **world**");
+        assert!(!r.is_empty(), "no text shapes produced at all");
+        let text = joined(&r);
+        assert!(text.contains("Hello markdown"), "plain text run missing: {text:?}");
+        assert!(text.contains("world"), "bold run missing: {text:?}");
+        assert!(
+            r.iter().any(|(_, h)| *h > 5.0),
+            "all galleys have zero height: {r:?}"
+        );
+    }
+
+    #[test]
+    fn list_code_heading_render() {
+        let r = rendered("# Title\n\n- item one\n- **item two**\n\n```rust\nfn main() {}\n```\n");
+        let text = joined(&r);
+        assert!(text.contains("Title"), "heading missing: {text:?}");
+        assert!(text.contains("item one"), "list item missing: {text:?}");
+        assert!(text.contains("fn main()"), "code block missing: {text:?}");
+    }
+
+    /// Horizontal bounding box (min_x, max_x) of a shape.
+    fn shape_x_bounds(shape: &egui::Shape) -> (f32, f32) {
+        match shape {
+            egui::Shape::Text(t) => {
+                // `galley.rect` is LOCAL to the shape; the on-screen
+                // position is `pos + galley.rect`.
+                (t.pos.x + t.galley.rect.min.x, t.pos.x + t.galley.rect.max.x)
+            }
+            egui::Shape::Rect(r) => (r.rect.min.x, r.rect.max.x),
+            egui::Shape::Circle(c) => {
+                let r = c.radius + c.stroke.width / 2.0;
+                (c.center.x - r, c.center.x + r)
+            }
+            egui::Shape::Path(p) => p
+                .points
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                    (lo.min(p.x), hi.max(p.x))
+                }),
+            egui::Shape::Mesh(m) => m
+                .vertices
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+                    (lo.min(v.pos.x), hi.max(v.pos.x))
+                }),
+            _ => (f32::MAX, f32::MIN),
+        }
+    }
+
+    /// Reproduce the chat bubble row (avatar + full-width frame +
+    /// `draw_markdown`) in a headless ctx with a fixed-width column, and
+    /// return how many pixels the drawn row exceeds the column width.
+    /// (The bubble must dock exactly to the column's right edge, never
+    /// spill past it — see the `take_available_width` rows in `bubbles.rs`.)
+    /// Trace where the available width vanishes in the nested list
+    /// structure (debug helper for the overflow investigation).
+    #[test]
+    fn trace_list_widths() {
+        use egui::{Align, Layout, Margin};
+        const COL_W: f32 = 560.0;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::emoji_fonts());
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(COL_W + 200.0, 4000.0),
+        ));
+        let trace = std::cell::RefCell::new(Vec::<(&'static str, f32)>::new());
+        let out = ctx.run_ui(raw, |ui| {
+            ui.set_width(COL_W);
+            ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+                ui.add_sized(egui::vec2(28.0, 28.0), egui::Label::new("A"));
+                ui.add_space(8.0);
+                ui.scope(|ui| {
+                    ui.take_available_width();
+                    ui.vertical(|ui| {
+                        egui::Frame::NONE
+                            .fill(egui::Color32::from_rgb(38, 42, 50))
+                            .inner_margin(Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.take_available_width();
+                                ui.vertical(|ui| {
+                                    trace.borrow_mut().push(("bubble content", ui.available_width()));
+                                    // top-level item with a nested sublist
+                                    ui.horizontal(|inner| {
+                                        inner.label("•");
+                                        inner.scope(|s| {
+                                            let w = s.available_width();
+                                            s.set_width(w.max(20.0));
+                                            trace.borrow_mut().push(("item scope", w.max(20.0)));
+                                            // nested block
+                                            s.vertical(|v| {
+                                                trace.borrow_mut().push(("nested vertical", v.available_width()));
+                                                v.horizontal(|inner2| {
+                                                    inner2.label("•");
+                                                    inner2.scope(|s2| {
+                                                        let w2 = s2.available_width();
+                                                        s2.set_width(w2.max(20.0));
+                                                        trace.borrow_mut().push(("nested item scope", w2.max(20.0)));
+                                                    });
+                                                });
+                                            });
+                                        });
+                                    });
+                                });
+                            });
+                    });
+                });
+            });
+        });
+        out.drop_without_applying_deltas();
+        for (name, w) in trace.borrow().iter() {
+            eprintln!("trace: {name} = {w}");
+        }
+    }
+
+    /// Regression: no markdown element may push the bubble row wider than
+    /// the chat column (the bubble must dock to the column's right edge).
+    #[test]
+    fn bubble_row_never_exceeds_column_width() {
+        let long_word = "x".repeat(400);
+        let long_line = "y".repeat(400);
+        let samples: &[(&str, &str)] = &[
+            (
+                "plain",
+                "A fairly long plain paragraph that wraps across several lines so the label \
+                 uses the full available width of the bubble and nothing should spill out \
+                 past the right edge of the chat column when it reflows.",
+            ),
+            (
+                "inline",
+                &format!(
+                    "Mix of **bold**, *italic*, ~~strike~~, `inline code` and a \
+                     [link](https://example.com/{long_word}) plus a long unbroken token \
+                     {long_word} to stress the wrap logic."
+                ),
+            ),
+            ("heading", "# Heading one\n\n## Heading two with a rather long title text\n"),
+            (
+                "bullets",
+                "- item one\n- **item two** with more text that keeps going and goes on and on\n  \
+                 - nested item\n  - another nested item with a longish label text here\n- three",
+            ),
+            ("ordered", "1. first step\n2. second step with a longer description text\n3. third"),
+            ("tasklist", "- [x] done item\n- [ ] todo item with a longer description here\n"),
+            ("code_short", "```rust\nfn main() {}\n```\n"),
+            ("code_long", &format!("```\n{long_line}\nfn main() {{}}\n```\n")),
+            ("table_2", "| a | b |\n|---|---|\n| 1 | 2 |\n"),
+            ("table_3", "| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |\n"),
+            ("table_4", "| a | b | c | d |\n|---|---|---|---|\n| 1 | 2 | 3 | 4 |\n"),
+            (
+                "table_6",
+                "| a | b | c | d | e | f |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |\n",
+            ),
+            (
+                "quote",
+                "> quoted **text** that is fairly long so it wraps inside the quote bar\n>\n> second paragraph",
+            ),
+            ("rule", "before\n\n---\n\nafter\n"),
+            (
+                "kitchen",
+                &format!(
+                    "**Status:** done\n\n**Details:**\n- changed *thing* with `code`\n- another \
+                     bullet that is intentionally made quite long so it wraps across the full \
+                     width of the bubble content area\n\n```rust\nfn main() {{}}\n{long_line}\n```\n\n\
+                     | col1 | col2 | col3 |\n|---|---|---|\n| a | b | c |\n",
+                ),
+            ),
+        ];
+        let mut offenders = Vec::new();
+        for (name, md) in samples {
+            let over = bubble_row_overflow_x(md);
+            if over > 0.5 {
+                offenders.push(format!("{name}={over:.1}px"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "bubble row wider than column: {}",
+            offenders.join(", ")
+        );
+    }
+
+    /// Print every visible shape of `text` that extends past the column
+    /// (temporary debug for the overflow hunt).
+    #[test]
+    fn dump_overflowing_shapes() {
+        use egui::{Align, Layout, Margin};
+        const COL_W: f32 = 560.0;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::emoji_fonts());
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(COL_W + 200.0, 4000.0),
+        ));
+        let long_line = "y".repeat(400);
+        let text = format!(
+            "**Status:** done\n\n**Details:**\n- changed *thing* with `code`\n- another \
+             bullet that is intentionally made quite long so it wraps across the full \
+             width of the bubble content area\n\n```rust\nfn main() {{}}\n{long_line}\n```\n\n\
+             | col1 | col2 | col3 |\n|---|---|---|\n| a | b | c |\n"
+        );
+        let out = ctx.run_ui(raw, |ui| {
+            ui.set_width(COL_W);
+            ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+                ui.add_sized(egui::vec2(28.0, 28.0), egui::Label::new("A"));
+                ui.add_space(8.0);
+                ui.scope(|ui| {
+                    ui.take_available_width();
+                    ui.vertical(|ui| {
+                        egui::Frame::NONE
+                            .fill(egui::Color32::from_rgb(38, 42, 50))
+                            .inner_margin(Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.take_available_width();
+                                draw_markdown(ui, &text, 13.5, egui::Color32::WHITE, &Theme::dark());
+                            });
+                    });
+                });
+            });
+        });
+        for cs in &out.shapes {
+            let (lo, hi) = shape_x_bounds(&cs.shape);
+            {
+                let (ty0, ty1) = match &cs.shape {
+                    egui::Shape::Text(t) => (
+                        t.pos.y + t.galley.rect.min.y,
+                        t.pos.y + t.galley.rect.max.y,
+                    ),
+                    _ => (f32::NAN, f32::NAN),
+                };
+                let kind = match &cs.shape {
+                    egui::Shape::Text(t) => format!("Text {:?}", t.galley.job.text.chars().take(20).collect::<String>()),
+                    egui::Shape::Rect(r) => format!("Rect fill={:?}", r.fill),
+                    egui::Shape::Circle(_) => "Circle".into(),
+                    egui::Shape::Path(p) => format!("Path n={}", p.points.len()),
+                    egui::Shape::Mesh(_) => "Mesh".into(),
+                    _ => "other".into(),
+                };
+                eprintln!(
+                    "SHAPE {kind} x=[{lo:.1}..{hi:.1}] y=[{ty0:.1}..{ty1:.1}] clipx=[{:.1}..{:.1}]",
+                    cs.clip_rect.min.x,
+                    cs.clip_rect.max.x
+                );
+            }
+        }
+        out.drop_without_applying_deltas();
+    }
+
+    fn bubble_row_overflow_x(text: &str) -> f32 {
+        use egui::{Align, Layout, Margin};
+        const COL_W: f32 = 560.0;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::emoji_fonts());
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(COL_W + 200.0, 4000.0),
+        ));
+        let out = ctx.run_ui(raw, |ui| {
+            ui.set_width(COL_W);
+            ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+                // avatar
+                ui.add_sized(egui::vec2(28.0, 28.0), egui::Label::new("A"));
+                ui.add_space(8.0);
+                // content column
+                ui.scope(|ui| {
+                    ui.take_available_width();
+                    ui.vertical(|ui| {
+                        egui::Frame::NONE
+                            .fill(egui::Color32::from_rgb(38, 42, 50))
+                            .inner_margin(Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.take_available_width();
+                                draw_markdown(
+                                    ui,
+                                    text,
+                                    13.5,
+                                    egui::Color32::from_rgb(235, 238, 242),
+                                    &Theme::dark(),
+                                );
+                            });
+                    });
+                });
+            });
+        });
+        // Visible part of each shape = shape x-range ∩ clip rect's x-range
+        // (content in a horizontal scroll area is clipped, so the unclipped
+        // galley rect must not count as overflow).
+        let (mut min_x, mut max_x) = (f32::MAX, f32::MIN);
+        for cs in &out.shapes {
+            let (mut lo, mut hi) = shape_x_bounds(&cs.shape);
+            lo = lo.max(cs.clip_rect.min.x);
+            hi = hi.min(cs.clip_rect.max.x);
+            if hi > lo {
+                min_x = min_x.min(lo);
+                max_x = max_x.max(hi);
+            }
+        }
+        out.drop_without_applying_deltas();
+        (max_x - min_x) - COL_W
+    }
 }
