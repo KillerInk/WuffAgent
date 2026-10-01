@@ -33,6 +33,16 @@ fn options() -> Options {
 /// missing it falls back to the regular proportional fonts).
 const STRONG_FAMILY: &str = "Strong";
 
+/// Vertical extent used when building a `max_rect` for a nested content
+/// scope (list item, table cell) that should "grow to fit its content".
+///
+/// A large FINITE value rather than `f32::INFINITY`: egui's cursor can hold
+/// `±inf` as a "fill in later" placeholder, and `Rect::from_min_size` does
+/// `min + size`, so `min.y == -inf` with an `inf` height yields `NaN` and
+/// trips egui's `max_rect is NaN` debug-assert. A finite cap never produces
+/// NaN, and no real list item / table cell comes close to it.
+const VERTICAL_GROW_CAP: f32 = 1_000_000.0;
+
 /// Nesting depth of inline styles (nested markup can push these above 1).
 #[derive(Clone, Copy, Default)]
 struct InlineStyle {
@@ -305,7 +315,7 @@ fn draw_list_item<'a>(
                 .layout(egui::Layout::top_down_justified(egui::Align::LEFT))
                 .max_rect(egui::Rect::from_min_size(
                     inner.cursor().min,
-                    egui::vec2(w, f32::INFINITY),
+                    egui::vec2(w, VERTICAL_GROW_CAP),
                 )),
             |v| draw_blocks(parser, v, theme, size, color, lists, queue, true),
         );
@@ -398,7 +408,7 @@ fn render_table(
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
                         ui.cursor().min,
-                        egui::vec2(col_w, f32::INFINITY),
+                        egui::vec2(col_w, VERTICAL_GROW_CAP),
                     )),
                     |ui| ui.add(egui::Label::new(cc).wrap()),
                 );
