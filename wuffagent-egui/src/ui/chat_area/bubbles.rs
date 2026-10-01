@@ -52,12 +52,15 @@ impl ChatApp {
                                     ui.spinner();
                                 });
                                 ui.add_space(4.0);
-                                ui.add(Self::breaking_label(
+                                // Dim markdown while the thinking streams in.
+                                super::markdown::draw_markdown_dimmed(
+                                    ui,
                                     current_thinking,
-                                    egui::FontId::proportional(12.0),
+                                    12.0,
                                     theme.text_dim,
+                                    theme,
                                     true,
-                                ));
+                                );
                             });
                         ui.add_space(8.0);
                     }
@@ -354,13 +357,16 @@ impl ChatApp {
                                 // (Tool messages never reach the bubble: they are
                                 // rendered as collapsible cards above.)
                                 if message.kind == MessageKind::Thinking {
-                                    // Thinking message — render dim and italic
-                                    ui.add(Self::breaking_label(
+                                    // Thinking message — dim markdown (regular
+                                    // weight, dimmed links/code).
+                                    super::markdown::draw_markdown_dimmed(
+                                        ui,
                                         &message.content,
-                                        egui::FontId::proportional(12.5),
+                                        12.5,
                                         theme.text_dim,
+                                        theme,
                                         true,
-                                    ));
+                                    );
                                 } else {
                                     // Normal message — strip any legacy <think> tags
                                     let display_content = if message.content.contains("<think>")

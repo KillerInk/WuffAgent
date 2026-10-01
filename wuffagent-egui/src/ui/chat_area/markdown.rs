@@ -2,8 +2,10 @@
 //!
 //! Parses GFM-flavoured markdown (pulldown-cmark: tables, strikethrough,
 //! task lists) and renders it into the existing chat theme. Used for AI
-//! messages in `bubbles.rs`; user messages and thinking blocks stay plain
-//! text.
+//! messages in `bubbles.rs`; user messages stay plain text. Thinking
+//! blocks also render as markdown, but dimmed (`dim: true`): regular
+//! weight, dimmed links and code, so they read as quieter than the
+//! answer they belong to.
 //!
 //! Supported elements:
 //! - inline: **bold** (real bold via the "Strong" font family, see
@@ -66,10 +68,34 @@ pub(super) fn draw_markdown(
     color: egui::Color32,
     theme: &Theme,
 ) {
+    draw_markdown_dimmed(ui, text, size, color, theme, false);
+}
+
+/// Render markdown `text` with an explicit dim flag: `dim = true` renders
+/// everything in `color` with regular weight — no bold "Strong" font, dimmed
+/// links and inline code — used for Thinking blocks.
+pub(super) fn draw_markdown_dimmed(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+    theme: &Theme,
+    dim: bool,
+) {
     let mut parser = Parser::new_ext(text, options());
     let mut lists = Vec::new();
     let mut queue = VecDeque::new();
-    draw_blocks(&mut parser, ui, theme, size, color, &mut lists, &mut queue, false);
+    draw_blocks(
+        &mut parser,
+        ui,
+        theme,
+        size,
+        color,
+        &mut lists,
+        &mut queue,
+        false,
+        dim,
+    );
 }
 
 fn heading_font_size(level: HeadingLevel) -> f32 {
@@ -100,6 +126,7 @@ fn flush_job(job: &mut Option<egui::epaint::text::LayoutJob>, ui: &mut egui::Ui)
 /// `in_item`: when true, stop at the current list item's boundary
 /// (`End(Item)`) so the item's content cannot swallow sibling items and
 /// later blocks (they would be drawn inside the item's scope).
+/// `dim`: render everything in `color` with regular weight (Thinking blocks).
 fn draw_blocks<'a>(
     parser: &mut Parser<'a>,
     ui: &mut egui::Ui,
@@ -109,6 +136,7 @@ fn draw_blocks<'a>(
     lists: &mut Vec<ListInfo>,
     queue: &mut VecDeque<Event<'a>>,
     in_item: bool,
+    dim: bool,
 ) {
     let mut job: Option<egui::epaint::text::LayoutJob> = None;
     let mut style = InlineStyle::default();
@@ -143,6 +171,7 @@ fn draw_blocks<'a>(
                                 hsize,
                                 theme.text_primary,
                                 theme,
+                                dim,
                             ),
                         }
                     }
@@ -184,6 +213,7 @@ fn draw_blocks<'a>(
                             lists,
                             queue,
                             in_item,
+                            dim,
                         );
                     });
                     let r = inner.response.rect;
@@ -204,11 +234,11 @@ fn draw_blocks<'a>(
                         next: start.unwrap_or(1),
                     });
                 }
-                Tag::Item => draw_list_item(parser, ui, theme, size, color, lists, queue),
+                Tag::Item => draw_list_item(parser, ui, theme, size, color, lists, queue, dim),
                 Tag::Table(_) => {
                     flush_job(&mut job, ui);
                     ui.add_space(4.0);
-                    render_table(parser, ui, theme, size, color, queue);
+                    render_table(parser, ui, theme, size, color, queue, dim);
                     ui.add_space(4.0);
                 }
                 _ => {}
@@ -245,7 +275,7 @@ fn draw_blocks<'a>(
             // fresh one for stray text outside a block).
             event => {
                 let j = job.get_or_insert_with(new_job);
-                apply_inline_event(j, &event, &mut style, size, color, theme);
+                apply_inline_event(j, &event, &mut style, size, color, theme, dim);
             }
         }
     }
@@ -261,6 +291,7 @@ fn draw_list_item<'a>(
     color: egui::Color32,
     lists: &mut Vec<ListInfo>,
     queue: &mut VecDeque<Event<'a>>,
+    dim: bool,
 ) {
     ui.add_space(2.0);
 
@@ -317,7 +348,7 @@ fn draw_list_item<'a>(
                     inner.cursor().min,
                     egui::vec2(w, VERTICAL_GROW_CAP),
                 )),
-            |v| draw_blocks(parser, v, theme, size, color, lists, queue, true),
+            |v| draw_blocks(parser, v, theme, size, color, lists, queue, true, dim),
         );
     });
     ui.add_space(2.0);
@@ -332,6 +363,7 @@ fn render_table(
     size: f32,
     color: egui::Color32,
     queue: &mut VecDeque<Event<'_>>,
+    dim: bool,
 ) {
     let mut header: Vec<egui::epaint::text::LayoutJob> = Vec::new();
     let mut rows: Vec<Vec<egui::epaint::text::LayoutJob>> = Vec::new();
@@ -350,7 +382,8 @@ fn render_table(
             Event::Start(Tag::TableRow) => row = Some(Vec::new()),
             Event::Start(Tag::TableCell) => {
                 cell = Some(new_job());
-                cell_style = if in_head {
+                // No bold for dim (thinking) tables: regular weight throughout.
+                cell_style = if in_head && !dim {
                     InlineStyle {
                         bold: 1,
                         ..Default::default()
@@ -378,7 +411,7 @@ fn render_table(
             Event::End(TagEnd::Table) => break,
             ev => {
                 if let Some(c) = cell.as_mut() {
-                    apply_inline_event(c, &ev, &mut cell_style, size, color, theme);
+                    apply_inline_event(c, &ev, &mut cell_style, size, color, theme, dim);
                 }
             }
         }
@@ -473,10 +506,11 @@ fn apply_inline_event(
     size: f32,
     color: egui::Color32,
     theme: &Theme,
+    dim: bool,
 ) {
     match event {
-        Event::Text(t) => append_inline(job, t, *style, size, color, theme, false),
-        Event::Code(c) => append_inline(job, c, *style, size, color, theme, true),
+        Event::Text(t) => append_inline(job, t, *style, size, color, theme, false, dim),
+        Event::Code(c) => append_inline(job, c, *style, size, color, theme, true, dim),
         Event::SoftBreak => append_plain(job, " ", size, color),
         Event::HardBreak => append_plain(job, "\n", size, color),
         Event::Start(Tag::Emphasis) => style.italics += 1,
@@ -513,9 +547,10 @@ fn append_plain(
         },
     );
 }
-
 /// Append a text run with the current inline style (bold via the "Strong"
 /// family, italics, strikethrough, links; `code` = inline code span).
+/// `dim = true` (Thinking blocks): regular weight, links keep `color`,
+/// inline code uses `color` with no background.
 fn append_inline(
     job: &mut egui::epaint::text::LayoutJob,
     text: &str,
@@ -524,21 +559,26 @@ fn append_inline(
     color: egui::Color32,
     theme: &Theme,
     code: bool,
+    dim: bool,
 ) {
     let (font_id, color, background, expand_bg) = if code {
-        (
-            egui::FontId::monospace(size - 0.5),
-            theme.code_text,
-            theme.code_bg,
-            1.0,
-        )
+        if dim {
+            (egui::FontId::monospace(size - 0.5), color, egui::Color32::TRANSPARENT, 0.0)
+        } else {
+            (
+                egui::FontId::monospace(size - 0.5),
+                theme.code_text,
+                theme.code_bg,
+                1.0,
+            )
+        }
     } else {
-        let font_id = if style.bold > 0 {
+        let font_id = if style.bold > 0 && !dim {
             egui::FontId::new(size, egui::FontFamily::Name(STRONG_FAMILY.into()))
         } else {
             egui::FontId::proportional(size)
         };
-        let color = if style.link > 0 { theme.accent } else { color };
+        let color = if style.link > 0 && !dim { theme.accent } else { color };
         (font_id, color, egui::Color32::TRANSPARENT, 0.0)
     };
     job.append(
@@ -573,16 +613,22 @@ mod tests {
     /// Render `text` through [`draw_markdown`] in a headless egui context and
     /// collect (text, height) for every produced text shape (galley).
     fn rendered(text: &str) -> Vec<(String, f32)> {
+        rendered_dimmed(text, false)
+    }
+
+    /// Like `rendered`, but with an explicit dim flag (Thinking blocks).
+    fn rendered_dimmed(text: &str, dim: bool) -> Vec<(String, f32)> {
         let ctx = egui::Context::default();
         ctx.set_fonts(crate::fonts::emoji_fonts());
         let out = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.set_width(560.0);
-            draw_markdown(
+            draw_markdown_dimmed(
                 ui,
                 text,
                 13.5,
                 egui::Color32::from_rgb(235, 238, 242),
                 &Theme::dark(),
+                dim,
             );
         });
         let mut out_shapes = Vec::new();
@@ -629,6 +675,14 @@ mod tests {
         assert!(text.contains("fn main()"), "code block missing: {text:?}");
     }
 
+    #[test]
+    fn dimmed_thinking_renders_markdown() {
+        let r = rendered_dimmed("Let me **think** about `foo` and [docs](https://x).", true);
+        assert!(!r.is_empty(), "dimmed markdown produced no text shapes");
+        let text = joined(&r);
+        assert!(text.contains("think"), "bold run missing: {text:?}");
+        assert!(text.contains("foo"), "code run missing: {text:?}");
+    }
     /// Horizontal bounding box (min_x, max_x) of a shape.
     fn shape_x_bounds(shape: &egui::Shape) -> (f32, f32) {
         match shape {
