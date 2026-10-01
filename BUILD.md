@@ -12,7 +12,7 @@ This project is a Cargo workspace with two crates:
 
 | Crate | Purpose |
 |-------|---------|
-| `wuffagent-core` | Shared library: types, LLM client (HTTP/SSE), config, server, sessions, tools (builtin + plugins + MCP), agents, memory, usage, trimming |
+| `wuffagent-core` | Shared library: types, LLM client (HTTP/SSE), config, server, sessions, tools (builtin + plugins + MCP), agents (incl. run-metrics store + self-improvement loop), memory (memories + skills + evals), usage/cost, stats, activity, trimming |
 | `wuffagent-egui` | Egui 0.36 frontend binary (egui_plot 0.37 for the usage chart) |
 
 ## Quick Start
@@ -64,11 +64,15 @@ target/release/wuffagent-egui.exe
 ## Where the app stores data
 
 All app data lives under the user home directory `~/.wuffagent/`:
-`config.json` (connection, presets, chat, memory, `mcp_servers`),
-`sessions/`, `agents/` (+ `agents/history/` prompt snapshots),
-`memories/<project>.json`, `usage.jsonl` (per-call token log), and the
-one-shot `restart.json` marker. Native tool plugins are the exception — they
-load from the platform config dir, `<platform config dir>/wuffagent/plugins`
+`config.json` (connection, presets, chat, memory, `mcp_servers`,
+`model_prices`, `metrics_retention_days`), `sessions/`,
+`agents/` (+ `agents/history/` prompt snapshots), `memories/<project>.json`,
+`usage.jsonl` (per-call token log), `metrics/<agent>.jsonl` (per-agent
+run-metrics store; old days roll up to `metrics/rollups/`), `skills/`
+(procedural-memory markdown) and `evals/<agent>.jsonl` (golden / regression
+evals), plus the one-shot `restart.json` marker. Native tool plugins are the
+exception — they load from the platform config dir,
+`<platform config dir>/wuffagent/plugins`
 (e.g. `%APPDATA%\wuffagent\plugins` on Windows).
 
 ## Architecture
@@ -76,24 +80,45 @@ load from the platform config dir, `<platform config dir>/wuffagent/plugins`
 ```
 Cargo.toml (workspace)
 ├── wuffagent-core/          # Shared backend logic
-│   ├── types.rs             # Base types: Message, AppEvent, ReasoningEffort, ...
+│   ├── types/               # Base types: Message, AppEvent, ReasoningEffort, policy, ...
+│   ├── activity.rs          # ActivityTracker / ActivityHandle (per-run stats)
 │   ├── llm.rs               # LlmClient trait + ChatClientAdapter
 │   ├── client/              # ChatClient: HTTP/SSE streaming, shared store, overflow retry
-│   ├── config/              # Config, presets, encryption, paths, mcp config, search
+│   ├── config/              # Config, presets, encryption, paths, mcp config, search, ModelPrice
 │   ├── server/              # ServerManager (local server lifecycle)
-│   ├── sessions/            # Session persistence (plain or encrypted) + runtime
-│   ├── tools/               # ToolManager, ToolRegistry
-│   │   ├── builtin/         # file I/O, shell, handoff, restart, memory, web, calc, time
+│   ├── sessions/            # Session persistence (plain or encrypted) + runtime + state
+│   ├── tools/               # ToolManager, ToolRegistry, validation, preview
+│   │   ├── builtin/         # file I/O, shell, handoff/restart/hand_back, session_note,
+│   │   │                    #   memory, skills, show_image, agent_profile, web, calc, time,
+│   │   │                    #   mcp, plugins, improvement/ (read_metrics, evals, run_eval,
+│   │   │                    #   run_self_improvement, list_improvement_status)
 │   │   ├── dynamic/         # native plugin loading (Tool trait ABI)
-│   │   └── mcp/             # MCP client (stdio + HTTP, hand-rolled JSON-RPC)
-│   ├── agents/              # AgentEngine, Agent, AgentConfig, AgentManager
-│   ├── memory/              # MemoryManager: store, search, maintenance, self-improvement
-│   ├── usage/               # UsageRecorder (JSONL) + stats (bucketing)
+│   │   ├── mcp/             # MCP client (stdio + HTTP, hand-rolled JSON-RPC)
+│   │   ├── manager/         # ToolManager (registry + per-agent view + shared state)
+│   │   ├── registry/        # ToolRegistry
+│   │   └── preview/         # one-line tool-call display previews
+│   ├── agents/              # AgentEngine, Agent (loop), AgentConfig, AgentManager
+│   │   ├── agent/           # per-run agent loop (prompt, verify, tool exec, stats)
+│   │   ├── engine/          # AgentEngine
+│   │   ├── manager/         # AgentManager
+│   │   ├── config/          # AgentConfig + profile loading
+│   │   ├── metrics/         # run-metrics store (JSONL, aggregates, rollup, fleet status)
+│   │   ├── improvement/     # self-improvement suggestion loop core
+│   │   ├── types/           # RunStats, Handoff/Restart/SessionNote requests
+│   │   └── chat_pipeline.rs # ChatPipeline
+│   ├── memory/              # MemoryManager: memories, skills, evals, maintenance, search
+│   ├── usage/               # UsageRecorder (JSONL) + cost (USD) + stats (bucketing)
+│   ├── stats/               # shared time-bucketing (Granularity) for usage + metrics
+│   ├── util/                # shared text helpers
 │   └── trimming/            # Conversation trimming: classifier, summarizer
 └── wuffagent-egui/          # Egui frontend
     ├── main.rs              # Bootstraps core + runs egui app
+    ├── bootstrap.rs         # config load / migrations / panic hook
+    ├── fonts.rs             # font loading (e.g. Noto Naskh Arabic)
     ├── image_loader.rs      # egui image loader for pasted/attached images
-    └── src/ui/              # chat, sessions, memory, mcp, usage, improvements, ...
+    ├── logging.rs           # tracing init
+    └── src/ui/              # chat, sessions, memory, mcp, usage, improvements,
+                             #   dashboard (fleet KPIs + trend), agent config/history, ...
 ```
 
 The egui frontend shares the `wuffagent-core` backend. The UI lives in
@@ -114,12 +139,26 @@ was removed; there is no separate planning pipeline anymore.
 
 `handoff` ends the current agent's turn and continues the same session with
 another profile (targets resolved from the same agent-profile discovery dirs
-the UI uses). `restart` optionally builds, relaunches the binary, and the
-new process auto-resumes the session from a `restart.json` marker.
+the UI uses); with `sub_session: true` it starts a clean sub-session (own
+context / tab / session file) that returns to its parent with the `hand_back`
+per-execution tool. `restart` optionally builds, relaunches the binary, and
+the new process auto-resumes the session from a `restart.json` marker.
+`session_note` pins a short state note to the session (survives trims and
+reload re-anchoring) without ending the turn.
 
-Every completed LLM call is logged as one JSON line to
-`~/.wuffagent/usage.jsonl` (best-effort; a log failure never breaks the
-chat) and feeds the egui usage panel's hour/day/week charts.
+Telemetry is all best-effort — a log failure never breaks the chat:
+- Every completed LLM call → one JSON line in `~/.wuffagent/usage.jsonl`,
+  feeding the egui usage panel's hour/day/week charts.
+- Every agent run → a `run` line in the per-agent run-metrics store
+  (`~/.wuffagent/metrics/<agent>.jsonl`), feeding the `read_metrics` tool and
+  the egui fleet dashboard (`ui/dashboard.rs`); fully-elapsed days older than
+  `metrics_retention_days` roll up to `metrics/rollups/`.
+- A per-task self-improvement check (`agents/improvement/`, gated by cooldown
+  + evidence) suggests prompt/tool/skill changes to a review panel;
+  `run_self_improvement` bypasses the gates on demand. Golden / regression
+  evals (`memory/evals/` + `run_eval`) give before/after signal after profile
+  or prompt changes, and reusable procedures are stored as skills
+  (`memory/skills/`) and injected into agent system prompts.
 
 ## Building a Single Crate
 
