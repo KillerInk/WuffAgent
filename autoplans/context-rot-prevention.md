@@ -1,6 +1,6 @@
 # Context-Rot Prevention After Trimming
 
-Created: 2026-09-27. Status: **S1+S2+S3 DONE** (2026-09-27), **S4a DONE** (2026-09-28, session_note tool + anchored notes), **S4b DONE** (2026-09-27, LLM brief polish, 1537247) — all S1–S4b on master as of 1913907. S5 (pre-trim note update) sketched below, pending.
+Created: 2026-09-27. Status: **S1+S2+S3+S4a+S4b+S5 ALL DONE** — S1–S3 2026-09-27, S4a 2026-09-28 (session_note tool + anchored notes), S4b 2026-09-27 (LLM brief polish, 1537247), S5 2026-10-01 (pre-trim note refresh, f8a6563) — all on master as of f8a6563.
 
 Goal: stop the model from "going off the rails" after the context window is
 reached and history is trimmed — it should keep the TASK, the user's
@@ -316,7 +316,7 @@ regardless.)
   loop-level test of the polish call itself (needs a scripted LLM harness);
    the polish request uses the agent's configured reasoning_effort.
 
-### S5 — Pre-trim session-note update (sketch, pending)
+### S5 — Pre-trim session-note update (as-built, 2026-10-01, f8a6563)
 
 Problem: the anchored session note is the strongest rot guarantee, but it is
 only as fresh as the agent's LAST `session_note` call. When the proactive trim
@@ -344,6 +344,43 @@ Design (deterministic, synchronous, no extra LLM round):
 - Tests: brief.rs (refresh dedupe/idempotent, cap-fold on repeated trims),
   loop-level unit via the existing scripted harness if available, else
   covered by the brief unit tests.
+
+#### S5 as-built notes (2026-10-01, f8a6563)
+
+- `brief.rs` gains two pure fns: `note_refresh_line(dropped) -> Option<String>`
+  (newest assistant line the brief classifies as in-progress — the model's
+  own "what's next" wins — falling back to the newest non-trivial assistant
+  text line; skips brief/note messages, bracket-marker lines and <12-char
+  lines; `None` for tool-only spans) and `refreshed_note_text(existing,
+  state_line)` (existing + " || " + state, capped at NOTE_INPUT_MAX by
+  truncating the OLD part — the fresh state must survive whole).
+- Loop: `Agent::refresh_note_pre_trim` (agents/agent/loop.rs) called at the
+  PROACTIVE trim site after the S4b polish block, gated on
+  `session_note_enabled && removed > 0`. Idempotency is the "stale refresh"
+  guard: if the newest anchored note already ENDS WITH the state line, no
+  change (a repeated trim of the same span is a no-op). Otherwise
+  `apply_note` inserts the note or replaces the newest note in place (same
+  text); the NOTES_MAX_ITEMS cap folds the oldest into the brief's `Notes:`
+  section as designed. Runs BEFORE `reconcile_store`, so the refreshed note
+  lands in the session file. The overflow backstop site does not refresh
+  (emergency path, like the polish skip). Log: `[AGENT] Agent '<name>'
+  session note refreshed pre-trim (N chars)`.
+- Store recording: no separate `record_in_store` call at the site —
+  `reconcile_store` immediately after mirrors the whole request list (note
+  included) into the store, same guarantee as the tool path's record-then-
+  reconcile.
+- Tests: 7 new brief.rs (in-progress preference, text-line fallback,
+  tool-only None, brief/note/trivial/bracket skipping, no-existing,
+  separator append, cap-by-cutting-old-part with the "…" marker). Suite:
+  847 passed, 0 failed (lib). No loop-level test (no scripted-LLM trim
+  harness; covered by the pure-fn tests + the existing S4a apply_note
+  coverage).
+- Deviations from the sketch: the "differs from the current note" check is
+  an endswith-guard (not a full equality/dedupe — a refresh with the SAME
+  note text would be a no-op via apply_note's dedupe anyway, but a span
+  whose state line the note already carries must not grow the note a second
+  time); cap-fold behavior on repeated trims is inherited from S4a's
+  `apply_note` (not re-tested in S5).
 
 ## Constraints / notes
 
