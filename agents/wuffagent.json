@@ -72,7 +72,7 @@
     "shell_timeout_ms": 300000,
     "shell_enabled": true
   },
-  "agents_dir": "C:\\Users\\troop\\.wuffagent\\agents",
+  "agents_dir": "",
   "agents_search_dirs": [],
   "custom_prompts": {},
   "reasoning_effort": "medium",
