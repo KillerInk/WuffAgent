@@ -427,3 +427,77 @@ fn parse_polish_rejects_garbage() {
     assert!(parse_polish("").is_none());
     assert!(parse_polish("no sections here at all").is_none());
 }
+
+// ── S5: pre-trim session-note refresh ──
+
+#[test]
+fn note_refresh_line_prefers_newest_in_progress() {
+    let dropped = vec![
+        assistant("Currently running the full test suite"),
+        assistant("Done with the wiring, will start the UI next"),
+        user("keep going"),
+        assistant("Next: fix the remaining two edge cases in brief.rs"),
+    ];
+    assert_eq!(
+        note_refresh_line(&dropped).as_deref(),
+        Some("Next: fix the remaining two edge cases in brief.rs")
+    );
+}
+
+#[test]
+fn note_refresh_line_falls_back_to_last_text_line() {
+    let dropped = vec![
+        assistant("Wrote the extraction heuristics and committed them"),
+        user("ok"),
+        assistant("I ran the build"),
+    ];
+    assert_eq!(
+        note_refresh_line(&dropped).as_deref(),
+        Some("I ran the build")
+    );
+}
+
+#[test]
+fn note_refresh_line_none_for_tool_only_span() {
+    let dropped = vec![user("please read the plan"), user("42 lines total")];
+    assert_eq!(note_refresh_line(&dropped), None);
+}
+
+#[test]
+fn note_refresh_line_skips_brief_note_and_trivial_lines() {
+    let brief = format!("{BRIEF_MARKER} ... Task: t");
+    let note = format!("{NOTE_MARKER} S4b done]");
+    let dropped = vec![
+        user(&brief),
+        user(&note),
+        assistant("ok"), // 2 chars: below the 12-char threshold
+        assistant("Done."),
+        assistant("[TRIM] something"), // bracket marker line
+    ];
+    assert_eq!(note_refresh_line(&dropped), None);
+}
+
+#[test]
+fn refreshed_note_text_no_existing_uses_state_line() {
+    assert_eq!(
+        refreshed_note_text(None, "Next: run the test suite"),
+        "Next: run the test suite"
+    );
+}
+
+#[test]
+fn refreshed_note_text_appends_state_via_separator() {
+    assert_eq!(
+        refreshed_note_text(Some("S4b done, HEAD at 1537247"), "Next: implement S5"),
+        "S4b done, HEAD at 1537247 || Next: implement S5"
+    );
+}
+
+#[test]
+fn refreshed_note_text_caps_by_cutting_old_part() {
+    let old = "x".repeat(NOTE_INPUT_MAX);
+    let out = refreshed_note_text(Some(&old), "Next: state");
+    assert_eq!(out.chars().count(), NOTE_INPUT_MAX);
+    assert!(out.ends_with(" || Next: state"), "fresh state survives whole");
+    assert!(out.contains("… || "), "the cut old part is marked before the separator");
+}

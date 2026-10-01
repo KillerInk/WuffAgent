@@ -623,6 +623,62 @@ pub fn reanchor_notes(messages: &mut Vec<Message>) {
     }
 }
 
+/// S5 (context-rot-prevention.md): the "state as of this compaction" line
+/// for the proactive-trim note refresh — the NEWEST assistant line the
+/// brief classifies as in-progress (the model's own "what's next" wins),
+/// falling back to the newest non-trivial assistant text line in the span.
+/// `None` when the span carries no assistant text worth noting (tool-only
+/// spans). Brief/note messages are skipped (protected, so they never reach
+/// a dropped span — belt-and-braces), as are bracket-marker lines and
+/// <12-char lines (the extraction threshold).
+pub fn note_refresh_line(dropped: &[Message]) -> Option<String> {
+    let mut in_progress: Option<String> = None;
+    let mut last_line: Option<String> = None;
+    for m in dropped {
+        if m.role.as_str() != "assistant" || is_brief_message(m) || is_note_message(m) {
+            continue;
+        }
+        for raw in m.content.lines() {
+            let line = raw.trim();
+            if line.len() < 12 || line.starts_with('[') {
+                continue;
+            }
+            let flat = one_line(line, IN_PROGRESS_MAX);
+            match classify_line(line) {
+                Some(Section::InProgress) => in_progress = Some(flat),
+                _ => last_line = Some(flat),
+            }
+        }
+    }
+    in_progress.or(last_line)
+}
+
+/// S5 (context-rot-prevention.md): the refreshed note text for the
+/// proactive-trim note update — the existing note (if any) with the fresh
+/// state line appended via " || ", capped at [`NOTE_INPUT_MAX`] by
+/// truncating the OLD part (the fresh state is the point of the refresh and
+/// must survive whole; a cut is marked with "…"). With no existing note the
+/// state line IS the note.
+pub fn refreshed_note_text(existing: Option<&str>, state_line: &str) -> String {
+    let state = state_line.trim();
+    match existing.map(str::trim).filter(|e| !e.is_empty()) {
+        None => one_line(state, NOTE_INPUT_MAX),
+        Some(e) => {
+            let sep = " || ";
+            // Room for the OLD part (the fresh state + separator must fit
+            // whole). `cap_chars` appends one "…" when it cuts, so reserve
+            // that slot and the total lands exactly on NOTE_INPUT_MAX.
+            let room = NOTE_INPUT_MAX
+                .saturating_sub(state.chars().count())
+                .saturating_sub(sep.chars().count());
+            // `cap_chars` keeps exactly `room` chars when it cuts (incl. the
+            // "…"), so the total lands exactly on NOTE_INPUT_MAX.
+            let old_part = cap_chars(e, room);
+            format!("{old_part}{sep}{state}")
+        }
+    }
+}
+
 /// Evict oldest list items (never the task) until the render fits
 /// [`BRIEF_MAX_CHARS`].
 pub fn enforce_total_cap(b: &mut SessionBrief) {

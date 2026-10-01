@@ -364,6 +364,27 @@ impl Agent {
                             );
                         }
                     }
+                    // S5 (context-rot-prevention.md): the anchored session
+                    // note is the strongest rot guarantee, but it is only as
+                    // fresh as the agent's LAST `session_note` call — when
+                    // this compaction drops assistant state, the note the
+                    // model reads first (before the task) goes stale.
+                    // Deterministic refresh (no LLM round): append the
+                    // span's newest state line to the newest note (capped;
+                    // the 3-note cap folds the oldest into the brief's
+                    // `Notes:` section, so no state is lost). Runs BEFORE
+                    // `reconcile_store`, so the refreshed note lands in the
+                    // session file. The overflow backstop site below does
+                    // not refresh — emergency path, like the polish skip.
+                    if self.config.session_note_enabled && removed > 0 {
+                        if let Some(note) = self.refresh_note_pre_trim(messages, &dropped) {
+                            tracing::info!(
+                                "[AGENT] Agent '{}' session note refreshed pre-trim ({} chars)",
+                                self.config.name,
+                                note.chars().count()
+                            );
+                        }
+                    }
                     // Post-trim verification: the trim already truncates the largest
                     // message as a fallback; log if we're still over budget.
                     let post_trim_total = crate::trimming::message_char_count(messages);
@@ -778,6 +799,34 @@ impl Agent {
         }
         crate::trimming::brief::apply_brief(messages, &text);
         Some(text)
+    }
+
+    /// S5 (context-rot-prevention.md): pre-trim session-note refresh for the
+    /// PROACTIVE trim site. Extracts the span's fresh state line
+    /// (`brief::note_refresh_line`); if the newest anchored note already
+    /// ends with it, the refresh is stale (idempotent — a repeated trim of
+    /// the same span is a no-op). Otherwise `brief::apply_note` inserts the
+    /// note (or replaces the newest note in place with the same text); the
+    /// `NOTES_MAX_ITEMS` cap folds the oldest note into the brief's
+    /// `Notes:` section, so the refresh never loses state. Returns the
+    /// stored note text when the request list changed.
+    fn refresh_note_pre_trim(&self, messages: &mut Vec<Message>, dropped: &[Message]) -> Option<String> {
+        let state_line = crate::trimming::brief::note_refresh_line(dropped)?;
+        let existing = messages
+            .iter()
+            .filter(|m| crate::trimming::brief::is_note_message(m))
+            .filter_map(|m| crate::trimming::brief::note_content(m))
+            .last();
+        let fresh = match existing {
+            Some(e) => !e.trim_end().ends_with(state_line.trim_end()),
+            None => true,
+        };
+        if !fresh {
+            return None;
+        }
+        let text = crate::trimming::brief::refreshed_note_text(existing, &state_line);
+        let idx = crate::trimming::brief::apply_note(messages, &text)?;
+        Some(messages.get(idx).map(|m| m.content.clone())?)
     }
 }
 
