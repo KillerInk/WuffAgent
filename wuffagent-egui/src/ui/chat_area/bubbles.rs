@@ -65,7 +65,9 @@ impl ChatApp {
                         ui.add_space(8.0);
                     }
                     if !stream_buffer.is_empty() {
-                        // Same bubble as a committed AI message.
+                        // Same bubble as a committed AI message — rendered as
+                        // markdown live, so bold/code/lists/tables appear while
+                        // the answer streams (matching the committed view).
                         egui::Frame::NONE
                             .fill(theme.ai_bg)
                             .stroke(egui::Stroke::new(1.0, theme.bubble_border))
@@ -73,12 +75,13 @@ impl ChatApp {
                             .inner_margin(egui::Margin::same(10))
                             .show(ui, |ui| {
                                 ui.take_available_width();
-                                ui.add(Self::breaking_label(
+                                super::markdown::draw_markdown(
+                                    ui,
                                     stream_buffer,
-                                    egui::FontId::proportional(13.5),
+                                    13.5,
                                     theme.text_primary,
-                                    false,
-                                ));
+                                    theme,
+                                );
                             });
                     } else if current_thinking.is_empty() {
                         // Nothing yet: pulsing typing dots in an empty bubble.
