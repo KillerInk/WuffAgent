@@ -171,11 +171,15 @@ fn draw_markdown_impl(
     cache: bool,
 ) {
     let events = parsed_events(ui.ctx(), text, cache);
-    let mut iter = events.iter().cloned();
+    // Borrow the cached events — a cursor over the shared `Vec` instead of a
+    // per-frame deep clone of the whole event vector (every clone is a heap
+    // allocation per text/code event, for every message, every frame).
+    let mut cursor = 0usize;
     let mut lists = Vec::new();
-    let mut queue = VecDeque::new();
+    let mut queue: VecDeque<&Event> = VecDeque::new();
     draw_blocks(
-        &mut iter,
+        &*events,
+        &mut cursor,
         ui,
         theme,
         size,
@@ -217,14 +221,31 @@ fn flush_job(job: &mut Option<egui::epaint::text::LayoutJob>, ui: &mut egui::Ui)
 /// (`End(Item)`) so the item's content cannot swallow sibling items and
 /// later blocks (they would be drawn inside the item's scope).
 /// `dim`: render everything in `color` with regular weight (Thinking blocks).
-fn draw_blocks<'a>(
-    events: &mut (dyn Iterator<Item = Event<'a>> + 'a),
+/// Take the next event from the borrowed parsed-event slice (cursor-based,
+/// so the shared events are never cloned per frame).
+#[inline]
+fn next_ev<'it, 'a>(
+    events: &'it [Event<'a>],
+    cursor: &mut usize,
+) -> Option<&'it Event<'a>> {
+    let i = *cursor;
+    if i < events.len() {
+        *cursor += 1;
+        Some(&events[i])
+    } else {
+        None
+    }
+}
+
+fn draw_blocks<'a, 'it>(
+    events: &'it [Event<'a>],
+    cursor: &mut usize,
     ui: &mut egui::Ui,
     theme: &Theme,
     size: f32,
     color: egui::Color32,
     lists: &mut Vec<ListInfo>,
-    queue: &mut VecDeque<Event<'a>>,
+    queue: &mut VecDeque<&'it Event<'a>>,
     in_item: bool,
     dim: bool,
 ) {
@@ -232,7 +253,10 @@ fn draw_blocks<'a>(
     let mut style = InlineStyle::default();
 
     loop {
-        let Some(event) = queue.pop_front().or_else(|| events.next()) else {
+        let Some(event) = queue
+            .pop_front()
+            .or_else(|| next_ev(events, cursor))
+        else {
             break;
         };
         match event {
@@ -244,7 +268,7 @@ fn draw_blocks<'a>(
                 Tag::Heading { level, .. } => {
                     flush_job(&mut job, ui);
                     ui.add_space(6.0);
-                    let hsize = heading_font_size(level);
+                    let hsize = heading_font_size(*level);
                     let mut hj = new_job();
                     let mut hs = InlineStyle {
                         bold: 1,
@@ -252,11 +276,11 @@ fn draw_blocks<'a>(
                     };
                     let mut done = false;
                     while !done {
-                        match queue.pop_front().or_else(|| events.next()) {
+                        match queue.pop_front().or_else(|| next_ev(events, cursor)) {
                             Some(Event::End(TagEnd::Heading(_))) | None => done = true,
                             Some(ev) => apply_inline_event(
                                 &mut hj,
-                                &ev,
+                                ev,
                                 &mut hs,
                                 hsize,
                                 theme.text_primary,
@@ -270,7 +294,7 @@ fn draw_blocks<'a>(
                 }
                 Tag::CodeBlock(kind) => {
                     flush_job(&mut job, ui);
-                    let lang = match &kind {
+                    let lang = match kind {
                         CodeBlockKind::Fenced(info) => info
                             .split_whitespace()
                             .next()
@@ -281,8 +305,8 @@ fn draw_blocks<'a>(
                     let mut buf = String::new();
                     let mut done = false;
                     while !done {
-                        match queue.pop_front().or_else(|| events.next()) {
-                            Some(Event::Text(t)) => buf.push_str(&t),
+                        match queue.pop_front().or_else(|| next_ev(events, cursor)) {
+                            Some(Event::Text(t)) => buf.push_str(t),
                             Some(Event::End(TagEnd::CodeBlock)) | None => done = true,
                             _ => {}
                         }
@@ -296,6 +320,7 @@ fn draw_blocks<'a>(
                     let inner = ui.indent(ui.id().with("md_quote"), |ui| {
                         draw_blocks(
                             events,
+                            cursor,
                             ui,
                             theme,
                             size - 0.5,
@@ -324,11 +349,23 @@ fn draw_blocks<'a>(
                         next: start.unwrap_or(1),
                     });
                 }
-                Tag::Item => draw_list_item(events, ui, theme, size, color, lists, queue, dim),
+                Tag::Item => {
+                    draw_list_item(
+                        events,
+                        cursor,
+                        ui,
+                        theme,
+                        size,
+                        color,
+                        lists,
+                        queue,
+                        dim,
+                    )
+                }
                 Tag::Table(_) => {
                     flush_job(&mut job, ui);
                     ui.add_space(4.0);
-                    render_table(events, ui, theme, size, color, queue, dim);
+                    render_table(events, cursor, ui, theme, size, color, queue, dim);
                     ui.add_space(4.0);
                 }
                 _ => {}
@@ -365,7 +402,7 @@ fn draw_blocks<'a>(
             // fresh one for stray text outside a block).
             event => {
                 let j = job.get_or_insert_with(new_job);
-                apply_inline_event(j, &event, &mut style, size, color, theme, dim);
+                apply_inline_event(j, event, &mut style, size, color, theme, dim);
             }
         }
     }
@@ -373,14 +410,15 @@ fn draw_blocks<'a>(
 }
 
 /// One list item: marker (bullet / number / task checkbox) + content.
-fn draw_list_item<'a>(
-    events: &mut (dyn Iterator<Item = Event<'a>> + 'a),
+fn draw_list_item<'a, 'it>(
+    events: &'it [Event<'a>],
+    cursor: &mut usize,
     ui: &mut egui::Ui,
     theme: &Theme,
     size: f32,
     color: egui::Color32,
     lists: &mut Vec<ListInfo>,
-    queue: &mut VecDeque<Event<'a>>,
+    queue: &mut VecDeque<&'it Event<'a>>,
     dim: bool,
 ) {
     ui.add_space(2.0);
@@ -388,16 +426,17 @@ fn draw_list_item<'a>(
     // If the item's first inline event is a TaskListMarker, pull it out so
     // the checkbox can replace the bullet.
     let mut task: Option<bool> = None;
-    if let Some(e1) = queue.pop_front().or_else(|| events.next()) {
+    if let Some(e1) = queue.pop_front().or_else(|| next_ev(events, cursor)) {
         match e1 {
-            Event::Start(Tag::Paragraph) => {
-                if let Some(e2) = queue.pop_front().or_else(|| events.next()) {
+            // Keep the borrowed event to requeue below (no clone).
+            ev @ Event::Start(Tag::Paragraph) => {
+                if let Some(e2) = queue.pop_front().or_else(|| next_ev(events, cursor)) {
                     match e2 {
-                        Event::TaskListMarker(b) => task = Some(b),
+                        Event::TaskListMarker(b) => task = Some(*b),
                         other => queue.push_front(other),
                     }
                 }
-                queue.push_front(Event::Start(Tag::Paragraph));
+                queue.push_front(ev);
             }
             other => queue.push_front(other),
         }
@@ -438,7 +477,7 @@ fn draw_list_item<'a>(
                     inner.cursor().min,
                     egui::vec2(w, VERTICAL_GROW_CAP),
                 )),
-            |v| draw_blocks(events, v, theme, size, color, lists, queue, true, dim),
+            |v| draw_blocks(events, cursor, v, theme, size, color, lists, queue, true, dim),
         );
     });
     ui.add_space(2.0);
@@ -446,13 +485,14 @@ fn draw_list_item<'a>(
 
 /// Collect a table (header + rows of inline jobs) and draw it with
 /// equal-width columns.
-fn render_table(
-    events: &mut (dyn Iterator<Item = Event<'_>> + '_),
+fn render_table<'a, 'it>(
+    events: &'it [Event<'a>],
+    cursor: &mut usize,
     ui: &mut egui::Ui,
     theme: &Theme,
     size: f32,
     color: egui::Color32,
-    queue: &mut VecDeque<Event<'_>>,
+    queue: &mut VecDeque<&'it Event<'a>>,
     dim: bool,
 ) {
     let mut header: Vec<egui::epaint::text::LayoutJob> = Vec::new();
@@ -463,7 +503,10 @@ fn render_table(
     let mut cell_style = InlineStyle::default();
 
     loop {
-        let Some(ev) = queue.pop_front().or_else(|| events.next()) else {
+        let Some(ev) = queue
+            .pop_front()
+            .or_else(|| next_ev(events, cursor))
+        else {
             break;
         };
         match ev {
@@ -501,7 +544,7 @@ fn render_table(
             Event::End(TagEnd::Table) => break,
             ev => {
                 if let Some(c) = cell.as_mut() {
-                    apply_inline_event(c, &ev, &mut cell_style, size, color, theme, dim);
+                    apply_inline_event(c, ev, &mut cell_style, size, color, theme, dim);
                 }
             }
         }

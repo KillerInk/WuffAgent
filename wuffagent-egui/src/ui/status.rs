@@ -102,21 +102,23 @@ impl ChatApp {
             // Tools executing right now (live cards are in the chat area; this
             // keeps them visible even when scrolled out of view).
             if !chat.active_tools.is_empty() {
-                let names: Vec<&str> = chat
-                    .active_tools
-                    .iter()
-                    .map(|t| t.tool_name.as_str())
-                    .collect();
-                ui.label(
+                let count = chat.active_tools.len();
+                let tools_resp = ui.label(
                     egui::RichText::new(format!(
-                        "🔧 {} tool{} running",
-                        names.len(),
-                        if names.len() == 1 { "" } else { "s" }
+                        "🔧 {count} tool{} running",
+                        if count == 1 { "" } else { "s" }
                     ))
                     .color(theme.accent)
                     .size(11.0),
-                )
-                .on_hover_text(names.join("\n"));
+                );
+                if tools_resp.hovered() {
+                    let names: Vec<&str> = chat
+                        .active_tools
+                        .iter()
+                        .map(|t| t.tool_name.as_str())
+                        .collect();
+                    tools_resp.on_hover_text(names.join("\n"));
+                }
             }
 
             ui.separator();
@@ -126,38 +128,35 @@ impl ChatApp {
                     .size(11.0),
             );
 
-            // Memory count indicator with a tooltip listing project + threshold.
+            // Memory count indicator (tooltip + config clone only while hovered).
             let mem_count = self.core.memory_manager.count();
-            let mconfig = self.core.memory_manager.config();
-            ui.label(
+            let mem_resp = ui.label(
                 egui::RichText::new(format!("🧠 {}", mem_count))
                     .color(theme.text_secondary)
                     .size(11.0),
-            )
-            .on_hover_text(format!(
-                "{} active memories (project '{}', max {})\nMaintenance: {}",
-                mem_count,
-                mconfig.project,
-                mconfig.max_entries,
-                if mconfig.memory_maintenance {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            ));
+            );
+            if mem_resp.hovered() {
+                let mconfig = self.core.memory_manager.config();
+                mem_resp.on_hover_text(format!(
+                    "{} active memories (project '{}', max {})\nMaintenance: {}",
+                    mem_count,
+                    mconfig.project,
+                    mconfig.max_entries,
+                    if mconfig.memory_maintenance {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                ));
+            }
 
-            // MCP indicator: connected / total servers.
-            let mcp_servers = self.core.mcp_manager.snapshot();
-            if !mcp_servers.is_empty() {
-                let (connected, total) = self.core.mcp_manager.connected_counts();
-                let detail: Vec<String> = mcp_servers
-                    .iter()
-                    .map(|s| {
-                        let tool_count = s.tools.iter().filter(|t| t.enabled).count();
-                        format!("{}: {:?} ({} enabled tools)", s.name, s.status, tool_count)
-                    })
-                    .collect();
-                ui.label(
+            // MCP indicator: connected / total servers. The label only needs
+            // the counts (cheap — no cloning); the full snapshot (every tool
+            // name + description of every server) is cloned only while the
+            // pill is hovered (tooltip).
+            let (connected, total) = self.core.mcp_manager.connected_counts();
+            if total > 0 {
+                let mcp_resp = ui.label(
                     egui::RichText::new(format!("MCP {connected}/{total}"))
                         .color(if connected == total {
                             theme.success
@@ -167,8 +166,20 @@ impl ChatApp {
                             theme.warning
                         })
                         .size(11.0),
-                )
-                .on_hover_text(detail.join("\n"));
+                );
+                if mcp_resp.hovered() {
+                    let detail: Vec<String> = self
+                        .core
+                        .mcp_manager
+                        .snapshot()
+                        .iter()
+                        .map(|s| {
+                            let tool_count = s.tools.iter().filter(|t| t.enabled).count();
+                            format!("{}: {:?} ({} enabled tools)", s.name, s.status, tool_count)
+                        })
+                        .collect();
+                    mcp_resp.on_hover_text(detail.join("\n"));
+                }
             }
 
             // Server status (llama.cpp): slot utilization + context window
@@ -179,19 +190,21 @@ impl ChatApp {
             // (the alert the user needs — no separate toast system).
             let guard = self.core.server_status.lock().ok();
             if let Some(info) = guard.as_ref().filter(|i| !i.reachable) {
-                let mut tooltip = format!(
-                    "llama.cpp server DOWN (was at {})",
-                    info.base_url
-                );
-                if let Some(model) = &info.model {
-                    tooltip.push_str(&format!("\nLast known model: {model}"));
-                }
-                ui.label(
+                let down_resp = ui.label(
                     egui::RichText::new("⚙ server down")
                         .color(theme.error)
                         .size(11.0),
-                )
-                .on_hover_text(tooltip);
+                );
+                if down_resp.hovered() {
+                    let mut tooltip = format!(
+                        "llama.cpp server DOWN (was at {})",
+                        info.base_url
+                    );
+                    if let Some(model) = &info.model {
+                        tooltip.push_str(&format!("\nLast known model: {model}"));
+                    }
+                    down_resp.on_hover_text(tooltip);
+                }
             } else if let Some(info) = guard.as_ref().filter(|i| i.reachable) {
                 let (busy, total) = info.busy_slots();
                 let mut parts = Vec::new();
@@ -217,35 +230,7 @@ impl ChatApp {
                     }
                 }
                 if !parts.is_empty() {
-                    let mut tooltip = format!(
-                        "llama.cpp server status (live, 3s polls)\n\nSlots: {busy}/{total} busy"
-                    );
-                    if let Some(model) = &info.model {
-                        tooltip.push_str(&format!("\nModel: {model}"));
-                    }
-                    if let (Some(n_ctx), Some(train)) = (info.n_ctx, info.n_ctx_train) {
-                        tooltip.push_str(&format!(
-                            "\nContext: {n_ctx} configured / {train} trained"
-                        ));
-                    }
-                    if let Some(m) = &info.metrics {
-                        tooltip.push_str("\n\nServer metrics (--metrics):");
-                        if let Some(tps) = m.prompt_tps {
-                            tooltip.push_str(&format!("\nPrompt: {tps:.1} tok/s"));
-                        }
-                        if let Some(tps) = m.predicted_tps {
-                            tooltip.push_str(&format!("\nGeneration: {tps:.1} tok/s"));
-                        }
-                        if let Some(r) = m.requests_processing {
-                            tooltip.push_str(&format!("\nRequests processing: {r}"));
-                        }
-                        if let Some(n) = m.n_tokens_max {
-                            tooltip.push_str(&format!("\nLargest sequence observed: {n} tokens"));
-                        }
-                    } else {
-                        tooltip.push_str("\n(Metrics hidden — start the server with --metrics / config `metrics: true`)");
-                    }
-                    ui.label(
+                    let pill_resp = ui.label(
                         egui::RichText::new(format!("⚙ {}", parts.join(" · ")))
                             .color(if busy > 0 {
                                 theme.accent
@@ -253,8 +238,38 @@ impl ChatApp {
                                 theme.text_secondary
                             })
                             .size(11.0),
-                    )
-                    .on_hover_text(tooltip);
+                    );
+                    if pill_resp.hovered() {
+                        let mut tooltip = format!(
+                            "llama.cpp server status (live, 3s polls)\n\nSlots: {busy}/{total} busy"
+                        );
+                        if let Some(model) = &info.model {
+                            tooltip.push_str(&format!("\nModel: {model}"));
+                        }
+                        if let (Some(n_ctx), Some(train)) = (info.n_ctx, info.n_ctx_train) {
+                            tooltip.push_str(&format!(
+                                "\nContext: {n_ctx} configured / {train} trained"
+                            ));
+                        }
+                        if let Some(m) = &info.metrics {
+                            tooltip.push_str("\n\nServer metrics (--metrics):");
+                            if let Some(tps) = m.prompt_tps {
+                                tooltip.push_str(&format!("\nPrompt: {tps:.1} tok/s"));
+                            }
+                            if let Some(tps) = m.predicted_tps {
+                                tooltip.push_str(&format!("\nGeneration: {tps:.1} tok/s"));
+                            }
+                            if let Some(r) = m.requests_processing {
+                                tooltip.push_str(&format!("\nRequests processing: {r}"));
+                            }
+                            if let Some(n) = m.n_tokens_max {
+                                tooltip.push_str(&format!("\nLargest sequence observed: {n} tokens"));
+                            }
+                        } else {
+                            tooltip.push_str("\n(Metrics hidden — start the server with --metrics / config `metrics: true`)");
+                        }
+                        pill_resp.on_hover_text(tooltip);
+                    }
                 }
             }
         });
@@ -296,20 +311,25 @@ impl ChatApp {
              
             // Token count pill (counts up live while generating; snaps to the
             // server-reported total when a round completes)
-            ui.add(egui::Label::new(
-                egui::RichText::new(format!("Tokens: {}", chat.token_count))
-                    .color(theme.text_secondary)
-                    .size(11.0)
-            ).wrap())
-            .on_hover_text(format!(
-                "Total context tokens for this chat (prompt + all messages)\n\
-                 Counts up live while generating (estimated ~3.5 chars/token);\n\
-                 snaps to the server-reported total when a round completes.\n\
-                 Use \u{21e9} to reset the context\n\n\
-                 Context window: {} tokens\nUsage: {:.1}%",
-                n_ctx,
-                chat.context_used
-            ));
+            let tokens_resp = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("Tokens: {}", chat.token_count))
+                        .color(theme.text_secondary)
+                        .size(11.0),
+                )
+                .wrap(),
+            );
+            if tokens_resp.hovered() {
+                tokens_resp.on_hover_text(format!(
+                    "Total context tokens for this chat (prompt + all messages)\n\
+                     Counts up live while generating (estimated ~3.5 chars/token);\n\
+                     snaps to the server-reported total when a round completes.\n\
+                     Use \u{21e9} to reset the context\n\n\
+                     Context window: {} tokens\nUsage: {:.1}%",
+                    n_ctx,
+                    chat.context_used
+                ));
+            }
              
             // Context usage pill with color coding
             let context_color = if chat.context_used > 80.0 {
@@ -338,15 +358,20 @@ impl ChatApp {
                 } else {
                     100.0
                 };
-                ui.add(egui::Label::new(
-                    egui::RichText::new(format!("PP {:.0}% ({}/{})", pct, done_new, total_new))
-                        .color(egui::Color32::from_rgb(255, 176, 64))
-                        .size(11.0)
-                ).wrap())
-                .on_hover_text(format!(
-                    "Prompt processing progress (llama.cpp)\n{}/{} uncached tokens processed ({} cached, {} total)\nSpeed in the PP t/s readout beside it",
-                    done_new, total_new, pp.cache, pp.total
-                ));
+                let pp_resp = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("PP {:.0}% ({}/{})", pct, done_new, total_new))
+                            .color(egui::Color32::from_rgb(255, 176, 64))
+                            .size(11.0),
+                    )
+                    .wrap(),
+                );
+                if pp_resp.hovered() {
+                    pp_resp.on_hover_text(format!(
+                        "Prompt processing progress (llama.cpp)\n{}/{} uncached tokens processed ({} cached, {} total)\nSpeed in the PP t/s readout beside it",
+                        done_new, total_new, pp.cache, pp.total
+                    ));
+                }
             }
 
             // llama.cpp speeds: shown only while a run is in progress (the
@@ -362,12 +387,17 @@ impl ChatApp {
                     speeds.push(format!("TG {:.1} t/s", tg));
                 }
                 if !speeds.is_empty() {
-                    ui.add(egui::Label::new(
-                        egui::RichText::new(speeds.join(" · ")).color(theme.accent).size(11.0)
-                    ).wrap())
-                    .on_hover_text(
-                        "PP = prompt processing (tokens/s) — live from llama.cpp `prompt_progress`\nwhile the prompt is processed (non-cached tokens), final server value on complete\nTG = token generation (tokens/s) — live estimate while generating,\nserver-reported value once a round completes (llama.cpp backends)"
+                    let speeds_resp = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(speeds.join(" · ")).color(theme.accent).size(11.0),
+                        )
+                        .wrap(),
                     );
+                    if speeds_resp.hovered() {
+                        speeds_resp.on_hover_text(
+                            "PP = prompt processing (tokens/s) — live from llama.cpp `prompt_progress`\nwhile the prompt is processed (non-cached tokens), final server value on complete\nTG = token generation (tokens/s) — live estimate while generating,\nserver-reported value once a round completes (llama.cpp backends)"
+                        );
+                    }
                 }
             }
 
@@ -382,15 +412,22 @@ impl ChatApp {
                 } else {
                     theme.text_dim
                 };
-                ui.add(egui::Label::new(
-                    egui::RichText::new(format!("KV {:.0}%", c.hit_rate)).color(kv_color).size(11.0)
-                ).wrap())
-                .on_hover_text(format!(
-                    "KV cache hit rate of the last completed round (llama.cpp)\n{cached} cached / {new} new prompt tokens ({rate:.0}% cached)\nCached prompt tokens are processed nearly for free;\nlow hit rate on every round usually means a context trim\njust happened (the prefix changed).\n\nSpeeds: see PP/TG readouts while generating.",
-                    cached = c.cached,
-                    new = c.new,
-                    rate = c.hit_rate
-                ));
+                let kv_resp = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("KV {:.0}%", c.hit_rate))
+                            .color(kv_color)
+                            .size(11.0),
+                    )
+                    .wrap(),
+                );
+                if kv_resp.hovered() {
+                    kv_resp.on_hover_text(format!(
+                        "KV cache hit rate of the last completed round (llama.cpp)\n{cached} cached / {new} new prompt tokens ({rate:.0}% cached)\nCached prompt tokens are processed nearly for free;\nlow hit rate on every round usually means a context trim\njust happened (the prefix changed).\n\nSpeeds: see PP/TG readouts while generating.",
+                        cached = c.cached,
+                        new = c.new,
+                        rate = c.hit_rate
+                    ));
+                }
             }
 
             ui.separator();

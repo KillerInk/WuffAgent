@@ -30,6 +30,23 @@ pub struct SessionsPanel {
     export_path: String,
     /// Path for import (set when user clicks Import).
     import_path: String,
+    /// Per-frame row-label cache: session id -> cache entry. The label's
+    /// content inputs (message list, updated_at) only change via `refresh()`,
+    /// which clears the cache, so a steady-state frame skips the reverse
+    /// message scan, the last-message content clone, and the relative-time
+    /// formatting per row. `minute_bucket` keeps the relative timestamp
+    /// fresh (relative_time has 1-minute granularity).
+    row_label_cache: std::collections::HashMap<String, RowLabelCacheEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct RowLabelCacheEntry {
+    is_generating: bool,
+    is_renaming: bool,
+    is_selected: bool,
+    /// Current wall-clock minute (relative_time has 1-minute granularity).
+    minute_bucket: i64,
+    label: String,
 }
 
 impl SessionsPanel {
@@ -55,11 +72,13 @@ impl SessionsPanel {
             notification_start: 0.0,
             export_path: String::new(),
             import_path: String::new(),
+            row_label_cache: std::collections::HashMap::new(),
         }
     }
 
     pub fn refresh(&mut self) {
         self.sessions = sessions::list_sessions(&self.sessions_dir);
+        self.row_label_cache.clear();
     }
 
     /// Clear the selected session (used after deletion).
@@ -126,15 +145,15 @@ impl SessionsPanel {
             .unwrap_or(false)
     }
 
-    /// Render the session button with metadata: name, message count,
-    /// last message preview, and relative timestamp.
-    fn draw_session_item(
-        ui: &mut egui::Ui,
+    /// Compute a session row's display label (name, message count,
+    /// last message preview, relative timestamp). This is the expensive
+    /// part (reverse message scan + last-message clone + time formatting),
+    /// so it runs only on cache miss — see `row_label_cache`.
+    fn compute_session_label(
         session: &wuffagent_core::sessions::Session,
-        is_selected: bool,
         is_renaming: bool,
         is_generating: bool,
-    ) -> egui::Response {
+    ) -> String {
         let count = session.messages.len();
         let count_text = if count == 1 {
             "1 message".to_string()
@@ -165,12 +184,21 @@ impl SessionsPanel {
             )
         };
 
-        let display_label = if is_renaming {
+        if is_renaming {
             format!("{}\n🔄 rename", label)
         } else {
             label
-        };
+        }
+    }
 
+    /// Render the session button from a precomputed label (the cache in
+    /// `row_label_cache` keeps it fresh; see `compute_session_label`).
+    fn draw_session_item(
+        ui: &mut egui::Ui,
+        display_label: &str,
+        is_selected: bool,
+        is_renaming: bool,
+    ) -> egui::Response {
         let response = ui.add(
             egui::Button::new(display_label)
                 .fill(if is_selected || is_renaming {
@@ -362,6 +390,9 @@ impl SessionsPanel {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
 
+                // Coarse wall-clock minute: part of the row-label cache key
+                // so relative timestamps ("5 min ago") keep advancing.
+                let minute_bucket = chrono::Utc::now().timestamp_millis() / 60_000;
                 // Collect actions to avoid borrowing self inside the loop
                 for session in &self.sessions {
                     let is_renaming = Some(&session.id) == self.renaming.as_ref();
@@ -387,7 +418,37 @@ impl SessionsPanel {
                     }
 
                     let is_selected = Some(&session.id) == self.selected_id.as_ref();
-                    let response = Self::draw_session_item(ui, session, is_selected, is_renaming, is_generating);
+                    // Row-label cache: the label's content inputs (message
+                    // list, updated_at) only change via refresh() (which
+                    // clears the cache), so per frame we only check the UI
+                    // flags + wall-clock minute before reusing the label.
+                    let display_label: String = if self
+                        .row_label_cache
+                        .get(&session.id)
+                        .is_some_and(|e| {
+                            e.is_generating == is_generating
+                                && e.is_renaming == is_renaming
+                                && e.is_selected == is_selected
+                                && e.minute_bucket == minute_bucket
+                        }) {
+                        self.row_label_cache[&session.id].label.clone()
+                    } else {
+                        let fresh =
+                            Self::compute_session_label(session, is_renaming, is_generating);
+                        self.row_label_cache.insert(
+                            session.id.clone(),
+                            RowLabelCacheEntry {
+                                is_generating,
+                                is_renaming,
+                                is_selected,
+                                minute_bucket,
+                                label: fresh.clone(),
+                            },
+                        );
+                        fresh
+                    };
+                    let response =
+                        Self::draw_session_item(ui, &display_label, is_selected, is_renaming);
 
                     if response.clicked() {
                         selected_id = Some(session.id.clone());
