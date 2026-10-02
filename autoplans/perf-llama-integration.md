@@ -56,14 +56,14 @@ Deferred (measured as negligible):
 - Duplicated `test_parse_progress` in `server/tests.rs` and
   `server/progress/tests.rs` — cosmetic.
 
-## Implementation (this session)
+## Implementation (this session) — DONE (commit 88a649f)
 
-- [ ] Plan file committed
-- [ ] status.rs: client reuse (P1) + single /props parse (P5)
-- [ ] mod.rs: drain pipes at spawn (P2) + wait_for_ready client (P1) + remove monitor_output
-- [ ] sse.rs: single delta bind (P3) + model gate (P4)
-- [ ] `cargo test -p wuffagent-core` + `cargo build` (egui) green
-- [ ] Commit
+- [x] Plan file committed
+- [x] status.rs: client reuse (P1) + single /props parse (P5)
+- [x] mod.rs: drain pipes at spawn (P2) + wait_for_ready client (P1) + remove monitor_output
+- [x] sse.rs: single delta bind (P3) + model gate (P4)
+- [x] `cargo test -p wuffagent-core` (887+2+1 ok, exit 0) + `cargo check --workspace --all-targets` (exit 0)
+- [x] Commit 88a649f
 
 ## Verification
 
