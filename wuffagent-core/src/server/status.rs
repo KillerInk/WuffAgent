@@ -112,39 +112,35 @@ pub async fn poll_server_status(
         ..Default::default()
     };
 
-    // 0. GET /health — liveness probe (200 or 503 both mean the process is
-    // up; `/slots`/`/props` may be unavailable on some builds/configs).
-    {
-        let mut builder = http_client.get(format!("{}/health", base_url));
-        if let Some(ref key) = api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
-        }
-        if let Ok(resp) = builder.send().await {
-            if matches!(resp.status().as_u16(), 200 | 503) {
-                status.reachable = true;
-            }
-            // Drain the body so the connection can be pooled.
-            let _ = resp.text().await;
-        }
-    }
-
-    // 1. GET /slots + /props + /metrics — fired in PARALLEL (perf follow-up:
-    // sequential awaits added up to 3× the single-request latency per poll;
-    // with the shared client's 5 s request timeout a slow poll could
-    // otherwise take ~15 s). /metrics is always requested (the endpoint
-    // 501s when the server was not started with --metrics) and its body is
-    // only parsed when metrics are enabled.
+    // GET /health + /slots + /props + /metrics — all four fired in PARALLEL
+    // (perf follow-up: sequential awaits added up to 4× the single-request
+    // latency per poll; with the shared client's 5 s request timeout a slow
+    // poll could otherwise take ~20 s). /health is the liveness probe (200
+    // or 503 both mean the process is up; `/slots`/`/props` may be
+    // unavailable on some builds/configs). /metrics is always requested
+    // (the endpoint 501s when the server was not started with --metrics)
+    // and its body is only parsed when metrics are enabled.
     let auth = |b: reqwest::RequestBuilder| -> reqwest::RequestBuilder {
         match api_key {
             Some(key) => b.header("Authorization", format!("Bearer {}", key)),
             None => b,
         }
     };
-    let (slots_res, props_res, metrics_res) = futures::join!(
+    let (health_res, slots_res, props_res, metrics_res) = futures::join!(
+        auth(http_client.get(format!("{}/health", base_url))).send(),
         auth(http_client.get(format!("{}/slots", base_url))).send(),
         auth(http_client.get(format!("{}/props", base_url))).send(),
         auth(http_client.get(format!("{}/metrics", base_url))).send(),
     );
+
+    // /health — liveness probe.
+    if let Ok(resp) = health_res {
+        if matches!(resp.status().as_u16(), 200 | 503) {
+            status.reachable = true;
+        }
+        // Drain the body so the connection can be pooled.
+        let _ = resp.text().await;
+    }
 
     // /slots — per-slot state.
     if let Ok(resp) = slots_res {

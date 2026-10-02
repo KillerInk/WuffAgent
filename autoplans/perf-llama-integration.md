@@ -48,13 +48,31 @@ Issues, by impact:
    once, reuse.
 
 Deferred (measured as negligible):
-- `poll_server_status` runs its 4 GETs sequentially (~2 ms saved every 3 s
-  if parallelized via `futures::join!`). Skip unless the poll interval drops.
+- ~~`poll_server_status` runs its GETs sequentially~~ — **done** (`03544a7`):
+  `/slots`, `/props`, `/metrics` now fire concurrently via `futures::join!`
+  (worst-case poll latency was 3× the 5 s request timeout, now 1×; `/metrics`
+  is requested unconditionally and only parsed when enabled).
 - `String::from_utf8_lossy(&bytes)` in the SSE reader: keep, but only if it
   doesn't clone (verify at build; switch to `str::from_utf8_lossy` if it
   allocates on valid UTF-8).
-- Duplicated `test_parse_progress` in `server/tests.rs` and
-  `server/progress/tests.rs` — cosmetic.
+- ~~Duplicated `test_parse_progress`~~ — **done** (`03544a7`): removed the
+  `server/tests.rs` copy; the one next to the function in
+  `server/progress/tests.rs` is kept.
+
+## Follow-up audit (memory manager + MCP dispatch) — clean, no changes
+
+- `tools/mcp/transport_stdio.rs`: stderr drained, no guard held across await,
+  per-response double parse is per-tool-call (negligible). Solid.
+- `tools/mcp/transport_http.rs` / `client.rs` / `tool.rs`: client built once
+  per transport; per-call cost = spawn + oneshot + one JSON-RPC round-trip
+  (intrinsic); `McpTool::execute` bridges the sync trait via the MCP runtime
+  correctly. Clean.
+- `memory/search.rs`: already optimized by the earlier pass (query prepared
+  once; in-memory scoring, no per-call I/O). Per-entry tokenize/freq-map is
+  sub-ms for realistic store sizes and runs per search call, not per token.
+- `wuffagent-egui/ui/status.rs` per-frame path: small struct reads + two
+  `format!`s. No issue.
+=======
 
 ## Implementation (this session) — DONE (commit 88a649f)
 
