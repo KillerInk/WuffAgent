@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 mod progress;
 pub use progress::parse_progress;
+pub mod status;
 
 pub struct ServerManager {
     server_path: String,
@@ -18,6 +19,10 @@ pub struct ServerManager {
     process: Arc<Mutex<Option<tokio::process::Child>>>,
     running: Arc<std::sync::atomic::AtomicBool>,
     error: Arc<std::sync::Mutex<Option<String>>>,
+    /// Whether the server status monitor is active.
+    monitor_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Handle to the server status monitor task (so we can await it on shutdown).
+    monitor_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +53,8 @@ impl ServerManager {
             process: Arc::new(Mutex::new(None)),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             error: Arc::new(std::sync::Mutex::new(None)),
+            monitor_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            monitor_handle: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -64,6 +71,8 @@ impl ServerManager {
             process: Arc::new(Mutex::new(None)),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             error: Arc::new(std::sync::Mutex::new(None)),
+            monitor_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            monitor_handle: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -77,6 +86,42 @@ impl ServerManager {
             self.threads,
         )
         .await
+    }
+
+    /// Start the server status monitor (polls `/slots` + `/props` every 3s).
+    ///
+    /// Must be called AFTER the server is ready (i.e. after `wait_for_ready`).
+    /// The monitor emits `AppEvent::ServerStatus` snapshots via `event_tx`.
+    /// Safe to call multiple times — replaces any existing monitor.
+    pub fn start_status_monitor(
+        &self,
+        base_url: &str,
+        api_key: Option<&str>,
+        event_tx: std::sync::mpsc::Sender<crate::types::AppEvent>,
+    ) {
+        // Stop any existing monitor first.
+        let _ = tokio::runtime::Handle::current().block_on(self.stop_status_monitor());
+        self.monitor_active
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let base_url = base_url.to_string();
+        let api_key = api_key.map(|s| s.to_string());
+        let active = self.monitor_active.clone();
+
+        let handle = status::spawn_server_monitor(base_url, api_key, event_tx, active);
+
+        *self.monitor_handle.lock().unwrap() = Some(handle);
+    }
+
+    /// Stop the server status monitor.
+    pub async fn stop_status_monitor(&self) {
+        self.monitor_active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut guard) = self.monitor_handle.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.await;
+            }
+        }
     }
 
     pub async fn start_server_with_paths(
@@ -178,6 +223,11 @@ impl ServerManager {
     /// Returns the actual threads value this server was started with.
     pub fn get_threads(&self) -> u32 {
         self.threads
+    }
+
+    /// Returns the base URL for this server (e.g. `http://127.0.0.1:8080`).
+    pub fn get_base_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
     }
 
     pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), Error> {

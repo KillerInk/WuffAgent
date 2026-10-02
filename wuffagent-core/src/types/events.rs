@@ -180,4 +180,10 @@ pub enum AppEvent {
         message: Box<QueuedMessage>,
         session_id: String,
     },
+    /// Periodic server status snapshot (slot occupancy, context window,
+    /// model name). Emitted by `ServerMonitor` (~every 3s when the server
+    /// is running). No `session_id`: server status is global.
+    ServerStatus {
+        status: crate::types::ServerStatusInfo,
+    },
 }

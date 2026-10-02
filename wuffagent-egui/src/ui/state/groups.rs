@@ -48,6 +48,10 @@ pub struct CoreServices {
     /// Its own `shutdown()` (called in `Drop`) disconnects all servers and
     /// drops that runtime on a plain thread.
     pub mcp_manager: Arc<wuffagent_core::tools::mcp::McpManager>,
+    /// Latest server status snapshot (populated by the server status monitor
+    /// via `AppEvent::ServerStatus`). Read by the UI each frame for the server
+    /// status indicator in the status bar.
+    pub server_status: Arc<Mutex<wuffagent_core::types::ServerStatusInfo>>,
 }
 
 /// Per-session runtime state + session selection + chat-input staging.

@@ -106,6 +106,7 @@ impl ChatApp {
         mcp_manager: Arc<wuffagent_core::tools::mcp::McpManager>,
         auto_resume_reason: Option<String>,
         auto_resume_failed: Option<(String, String)>,
+        server_status: Arc<Mutex<wuffagent_core::types::ServerStatusInfo>>,
     ) -> Self {
         // Build the sessions sidebar widget, pre-selecting the active session.
         let mut panel =
@@ -125,6 +126,7 @@ impl ChatApp {
                 memory_manager,
                 memory_runtime: RuntimeOnThread::new(memory_runtime),
                 mcp_manager,
+                server_status,
             },
             sessions: groups::SessionState {
                 session_store,

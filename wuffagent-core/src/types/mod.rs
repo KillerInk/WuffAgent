@@ -25,7 +25,7 @@ pub use policy::{
 pub use activity::{ActivityPhase, LlmActivityInfo};
 pub use reasoning::{ReasoningEffort, ReasoningMode};
 pub use timestamp::{format_timestamp, timestamp_day, timestamp_time};
-pub use usage::{LlamaTimings, PromptProgress, Usage};
+pub use usage::{LlamaTimings, PromptProgress, ServerStatusInfo, SlotInfo, Usage};
 
 #[cfg(test)]
 mod tests;

@@ -48,6 +48,8 @@ impl ChatApp {
             // Status bar: LLM-activity snapshot — not session-bound (it is a
             // global view of everything running).
             AppEvent::LlmActivity { .. } => String::new(),
+            // Server status monitor — not session-bound (global server state).
+            AppEvent::ServerStatus { .. } => String::new(),
         };
         match event {
             // Stream lifecycle arms: see `stream.rs`.
@@ -308,6 +310,13 @@ impl ChatApp {
             // means nothing is running anymore).
             AppEvent::LlmActivity { activities } => {
                 self.display.llm_activities = activities;
+            }
+            // Server status monitor: update the shared server status snapshot
+            // (the UI reads this each frame for the server status indicator).
+            AppEvent::ServerStatus { status } => {
+                if let Ok(mut guard) = self.core.server_status.lock() {
+                    *guard = status;
+                }
             }
             AppEvent::McpConfigChanged { .. } => {
                 // An MCP management tool rewrote config.json's mcp_servers

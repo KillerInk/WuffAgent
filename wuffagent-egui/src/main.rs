@@ -108,6 +108,7 @@ async fn main() -> eframe::Result {
                 mcp_manager,
                 event_tx,
                 event_rx,
+                server_status,
             } = ctx;
             Ok(Box::new(ui::state::ChatApp::new(
                 config,
@@ -124,6 +125,7 @@ async fn main() -> eframe::Result {
                 mcp_manager,
                 auto_resume_reason,
                 auto_resume_failed,
+                server_status,
             )))
         }),
     )

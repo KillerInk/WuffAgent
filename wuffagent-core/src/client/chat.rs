@@ -352,6 +352,67 @@ impl ChatClient {
         Ok((msg, usage))
     }
 
+    // ── Token counting ────────────────────────────────────────────────────────
+
+    /// Count the exact token count of a chat-completion request using the
+    /// llama.cpp `POST /v1/chat/completions/input_tokens` endpoint.
+    ///
+    /// This is a server-side count using the actual model tokenizer — far
+    /// more accurate than the client-side char-count estimate
+    /// (`message_char_count / chars_per_token`). Used by the trimming path
+    /// to decide whether the context window is about to be exceeded, so the
+    /// `exceed_context_size_error` retry is a backstop rather than the
+    /// primary path.
+    ///
+    /// Returns `None` when the server doesn't support the endpoint (older
+    /// llama.cpp builds) — the caller falls back to the char-count estimate.
+    pub async fn count_tokens(
+        &self,
+        messages: &[Message],
+        tools: Option<&[crate::tools::ToolDefinition]>,
+    ) -> Option<usize> {
+        let (reasoning_effort, chat_template_kwargs) =
+            http::reasoning_wire(self.reasoning_effort());
+        let request = http::ChatRequestRef {
+            model: "local",
+            messages,
+            stream: false,
+            tools,
+            reasoning_effort: reasoning_effort.as_deref(),
+            chat_template_kwargs,
+            stream_options: None,
+            return_progress: None,
+        };
+        let body = request.to_json().ok()?;
+
+        let mut builder = self
+            .http_client
+            .post(format!("{}/v1/chat/completions/input_tokens", self.url()))
+            .header("Content-Type", "application/json")
+            .body(body);
+        if let Some(ref key) = self.settings.api_key() {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let resp = builder.send().await.ok()?;
+        if !resp.status().is_success() {
+            // Endpoint not supported (404/501) or other error — fall back
+            // to the char-count estimate at the call site.
+            tracing::debug!(
+                "count_tokens: server returned {}; falling back to estimate",
+                resp.status()
+            );
+            return None;
+        }
+
+        let text = resp.text().await.ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
+        // llama.cpp returns the count as a bare JSON number
+        // (e.g. `1234`), not an object.
+        let tokens = parsed.as_u64()? as usize;
+        Some(tokens)
+    }
+
     // ── Tool call helpers ─────────────────────────────────────────────────────
 
     /// Check for malformed tool calls in the conversation and return warnings.

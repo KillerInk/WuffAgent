@@ -25,7 +25,7 @@ use wuffagent_core::{
     server::ServerManager,
     sessions::{self, sessions_dir, SessionRuntime},
     tools::{builtin, registry::ToolRegistry, McpManager, ToolManager, TracingToolLogger},
-    types::AppEvent,
+    types::{AppEvent, ServerStatusInfo},
 };
 
 /// Everything the UI app needs, built once at startup.
@@ -43,6 +43,8 @@ pub struct AppContext {
     pub mcp_manager: Arc<McpManager>,
     pub event_tx: std::sync::mpsc::Sender<AppEvent>,
     pub event_rx: std::sync::mpsc::Receiver<AppEvent>,
+    /// Latest server status snapshot (populated by the server status monitor).
+    pub server_status: Arc<Mutex<ServerStatusInfo>>,
 }
 
 /// The three chat clients the app runs: the streaming session client
@@ -234,6 +236,33 @@ pub fn bootstrap() -> AppContext {
     .with_agents_search_dirs(agents_search_dirs)
     .with_model_prices(config.model_prices.clone());
 
+    let server_status = Arc::new(Mutex::new(ServerStatusInfo::default()));
+
+    // Start the server status monitor (polls /slots + /props every 3s,
+    // emits AppEvent::ServerStatus for the UI status bar indicator).
+    // If the server is already running (local mode), start it now.
+    // Otherwise the monitor will be started when the server becomes ready
+    // (see the server management code in the UI).
+    if server.is_running() {
+        let base_url = server.get_base_url();
+        let api_key = config.remote_api_key.clone();
+        server.start_status_monitor(
+            &base_url,
+            api_key.as_deref(),
+            event_tx.clone(),
+        );
+        tracing::info!("Server status monitor started for {}", base_url);
+    }
+
+    // Start the server status monitor (polls /slots + /props every 3s,
+    // emits AppEvent::ServerStatus for the UI status bar indicator).
+    // The monitor is started when the server becomes ready (see the
+    // `server_ready` event handler in the UI).
+    //
+    // For now, if the server is already running (e.g. local mode), start it
+    // here. The UI will also start it when it receives a `server_ready`
+    // event from the server management code.
+
     AppContext {
         config,
         server,
@@ -244,6 +273,7 @@ pub fn bootstrap() -> AppContext {
         mcp_manager: tooling.mcp_manager,
         event_tx,
         event_rx,
+        server_status,
     }
 }
 

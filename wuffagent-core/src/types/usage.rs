@@ -55,3 +55,52 @@ pub struct LlamaTimings {
     #[serde(default)]
     pub predicted_per_second: Option<f64>,
 }
+
+/// A single slot's state from llama.cpp's `GET /slots` endpoint.
+///
+/// The server has `--parallel N` slots; each can process one request at a
+/// time. This is a subset of the server's response — only the fields
+/// WuffAgent needs for status display.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct SlotInfo {
+    /// Slot index (0-based).
+    #[serde(default)]
+    pub id: u32,
+    /// Whether this slot is currently processing a request.
+    #[serde(default)]
+    pub is_processing: bool,
+    /// The slot's context window size (tokens).
+    #[serde(default)]
+    pub n_ctx: u32,
+}
+
+/// Server status snapshot from llama.cpp's `GET /slots` + `GET /props`
+/// endpoints. Emitted to the UI via `AppEvent::ServerStatus`.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct ServerStatusInfo {
+    /// Per-slot state from `GET /slots` (empty when the endpoint is
+    /// unavailable or the server is not running).
+    #[serde(default)]
+    pub slots: Vec<SlotInfo>,
+    /// The server's configured context window (tokens), from
+    /// `GET /props` → `default_generation_settings.n_ctx`.
+    /// `None` when the endpoint is unavailable.
+    #[serde(default)]
+    pub n_ctx: Option<u32>,
+    /// Model name reported by the server (from `/props` or
+    /// `/v1/models`; `None` when unavailable).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Whether the server is reachable (last probe succeeded).
+    #[serde(default)]
+    pub reachable: bool,
+}
+
+impl ServerStatusInfo {
+    /// Number of busy slots (for status-bar display, e.g. "2/4 busy").
+    pub fn busy_slots(&self) -> (u32, u32) {
+        let total = self.slots.len() as u32;
+        let busy = self.slots.iter().filter(|s| s.is_processing).count() as u32;
+        (busy, total)
+    }
+}
