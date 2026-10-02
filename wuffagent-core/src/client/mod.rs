@@ -52,7 +52,7 @@ impl ConnectionSettings {
 // Re-export key types so the public API surface is unchanged
 pub use http::{
     build_request, build_stream_request, send_message, ChatRequest, ChatRequestRef, Choice,
-    NonStreamResult, Response,
+    LlmError, NonStreamResult, Response,
 };
 
 // Session persistence orchestrators moved to `crate::sessions::persist`
@@ -103,10 +103,14 @@ pub fn estimate_conversation_tokens(
 /// prompt size and context window, so the caller can force-trim to fit and
 /// retry. Returns `None` for any other error.
 pub fn parse_context_overflow(err: &Error) -> Option<ContextOverflow> {
-    let Error::Http(msg) = err else {
-        return None;
-    };
-    crate::trimming::parse_context_overflow_msg(msg)
+    match err {
+        // Structured: the error body was the OAI envelope carrying
+        // n_prompt_tokens / n_ctx.
+        Error::Llm(llm) => llm.context_overflow(),
+        // Legacy: raw "Server returned 400 …: {json}" string.
+        Error::Http(msg) => crate::trimming::parse_context_overflow_msg(msg),
+        _ => None,
+    }
 }
 
 pub struct ChatClient {
@@ -584,8 +588,15 @@ impl ChatClient {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// HTTP request failed (connection error, or a non-JSON error body).
     #[error("HTTP error: {0}")]
     Http(String),
+    /// The server answered with a structured OpenAI-format error
+    /// (`{"error": {...}}`): status code + message + type, so callers can
+    /// branch on the error TYPE (e.g. `exceed_context_size_error`) instead
+    /// of string-matching a formatted message.
+    #[error("{0}")]
+    Llm(#[from] LlmError),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("Stream error: {0}")]

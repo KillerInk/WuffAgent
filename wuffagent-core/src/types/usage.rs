@@ -200,6 +200,11 @@ pub struct ServerStatusInfo {
     /// tooltip "n_ctx 4096 / train 32768".
     #[serde(default)]
     pub n_ctx_train: Option<u32>,
+    /// Base URL of the server this snapshot was polled from (set by the
+    /// monitor; shown in the status-bar tooltip, e.g. on the "server down"
+    /// pill).
+    #[serde(default)]
+    pub base_url: String,
 }
 
 impl ServerStatusInfo {

@@ -304,20 +304,27 @@ impl ChatClient {
         };
         let body = request.to_json()?;
 
-        let mut builder = http_client
-            .post(format!("{}/v1/chat/completions", base_url))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .body(body);
-        if let Some(ref key) = api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let resp = builder.send().await?;
+        let url = format!("{}/v1/chat/completions", base_url);
+        let auth = api_key.as_deref().map(|k| format!("Bearer {}", k));
+        let resp = http::send_with_transient_retries(
+            || {
+                let mut b = http_client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .body(body.clone());
+                if let Some(ref key) = auth {
+                    b = b.header("Authorization", key.clone());
+                }
+                async { b.send().await }
+            },
+            cancel_token,
+        )
+        .await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Http(format!("Server returned {}: {}", status, text)));
+            return Err(http::llm_error_or_http(status.as_u16(), &text));
         }
 
         // Throwaway conversation seeded with one empty assistant message; the

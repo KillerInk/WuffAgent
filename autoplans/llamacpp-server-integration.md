@@ -351,22 +351,23 @@ Wire facts (verified in the local llama.cpp source):
 
 **Verify:** `cargo build` + manual test with router mode (requires a llama.cpp build with router support).
 
-### Phase 5: Error handling + health check improvements
+### Phase 5: Error handling + health check improvements — ✅ done
 
-1. **Structured LlmError:**
-   - New `LlmError` type with `code: u16`, `message: String`, `error_type: String`.
-   - Parse the OAI error format from HTTP error responses.
-   - Add specific handling for common error types.
+1. **Structured LlmError:** ✅
+   - `LlmError { code: u16, message: String, error_type: String }` in `client/http.rs` + `Error::Llm` variant (`#[from]`) in `client/mod.rs`; `llm_error_or_http()` builds it from any non-success response (falls back to the legacy `Error::Http` string for non-JSON bodies).
+   - Specific handling: `LlmError::context_overflow()` reads `n_prompt_tokens`/`n_ctx` from the envelope and `parse_context_overflow()` now branches on the structured variant (string parser kept for `Error::Http`).
+   - Unit tests: overflow envelope, 503 retryability, non-JSON fallback, `error`-string shape, missing-tokens edge.
 
-2. **Health check:**
-   - Use `GET /health` in the `ServerMonitor` (in addition to or instead of the TCP probe).
-   - Alert the user if the server goes down (status bar color change + notification).
+2. **Health check:** ✅
+   - `poll_server_status` probes `GET /health` first (200 OR 503 ⇒ reachable — the most reliable liveness signal; `/slots`/`/props` may 404/503 on some builds).
+   - The monitor now emits on the UP→DOWN and DOWN→UP transition edges (plus periodic snapshots while up); the status bar shows a red "⚙ server down" pill (with last-known model in the tooltip) on the down edge — there is no toast system in the app, the pill IS the notification. `ServerStatusInfo` gained `base_url` (was never set before).
 
-3. **Retry logic:**
-   - Add retry with exponential backoff for transient errors (503, connection reset).
-   - Don't retry 4xx errors (except 400 `exceed_context_size_error`, which already has its own retry path).
+3. **Retry logic:** ✅
+   - `send_with_transient_retries()` in `client/http.rs`: exponential backoff 250ms/500ms/1s (3 retries) for connection errors (`is_connect`) and 502/503/504; any other result (success, 4xx, other 5xx) is returned immediately so callers keep their existing behavior (400 overflow retry path untouched). Cancellation-aware for the streaming path (`tokio::select!` on the backoff sleep).
+   - Wired into BOTH `send_message` (non-stream) and the streaming `chat` request.
+   - Unit tests: 503,503→200 succeeds; 400 not retried; exhausted retries report structured 503; connection-refused retried then reported.
 
-**Verify:** `cargo test -p wuffagent-core` + manual test with server errors.
+**Verify:** `cargo test -p wuffagent-core` — ✅ 887 + 2 + 1 passed, 0 failed (2026-10-02); `cargo check -p wuffagent-egui` clean. Manual server-error test pending (needs the llama.cpp server running).
 
 ## Out of scope
 

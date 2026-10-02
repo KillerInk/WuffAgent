@@ -173,9 +173,26 @@ impl ChatApp {
 
             // Server status (llama.cpp): slot utilization + context window
             // from the server status monitor (`AppEvent::ServerStatus`).
-            // Shown only when a reachable local server has reported.
+            // The monitor emits while the server is reachable AND on the
+            // up → down transition, so a `reachable: false` snapshot here
+            // means the server was up and went away: red "down" pill
+            // (the alert the user needs — no separate toast system).
             let guard = self.core.server_status.lock().ok();
-            if let Some(info) = guard.as_ref().filter(|i| i.reachable) {
+            if let Some(info) = guard.as_ref().filter(|i| !i.reachable) {
+                let mut tooltip = format!(
+                    "llama.cpp server DOWN (was at {})",
+                    info.base_url
+                );
+                if let Some(model) = &info.model {
+                    tooltip.push_str(&format!("\nLast known model: {model}"));
+                }
+                ui.label(
+                    egui::RichText::new("⚙ server down")
+                        .color(theme.error)
+                        .size(11.0),
+                )
+                .on_hover_text(tooltip);
+            } else if let Some(info) = guard.as_ref().filter(|i| i.reachable) {
                 let (busy, total) = info.busy_slots();
                 let mut parts = Vec::new();
                 if total > 0 {

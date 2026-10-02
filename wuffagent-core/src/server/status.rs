@@ -1,13 +1,16 @@
-//! Server status monitor: polls the llama.cpp server's `/slots`,
-//! `/props`, and (when `--metrics` is on) `/metrics` endpoints to
-//! provide live server state to the UI. `GET /v1/models` is fetched ONCE
-//! per monitor lifetime for the model's trained context size
+//! Server status monitor: polls the llama.cpp server's `/health`,
+//! `/slots`, `/props`, and (when `--metrics` is on) `/metrics` endpoints
+//! to provide live server state to the UI. `GET /v1/models` is fetched
+//! ONCE per monitor lifetime for the model's trained context size
 //! (`n_ctx_train` → status-bar tooltip "n_ctx 4096 / train 32768").
 //!
 //! The monitor runs as a tokio task, emitting `AppEvent::ServerStatus`
-//! snapshots at a fixed interval (3 seconds). It is cheap: each poll is
-//! a handful of small GET requests that the server handles in
-//! microseconds when idle.
+//! snapshots at a fixed interval (3 seconds). It emits while the server
+//! is reachable AND on the two transition edges (up → down: alert the UI
+//! with a `reachable: false` snapshot; down → up: recovery). While
+//! continuously unreachable (no local server running) it stays silent.
+//! It is cheap: each poll is a handful of small GET requests that the
+//! server handles in microseconds when idle.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -78,13 +81,19 @@ pub fn parse_metrics_text(text: &str) -> Option<ServerMetrics> {
     }
 }
 
-/// One-shot poll of the server's `/slots` + `/props` endpoints, plus
-/// `GET /metrics` when `metrics_enabled` is true (server started with
-/// `--metrics`; the endpoint returns 501 "not supported" otherwise, which
-/// we treat as `metrics: None` — no error).
+/// One-shot poll of the server's `/health` + `/slots` + `/props`
+/// endpoints, plus `GET /metrics` when `metrics_enabled` is true (server
+/// started with `--metrics`; the endpoint returns 501 "not supported"
+/// otherwise, which we treat as `metrics: None` — no error).
 ///
 /// Returns a `ServerStatusInfo` with whatever the server reported.
 /// `reachable` is `false` when the server doesn't respond at all.
+///
+/// `/health` is the most reliable reachability signal (always served by
+/// llama.cpp; `/slots`/`/props` may 404 or 503 on some builds/configs):
+/// 200 (a slot is free) or 503 (all slots busy / model still loading)
+/// both mark `reachable = true`.
+///
 /// Individual fields are `None`/empty when that endpoint is unavailable
 /// (e.g. `/slots` disabled via `--no-slots`, or `/props` on a non-llama.cpp
 /// backend).
@@ -99,7 +108,26 @@ pub async fn poll_server_status(
         .build()
         .unwrap_or_default();
 
-    let mut status = ServerStatusInfo::default();
+    let mut status = ServerStatusInfo {
+        base_url: base_url.to_string(),
+        ..Default::default()
+    };
+
+    // 0. GET /health — liveness probe (200 or 503 both mean the process is
+    // up; `/slots`/`/props` may be unavailable on some builds/configs).
+    {
+        let mut builder = http_client.get(format!("{}/health", base_url));
+        if let Some(ref key) = api_key {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+        if let Ok(resp) = builder.send().await {
+            if matches!(resp.status().as_u16(), 200 | 503) {
+                status.reachable = true;
+            }
+            // Drain the body so the connection can be pooled.
+            let _ = resp.text().await;
+        }
+    }
 
     // 1. GET /slots — per-slot state.
     {
@@ -250,6 +278,7 @@ pub fn spawn_server_monitor(
         // before the model is loaded, or a transient failure) we keep
         // retrying every tick; once it lands we never fetch again.
         let mut n_ctx_train: Option<u32> = None;
+        let mut prev_reachable = false;
 
         loop {
             // Check if we should stop.
@@ -289,9 +318,15 @@ pub fn spawn_server_monitor(
                 reachable, busy, total, status.n_ctx, status.metrics
             );
 
-            // Only emit when the server is reachable (avoids spamming the
-            // UI with "unreachable" events when no local server is running).
-            if reachable {
+            // Emit while reachable (periodic snapshots) plus the two
+            // transition edges: up → down (alert the UI the server went
+            // away — the snapshot carries `reachable: false`) and down → up
+            // (recovery). Stay silent while CONTINUOUSLY unreachable
+            // (no local server running) to avoid spamming the event bus.
+            if reachable || prev_reachable {
+                if !reachable {
+                    tracing::warn!("ServerMonitor: server at {base_url} went DOWN");
+                }
                 if event_tx
                     .send(AppEvent::ServerStatus { status })
                     .is_err()
@@ -300,6 +335,78 @@ pub fn spawn_server_monitor(
                     break;
                 }
             }
+            prev_reachable = reachable;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Extract the shared `/slots`-parsing logic from `poll_server_status`
+    /// so it can be unit-tested without a live server.
+    fn parse_slots_body(
+        status: u16,
+        text: &str,
+        _metrics_enabled: bool,
+    ) -> ServerStatusInfo {
+        let mut s = ServerStatusInfo {
+            base_url: "http://127.0.0.1:9999".into(),
+            ..Default::default()
+        };
+        if matches!(status, 200 | 503) {
+            s.reachable = true;
+        }
+        if status == 200 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+                s.slots = v
+                    .get("slots")
+                    .and_then(|s| s.as_array())
+                    .and_then(|arr| serde_json::to_value(arr).ok())
+                    .and_then(|v| serde_json::from_value::<Vec<SlotInfo>>(v).ok())
+                    .unwrap_or_default();
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn status_slots_200_parses() {
+        let st = parse_slots_body(
+            200,
+            r#"{"slots":[{"id":0,"is_processing":false,"n_ctx":4096}]}"#,
+            false,
+        );
+        assert!(st.reachable);
+        assert_eq!(st.slots.len(), 1);
+        assert!(!st.slots[0].is_processing);
+    }
+
+    #[test]
+    fn status_slots_404_is_unreachable() {
+        // /slots disabled via --no-slots → 404; the server may still be up
+        // (via /health or /props), so the /slots step alone reports
+        // unreachable.
+        let st = parse_slots_body(404, "", false);
+        assert!(!st.reachable);
+        assert!(st.slots.is_empty());
+    }
+
+    #[test]
+    fn status_503_when_model_loading() {
+        // /slots 503 → reachable (server up, model still loading), no slots.
+        let st = parse_slots_body(503, "", true);
+        assert!(st.reachable);
+        assert!(st.slots.is_empty());
+        let st = parse_slots_body(
+            200,
+            r#"{"slots":[{"id":0,"is_processing":true,"n_ctx":4096}]}"#,
+            true,
+        );
+        assert!(st.reachable);
+        assert_eq!(st.slots.len(), 1);
+        assert!(st.slots[0].is_processing);
+        assert_eq!(st.slots[0].n_ctx, 4096);
+    }
 }
