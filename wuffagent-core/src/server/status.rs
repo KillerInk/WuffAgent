@@ -80,8 +80,8 @@ pub fn parse_metrics_text(text: &str) -> Option<ServerMetrics> {
 
 /// One-shot poll of the server's `/slots` + `/props` endpoints, plus
 /// `GET /metrics` when `metrics_enabled` is true (server started with
-/// `--metrics`; the endpoint 405s otherwise, which we treat as
-/// `metrics: None` — no error).
+/// `--metrics`; the endpoint returns 501 "not supported" otherwise, which
+/// we treat as `metrics: None` — no error).
 ///
 /// Returns a `ServerStatusInfo` with whatever the server reported.
 /// `reachable` is `false` when the server doesn't respond at all.
@@ -159,7 +159,7 @@ pub async fn poll_server_status(
     }
 
     // 3. GET /metrics — live throughput gauges (only when the server was
-    // started with --metrics; otherwise the endpoint 405s and we leave
+    // started with --metrics; otherwise the endpoint 501s and we leave
     // `metrics: None`).
     if metrics_enabled {
         let mut builder = http_client.get(format!("{}/metrics", base_url));

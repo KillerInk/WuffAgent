@@ -58,6 +58,7 @@ impl ChatApp {
                 let t = u.timings.as_ref();
                 runtime.chat_state.prompt_tps = t.and_then(|t| t.prompt_per_second);
                 runtime.chat_state.gen_tps = t.and_then(|t| t.predicted_per_second);
+                runtime.chat_state.prompt_cache = t.and_then(|t| t.prompt_cache_stats());
             } else {
                 runtime.refresh_token_gauge(n_ctx);
             }
@@ -107,6 +108,7 @@ impl ChatApp {
                 let t = usage.timings.as_ref();
                 runtime.chat_state.prompt_tps = t.and_then(|t| t.prompt_per_second);
                 runtime.chat_state.gen_tps = t.and_then(|t| t.predicted_per_second);
+                runtime.chat_state.prompt_cache = t.and_then(|t| t.prompt_cache_stats());
             } else {
                 runtime.refresh_token_gauge(n_ctx);
             }

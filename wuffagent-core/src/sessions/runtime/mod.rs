@@ -60,6 +60,12 @@ pub struct ChatAreaState {
     /// to the llama.cpp "predicted" speed from the server's `timings`
     /// (or None if the backend doesn't report them).
     pub gen_tps: Option<f64>,
+    /// KV-cache stats of the last completed round's prompt processing
+    /// (llama.cpp `timings`: `cache_n` = tokens served from cache,
+    /// `prompt_n` = total prompt tokens). `None` until a llama.cpp backend
+    /// has completed a round (or cleared by a backend that doesn't report
+    /// them). Shown in the bottom bar as "KV 96% (1240 cached / 52 new)".
+    pub prompt_cache: Option<crate::types::PromptCacheStats>,
     /// Content characters streamed in the current (in-progress) generation
     /// segment — the status bar's live token/speed estimate. Reset by
     /// `commit_stream`.
@@ -118,6 +124,7 @@ impl Default for ChatAreaState {
             token_count: 0,
             prompt_tps: None,
             gen_tps: None,
+            prompt_cache: None,
             live_gen_chars: 0,
             live_gen_started: None,
             live_tokens_added: 0.0,

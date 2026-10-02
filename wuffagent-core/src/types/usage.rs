@@ -97,6 +97,36 @@ impl LlamaTimings {
             _ => None,
         }
     }
+
+    /// KV-cache display stats for the prompt of this call: how many tokens
+    /// were served from the cache vs. actually processed, and the hit rate.
+    /// `None` when the server didn't report the cache stats (older builds,
+    /// or backends without a KV cache) — the UI then shows no cache pill.
+    pub fn prompt_cache_stats(&self) -> Option<PromptCacheStats> {
+        let cached = self.cache_n?;
+        let total = self.prompt_n?;
+        if total == 0 {
+            return None;
+        }
+        let new = total.saturating_sub(cached);
+        Some(PromptCacheStats {
+            cached,
+            new,
+            hit_rate: (cached as f64 / total as f64) * 100.0,
+        })
+    }
+}
+
+/// KV-cache stats of ONE completed round's prompt processing (display-only
+/// summary of `LlamaTimings.{cache_n, prompt_n}`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PromptCacheStats {
+    /// Prompt tokens served from the KV cache (nearly free).
+    pub cached: u32,
+    /// Prompt tokens that had to be actually processed.
+    pub new: u32,
+    /// Cache hit rate in percent (0..=100).
+    pub hit_rate: f64,
 }
 
 /// A single slot's state from llama.cpp's `GET /slots` endpoint.
@@ -178,5 +208,79 @@ impl ServerStatusInfo {
         let total = self.slots.len() as u32;
         let busy = self.slots.iter().filter(|s| s.is_processing).count() as u32;
         (busy, total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Full b11126 `timings` payload (`server_slot_stats::to_json` —
+    /// field names verified against
+    /// `tools/server/server-common.cpp:84-104`): every field the server
+    /// can send, including the speculative-decoding extras.
+    #[test]
+    fn llama_timings_full_b11126_fixture() {
+        let json = r#"{
+            "cache_n": 1240,
+            "prompt_n": 1292,
+            "prompt_ms": 41.2,
+            "prompt_per_token_ms": 0.0319,
+            "prompt_per_second": 1250.0,
+            "predicted_n": 256,
+            "predicted_ms": 3840.0,
+            "predicted_per_token_ms": 15.0,
+            "predicted_per_second": 66.67,
+            "draft_n": 128,
+            "draft_n_accepted": 96
+        }"#;
+        let t: LlamaTimings = serde_json::from_str(json).unwrap();
+        assert_eq!(t.prompt_per_second, Some(1250.0));
+        assert_eq!(t.predicted_per_second, Some(66.67));
+        assert_eq!(t.cache_n, Some(1240));
+        assert_eq!(t.prompt_n, Some(1292));
+        assert_eq!(t.prompt_ms, Some(41.2));
+        assert_eq!(t.predicted_n, Some(256));
+        assert_eq!(t.predicted_ms, Some(3840.0));
+
+        assert_eq!(t.new_prompt_tokens(), Some(52));
+        assert!((t.cache_fraction().unwrap() - 1240.0 / 1292.0).abs() < 1e-9);
+
+        let stats = t.prompt_cache_stats().unwrap();
+        assert_eq!(stats.cached, 1240);
+        assert_eq!(stats.new, 52);
+        assert!((stats.hit_rate - 1240.0_f64 / 1292.0 * 100.0).abs() < 1e-9);
+    }
+
+    /// Legacy/other backends: only the two speed fields (or nothing at
+    /// all) — must deserialize unchanged, with no cache stats.
+    #[test]
+    fn llama_timings_legacy_speeds_only() {
+        let t: LlamaTimings =
+            serde_json::from_str(r#"{"prompt_per_second": 100.0, "predicted_per_second": 25.0}"#)
+                .unwrap();
+        assert_eq!(t.prompt_per_second, Some(100.0));
+        assert_eq!(t.cache_n, None);
+        assert_eq!(t.prompt_n, None);
+        assert_eq!(t.prompt_cache_stats(), None);
+        assert_eq!(LlamaTimings::default().prompt_cache_stats(), None);
+    }
+
+    /// Edge cases for the cache stats: fully-cached prompt (hit rate 100%),
+    /// zero-prompt (no stats at all).
+    #[test]
+    fn llama_timings_cache_edge_cases() {
+        let full: LlamaTimings = serde_json::from_str(r#"{"cache_n": 100, "prompt_n": 100}"#).unwrap();
+        let s = full.prompt_cache_stats().unwrap();
+        assert_eq!((s.cached, s.new), (100, 0));
+        assert!((s.hit_rate - 100.0).abs() < 1e-9);
+        assert_eq!(full.new_prompt_tokens(), Some(0));
+
+        let zero: LlamaTimings = serde_json::from_str(r#"{"cache_n": 0, "prompt_n": 0}"#).unwrap();
+        assert_eq!(zero.prompt_cache_stats(), None);
+
+        // Missing one of the pair -> no stats (can't compute a rate).
+        let partial: LlamaTimings = serde_json::from_str(r#"{"cache_n": 10}"#).unwrap();
+        assert_eq!(partial.prompt_cache_stats(), None);
     }
 }

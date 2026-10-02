@@ -354,6 +354,28 @@ impl ChatApp {
                 }
             }
 
+            // KV-cache hit rate of the LAST completed round (llama.cpp
+            // `timings` `cache_n`/`prompt_n`): shows how much of the prompt
+            // was served from cache — the main lever for PP speed.
+            if let Some(c) = &chat.prompt_cache {
+                let kv_color = if c.hit_rate >= 80.0 {
+                    theme.success
+                } else if c.hit_rate >= 40.0 {
+                    theme.warning
+                } else {
+                    theme.text_dim
+                };
+                ui.add(egui::Label::new(
+                    egui::RichText::new(format!("KV {:.0}%", c.hit_rate)).color(kv_color).size(11.0)
+                ).wrap())
+                .on_hover_text(format!(
+                    "KV cache hit rate of the last completed round (llama.cpp)\n{cached} cached / {new} new prompt tokens ({rate:.0}% cached)\nCached prompt tokens are processed nearly for free;\nlow hit rate on every round usually means a context trim\njust happened (the prefix changed).\n\nSpeeds: see PP/TG readouts while generating.",
+                    cached = c.cached,
+                    new = c.new,
+                    rate = c.hit_rate
+                ));
+            }
+
             ui.separator();
             
             // Server specs. In remote mode before /props has been fetched,
