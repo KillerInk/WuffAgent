@@ -97,17 +97,16 @@ pub fn parse_metrics_text(text: &str) -> Option<ServerMetrics> {
 /// Individual fields are `None`/empty when that endpoint is unavailable
 /// (e.g. `/slots` disabled via `--no-slots`, or `/props` on a non-llama.cpp
 /// backend).
+/// `client` is shared for the whole monitor lifetime (perf pass: building a
+/// `reqwest::Client` sets up the pool / TLS context, and a fresh one per
+/// 3 s poll threw away keep-alive connections; the 2 s connect / 5 s
+/// request timeouts live on the shared client).
 pub async fn poll_server_status(
+    http_client: &reqwest::Client,
     base_url: &str,
     api_key: Option<&str>,
     metrics_enabled: bool,
 ) -> ServerStatusInfo {
-    let http_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-
     let mut status = ServerStatusInfo {
         base_url: base_url.to_string(),
         ..Default::default()
@@ -162,10 +161,12 @@ pub async fn poll_server_status(
             if resp.status().is_success() {
                 if let Ok(text) = resp.text().await {
                     status.reachable = true;
-                    // Extract n_ctx from default_generation_settings.n_ctx
-                    // (top-level fallback for non-llama.cpp backends).
-                    if status.n_ctx.is_none() {
-                        if let Ok(props) = serde_json::from_str::<serde_json::Value>(&text) {
+                    // Parse ONCE — both n_ctx and model come from this body
+                    // (perf pass: the old code ran from_str twice per poll).
+                    if let Ok(props) = serde_json::from_str::<serde_json::Value>(&text) {
+                        // n_ctx from default_generation_settings.n_ctx
+                        // (top-level fallback for non-llama.cpp backends).
+                        if status.n_ctx.is_none() {
                             status.n_ctx = props
                                 .get("default_generation_settings")
                                 .and_then(|s| s.get("n_ctx"))
@@ -173,9 +174,7 @@ pub async fn poll_server_status(
                                 .and_then(|v| v.as_u64())
                                 .map(|v| v as u32);
                         }
-                    }
-                    // Extract model name from `model` field (if present).
-                    if let Ok(props) = serde_json::from_str::<serde_json::Value>(&text) {
+                        // Extract model name from `model` field (if present).
                         status.model = props
                             .get("model")
                             .and_then(|m| m.as_str())
@@ -231,13 +230,11 @@ pub fn n_ctx_train_from_models(models: &serde_json::Value) -> Option<u32> {
 /// `GET /v1/models` → `data[0].meta.n_ctx_train` (b11126
 /// `server-models.cpp`, `get_router_models`). Returns `None` when the
 /// endpoint or the field is unavailable (e.g. non-llama.cpp backend).
-pub async fn fetch_n_ctx_train(base_url: &str, api_key: Option<&str>) -> Option<u32> {
-    let http_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-
+pub async fn fetch_n_ctx_train(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Option<u32> {
     let mut builder = http_client.get(format!("{}/v1/models", base_url));
     if let Some(ref key) = api_key {
         builder = builder.header("Authorization", format!("Bearer {}", key));
@@ -266,6 +263,13 @@ pub fn spawn_server_monitor(
     active: Arc<AtomicBool>,
     metrics_enabled: bool,
 ) -> tokio::task::JoinHandle<()> {
+    // One client for the whole monitor lifetime (perf pass: was a fresh
+    // Client per 3 s poll + one per n_ctx_train retry).
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
         // The first tick fires immediately; we want the first poll after
@@ -294,8 +298,13 @@ pub fn spawn_server_monitor(
                 break;
             }
 
-            let mut status =
-                poll_server_status(&base_url, api_key.as_deref(), metrics_enabled).await;
+            let mut status = poll_server_status(
+                &http_client,
+                &base_url,
+                api_key.as_deref(),
+                metrics_enabled,
+            )
+            .await;
             let reachable = status.reachable;
             let (busy, total) = status.busy_slots();
 
@@ -303,7 +312,8 @@ pub fn spawn_server_monitor(
             // tick until it lands, then keep the value for good (it is
             // static for the server process).
             if n_ctx_train.is_none() {
-                n_ctx_train = fetch_n_ctx_train(&base_url, api_key.as_deref()).await;
+                n_ctx_train =
+                    fetch_n_ctx_train(&http_client, &base_url, api_key.as_deref()).await;
                 if n_ctx_train.is_some() {
                     tracing::info!(
                         n_ctx_train = ?n_ctx_train,

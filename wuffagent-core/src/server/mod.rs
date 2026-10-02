@@ -233,6 +233,32 @@ impl ServerManager {
             .spawn()
             .map_err(|e| Error::SpawnFailed(e, server_path.to_string()))?;
 
+        // Drain the child's pipes (perf/stability pass): llama-server logs
+        // to stderr and BLOCKS on write() once the OS pipe buffer fills —
+        // with no reader the server would stall mid-session. The old
+        // `monitor_output` was the only reader and was never called.
+        // `debug!` on purpose: the server logs a line per request, and
+        // info-level would flood the log.
+        let mut child = child;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        if let Some(pipe) = stdout {
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(pipe).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!("[llama-server] {}", line);
+                }
+            });
+        }
+        if let Some(pipe) = stderr {
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(pipe).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!("[llama-server:err] {}", line);
+                }
+            });
+        }
+
         *self.process.lock().await = Some(child);
         self.running
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -368,6 +394,11 @@ impl ServerManager {
     }
 
     pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), Error> {
+        // One client for the whole wait loop (perf pass: model loads take
+        // minutes — the old code built a fresh reqwest Client per 500 ms
+        // probe via reqwest::get).
+        let client = reqwest::Client::new();
+        let health_url = format!("http://127.0.0.1:{}/health", self.port);
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if tokio::time::Instant::now() > deadline {
@@ -375,7 +406,7 @@ impl ServerManager {
             }
 
             // Try HTTP health check
-            match reqwest::get(format!("http://127.0.0.1:{}/health", self.port)).await {
+            match client.get(&health_url).send().await {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
                 Ok(_) => {}
                 Err(_) => {}
@@ -385,10 +416,7 @@ impl ServerManager {
             if TcpStream::connect(format!("127.0.0.1:{}", self.port)).is_ok() {
                 // Give HTTP a moment to be ready
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                if reqwest::get(format!("http://127.0.0.1:{}/health", self.port))
-                    .await
-                    .is_ok()
-                {
+                if client.get(&health_url).send().await.is_ok() {
                     return Ok(());
                 }
             }
@@ -399,28 +427,6 @@ impl ServerManager {
 
     pub fn get_error(&self) -> Option<String> {
         self.error.lock().unwrap().clone()
-    }
-
-    pub async fn monitor_output(&self) -> tokio::sync::mpsc::Receiver<String> {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-        let mut process = self.process.lock().await;
-
-        if let Some(child) = process.take() {
-            tokio::spawn(async move {
-                if let Some(stdout) = child.stdout {
-                    let reader = tokio::io::BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        tracing::info!("[llama-server] {}", line);
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-
-        rx
     }
 }
 

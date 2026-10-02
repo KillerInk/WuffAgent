@@ -160,6 +160,14 @@ pub async fn process_sse_line(
         }
     };
 
+    // Hot path (perf pass): every branch below reads `choices[0].delta` —
+    // bind it ONCE instead of re-running the 3-hop Value lookup per branch
+    // (was 7 chains × 3 hops = 21 map lookups per streamed line).
+    let delta = chunk
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"));
+
     // llama.cpp live prompt-processing progress (`return_progress: true`):
     // sent per server tick while the prompt is being processed, before the
     // first token. Forward it to the caller (status bar live PP speed).
@@ -178,10 +186,7 @@ pub async fn process_sse_line(
     // executing it while the model keeps reasoning. The very last tool call
     // in a stream is never reported (nothing follows it to signal
     // completion) — callers execute that one inline.
-    let has_text = chunk
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"))
+    let has_text = delta
         .map(|d| {
             ["content", "thinking", "reasoning", "reasoning_content"]
                 .iter()
@@ -196,10 +201,7 @@ pub async fn process_sse_line(
     // Id of the tool call touched by THIS line (if any). Continuation
     // chunks carry only an index — resolve it to the id of the call
     // already accumulated at that slot.
-    let incoming_id: Option<String> = chunk
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"))
+    let incoming_id: Option<String> = delta
         .and_then(|d| d.get("tool_calls"))
         .and_then(|t| t.as_array())
         .and_then(|tcs| tcs.first())
@@ -237,10 +239,7 @@ pub async fn process_sse_line(
         }
     }
 
-    if let Some(text) = chunk
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"))
+    if let Some(text) = delta
         .and_then(|d| d.get("content"))
         .and_then(|c| c.as_str())
     {
@@ -258,25 +257,16 @@ pub async fn process_sse_line(
     // Handle thinking/reasoning content in streaming delta chunks
     // Claude uses `delta.thinking`, llama.cpp uses `delta.reasoning` or
     // `delta.reasoning_content` (deepseek reasoning format, Qwen3 default)
-    let thinking = chunk
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"))
+    let thinking = delta
         .and_then(|d| d.get("thinking"))
         .and_then(|t| t.as_str())
         .or_else(|| {
-            chunk
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("delta"))
+            delta
                 .and_then(|d| d.get("reasoning"))
                 .and_then(|t| t.as_str())
         })
         .or_else(|| {
-            chunk
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("delta"))
+            delta
                 .and_then(|d| d.get("reasoning_content"))
                 .and_then(|t| t.as_str())
         });
@@ -302,12 +292,7 @@ pub async fn process_sse_line(
     }
 
     // Handle tool_calls in streaming delta chunks
-    if let Some(tool_calls) = chunk
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"))
-        .and_then(|d| d.get("tool_calls"))
-    {
+    if let Some(tool_calls) = delta.and_then(|d| d.get("tool_calls")) {
         if let Some(tc_array) = tool_calls.as_array() {
             for tc_chunk in tc_array {
                 // Extract id (may be null/missing in delta chunks after the first)
@@ -454,7 +439,10 @@ pub async fn stream_message(
                         buffer.drain(..=newline_pos);
                         // Capture the model once (usually from the very
                         // first chunk); skip the extra JSON parse after that.
-                        if model.is_none() {
+                        // Gate on a cheap substring first — backends that
+                        // never send a `model` field would otherwise get a
+                        // second full JSON parse of every streamed line.
+                        if model.is_none() && line.contains("\"model\"") {
                             model = extract_model(&line);
                         }
                         if let Some(usage) = process_sse_line(
@@ -486,7 +474,7 @@ pub async fn stream_message(
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..=newline_pos].to_string();
                 buffer.drain(..=newline_pos);
-                if model.is_none() {
+                if model.is_none() && line.contains("\"model\"") {
                     model = extract_model(&line);
                 }
                 if let Some(usage) = process_sse_line(
