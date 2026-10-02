@@ -24,6 +24,52 @@ struct ToolCardInfo {
     image_uri: Option<String>,
 }
 
+/// Per-Context cache of tool-result JSON parses (egui temp data — cleared
+/// with the context). An expanded tool card re-ran `serde_json::from_str` on
+/// the (potentially multi-MB) result every frame; the result text is
+/// immutable per message, so parse once and reuse. `None` entries remember
+/// non-JSON results so plain-text output doesn't re-fail the parse either.
+#[derive(Clone, Default)]
+struct ToolJsonCache {
+    /// Key: (64-bit hash of the result, byte length) -> parsed result.
+    entries: std::collections::HashMap<(u64, u32), std::sync::Arc<Option<serde_json::Value>>>,
+}
+
+/// Cache bound in entries; on overflow the whole map is dropped (visible
+/// cards re-parse once, memory stays bounded).
+const MAX_TOOL_JSON_CACHE_ENTRIES: usize = 128;
+
+/// Parsed tool result for `raw`: a cache hit is an O(1) `Arc::clone`, a
+/// miss parses once and stores the outcome (`None` = not JSON).
+fn parsed_tool_json(ctx: &egui::Context, raw: &str) -> std::sync::Arc<Option<serde_json::Value>> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut h);
+    let key = (h.finish(), raw.len() as u32);
+    // Raw read (no clone of the whole map): type-keyed at `Id::NULL`.
+    let cached = ctx.data(|d| {
+        d.get_temp_raw(egui::util::id_type_map::RawKey::new::<ToolJsonCache>(
+            egui::Id::NULL,
+        ))
+        .and_then(|v| v.downcast_ref::<ToolJsonCache>())
+        .and_then(|c| c.entries.get(&key))
+        .cloned()
+    });
+    if let Some(hit) = cached {
+        return hit;
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok();
+    let arc = std::sync::Arc::new(parsed);
+    ctx.data_mut(|d| {
+        let cache = d.get_temp_mut_or_default::<ToolJsonCache>(egui::Id::NULL);
+        if cache.entries.len() >= MAX_TOOL_JSON_CACHE_ENTRIES {
+            cache.entries.clear();
+        }
+        cache.entries.insert(key, arc.clone());
+    });
+    arc
+}
+
 impl ChatApp {
     /// Collapsed row: status icon, tool icon + name, the call's args preview
     /// (what it did), a result/error summary, a duration chip, and the time.
@@ -231,12 +277,19 @@ impl ChatApp {
                                         .italics()
                                         .size(11.0),
                                 );
-                            } else if let Ok(json) =
-                                serde_json::from_str::<serde_json::Value>(raw_result.as_str())
-                            {
-                                self.draw_tool_json_result(ui, &json, raw_result.as_str(), theme);
                             } else {
-                                self.draw_tool_plain_result(ui, raw_result.as_str(), theme);
+                                // Parse once per result body (cached in the egui
+                                // context): re-parsing multi-MB results ran on
+                                // every frame for each expanded card.
+                                let parsed = parsed_tool_json(ui.ctx(), raw_result.as_str());
+                                match &*parsed {
+                                    Some(json) => {
+                                        self.draw_tool_json_result(ui, json, raw_result.as_str(), theme);
+                                    }
+                                    None => {
+                                        self.draw_tool_plain_result(ui, raw_result.as_str(), theme);
+                                    }
+                                }
                             }
                         }
                     });

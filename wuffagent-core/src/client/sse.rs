@@ -431,7 +431,7 @@ pub async fn stream_message(
             result = async {
                 while let Some(chunk) = stream.next().await {
                     let bytes = chunk?;
-                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    push_utf8(&mut buffer, &bytes);
 
                     // Process complete lines
                     while let Some(newline_pos) = buffer.find('\n') {
@@ -468,7 +468,7 @@ pub async fn stream_message(
     } else {
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            push_utf8(&mut buffer, &bytes);
 
             // Process complete lines
             while let Some(newline_pos) = buffer.find('\n') {
@@ -494,6 +494,22 @@ pub async fn stream_message(
     }
 
     Ok((last_usage, model))
+}
+
+/// Push network bytes into the SSE line buffer. Fast path: ASCII (the
+/// common case for SSE/JSON frames) is valid UTF-8 by construction, so it
+/// skips the full UTF-8 validation state machine; otherwise validate once,
+/// and only fall back to lossy replacement for genuinely invalid bytes.
+fn push_utf8(buf: &mut String, bytes: &[u8]) {
+    if bytes.is_ascii() {
+        // SAFETY: `is_ascii` guarantees every byte is < 0x80, which is a
+        // valid single-byte UTF-8 code point.
+        buf.push_str(unsafe { std::str::from_utf8_unchecked(bytes) });
+    } else if let Ok(s) = std::str::from_utf8(bytes) {
+        buf.push_str(s);
+    } else {
+        buf.push_str(&String::from_utf8_lossy(bytes));
+    }
 }
 
 /// Add user and empty assistant messages to the conversation.

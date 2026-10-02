@@ -30,6 +30,67 @@ fn options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
 }
 
+/// Owned (`'static`) parsed markdown events, so they can be cached in the
+/// egui Context without borrowing the source text.
+type OwnedEvents = Vec<Event<'static>>;
+
+/// Per-Context cache of parsed markdown (egui temp data — cleared with the
+/// context). Immediate mode redraws the whole transcript every frame, but a
+/// committed message's text never changes, so parse it once and reuse the
+/// events. Without this, every frame re-ran the pulldown-cmark parse for
+/// every AI/thinking message (plus the growing stream buffer per token).
+#[derive(Clone, Default)]
+struct MarkdownParseCache {
+    /// Key: (64-bit hash of the text, byte length) -> owned events.
+    entries: std::collections::HashMap<(u64, u32), std::sync::Arc<OwnedEvents>>,
+}
+
+/// Cache bound in entries. On overflow the whole map is dropped — the
+/// visible session's messages re-parse once, and memory stays bounded even
+/// across many large sessions.
+const MAX_PARSE_CACHE_ENTRIES: usize = 256;
+
+/// Cache key for a text body: 64-bit hash + byte length (the length reduces
+/// the already-negligible collision risk).
+fn text_key(text: &str) -> (u64, u32) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    (h.finish(), text.len() as u32)
+}
+
+/// Parsed events for `text`: a cache hit is an O(1) `Arc::clone`, a miss
+/// parses once (and stores it when `cache` is true).
+fn parsed_events(ctx: &egui::Context, text: &str, cache: bool) -> std::sync::Arc<OwnedEvents> {
+    let key = text_key(text);
+    // Raw read (no clone of the whole map): type-keyed at `Id::NULL`.
+    let cached = ctx.data(|d| {
+        d.get_temp_raw(egui::util::id_type_map::RawKey::new::<MarkdownParseCache>(
+            egui::Id::NULL,
+        ))
+        .and_then(|v| v.downcast_ref::<MarkdownParseCache>())
+        .and_then(|c| c.entries.get(&key))
+        .cloned()
+    });
+    if let Some(hit) = cached {
+        return hit;
+    }
+    let events = Parser::new_ext(text, options())
+        .map(Event::into_static)
+        .collect::<OwnedEvents>();
+    let arc = std::sync::Arc::new(events);
+    if cache {
+        ctx.data_mut(|d| {
+            let cache = d.get_temp_mut_or_default::<MarkdownParseCache>(egui::Id::NULL);
+            if cache.entries.len() >= MAX_PARSE_CACHE_ENTRIES {
+                cache.entries.clear();
+            }
+            cache.entries.insert(key, arc.clone());
+        });
+    }
+    arc
+}
+
 /// Font family used for bold runs and headings. Registered in `fonts.rs`
 /// (Segoe UI Semibold on Windows, Arial Bold on macOS; when the file is
 /// missing it falls back to the regular proportional fonts).
@@ -68,7 +129,7 @@ pub(super) fn draw_markdown(
     color: egui::Color32,
     theme: &Theme,
 ) {
-    draw_markdown_dimmed(ui, text, size, color, theme, false);
+    draw_markdown_impl(ui, text, size, color, theme, false, true);
 }
 
 /// Render markdown `text` with an explicit dim flag: `dim = true` renders
@@ -82,11 +143,39 @@ pub(super) fn draw_markdown_dimmed(
     theme: &Theme,
     dim: bool,
 ) {
-    let mut parser = Parser::new_ext(text, options());
+    draw_markdown_impl(ui, text, size, color, theme, dim, true);
+}
+
+/// Streaming variant of [`draw_markdown_dimmed`]: the same rendering, but the
+/// parse is NOT inserted into the cache — the live buffer changes every
+/// frame (per token), so caching it would add a fresh entry every frame and
+/// evict the committed messages' entries within seconds.
+pub(super) fn draw_markdown_streaming(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+    theme: &Theme,
+    dim: bool,
+) {
+    draw_markdown_impl(ui, text, size, color, theme, dim, false);
+}
+
+fn draw_markdown_impl(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+    theme: &Theme,
+    dim: bool,
+    cache: bool,
+) {
+    let events = parsed_events(ui.ctx(), text, cache);
+    let mut iter = events.iter().cloned();
     let mut lists = Vec::new();
     let mut queue = VecDeque::new();
     draw_blocks(
-        &mut parser,
+        &mut iter,
         ui,
         theme,
         size,
@@ -120,7 +209,8 @@ fn flush_job(job: &mut Option<egui::epaint::text::LayoutJob>, ui: &mut egui::Ui)
     }
 }
 
-/// Render the stream of block-level events until the parser/queue runs out.
+/// Render the stream of block-level events until the event iterator/queue
+/// runs out.
 /// `queue` holds events the caller already pulled (e.g. an item's first
 /// inline event when sniffing for a task-list marker).
 /// `in_item`: when true, stop at the current list item's boundary
@@ -128,7 +218,7 @@ fn flush_job(job: &mut Option<egui::epaint::text::LayoutJob>, ui: &mut egui::Ui)
 /// later blocks (they would be drawn inside the item's scope).
 /// `dim`: render everything in `color` with regular weight (Thinking blocks).
 fn draw_blocks<'a>(
-    parser: &mut Parser<'a>,
+    events: &mut (dyn Iterator<Item = Event<'a>> + 'a),
     ui: &mut egui::Ui,
     theme: &Theme,
     size: f32,
@@ -142,7 +232,7 @@ fn draw_blocks<'a>(
     let mut style = InlineStyle::default();
 
     loop {
-        let Some(event) = queue.pop_front().or_else(|| parser.next()) else {
+        let Some(event) = queue.pop_front().or_else(|| events.next()) else {
             break;
         };
         match event {
@@ -162,7 +252,7 @@ fn draw_blocks<'a>(
                     };
                     let mut done = false;
                     while !done {
-                        match queue.pop_front().or_else(|| parser.next()) {
+                        match queue.pop_front().or_else(|| events.next()) {
                             Some(Event::End(TagEnd::Heading(_))) | None => done = true,
                             Some(ev) => apply_inline_event(
                                 &mut hj,
@@ -191,7 +281,7 @@ fn draw_blocks<'a>(
                     let mut buf = String::new();
                     let mut done = false;
                     while !done {
-                        match queue.pop_front().or_else(|| parser.next()) {
+                        match queue.pop_front().or_else(|| events.next()) {
                             Some(Event::Text(t)) => buf.push_str(&t),
                             Some(Event::End(TagEnd::CodeBlock)) | None => done = true,
                             _ => {}
@@ -205,7 +295,7 @@ fn draw_blocks<'a>(
                     ui.add_space(4.0);
                     let inner = ui.indent(ui.id().with("md_quote"), |ui| {
                         draw_blocks(
-                            parser,
+                            events,
                             ui,
                             theme,
                             size - 0.5,
@@ -234,11 +324,11 @@ fn draw_blocks<'a>(
                         next: start.unwrap_or(1),
                     });
                 }
-                Tag::Item => draw_list_item(parser, ui, theme, size, color, lists, queue, dim),
+                Tag::Item => draw_list_item(events, ui, theme, size, color, lists, queue, dim),
                 Tag::Table(_) => {
                     flush_job(&mut job, ui);
                     ui.add_space(4.0);
-                    render_table(parser, ui, theme, size, color, queue, dim);
+                    render_table(events, ui, theme, size, color, queue, dim);
                     ui.add_space(4.0);
                 }
                 _ => {}
@@ -284,7 +374,7 @@ fn draw_blocks<'a>(
 
 /// One list item: marker (bullet / number / task checkbox) + content.
 fn draw_list_item<'a>(
-    parser: &mut Parser<'a>,
+    events: &mut (dyn Iterator<Item = Event<'a>> + 'a),
     ui: &mut egui::Ui,
     theme: &Theme,
     size: f32,
@@ -298,10 +388,10 @@ fn draw_list_item<'a>(
     // If the item's first inline event is a TaskListMarker, pull it out so
     // the checkbox can replace the bullet.
     let mut task: Option<bool> = None;
-    if let Some(e1) = queue.pop_front().or_else(|| parser.next()) {
+    if let Some(e1) = queue.pop_front().or_else(|| events.next()) {
         match e1 {
             Event::Start(Tag::Paragraph) => {
-                if let Some(e2) = queue.pop_front().or_else(|| parser.next()) {
+                if let Some(e2) = queue.pop_front().or_else(|| events.next()) {
                     match e2 {
                         Event::TaskListMarker(b) => task = Some(b),
                         other => queue.push_front(other),
@@ -348,7 +438,7 @@ fn draw_list_item<'a>(
                     inner.cursor().min,
                     egui::vec2(w, VERTICAL_GROW_CAP),
                 )),
-            |v| draw_blocks(parser, v, theme, size, color, lists, queue, true, dim),
+            |v| draw_blocks(events, v, theme, size, color, lists, queue, true, dim),
         );
     });
     ui.add_space(2.0);
@@ -357,7 +447,7 @@ fn draw_list_item<'a>(
 /// Collect a table (header + rows of inline jobs) and draw it with
 /// equal-width columns.
 fn render_table(
-    parser: &mut Parser<'_>,
+    events: &mut (dyn Iterator<Item = Event<'_>> + '_),
     ui: &mut egui::Ui,
     theme: &Theme,
     size: f32,
@@ -373,7 +463,7 @@ fn render_table(
     let mut cell_style = InlineStyle::default();
 
     loop {
-        let Some(ev) = queue.pop_front().or_else(|| parser.next()) else {
+        let Some(ev) = queue.pop_front().or_else(|| events.next()) else {
             break;
         };
         match ev {

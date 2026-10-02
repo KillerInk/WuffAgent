@@ -28,22 +28,23 @@ pub fn session_exists(dir: &Path, id: &str) -> bool {
 
 pub fn load_session(dir: &Path, id: &str) -> Option<Session> {
     let path = dir.join(format!("{}.json", id));
-    if path.exists() {
-        if let Ok(bytes) = fs::read(&path) {
-            if bytes.len() > ENCRYPTION_MARKER.len()
-                && &bytes[..ENCRYPTION_MARKER.len()] == ENCRYPTION_MARKER
-            {
-                // Encrypted file — return None to signal that decrypt_and_load_session is needed
-                return None;
-            }
+    // Single read: the encryption-marker check and the JSON parse used to
+    // each read the (potentially MB-sized) file from disk.
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            tracing::warn!("Session file not found: {}", path.display());
+            return None;
         }
-    } else {
-        tracing::warn!("Session file not found: {}", path.display());
+    };
+    if bytes.len() > ENCRYPTION_MARKER.len()
+        && &bytes[..ENCRYPTION_MARKER.len()] == ENCRYPTION_MARKER
+    {
+        // Encrypted file — return None to signal that decrypt_and_load_session is needed
+        return None;
     }
-    let path = dir.join(format!("{}.json", id));
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+    let s = String::from_utf8(bytes).ok()?;
+    serde_json::from_str(&s).ok()
 }
 
 /// Encrypt and save a session. Writes the file with an encryption marker prefix,

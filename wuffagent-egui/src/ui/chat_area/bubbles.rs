@@ -53,7 +53,9 @@ impl ChatApp {
                                 });
                                 ui.add_space(4.0);
                                 // Dim markdown while the thinking streams in.
-                                super::markdown::draw_markdown_dimmed(
+                                // Streaming variant: the buffer changes every
+                                // token, so it must not pollute the parse cache.
+                                super::markdown::draw_markdown_streaming(
                                     ui,
                                     current_thinking,
                                     12.0,
@@ -75,12 +77,15 @@ impl ChatApp {
                             .inner_margin(egui::Margin::same(10))
                             .show(ui, |ui| {
                                 ui.take_available_width();
-                                super::markdown::draw_markdown(
+                                // Streaming variant: the buffer changes every
+                                // token, so it must not pollute the parse cache.
+                                super::markdown::draw_markdown_streaming(
                                     ui,
                                     stream_buffer,
                                     13.5,
                                     theme.text_primary,
                                     theme,
+                                    false,
                                 );
                             });
                     } else if current_thinking.is_empty() {
