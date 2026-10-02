@@ -288,6 +288,55 @@ pub fn build_stream_request(
     builder
 }
 
+/// Parse the `count` field of a llama.cpp `input_tokens` response
+/// (`{"count": N}`). `None` when the body is not JSON or lacks a numeric
+/// `count`.
+pub fn parse_input_tokens_count(body: &str) -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get("count").and_then(|c| c.as_u64()).map(|c| c as u32)
+}
+
+/// Count the EXACT input tokens of a request via llama.cpp's
+/// `POST /v1/chat/completions/input_tokens` (the model's real tokenizer,
+/// no generation). The body is the same chat-completion shape as the real
+/// call (so `tools` and the full message list are counted the same way);
+/// the response is `{"count": N}`.
+///
+/// Servers without the endpoint (404) or that reject it (501) yield
+/// [`Error::UnsupportedEndpoint`] so the caller can feature-detect ONCE and
+/// permanently fall back to the char-count estimate.
+pub async fn count_input_tokens(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+    request: &ChatRequestRef<'_>,
+) -> Result<u32, Error> {
+    let body = request.to_json()?;
+    let mut builder = http_client
+        .post(format!("{}/v1/chat/completions/input_tokens", base_url))
+        .header("Content-Type", "application/json")
+        .body(body);
+    if let Some(ref key) = api_key {
+        builder = builder.header("Authorization", format!("Bearer {}", key));
+    }
+    let resp = builder.send().await?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if status.as_u16() == 404 || status.as_u16() == 501 {
+        return Err(Error::UnsupportedEndpoint(text));
+    }
+    if !status.is_success() {
+        return Err(Error::Http(format!("Server returned {}: {}", status, text)));
+    }
+    parse_input_tokens_count(&text).ok_or_else(|| {
+        Error::Json(
+            <serde_json::Error as serde::de::Error>::custom(
+                "input_tokens response is missing a numeric 'count' field",
+            ),
+        )
+    })
+}
+
 /// Extract the server's `n_ctx` from a llama.cpp `/props` response body.
 ///
 /// Servers report it under `default_generation_settings.n_ctx`; some builds or

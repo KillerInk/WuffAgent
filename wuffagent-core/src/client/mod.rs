@@ -70,7 +70,7 @@ pub use sse::{
 pub use crate::trimming::{
     estimate_tokens, message_char_count, ContextOverflow, ContextTrimming,
 };
-pub use http::{parse_props_n_ctx, strip_think_tags};
+pub use http::{parse_input_tokens_count, parse_props_n_ctx, strip_think_tags};
 
 /// Backward-compat wrapper: delegates to `ContextTrimming::trim_to_token_budget`.
 pub fn trim_to_token_budget(
@@ -191,6 +191,12 @@ pub struct ChatClient {
     /// agents run sequentially per session (same assumption as `agent_name`);
     /// clones of the client share the stamp (shared interior state).
     last_model: Arc<Mutex<Option<String>>>,
+    /// Feature-detect flag for llama.cpp's `input_tokens` endpoint (exact
+    /// token counting for the trim gate). Starts `true` (optimistic); the
+    /// first 404/501 clears it and every later call skips the HTTP
+    /// round-trip, falling back to the char-count estimate. Shared like the
+    /// other per-client state: clones see the same detection result.
+    input_tokens_supported: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Clone for ChatClient {
@@ -215,6 +221,7 @@ impl Clone for ChatClient {
             trim_pcts: self.trim_pcts.clone(),
             run_id: self.run_id.clone(),
             last_model: self.last_model.clone(),
+            input_tokens_supported: self.input_tokens_supported.clone(),
         }
     }
 }
@@ -287,6 +294,7 @@ impl ChatClient {
                 Self::TRIM_TRIGGER_PCT,
                 Self::TRIM_TARGET_PCT,
             ))),
+            input_tokens_supported: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
@@ -547,6 +555,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("Cancelled")]
     Cancelled,
+    /// The server has no (or rejects) a llama.cpp extension endpoint
+    /// (HTTP 404/501) — e.g. `POST /v1/chat/completions/input_tokens`.
+    /// Callers feature-detect on this: fall back permanently instead of
+    /// retrying every call.
+    #[error("Endpoint not supported by the server: {0}")]
+    UnsupportedEndpoint(String),
 }
 
 impl From<reqwest::Error> for Error {

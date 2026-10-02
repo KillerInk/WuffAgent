@@ -5,7 +5,8 @@ use crate::types::{Message, Usage};
 use crate::trimming::ContextTrimming;
 
 use super::conversation;
-use super::{ChatClient, ContextOverflow};
+use super::http;
+use super::{ChatClient, ContextOverflow, Error};
 
 impl ChatClient {
     /// Calibrated chars-per-token ratio (×100). Falls back to the static
@@ -57,6 +58,87 @@ impl ChatClient {
     /// far below the limit, not just under it.
     pub fn trim_target_chars(&self) -> usize {
         self.char_budget_pct(self.trim_pcts().1)
+    }
+
+    /// Trim trigger in TOKEN units (the configured trigger percentage of the
+    /// current n_ctx, default 90) — the exact-token counterpart of
+    /// [`Self::trim_trigger_chars`], for comparing against server-reported
+    /// token counts. 0 when the window size is unknown.
+    pub fn trim_trigger_tokens(&self) -> u32 {
+        let n_ctx = self.n_ctx();
+        if n_ctx == 0 {
+            return 0;
+        }
+        ((n_ctx as u64) * self.trim_pcts().0 / 100) as u32
+    }
+
+    /// Whether llama.cpp's `input_tokens` endpoint is still considered
+    /// available (feature-detected once per client lifetime; see
+    /// [`Self::exact_prompt_tokens`]).
+    pub fn input_tokens_supported(&self) -> bool {
+        self.input_tokens_supported
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Exact prompt token count for `messages` + `tools` via llama.cpp's
+    /// `POST /v1/chat/completions/input_tokens` — the same tokenizer the
+    /// server uses for the real call, so the result is a fair comparison
+    /// against [`Self::trim_trigger_tokens`].
+    ///
+    /// Returns `None` (callers keep the char-count estimate) when:
+    /// - the server has no such endpoint (404/501) — clears
+    ///   `input_tokens_supported` so later calls skip the HTTP round-trip, or
+    /// - the call fails for any other reason (transient).
+    pub async fn exact_prompt_tokens(
+        &self,
+        messages: &[Message],
+        tools: Option<&[crate::tools::ToolDefinition]>,
+    ) -> Option<u32> {
+        if !self.input_tokens_supported() {
+            return None;
+        }
+        let base_url = self.settings.base_url();
+        let api_key = self.settings.api_key();
+        let (reasoning_effort, chat_template_kwargs) =
+            http::reasoning_wire(self.reasoning_effort());
+        // Mirror the real request's counted content (messages + tools) with
+        // `stream: false` — generation params are irrelevant to counting.
+        let request = http::ChatRequestRef {
+            model: "local",
+            messages,
+            stream: false,
+            tools,
+            reasoning_effort: reasoning_effort.as_deref(),
+            chat_template_kwargs,
+            stream_options: None,
+            return_progress: None,
+        };
+        match http::count_input_tokens(
+            &self.http_client,
+            &base_url,
+            api_key.as_deref(),
+            &request,
+        )
+        .await
+        {
+            Ok(n) => Some(n),
+            Err(Error::UnsupportedEndpoint(_)) => {
+                self.input_tokens_supported
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                tracing::debug!(
+                    "server has no /v1/chat/completions/input_tokens endpoint; \
+                     trimming falls back to the char-count estimate"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "input_tokens count failed ({}); char-count estimate fallback",
+                    e
+                );
+                None
+            }
+        }
     }
 
     /// Record the estimator char count of a prompt about to be sent, so the

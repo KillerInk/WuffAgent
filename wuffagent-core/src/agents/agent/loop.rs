@@ -306,7 +306,35 @@ impl Agent {
                 // the trigger check below and the `chars_before` metric.
                 let msg_chars = crate::trimming::message_char_count(messages);
                 let total_chars = msg_chars + overhead_chars;
-                if msg_count > 4 && total_chars > self.client.trim_trigger_chars() {
+                // Exact-token gate (llama.cpp `input_tokens`): the char
+                // estimate is only a reliable decision NEAR the boundary, so
+                // when it sits within ±5% of the trigger we ask the server
+                // for the EXACT tokenizer count and let that decide; well
+                // below the trigger we skip the extra HTTP round-trip.
+                let trigger_chars = self.client.trim_trigger_chars();
+                let estimate_over = total_chars > trigger_chars;
+                let estimate_in_band = !estimate_over
+                    && (trigger_chars as u64).saturating_sub(total_chars as u64)
+                        <= (trigger_chars / 20) as u64;
+                let trim_now = if estimate_over {
+                    true
+                } else if estimate_in_band && self.client.input_tokens_supported() {
+                    self.client
+                        .exact_prompt_tokens(messages, tool_defs.as_deref())
+                        .await
+                        .map(|exact| {
+                            let trigger_tokens = self.client.trim_trigger_tokens();
+                            tracing::debug!(
+                                "exact prompt count {} vs trim trigger {} tokens",
+                                exact, trigger_tokens
+                            );
+                            trigger_tokens > 0 && exact > trigger_tokens
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if msg_count > 4 && trim_now {
                     // Target in char units: the configured target percentage
                     // of n_ctx (default 50) converted to chars via the
                     // client's calibrated chars-per-token ratio, minus the

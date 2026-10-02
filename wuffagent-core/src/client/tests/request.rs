@@ -272,6 +272,40 @@ fn test_parse_props_n_ctx_absent_or_invalid() {
 }
 
 #[test]
+fn test_parse_input_tokens_count() {
+    assert_eq!(parse_input_tokens_count(r#"{"count":1234}"#), Some(1234));
+    assert_eq!(parse_input_tokens_count(r#"{"count":0}"#), Some(0));
+    // Missing / non-numeric count → None (caller falls back to the estimate).
+    assert_eq!(parse_input_tokens_count(r#"{"ok":true}"#), None);
+    assert_eq!(parse_input_tokens_count(r#"{"count":"1234"}"#), None);
+    assert_eq!(parse_input_tokens_count("not json"), None);
+    assert_eq!(parse_input_tokens_count(""), None);
+}
+
+#[test]
+fn test_trim_trigger_tokens_follows_n_ctx_and_pcts() {
+    let client = ChatClient::new("http://localhost:8080");
+    client.set_n_ctx(0);
+    assert_eq!(client.trim_trigger_tokens(), 0, "n_ctx 0 → 0");
+    client.set_n_ctx(10_000);
+    assert_eq!(client.trim_trigger_tokens(), 9_000, "default 90%");
+    client.set_trim_pcts(65, 30);
+    assert_eq!(client.trim_trigger_tokens(), 6_500, "stamped pcts");
+}
+
+#[tokio::test]
+async fn test_exact_prompt_tokens_unsupported_short_circuits() {
+    // Once the feature is detected as missing, the call must return None
+    // WITHOUT any HTTP round-trip (dead URL would hang/error otherwise).
+    let client = ChatClient::new("http://127.0.0.1:1");
+    assert!(client.input_tokens_supported());
+    client.input_tokens_supported
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let msgs: Vec<crate::types::Message> = Vec::new();
+    assert_eq!(client.exact_prompt_tokens(&msgs, None).await, None);
+}
+
+#[test]
 fn test_build_request_with_system_prompt() {
     let client = ChatClient::new("http://localhost:8080");
     client.set_system_prompt("You are helpful.");
