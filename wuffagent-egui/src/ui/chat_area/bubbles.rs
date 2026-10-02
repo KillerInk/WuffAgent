@@ -231,6 +231,17 @@ impl ChatApp {
         t.strip_suffix("</think>").unwrap_or(t).trim().to_string()
     }
 
+    /// Per-frame display content for a message: borrows the content when no
+    /// legacy think tags are present (the common case), so the hot draw path
+    /// does not clone the message body every frame.
+    fn display_content_ref<'a>(content: &'a str) -> std::borrow::Cow<'a, str> {
+        if content.contains("\u{3C}think\u{3E}") || content.contains("\u{3C}/think\u{3E}") {
+            std::borrow::Cow::Owned(Self::strip_thinking_tags(content))
+        } else {
+            std::borrow::Cow::Borrowed(content)
+        }
+    }
+
     pub(super) fn draw_message(
         &mut self,
         ui: &mut egui::Ui,
@@ -376,14 +387,11 @@ impl ChatApp {
                                         true,
                                     );
                                 } else {
-                                    // Normal message — strip any legacy <think> tags
-                                    let display_content = if message.content.contains("<think>")
-                                        || message.content.contains("</think>")
-                                    {
-                                        Self::strip_thinking_tags(&message.content)
-                                    } else {
-                                        message.content.clone()
-                                    };
+                                    // Normal message — strip legacy think tags.
+                                    // Borrows the content when no tags are present
+                                    // (the common case), avoiding a per-frame clone.
+                                    let display_content =
+                                        Self::display_content_ref(&message.content);
                                     if is_user {
                                         // User messages stay plain text.
                                         ui.add(Self::breaking_label(
