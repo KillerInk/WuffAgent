@@ -45,8 +45,14 @@ impl PromptProgress {
     }
 }
 
-/// llama.cpp server-reported per-stage speeds for one completed call.
-#[derive(Deserialize, Debug, Clone)]
+/// llama.cpp server-reported per-stage timings for one completed call.
+///
+/// The server sends the full `server_slot_stats` object as a `timings`
+/// SIBLING of `usage` (field names verified against b11126
+/// `tools/server/server-common.cpp` `server_slot_stats::to_json`). All
+/// fields are optional so older server builds and other backends
+/// deserialize unchanged.
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct LlamaTimings {
     /// Prompt processing speed (tokens/second).
     #[serde(default)]
@@ -54,6 +60,43 @@ pub struct LlamaTimings {
     /// Token generation (llama.cpp "predicted") speed (tokens/second).
     #[serde(default)]
     pub predicted_per_second: Option<f64>,
+    /// Prompt tokens reused from the KV cache (processed nearly for free).
+    #[serde(default)]
+    pub cache_n: Option<u32>,
+    /// Total prompt tokens processed (cached + new).
+    #[serde(default)]
+    pub prompt_n: Option<u32>,
+    /// Milliseconds spent processing the prompt.
+    #[serde(default)]
+    pub prompt_ms: Option<f64>,
+    /// Number of generated tokens.
+    #[serde(default)]
+    pub predicted_n: Option<u32>,
+    /// Milliseconds spent generating tokens.
+    #[serde(default)]
+    pub predicted_ms: Option<f64>,
+}
+
+impl LlamaTimings {
+    /// Prompt tokens that had to be actually processed (not served from the
+    /// KV cache): `prompt_n - cache_n`. `None` when the server didn't
+    /// report both.
+    pub fn new_prompt_tokens(&self) -> Option<u32> {
+        match (self.prompt_n, self.cache_n) {
+            (Some(p), Some(c)) if p > c => Some(p - c),
+            (Some(p), Some(c)) if p == c => Some(0),
+            _ => None,
+        }
+    }
+
+    /// Fraction of the prompt served from the KV cache, 0.0..=1.0. `None`
+    /// when the server didn't report the cache stats or there was no prompt.
+    pub fn cache_fraction(&self) -> Option<f64> {
+        match (self.prompt_n, self.cache_n) {
+            (Some(p), Some(c)) if p > 0 => Some((c as f64) / (p as f64)),
+            _ => None,
+        }
+    }
 }
 
 /// A single slot's state from llama.cpp's `GET /slots` endpoint.
