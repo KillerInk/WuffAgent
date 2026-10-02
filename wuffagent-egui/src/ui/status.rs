@@ -170,6 +170,76 @@ impl ChatApp {
                 )
                 .on_hover_text(detail.join("\n"));
             }
+
+            // Server status (llama.cpp): slot utilization + context window
+            // from the server status monitor (`AppEvent::ServerStatus`).
+            // Shown only when a reachable local server has reported.
+            let guard = self.core.server_status.lock().ok();
+            if let Some(info) = guard.as_ref().filter(|i| i.reachable) {
+                let (busy, total) = info.busy_slots();
+                let mut parts = Vec::new();
+                if total > 0 {
+                    parts.push(format!("Slots {busy}/{total}"));
+                }
+                if let Some(n_ctx) = info.n_ctx {
+                    if let Some(train) = info.n_ctx_train {
+                        parts.push(format!("n_ctx {n_ctx} / {train}"));
+                    } else {
+                        parts.push(format!("n_ctx {n_ctx}"));
+                    }
+                }
+                if let Some(model) = &info.model {
+                    // Keep the pill short: file name without path.
+                    let short = model.rsplit(['/', '\\']).next().unwrap_or(model);
+                    let short = short.strip_suffix(".gguf").unwrap_or(short);
+                    parts.push(short.to_string());
+                }
+                if let Some(m) = &info.metrics {
+                    if let Some(tps) = m.predicted_tps {
+                        parts.push(format!("{tps:.0} t/s"));
+                    }
+                }
+                if !parts.is_empty() {
+                    let mut tooltip = format!(
+                        "llama.cpp server status (live, 3s polls)\n\nSlots: {busy}/{total} busy"
+                    );
+                    if let Some(model) = &info.model {
+                        tooltip.push_str(&format!("\nModel: {model}"));
+                    }
+                    if let (Some(n_ctx), Some(train)) = (info.n_ctx, info.n_ctx_train) {
+                        tooltip.push_str(&format!(
+                            "\nContext: {n_ctx} configured / {train} trained"
+                        ));
+                    }
+                    if let Some(m) = &info.metrics {
+                        tooltip.push_str("\n\nServer metrics (--metrics):");
+                        if let Some(tps) = m.prompt_tps {
+                            tooltip.push_str(&format!("\nPrompt: {tps:.1} tok/s"));
+                        }
+                        if let Some(tps) = m.predicted_tps {
+                            tooltip.push_str(&format!("\nGeneration: {tps:.1} tok/s"));
+                        }
+                        if let Some(r) = m.requests_processing {
+                            tooltip.push_str(&format!("\nRequests processing: {r}"));
+                        }
+                        if let Some(n) = m.n_tokens_max {
+                            tooltip.push_str(&format!("\nLargest sequence observed: {n} tokens"));
+                        }
+                    } else {
+                        tooltip.push_str("\n(Metrics hidden — start the server with --metrics / config `metrics: true`)");
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("⚙ {}", parts.join(" · ")))
+                            .color(if busy > 0 {
+                                theme.accent
+                            } else {
+                                theme.text_secondary
+                            })
+                            .size(11.0),
+                    )
+                    .on_hover_text(tooltip);
+                }
+            }
         });
     }
 

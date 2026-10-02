@@ -308,7 +308,12 @@ Code-anchored (verified 2026-07-19):
    - `client/http.rs`: `count_input_tokens(http_client, base_url, api_key, request: &ChatRequest) -> Result<u32, Error>` → `POST /v1/chat/completions/input_tokens`, parse `{"count": N}`.
    - Trimming path (agents/agent/loop.rs ~line 297): call it ONLY when the char-count estimate lands within ±5% of `trim_trigger_chars` (otherwise no extra HTTP round-trip); the exact count decides the trim.
    - Feature-detect once per client: 404/501 → `input_tokens_supported = false`, permanently fall back to the char estimate. `calibrate_from_usage` stays as secondary.
-6. **(Optional) `/metrics` + `/v1/models` polling:** when `metrics` is enabled, the status monitor also polls `GET /metrics` (parse the small Prometheus subset: prompt/predicted t/s, `requests_processing`) and `GET /v1/models` once for `n_ctx_train` → status-bar tooltip "n_ctx 4096 / train 32768".
+6. **(Optional) `/metrics` + `/v1/models` polling:** ✅ done 2026-07-19
+   - `server/status.rs`: `parse_metrics_text` (small Prometheus text subset — `llamacpp:prompt_tokens_seconds`, `llamacpp:predicted_tokens_seconds`, `llamacpp:requests_processing`, `llamacpp:n_tokens_max`; metric names verified against b11126 `tools/server/server-task.cpp` `to_metrics`), `n_ctx_train_from_models` (b11126 shape `{"data":[{meta:{n_ctx_train}}]}`, tolerant of bare array / top-level field), `fetch_n_ctx_train` (one-shot GET).
+   - `poll_server_status(base_url, api_key, metrics_enabled)` — `GET /metrics` only when the server was started with `--metrics` (the endpoint 405s otherwise → `metrics: None`).
+   - `spawn_server_monitor(..., metrics_enabled)` — fetches `/v1/models` ONCE per monitor lifetime, keeps `n_ctx_train` across snapshots.
+   - `types/usage.rs`: `ServerMetrics` (4 fields) + `ServerStatusInfo.{metrics, n_ctx_train}`.
+   - Status-bar pill (egui `ui/status.rs`): `⚙ Slots 0/1 · n_ctx 4096 / 32768 · <model> · 18 t/s`, full tooltip with per-stage t/s, requests processing, largest observed sequence.
 
 **Verify:** `cargo test -p wuffagent-core config server client` + manual: inspect the spawned process's command line (new flags present), server log lines in the WuffAgent log, attach mode when the port is busy, graceful stop (server exits within 5s without a kill).
 

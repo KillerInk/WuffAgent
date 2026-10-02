@@ -126,8 +126,10 @@ impl ServerManager {
         let base_url = base_url.to_string();
         let api_key = api_key.map(|s| s.to_string());
         let active = self.monitor_active.clone();
+        let metrics_enabled = self.args.metrics;
 
-        let handle = status::spawn_server_monitor(base_url, api_key, event_tx, active);
+        let handle =
+            status::spawn_server_monitor(base_url, api_key, event_tx, active, metrics_enabled);
 
         *self.monitor_handle.lock().unwrap() = Some(handle);
     }

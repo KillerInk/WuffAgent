@@ -74,7 +74,30 @@ pub struct SlotInfo {
     pub n_ctx: u32,
 }
 
+/// Prometheus gauges/counters from llama.cpp's `GET /metrics` endpoint
+/// (server started with `--metrics`). Parsed by the status monitor from the
+/// small Prometheus text subset the server emits — metric names verified
+/// against b11126 `tools/server/server-task.cpp` (`to_metrics`), e.g.
+/// `llamacpp:prompt_tokens_seconds 123.45`. `None` per field when the
+/// server doesn't report it.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct ServerMetrics {
+    /// Prompt-processing throughput (tokens/s) — `llamacpp:prompt_tokens_seconds`.
+    #[serde(default)]
+    pub prompt_tps: Option<f64>,
+    /// Token-generation throughput (tokens/s) — `llamacpp:predicted_tokens_seconds`.
+    #[serde(default)]
+    pub predicted_tps: Option<f64>,
+    /// Number of requests currently being processed — `llamacpp:requests_processing`.
+    #[serde(default)]
+    pub requests_processing: Option<u32>,
+    /// Largest observed sequence length (prompt + generation) — `llamacpp:n_tokens_max`.
+    #[serde(default)]
+    pub n_tokens_max: Option<u32>,
+}
+
 /// Server status snapshot from llama.cpp's `GET /slots` + `GET /props`
+/// (and, when enabled/available, `GET /metrics` + `GET /v1/models`)
 /// endpoints. Emitted to the UI via `AppEvent::ServerStatus`.
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct ServerStatusInfo {
@@ -94,6 +117,16 @@ pub struct ServerStatusInfo {
     /// Whether the server is reachable (last probe succeeded).
     #[serde(default)]
     pub reachable: bool,
+    /// Live throughput gauges from `GET /metrics` (only when the server was
+    /// started with `--metrics`; `None` otherwise).
+    #[serde(default)]
+    pub metrics: Option<ServerMetrics>,
+    /// The model's trained context window (tokens), from `GET /v1/models`
+    /// → `data[0].meta.n_ctx_train` (fetched once per monitor lifetime).
+    /// `None` when the endpoint is unavailable. Used for the status-bar
+    /// tooltip "n_ctx 4096 / train 32768".
+    #[serde(default)]
+    pub n_ctx_train: Option<u32>,
 }
 
 impl ServerStatusInfo {
