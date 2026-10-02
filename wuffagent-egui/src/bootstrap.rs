@@ -239,30 +239,22 @@ pub fn bootstrap() -> AppContext {
 
     let server_status = Arc::new(Mutex::new(ServerStatusInfo::default()));
 
-    // Start the server status monitor (polls /slots + /props every 3s,
-    // emits AppEvent::ServerStatus for the UI status bar indicator).
-    // If the server is already running (local mode), start it now.
-    // Otherwise the monitor will be started when the server becomes ready
-    // (see the server management code in the UI).
-    if server.is_running() {
+    // Attach mode (Phase 2 item 3) for the common startup case: the user
+    // runs llama-server externally, so WuffAgent probes the configured port.
+    // If something is listening, attach to it (no process of ours) and start
+    // the status monitor (polls /slots + /props every 3s, emits
+    // AppEvent::ServerStatus for the UI status bar indicator).
+    // For servers started LATER via the UI, the UI starts the monitor after
+    // `wait_for_ready` (see `start_status_monitor`).
+    if server.attach_if_running(config.port) {
         let base_url = server.get_base_url();
-        let api_key = config.remote_api_key.clone();
         server.start_status_monitor(
             &base_url,
-            api_key.as_deref(),
+            config.remote_api_key.as_deref(),
             event_tx.clone(),
         );
         tracing::info!("Server status monitor started for {}", base_url);
     }
-
-    // Start the server status monitor (polls /slots + /props every 3s,
-    // emits AppEvent::ServerStatus for the UI status bar indicator).
-    // The monitor is started when the server becomes ready (see the
-    // `server_ready` event handler in the UI).
-    //
-    // For now, if the server is already running (e.g. local mode), start it
-    // here. The UI will also start it when it receives a `server_ready`
-    // event from the server management code.
 
     AppContext {
         config,

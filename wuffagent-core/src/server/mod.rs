@@ -28,6 +28,9 @@ pub struct ServerManager {
     monitor_active: Arc<std::sync::atomic::AtomicBool>,
     /// Handle to the server status monitor task (so we can await it on shutdown).
     monitor_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// True when we ATTACHED to a server already listening on the port
+    /// (no child process of ours — `stop_server` must not kill it).
+    attached: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +65,7 @@ impl ServerManager {
             error: Arc::new(std::sync::Mutex::new(None)),
             monitor_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             monitor_handle: Arc::new(std::sync::Mutex::new(None)),
+            attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -81,6 +85,7 @@ impl ServerManager {
             error: Arc::new(std::sync::Mutex::new(None)),
             monitor_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             monitor_handle: Arc::new(std::sync::Mutex::new(None)),
+            attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -107,8 +112,14 @@ impl ServerManager {
         api_key: Option<&str>,
         event_tx: std::sync::mpsc::Sender<crate::types::AppEvent>,
     ) {
-        // Stop any existing monitor first.
-        let _ = tokio::runtime::Handle::current().block_on(self.stop_status_monitor());
+        // Replace any existing monitor WITHOUT blocking (this is called from
+        // sync contexts — bootstrap, UI callbacks — where `block_on` would
+        // panic: "Cannot start a runtime from within a runtime"). The old
+        // task is aborted; the shared `active` flag stays owned by the NEW
+        // task (app shutdown clears it via `stop_status_monitor`).
+        if let Some(old) = self.monitor_handle.lock().unwrap().take() {
+            old.abort();
+        }
         self.monitor_active
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
@@ -132,6 +143,27 @@ impl ServerManager {
         }
     }
 
+    /// Attach to a server already listening on `port` (attach mode, Phase 2
+    /// item 3): marks this manager running/attached WITHOUT spawning a
+    /// process. Sync on purpose (atomic state only) so the non-async
+    /// bootstrap can call it at startup. Returns true when attached.
+    /// `stop_server` on an attached manager only clears the flags — it must
+    /// not kill a process that is not ours.
+    pub fn attach_if_running(&self, port: u16) -> bool {
+        if TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+            self.attached
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            tracing::info!(port, "attached to existing server on :{port} (no process spawned)");
+            true
+        } else {
+            self.attached
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            false
+        }
+    }
+
     pub async fn start_server_with_paths(
         &self,
         server_path: &str,
@@ -141,6 +173,12 @@ impl ServerManager {
         n_ctx: u32,
         threads: u32,
     ) -> Result<(), Error> {
+        // Attach mode (Phase 2 item 3): if something is already listening on
+        // the port, attach instead of failing with a port collision.
+        if self.attach_if_running(port) {
+            return Ok(());
+        }
+
         // Build arguments. Core flags first, then the config-driven tuning
         // args (batch sizes, slots, metrics, ...) from `ServerArgs`.
         // NOTE: current llama.cpp builds use `--ctx-size` (NOT `--n-ctx` —
@@ -176,6 +214,14 @@ impl ServerManager {
         let mut cmd = Command::new(server_path);
         cmd.args(&args);
         cmd.args(&self.args.to_cli_args());
+
+        // Windows: give the server its own process group (group id = child
+        // pid) so `stop_server` can ask it to handle CTRL_C gracefully
+        // instead of SIGKILL (Phase 2 item 4).
+        #[cfg(windows)]
+        cmd.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+        );
 
         // Capture stdout and stderr for monitoring
         cmd.stdout(std::process::Stdio::piped());
@@ -221,6 +267,57 @@ impl ServerManager {
 
         let mut process = self.process.lock().await;
         if let Some(child) = process.as_mut() {
+            #[cfg(windows)]
+            {
+                // Graceful shutdown (Phase 2 item 4): ask the server's
+                // process group to handle CTRL_C — llama-server registers a
+                // console handler that releases model memory cleanly. Wait up
+                // to 5 s for the exit, then fall back to a hard kill.
+                // (`GenerateConsoleCtrlEvent` can fail when the calling
+                // process has no console of its own — e.g. this GUI app; the
+                // kill fallback covers that case.)
+                if let Some(pid) = child.id() {
+                    let sent = unsafe {
+                        // SAFETY: `GenerateConsoleCtrlEvent` takes a plain u32
+                        // process-group id (the child's pid — a valid group
+                        // because we spawned it with CREATE_NEW_PROCESS_GROUP)
+                        // and no pointers; failure is reported via its return
+                        // value (and falls back to `kill()` below).
+                        windows_sys::Win32::System::Console::GenerateConsoleCtrlEvent(
+                            windows_sys::Win32::System::Console::CTRL_C_EVENT,
+                            pid,
+                        )
+                    };
+                    tracing::info!(
+                        pid,
+                        ctrl_c_sent = sent != 0,
+                        "sent CTRL_C to llama-server process group; waiting up to 5s for a clean exit"
+                    );
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                    let mut exited = false;
+                    while tokio::time::Instant::now() < deadline {
+                        match child.try_wait() {
+                            Ok(Some(_)) => {
+                                exited = true;
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!(error = %e, "try_wait failed during graceful shutdown");
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    if !exited {
+                        tracing::info!(pid, "llama-server did not exit within 5s; killing");
+                        child.kill().await?;
+                    }
+                } else {
+                    child.kill().await?;
+                }
+            }
+            #[cfg(not(windows))]
             child.kill().await?;
         }
         *process = None;
@@ -253,6 +350,14 @@ impl ServerManager {
     /// Returns the tuning arguments this server was started with (Phase 2).
     pub fn get_args(&self) -> &ServerArgs {
         &self.args
+    }
+
+    /// Returns true when this manager is attached to a server that was
+    /// already listening on its port (attach mode — the process is NOT ours,
+    /// so `stop_server` only clears the running flags).
+    pub fn is_attached(&self) -> bool {
+        self.attached
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Returns the base URL for this server (e.g. `http://127.0.0.1:8080`).

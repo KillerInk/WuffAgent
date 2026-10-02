@@ -295,16 +295,16 @@ Code-anchored (verified 2026-07-19):
 - bootstrap.rs:123 constructs the `ServerManager` from `Config`.
 - llama-server treats SIGINT/SIGTERM as graceful shutdown (b11126 `tools/server/server.cpp:501-502`).
 
-1. **New server flags (config → spawn args):**
+1. **New server flags (config → spawn args):** ✅ done 2026-07-19 (commit 6daf523)
    - Add to `LocalConfig` (each `#[serde(default)]` so old config files load unchanged): `parallel: u32` (default 1), `cache_reuse: u32` (0 = off), `sleep_idle_seconds: i32` (-1 = off), `metrics: bool` (false), `sse_ping_interval: i32` (-1 = server default 30), `api_key: String` ("" = off). Mirror into `Config` (config/mod.rs).
    - `ServerManager::new` stops taking positional args — take the config struct instead. Args builder in `start_server_with_paths`: always `--parallel`; `--metrics` iff true; `--cache-reuse` iff > 0; `--sleep-idle-seconds` iff >= 0; `--sse-ping-interval` iff >= 0; `--api-key` iff non-empty.
    - bootstrap.rs:123 passes the config; when `api_key` is set, hand it to the ChatClient and the status monitor (both already accept an api_key parameter).
    - UI settings panel: expose `parallel` + `metrics` now (the rest stay config-file-only until needed), with a "requires server restart" hint.
    - presets.rs: leave presets as-is (new fields default; not part of preset comparison).
-2. **Server log forwarding:** the existing stdout read loop (AsyncBufReadExt + `parse_progress`) forwards every line to `tracing::debug!(target: "llama-server", line = %line)`; progress lines additionally at INFO (keep `parse_progress` for the loading-% AppEvent).
+2. **Server log forwarding:** ✅ done (pre-existing: every stdout line forwarded at INFO with a `[llama-server]` prefix — server/mod.rs; `parse_progress` still emits the loading-% AppEvent).
 3. **Port collision → attach mode:** before spawning, TCP-probe 127.0.0.1:port (the existing probe in server/mod.rs). If reachable: do NOT spawn — mark running/ready ("attached"), start the status monitor, log `attached to existing server on :{port}`. If not reachable: spawn as today. (bootstrap.rs already handles the "server already running at startup" case; this generalizes it.)
 4. **Graceful shutdown (Windows):** spawn with `CREATE_NEW_PROCESS_GROUP` (tokio `creation_flags`); on stop: `GenerateConsoleCtrlEvent(CTRL_C_EVENT, <group>)` via `windows-sys` (new dep, windows target only) → wait up to 5s for the child to exit → `kill()` fallback. Keep `kill()` when the flags are unavailable (documented).
-5. **Exact token counting (Phase 1 remainder, items 1-2):**
+5. **Exact token counting (Phase 1 remainder, items 1-2):** ✅ done 2026-07-19 (commit f40d022)
    - `client/http.rs`: `count_input_tokens(http_client, base_url, api_key, request: &ChatRequest) -> Result<u32, Error>` → `POST /v1/chat/completions/input_tokens`, parse `{"count": N}`.
    - Trimming path (agents/agent/loop.rs ~line 297): call it ONLY when the char-count estimate lands within ±5% of `trim_trigger_chars` (otherwise no extra HTTP round-trip); the exact count decides the trim.
    - Feature-detect once per client: 404/501 → `input_tokens_supported = false`, permanently fall back to the char estimate. `calibrate_from_usage` stays as secondary.

@@ -31,6 +31,61 @@ fn test_server_manager_get_args() {
     assert_eq!(server.get_args(), &args);
 }
 
+#[tokio::test]
+async fn attach_mode_when_port_busy() {
+    // Occupy a random port; starting the server against it must ATTACH
+    // (running + attached, no spawn attempt, fake path never executed)
+    // instead of failing with a port collision.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = ServerManager::new(
+        "llama-server-does-not-exist",
+        "m.gguf",
+        port as u16,
+        0,
+        4096,
+        4,
+        ServerArgs::default(),
+    );
+    assert!(!server.is_attached());
+
+    // Async start path: probes the port, sees it busy, attaches.
+    assert!(server
+        .start_server_with_paths(
+            "llama-server-does-not-exist",
+            "m.gguf",
+            port as u16,
+            0,
+            4096,
+            4
+        )
+        .await
+        .is_ok());
+    assert!(server.is_running());
+    assert!(server.is_attached());
+
+    // stop_server on an attached manager clears the flags without killing
+    // anything (no child of ours).
+    assert!(server.stop_server().await.is_ok());
+    assert!(!server.is_running());
+    assert!(server.is_attached());
+    drop(listener);
+}
+
+#[test]
+fn attach_mode_when_port_free() {
+    // No listener on a random free port → attach_if_running is a no-op.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // port is now free
+
+    let server = ServerManager::new("llama-server", "m.gguf", port as u16, 0, 4096, 4, ServerArgs::default());
+    assert!(!server.attach_if_running(port as u16));
+    assert!(!server.is_running());
+    assert!(!server.is_attached());
+}
+
 #[test]
 fn test_parse_progress() {
     assert_eq!(parse_progress("loading model ... 100%"), Some(100.0));

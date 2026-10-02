@@ -35,3 +35,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 [dev-dependencies]
 tempfile = "3.0"
+
+# Windows support for graceful llama-server shutdown:
+# - `CREATE_NEW_PROCESS_GROUP` (Win32_System_Threading) at spawn, so the child
+#   has its own process group (group id = child pid).
+# - `GenerateConsoleCtrlEvent(CTRL_C_EVENT, <group>)` (Win32_System_Console)
+#   at stop, with a 5 s wait + `kill()` fallback.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
