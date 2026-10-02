@@ -128,72 +128,72 @@ pub async fn poll_server_status(
         }
     }
 
-    // 1. GET /slots — per-slot state.
-    {
-        let mut builder = http_client.get(format!("{}/slots", base_url));
-        if let Some(ref key) = api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
+    // 1. GET /slots + /props + /metrics — fired in PARALLEL (perf follow-up:
+    // sequential awaits added up to 3× the single-request latency per poll;
+    // with the shared client's 5 s request timeout a slow poll could
+    // otherwise take ~15 s). /metrics is always requested (the endpoint
+    // 501s when the server was not started with --metrics) and its body is
+    // only parsed when metrics are enabled.
+    let auth = |b: reqwest::RequestBuilder| -> reqwest::RequestBuilder {
+        match api_key {
+            Some(key) => b.header("Authorization", format!("Bearer {}", key)),
+            None => b,
         }
-        if let Ok(resp) = builder.send().await {
-            if resp.status().is_success() {
-                if let Ok(text) = resp.text().await {
-                    match serde_json::from_str::<Vec<SlotInfo>>(&text) {
-                        Ok(slots) => {
-                            status.slots = slots;
-                            status.reachable = true;
-                        }
-                        Err(e) => {
-                            tracing::debug!("ServerMonitor: failed to parse /slots: {}", e);
-                        }
+    };
+    let (slots_res, props_res, metrics_res) = futures::join!(
+        auth(http_client.get(format!("{}/slots", base_url))).send(),
+        auth(http_client.get(format!("{}/props", base_url))).send(),
+        auth(http_client.get(format!("{}/metrics", base_url))).send(),
+    );
+
+    // /slots — per-slot state.
+    if let Ok(resp) = slots_res {
+        if resp.status().is_success() {
+            if let Ok(text) = resp.text().await {
+                match serde_json::from_str::<Vec<SlotInfo>>(&text) {
+                    Ok(slots) => {
+                        status.slots = slots;
+                        status.reachable = true;
+                    }
+                    Err(e) => {
+                        tracing::debug!("ServerMonitor: failed to parse /slots: {}", e);
                     }
                 }
             }
         }
     }
 
-    // 2. GET /props — n_ctx + model info.
-    {
-        let mut builder = http_client.get(format!("{}/props", base_url));
-        if let Some(ref key) = api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
-        }
-        if let Ok(resp) = builder.send().await {
-            if resp.status().is_success() {
-                if let Ok(text) = resp.text().await {
-                    status.reachable = true;
-                    // Parse ONCE — both n_ctx and model come from this body
-                    // (perf pass: the old code ran from_str twice per poll).
-                    if let Ok(props) = serde_json::from_str::<serde_json::Value>(&text) {
-                        // n_ctx from default_generation_settings.n_ctx
-                        // (top-level fallback for non-llama.cpp backends).
-                        if status.n_ctx.is_none() {
-                            status.n_ctx = props
-                                .get("default_generation_settings")
-                                .and_then(|s| s.get("n_ctx"))
-                                .or_else(|| props.get("n_ctx"))
-                                .and_then(|v| v.as_u64())
-                                .map(|v| v as u32);
-                        }
-                        // Extract model name from `model` field (if present).
-                        status.model = props
-                            .get("model")
-                            .and_then(|m| m.as_str())
-                            .map(|s| s.to_string());
+    // /props — n_ctx + model info.
+    if let Ok(resp) = props_res {
+        if resp.status().is_success() {
+            if let Ok(text) = resp.text().await {
+                status.reachable = true;
+                // Parse ONCE — both n_ctx and model come from this body.
+                if let Ok(props) = serde_json::from_str::<serde_json::Value>(&text) {
+                    // n_ctx from default_generation_settings.n_ctx
+                    // (top-level fallback for non-llama.cpp backends).
+                    if status.n_ctx.is_none() {
+                        status.n_ctx = props
+                            .get("default_generation_settings")
+                            .and_then(|s| s.get("n_ctx"))
+                            .or_else(|| props.get("n_ctx"))
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32);
                     }
+                    // Extract model name from `model` field (if present).
+                    status.model = props
+                        .get("model")
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string());
                 }
             }
         }
     }
 
-    // 3. GET /metrics — live throughput gauges (only when the server was
-    // started with --metrics; otherwise the endpoint 501s and we leave
-    // `metrics: None`).
+    // /metrics — Prometheus-text subset (only when the server was started
+    // with --metrics; the endpoint 501s otherwise → `metrics: None`).
     if metrics_enabled {
-        let mut builder = http_client.get(format!("{}/metrics", base_url));
-        if let Some(ref key) = api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
-        }
-        if let Ok(resp) = builder.send().await {
+        if let Ok(resp) = metrics_res {
             if resp.status().is_success() {
                 if let Ok(text) = resp.text().await {
                     status.metrics = parse_metrics_text(&text);
