@@ -15,7 +15,7 @@
 //! │                  (carries a SessionState handle), tools (ToolDefinition
 //! │                  in request types)
 //! ├── config         (Config, ConnectionType) → re-exports agents::config,
-//! │                  memory::types
+//! │                  memory::types; server (ServerArgs field)
 //! ├── agents         (Agent, AgentEngine, ChatPipeline) → llm, client, tools,
 //! │                  memory, trimming, sessions (QueuedMessage), types
 //! │   ├── agent      (Agent: execute, loop, prompt, verify, toolcall_parse,

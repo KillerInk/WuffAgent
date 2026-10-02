@@ -67,6 +67,12 @@ pub struct Config {
     pub n_gpu_layers: i32,
     pub n_ctx: u32,
     pub threads: u32,
+    /// llama.cpp server tuning arguments (local mode only): batch sizes,
+    /// parallel slots, flash-attn, KV cache reuse, idle sleep, metrics,
+    /// API key, SSE ping, extra pass-through args. Old config files load
+    /// with `ServerArgs::default` for any missing field.
+    #[serde(default)]
+    pub server_args: crate::server::ServerArgs,
 
     // Remote-mode fields
     #[serde(default)]
@@ -197,6 +203,7 @@ impl Default for Config {
             n_gpu_layers: 99,
             n_ctx: 4096,
             threads: 8,
+            server_args: crate::server::ServerArgs::default(),
             remote_url: String::new(),
             remote_api_key: None,
             system_prompt: String::new(),

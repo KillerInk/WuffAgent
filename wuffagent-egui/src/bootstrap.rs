@@ -127,6 +127,7 @@ pub fn bootstrap() -> AppContext {
         config.n_gpu_layers,
         config.n_ctx,
         config.threads,
+        config.server_args.clone(),
     );
 
     // Initialize memory manager (with the memory-dedicated LLM client that

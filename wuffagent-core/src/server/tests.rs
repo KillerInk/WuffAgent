@@ -4,9 +4,31 @@ use super::*;
 
 #[test]
 fn test_server_manager_creation() {
-    let server = ServerManager::new("llama-server", "test_model.gguf", 18080, 0, 2048, 4);
+    let server = ServerManager::new(
+        "llama-server",
+        "test_model.gguf",
+        18080,
+        0,
+        2048,
+        4,
+        ServerArgs::default(),
+    );
     assert!(!server.is_running());
     assert_eq!(server.get_error(), None);
+}
+
+#[test]
+fn test_server_manager_get_args() {
+    let args = ServerArgs {
+        parallel: 4,
+        cache_reuse: 64,
+        ..Default::default()
+    };
+    let server =
+        ServerManager::new("llama-server", "m.gguf", 18081, 99, 16384, 8, args.clone());
+    assert_eq!(server.get_args().parallel, 4);
+    assert_eq!(server.get_args().cache_reuse, 64);
+    assert_eq!(server.get_args(), &args);
 }
 
 #[test]

@@ -5,6 +5,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+mod args;
+pub use args::ServerArgs;
 mod progress;
 pub use progress::parse_progress;
 pub mod status;
@@ -16,6 +18,9 @@ pub struct ServerManager {
     n_gpu_layers: i32,
     n_ctx: u32,
     threads: u32,
+    /// Tunable server CLI arguments (batch sizes, slots, metrics, ...) —
+    /// see [`ServerArgs`].
+    args: ServerArgs,
     process: Arc<Mutex<Option<tokio::process::Child>>>,
     running: Arc<std::sync::atomic::AtomicBool>,
     error: Arc<std::sync::Mutex<Option<String>>>,
@@ -42,6 +47,7 @@ impl ServerManager {
         n_gpu_layers: i32,
         n_ctx: u32,
         threads: u32,
+        args: ServerArgs,
     ) -> Self {
         Self {
             server_path: server_path.to_string(),
@@ -50,6 +56,7 @@ impl ServerManager {
             n_gpu_layers,
             n_ctx,
             threads,
+            args,
             process: Arc::new(Mutex::new(None)),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             error: Arc::new(std::sync::Mutex::new(None)),
@@ -68,6 +75,7 @@ impl ServerManager {
             n_gpu_layers: 0,
             n_ctx: 0,
             threads: 0,
+            args: ServerArgs::default(),
             process: Arc::new(Mutex::new(None)),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             error: Arc::new(std::sync::Mutex::new(None)),
@@ -133,7 +141,10 @@ impl ServerManager {
         n_ctx: u32,
         threads: u32,
     ) -> Result<(), Error> {
-        // Build arguments
+        // Build arguments. Core flags first, then the config-driven tuning
+        // args (batch sizes, slots, metrics, ...) from `ServerArgs`.
+        // NOTE: current llama.cpp builds use `--ctx-size` (NOT `--n-ctx` —
+        // unknown arguments are fatal and the server exits 1).
         let args = vec![
             "--model".to_string(),
             model_path.to_string(),
@@ -145,12 +156,13 @@ impl ServerManager {
             threads.to_string(),
             "--n-gpu-layers".to_string(),
             n_gpu_layers.to_string(),
-            "--n-ctx".to_string(),
+            "--ctx-size".to_string(),
             n_ctx.to_string(),
         ];
 
         let mut cmd = Command::new(server_path);
         cmd.args(&args);
+        cmd.args(&self.args.to_cli_args());
 
         // Capture stdout and stderr for monitoring
         cmd.stdout(std::process::Stdio::piped());
@@ -223,6 +235,11 @@ impl ServerManager {
     /// Returns the actual threads value this server was started with.
     pub fn get_threads(&self) -> u32 {
         self.threads
+    }
+
+    /// Returns the tuning arguments this server was started with (Phase 2).
+    pub fn get_args(&self) -> &ServerArgs {
+        &self.args
     }
 
     /// Returns the base URL for this server (e.g. `http://127.0.0.1:8080`).
