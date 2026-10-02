@@ -26,6 +26,17 @@ pub struct SettingsDialog {
     search_backend_label: String,
     /// SearXNG instance URL (shown only for the SearXNG backend).
     searxng_url: String,
+    // Local llama.cpp server tuning (Phase 2) — edits `config.server_args`,
+    // shown only when the connection type is Local.
+    srv_parallel: u32,
+    srv_cache_reuse: u32,
+    srv_n_batch: u32,
+    srv_n_ubatch: u32,
+    srv_sleep: u32,
+    srv_metrics: bool,
+    srv_no_webui: bool,
+    srv_api_key: String,
+    srv_extra: String,
 }
 
 impl SettingsDialog {
@@ -59,6 +70,15 @@ impl SettingsDialog {
             config_dirty: false,
             search_backend_label,
             searxng_url,
+            srv_parallel: cfg.server_args.parallel,
+            srv_cache_reuse: cfg.server_args.cache_reuse,
+            srv_n_batch: cfg.server_args.n_batch,
+            srv_n_ubatch: cfg.server_args.n_ubatch,
+            srv_sleep: cfg.server_args.sleep_idle_seconds,
+            srv_metrics: cfg.server_args.metrics,
+            srv_no_webui: cfg.server_args.no_webui,
+            srv_api_key: cfg.server_args.api_key.clone().unwrap_or_default(),
+            srv_extra: cfg.server_args.extra_args.join(" "),
         }
     }
 
@@ -187,7 +207,74 @@ impl SettingsDialog {
                     );
                 });
 
-                ui.separator();
+                // Section: Local server tuning (llama.cpp local mode only,
+                // Phase 2 — config.server_args).
+                let (is_local, n_ctx) = {
+                    let cfg = self.config.lock().unwrap();
+                    let local = matches!(
+                        cfg.connection_type,
+                        wuffagent_core::config::ConnectionType::Local
+                    );
+                    (local, cfg.n_ctx)
+                };
+                if is_local {
+                    let kv_gb = wuffagent_core::server::kv_estimate_gb(self.srv_parallel, n_ctx);
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Local server tuning")
+                                    .strong()
+                                    .color(theme.primary),
+                            );
+                            ui.label(
+                                egui::RichText::new("(applies on next server start)")
+                                    .size(11.0)
+                                    .color(theme.text_secondary),
+                            );
+                        });
+                        ui.separator();
+                        ui.add(
+                            egui::Slider::new(&mut self.srv_parallel, 0..=16)
+                                .text("Parallel slots (0 = single)"),
+                        );
+                        if self.srv_parallel > 1 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "≈ {kv_gb:.1} GB KV cache (7B-class estimate, ctx={n_ctx})"
+                                ))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(255, 200, 60)),
+                            );
+                        }
+                        ui.add(
+                            egui::Slider::new(&mut self.srv_cache_reuse, 0..=2048)
+                                .text("KV cache reuse (tokens, 0 = off)"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut self.srv_n_batch, 0..=8192)
+                                .text("Batch size (0 = llama.cpp default 512)"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut self.srv_n_ubatch, 0..=8192)
+                                .text("Micro batch (0 = default)"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut self.srv_sleep, 0..=3600)
+                                .text("Sleep after N idle seconds (0 = never)"),
+                        );
+                        ui.checkbox(&mut self.srv_metrics, "Prometheus /v1/metrics endpoint");
+                        ui.checkbox(&mut self.srv_no_webui, "Hide web UI (--no-webui)");
+                        ui.horizontal(|ui| {
+                            ui.label("API key:");
+                            ui.text_edit_singleline(&mut self.srv_api_key);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Extra args:");
+                            ui.text_edit_singleline(&mut self.srv_extra);
+                        });
+                    });
+                    ui.separator();
+                }
 
                 // Action buttons
                 ui.horizontal(|ui| {
@@ -294,6 +381,31 @@ impl SettingsDialog {
             // "Brave (API key)": keep the stored key unchanged.
             _ => cfg.search_config.backend.clone(),
         };
+        // Local server tuning (Phase 2). Written in every mode: Remote
+        // ignores server_args at runtime, but keeping the last Local values
+        // means switching back and forth loses nothing.
+        let extra: Vec<String> = self
+            .srv_extra
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+        cfg.server_args = wuffagent_core::server::ServerArgs {
+            parallel: self.srv_parallel,
+            cache_reuse: self.srv_cache_reuse,
+            n_batch: self.srv_n_batch,
+            n_ubatch: self.srv_n_ubatch,
+            sleep_idle_seconds: self.srv_sleep,
+            metrics: self.srv_metrics,
+            no_webui: self.srv_no_webui,
+            api_key: if self.srv_api_key.trim().is_empty() {
+                None
+            } else {
+                Some(self.srv_api_key.trim().to_string())
+            },
+            extra_args: extra,
+            ..std::mem::take(&mut cfg.server_args)
+        };
+
         // Save via the shared config reference
         if let Err(e) = cfg.save() {
             tracing::warn!(error = %e, "Failed to save config");

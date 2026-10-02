@@ -153,6 +153,28 @@ impl ServerArgs {
         a.extend(self.extra_args.iter().cloned());
         a
     }
+
+    /// Rough KV-cache size estimate in GB for `n_ctx` context tokens at this
+    /// `parallel` slot count. Delegates to [`kv_estimate_gb`].
+    pub fn kv_estimate_gb(&self, n_ctx: u32) -> f64 {
+        kv_estimate_gb(self.parallel, n_ctx)
+    }
+}
+
+/// Rough KV-cache size estimate in GB for `n_ctx` context tokens at
+/// `parallel` slot count, assuming a **7B-class** model (32 layers,
+/// 40 KV heads, 128 head-dim, fp16 K/V ≈ 0.63 MB per token).
+///
+/// This is a warning heuristic, not a budget: bigger models use more,
+/// smaller less; quantized KV caches (`--cache-type-k/q`) reduce it.
+/// It exists so the settings UI and the server-start log can warn before
+/// a 4-slot × 32K configuration OOMs the machine.
+pub fn kv_estimate_gb(parallel: u32, n_ctx: u32) -> f64 {
+    // Llama-2-7B class: 2 (K+V) · 32 layers · 32 KV heads · 128 head-dim · 2
+    // bytes (fp16) = 0.5 MB per context token. GQA models (fewer KV heads)
+    // use less; this is the conservative upper bound for 7–8B models.
+    const KV_BYTES_PER_TOKEN_7B: f64 = 524_288.0; // 2·32·32·128·2
+    (n_ctx as f64) * (parallel.max(1) as f64) * KV_BYTES_PER_TOKEN_7B / 1.0e9
 }
 
 #[cfg(test)]
@@ -265,5 +287,17 @@ mod tests {
         assert!(!args.metrics);
         assert_eq!(args.n_batch, 2048);
         assert_eq!(args.n_ubatch, 512);
+    }
+
+    #[test]
+    fn kv_estimate_matches_7b_rule_of_thumb() {
+        // 4 parallel slots × 16K ctx on a 7B-class model (0.5 MB/token):
+        // 4 · 16384 · 524288 B = 34.4 GB.
+        let a = ServerArgs { parallel: 4, ..Default::default() };
+        let gb = a.kv_estimate_gb(16_384);
+        assert!((gb - 34.36).abs() < 0.2, "4×16K 7B-class ≈ 34 GB, got {}", gb);
+        // Single slot is exactly parallel/4 of that.
+        let a1 = ServerArgs::default();
+        assert!((a1.kv_estimate_gb(16_384) * 4.0 - gb).abs() < 0.01);
     }
 }

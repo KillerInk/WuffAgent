@@ -6,7 +6,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 mod args;
-pub use args::ServerArgs;
+pub use args::{kv_estimate_gb, ServerArgs};
 mod progress;
 pub use progress::parse_progress;
 pub mod status;
@@ -159,6 +159,19 @@ impl ServerManager {
             "--ctx-size".to_string(),
             n_ctx.to_string(),
         ];
+
+        // KV cache budget warning: parallel slots multiply the per-slot KV
+        // cache, the most common way to OOM a local setup.
+        if self.args.parallel > 1 {
+            let gb = self.args.kv_estimate_gb(n_ctx);
+            tracing::info!(
+                n_parallel = self.args.parallel,
+                n_ctx,
+                kv_estimate_gb = format!("{:.1}", gb),
+                "parallel slots multiply the KV cache (7B-class estimate); \
+                 lower --parallel or n_ctx if the server OOMs on load"
+            );
+        }
 
         let mut cmd = Command::new(server_path);
         cmd.args(&args);
