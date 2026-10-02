@@ -322,6 +322,7 @@ fn build_clients(
     let mut client = ChatClient::from_settings(connection.clone());
     client.set_session(config.session_id.clone(), config.sessions_dir.clone());
     client.set_reasoning_effort(config.reasoning_effort);
+    client.set_reasoning_budget(config.reasoning_format.as_deref(), config.reasoning_budget_tokens);
     client.set_max_messages(config.max_messages);
     client.set_n_ctx(config.n_ctx);
     if config.encryption_enabled {
@@ -335,6 +336,7 @@ fn build_clients(
     // wrapping in the adapter (the adapter only holds the client handle).
     let non_streaming = ChatClient::from_settings(connection.clone());
     non_streaming.set_reasoning_effort(config.reasoning_effort);
+    non_streaming.set_reasoning_budget(config.reasoning_format.as_deref(), config.reasoning_budget_tokens);
     non_streaming.set_n_ctx(config.n_ctx);
     let llm_client = Arc::new(
         ChatClientAdapter::new(non_streaming).with_activity(activity.clone()),
@@ -357,6 +359,7 @@ fn build_clients(
     let memory_llm =
         ChatClient::from_settings_with_timeout(connection.clone(), MEMORY_LLM_TIMEOUT_SECS);
     memory_llm.set_reasoning_effort(config.reasoning_effort);
+    memory_llm.set_reasoning_budget(config.reasoning_format.as_deref(), config.reasoning_budget_tokens);
     memory_llm.set_n_ctx(config.n_ctx);
     let memory_llm_client = Arc::new(ChatClientAdapter::new(memory_llm).with_activity(activity.clone()));
 

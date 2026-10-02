@@ -197,6 +197,14 @@ pub struct ChatClient {
     /// round-trip, falling back to the char-count estimate. Shared like the
     /// other per-client state: clones see the same detection result.
     input_tokens_supported: Arc<std::sync::atomic::AtomicBool>,
+    /// llama.cpp reasoning tuning (Phase 3 items 3+4): the request-body
+    /// `reasoning_format` (e.g. "deepseek" for DeepSeek-family models) and
+    /// `reasoning_budget_tokens` cap (-1 = server default). Both `None` =
+    /// omitted from the request (server default). Global config values,
+    /// stamped by bootstrap on every app-level client; per-run clones copy
+    /// them (like `reasoning_effort`) so an agent can override its copy.
+    reasoning_format: Mutex<Option<String>>,
+    reasoning_budget_tokens: Mutex<Option<i32>>,
 }
 
 impl Clone for ChatClient {
@@ -222,6 +230,10 @@ impl Clone for ChatClient {
             run_id: self.run_id.clone(),
             last_model: self.last_model.clone(),
             input_tokens_supported: self.input_tokens_supported.clone(),
+            // Copy into FRESH mutexes like `reasoning_effort`: a per-run
+            // clone's overrides must stay isolated from the shared client.
+            reasoning_format: Mutex::new(self.reasoning_format()),
+            reasoning_budget_tokens: Mutex::new(self.reasoning_budget_tokens()),
         }
     }
 }
@@ -295,6 +307,8 @@ impl ChatClient {
                 Self::TRIM_TARGET_PCT,
             ))),
             input_tokens_supported: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            reasoning_format: Mutex::new(None),
+            reasoning_budget_tokens: Mutex::new(None),
         }
     }
 
@@ -474,6 +488,31 @@ impl ChatClient {
 
     pub fn reasoning_effort(&self) -> crate::types::ReasoningEffort {
         *self.reasoning_effort.lock().unwrap()
+    }
+
+    /// Set the llama.cpp reasoning tuning fields for every request this
+    /// client builds (`None` for each = omitted from the body = server
+    /// default).
+    pub fn set_reasoning_budget(&self, format: Option<&str>, budget: Option<i32>) {
+        *self.reasoning_format.lock().unwrap() = format.map(str::to_string);
+        *self.reasoning_budget_tokens.lock().unwrap() = budget;
+    }
+
+    pub fn reasoning_format(&self) -> Option<String> {
+        self.reasoning_format.lock().unwrap().clone()
+    }
+
+    pub fn reasoning_budget_tokens(&self) -> Option<i32> {
+        *self.reasoning_budget_tokens.lock().unwrap()
+    }
+
+    /// Both tuning fields as request-body values (see
+    /// [`http::reasoning_budget_wire`]) — the single read used by every
+    /// request-construction site on this client.
+    pub fn reasoning_budget(&self) -> (Option<String>, Option<i32>) {
+        let format = self.reasoning_format.lock().unwrap().clone();
+        let budget = *self.reasoning_budget_tokens.lock().unwrap();
+        (format, budget)
     }
 
     /// Set the per-session UI selections persisted with the session file

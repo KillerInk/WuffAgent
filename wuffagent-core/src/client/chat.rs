@@ -33,6 +33,7 @@ impl ChatClient {
     ) -> Result<(String, Option<Usage>), Error> {
         let mut msgs = messages.to_vec();
         let (reasoning_effort, chat_template_kwargs) = http::reasoning_wire(self.reasoning_effort());
+        let (reasoning_format, reasoning_budget_tokens) = self.reasoning_budget();
         let stream_options = http::StreamOptions { include_usage: true };
         // P2: serialize the BORROWED view — the owned ChatRequest deep-cloned
         // the whole history + tools into fields that were serialized and
@@ -46,6 +47,10 @@ impl ChatClient {
             chat_template_kwargs,
             stream_options: Some(&stream_options),
             return_progress: None,
+            // Clone: the value must survive for the overflow-retry request
+            // below (the first request moves the original).
+            reasoning_format: reasoning_format.clone(),
+            reasoning_budget_tokens,
         };
         self.note_prompt_chars(message_char_count(&msgs));
         let result = send_message(
@@ -80,6 +85,10 @@ impl ChatClient {
                         chat_template_kwargs,
                         stream_options: Some(&stream_options),
                         return_progress: None,
+                        // The first request moved the value (it was dropped
+                        // after being serialized) — copy it for the retry.
+                        reasoning_format: reasoning_format.clone(),
+                        reasoning_budget_tokens,
                     };
                     self.note_prompt_chars(message_char_count(&msgs));
                     match send_message(
@@ -121,6 +130,7 @@ impl ChatClient {
         prompt: &str,
         tools: Option<&[crate::tools::ToolDefinition]>,
     ) -> Result<(String, Option<Usage>), Error> {
+        let (reasoning_format, reasoning_budget_tokens) = self.reasoning_budget();
         let request = build_request(
             &self.session.system_prompt(),
             self.session.conversation(),
@@ -129,6 +139,8 @@ impl ChatClient {
             tools,
             self.reasoning_effort(),
             self.n_ctx(),
+            reasoning_format.as_deref(),
+            reasoning_budget_tokens,
         );
         self.note_prompt_chars(message_char_count(&request.messages));
         let result = send_message(
@@ -160,6 +172,8 @@ impl ChatClient {
                         tools,
                         self.reasoning_effort(),
                         self.n_ctx(),
+                        reasoning_format.as_deref(),
+                        reasoning_budget_tokens,
                     );
                     self.note_prompt_chars(message_char_count(&request2.messages));
                     let retry = send_message(
@@ -270,6 +284,7 @@ impl ChatClient {
 
         let (reasoning_effort, chat_template_kwargs) =
             http::reasoning_wire(client.reasoning_effort());
+        let (reasoning_format, reasoning_budget_tokens) = client.reasoning_budget();
         let stream_options = http::StreamOptions { include_usage: true };
         // P2: serialize the BORROWED view — no per-round deep clone of the
         // full `messages` history or the `tools` definitions (the owned
@@ -284,6 +299,8 @@ impl ChatClient {
             stream_options: Some(&stream_options),
             // Ask llama.cpp for live prompt-processing progress chunks.
             return_progress: Some(true),
+            reasoning_format,
+            reasoning_budget_tokens,
         };
         let body = request.to_json()?;
 
@@ -373,6 +390,7 @@ impl ChatClient {
     ) -> Option<usize> {
         let (reasoning_effort, chat_template_kwargs) =
             http::reasoning_wire(self.reasoning_effort());
+        let (reasoning_format, reasoning_budget_tokens) = self.reasoning_budget();
         let request = http::ChatRequestRef {
             model: "local",
             messages,
@@ -382,6 +400,8 @@ impl ChatClient {
             chat_template_kwargs,
             stream_options: None,
             return_progress: None,
+            reasoning_format,
+            reasoning_budget_tokens,
         };
         let body = request.to_json().ok()?;
 

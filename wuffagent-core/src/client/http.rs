@@ -29,6 +29,18 @@ pub struct ChatRequest {
     /// (`prompt_progress` chunks) in stream mode. Ignored by other backends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_progress: Option<bool>,
+    /// llama.cpp extension: the reasoning-format marker for reasoning
+    /// models (e.g. "deepseek", "deepseek-legacy" for DeepSeek-family
+    /// models) — tells the server how to split `reasoning_content` out.
+    /// Omitted (None) = server default; `strip_think_tags` remains the
+    /// fallback for servers that don't split reasoning out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_format: Option<String>,
+    /// llama.cpp extension: cap on reasoning tokens
+    /// (`reasoning_budget_tokens` on the wire; -1 = server default).
+    /// Omitted (None) = server default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_tokens: Option<i32>,
 }
 
 /// Borrowed view of [`ChatRequest`]: the same wire fields in the same order,
@@ -54,6 +66,12 @@ pub struct ChatRequestRef<'a> {
     pub stream_options: Option<&'a StreamOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_progress: Option<bool>,
+    /// llama.cpp extension — see [`ChatRequest::reasoning_format`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_format: Option<String>,
+    /// llama.cpp extension — see [`ChatRequest::reasoning_budget_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_tokens: Option<i32>,
 }
 
 impl ChatRequestRef<'_> {
@@ -88,6 +106,17 @@ pub fn reasoning_wire(
             enable_thinking: effort.enable_thinking(),
         }),
     )
+}
+
+/// The llama.cpp reasoning tuning fields as request-body values
+/// (`reasoning_format` + `reasoning_budget_tokens`). `None` for each is
+/// omitted from the body (server default) — see the struct fields on
+/// [`ChatRequest`].
+pub fn reasoning_budget_wire(
+    format: Option<&str>,
+    budget: Option<i32>,
+) -> (Option<String>, Option<i32>) {
+    (format.map(str::to_string), budget)
 }
 
 #[derive(Deserialize, Debug)]
@@ -136,6 +165,8 @@ pub fn build_request(
     tools: Option<&[crate::tools::ToolDefinition]>,
     reasoning_effort: crate::types::ReasoningEffort,
     #[allow(unused_variables)] n_ctx: u32,
+    reasoning_format: Option<&str>,
+    reasoning_budget_tokens: Option<i32>,
 ) -> ChatRequest {
     let mut messages = Vec::new();
 
@@ -180,6 +211,8 @@ pub fn build_request(
     });
 
     let (reasoning_effort, chat_template_kwargs) = reasoning_wire(reasoning_effort);
+    let (reasoning_format, reasoning_budget_tokens) =
+        reasoning_budget_wire(reasoning_format, reasoning_budget_tokens);
     ChatRequest {
         model: "local".to_string(),
         messages,
@@ -192,6 +225,8 @@ pub fn build_request(
         }),
         // Live prompt-processing progress is only meaningful for streams.
         return_progress: if stream { Some(true) } else { None },
+        reasoning_format,
+        reasoning_budget_tokens,
     }
 }
 

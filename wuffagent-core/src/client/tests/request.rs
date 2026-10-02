@@ -16,6 +16,8 @@ fn test_build_request_reasoning_effort() {
         None,
         client.reasoning_effort(),
         4096,
+        None,
+        None,
     );
     assert!(request.reasoning_effort.is_none());
     assert_eq!(
@@ -39,6 +41,8 @@ fn test_build_request_reasoning_effort() {
         None,
         client.reasoning_effort(),
         4096,
+        None,
+        None,
     );
     assert_eq!(request.reasoning_effort.as_deref(), Some("xhigh"));
     assert_eq!(
@@ -90,6 +94,8 @@ fn test_build_request_no_system_prompt() {
         None,
         crate::types::ReasoningEffort::default(),
         4096,
+        None,
+        None,
     );
     assert_eq!(request.model, "local");
     assert!(!request.stream);
@@ -317,6 +323,8 @@ fn test_build_request_with_system_prompt() {
         None,
         crate::types::ReasoningEffort::default(),
         4096,
+        None,
+        None,
     );
     assert_eq!(request.model, "local");
     assert_eq!(request.messages.len(), 2);
@@ -337,6 +345,8 @@ fn test_build_request_streaming() {
         None,
         crate::types::ReasoningEffort::default(),
         4096,
+        None,
+        None,
     );
     assert!(request.stream);
     assert_eq!(request.messages.len(), 1);
@@ -365,6 +375,8 @@ fn test_build_request_with_tools() {
         Some(&tools),
         crate::types::ReasoningEffort::default(),
         4096,
+        None,
+        None,
     );
     assert!(request.tools.is_some());
     assert_eq!(request.tools.as_ref().unwrap().len(), 1);
@@ -402,6 +414,8 @@ fn test_build_request_includes_history() {
         None,
         crate::types::ReasoningEffort::default(),
         4096,
+        None,
+        None,
     );
     assert_eq!(request.messages.len(), 3);
     assert_eq!(request.messages[0].role, "user");
@@ -444,6 +458,8 @@ fn test_build_request_skips_empty_assistant_message() {
         None,
         crate::types::ReasoningEffort::default(),
         4096,
+        None,
+        None,
     );
     assert_eq!(request.messages.len(), 2);
     assert_eq!(request.messages[0].role, "user");
@@ -576,6 +592,8 @@ fn test_build_request_return_progress() {
         None,
         client.reasoning_effort(),
         4096,
+        None,
+        None,
     );
     assert_eq!(stream_req.return_progress, Some(true));
     let non_stream_req = build_request(
@@ -586,6 +604,8 @@ fn test_build_request_return_progress() {
         None,
         client.reasoning_effort(),
         4096,
+        None,
+        None,
     );
     assert_eq!(non_stream_req.return_progress, None);
 }
@@ -671,38 +691,97 @@ fn test_chat_request_ref_matches_owned() {
             (Some("xhigh"), Some(http::ChatTemplateKwargs { enable_thinking: true })),
         ] {
             for (with_stream_opts, return_progress) in [(true, Some(true)), (false, None)] {
-                // Build the owned request first, then borrow its fields for
-                // the ref view (borrowing from owned avoids move/borrow
-                // conflicts on the same local values).
-                let owned = http::ChatRequest {
-                    model: "local".to_string(),
-                    messages: messages.clone(),
-                    stream: true,
-                    tools: with_tools.then(|| tools.clone()),
-                    reasoning_effort: reasoning.map(str::to_string),
-                    chat_template_kwargs: kwargs,
-                    stream_options: with_stream_opts
-                        .then_some(http::StreamOptions { include_usage: true }),
-                    return_progress,
-                };
-                let borrowed = http::ChatRequestRef {
-                    model: "local",
-                    messages: &owned.messages,
-                    stream: true,
-                    tools: owned.tools.as_deref(),
-                    reasoning_effort: owned.reasoning_effort.as_deref(),
-                    chat_template_kwargs: kwargs,
-                    stream_options: owned.stream_options.as_ref(),
-                    return_progress,
-                };
-                let owned_json = serde_json::to_string(&owned).unwrap();
-                let borrowed_json = borrowed.to_json().unwrap();
-                assert_eq!(
-                    owned_json, borrowed_json,
-                    "P2 wire mismatch: tools={} reasoning={:?} stream_opts={} progress={:?}",
-                    with_tools, reasoning, with_stream_opts, return_progress
-                );
+                for (rformat, rbudget) in [
+                    (None::<String>, None::<i32>),
+                    (
+                        Some("deepseek".to_string()),
+                        Some(256),
+                    ),
+                ] {
+                    // Build the owned request first, then borrow its fields for
+                    // the ref view (borrowing from owned avoids move/borrow
+                    // conflicts on the same local values).
+                    let owned = http::ChatRequest {
+                        model: "local".to_string(),
+                        messages: messages.clone(),
+                        stream: true,
+                        tools: with_tools.then(|| tools.clone()),
+                        reasoning_effort: reasoning.map(str::to_string),
+                        chat_template_kwargs: kwargs,
+                        stream_options: with_stream_opts
+                            .then_some(http::StreamOptions { include_usage: true }),
+                        return_progress,
+                        reasoning_format: rformat.clone(),
+                        reasoning_budget_tokens: rbudget,
+                    };
+                    let borrowed = http::ChatRequestRef {
+                        model: "local",
+                        messages: &owned.messages,
+                        stream: true,
+                        tools: owned.tools.as_deref(),
+                        reasoning_effort: owned.reasoning_effort.as_deref(),
+                        chat_template_kwargs: kwargs,
+                        stream_options: owned.stream_options.as_ref(),
+                        return_progress,
+                        reasoning_format: rformat.clone(),
+                        reasoning_budget_tokens: rbudget,
+                    };
+                    let owned_json = serde_json::to_string(&owned).unwrap();
+                    let borrowed_json = borrowed.to_json().unwrap();
+                    assert_eq!(
+                        owned_json, borrowed_json,
+                        "P2 wire mismatch: tools={} reasoning={:?} stream_opts={} progress={:?} rformat={:?} rbudget={:?}",
+                        with_tools, reasoning, with_stream_opts, return_progress, rformat, rbudget
+                    );
+                }
             }
         }
     }
+}
+
+/// Phase 3 items 3+4: `reasoning_budget_tokens` + `reasoning_format` land on
+/// the wire with their exact wire names, and BOTH-None omits them entirely
+/// (server default — keeps old backends and the golden byte-identity intact).
+#[test]
+fn test_build_request_reasoning_budget_and_format() {
+    let client = ChatClient::new("http://localhost:8080");
+    client.set_reasoning_budget(Some("deepseek"), Some(256));
+    let (rformat, rbudget) = client.reasoning_budget();
+    let request = build_request(
+        &client.system_prompt(),
+        client.conversation(),
+        "Hello",
+        false,
+        None,
+        client.reasoning_effort(),
+        4096,
+        rformat.as_deref(),
+        rbudget,
+    );
+    assert_eq!(request.reasoning_format.as_deref(), Some("deepseek"));
+    assert_eq!(request.reasoning_budget_tokens, Some(256));
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains(r#""reasoning_format":"deepseek""#));
+    assert!(json.contains(r#""reasoning_budget_tokens":256"#));
+
+    // Both None: fields omitted from the body (server default).
+    let client2 = ChatClient::new("http://localhost:8080");
+    let (rformat, rbudget) = client2.reasoning_budget();
+    assert_eq!((rformat.clone(), rbudget), (None, None));
+    let request2 = build_request(
+        &client2.system_prompt(),
+        client2.conversation(),
+        "Hello",
+        false,
+        None,
+        client2.reasoning_effort(),
+        4096,
+        rformat.as_deref(),
+        rbudget,
+    );
+    assert!(request2.reasoning_format.is_none());
+    assert!(request2.reasoning_budget_tokens.is_none());
+    let json2 = serde_json::to_string(&request2).unwrap();
+    assert!(!json2.contains("reasoning_format"));
+    assert!(!json2.contains("reasoning_budget_tokens"));
 }

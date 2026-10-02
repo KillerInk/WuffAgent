@@ -101,6 +101,7 @@ impl ChatClient {
         let api_key = self.settings.api_key();
         let (reasoning_effort, chat_template_kwargs) =
             http::reasoning_wire(self.reasoning_effort());
+        let (reasoning_format, reasoning_budget_tokens) = self.reasoning_budget();
         // Mirror the real request's counted content (messages + tools) with
         // `stream: false` — generation params are irrelevant to counting.
         let request = http::ChatRequestRef {
@@ -112,6 +113,8 @@ impl ChatClient {
             chat_template_kwargs,
             stream_options: None,
             return_progress: None,
+            reasoning_format,
+            reasoning_budget_tokens,
         };
         match http::count_input_tokens(
             &self.http_client,

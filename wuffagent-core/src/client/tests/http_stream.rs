@@ -119,7 +119,7 @@ async fn test_send_message_success_parses_all_fields() {
     .await;
 
     let conv = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let request = build_request("sys", &conv, "hi", false, None, crate::types::ReasoningEffort::Off, 4096);
+    let request = build_request("sys", &conv, "hi", false, None, crate::types::ReasoningEffort::Off, 4096, None, None);
     let http = reqwest::Client::new();
     let result = send_message(&http, &base, Some("key"), &request)
         .await
@@ -147,7 +147,7 @@ async fn test_send_message_server_error_maps_to_http_error() {
     .await;
 
     let conv = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let request = build_request("", &conv, "hi", false, None, crate::types::ReasoningEffort::Off, 4096);
+    let request = build_request("", &conv, "hi", false, None, crate::types::ReasoningEffort::Off, 4096, None, None);
     let err = send_message(&reqwest::Client::new(), &base, None, &request)
         .await
         .unwrap_err();
@@ -169,7 +169,7 @@ async fn test_send_message_invalid_json_maps_to_json_error() {
     .await;
 
     let conv = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let request = build_request("", &conv, "hi", false, None, crate::types::ReasoningEffort::Off, 4096);
+    let request = build_request("", &conv, "hi", false, None, crate::types::ReasoningEffort::Off, 4096, None, None);
     match send_message(&reqwest::Client::new(), &base, None, &request).await.unwrap_err() {
         Error::Json(_) => {}
         other => panic!("expected Json error, got: {other:?}"),
@@ -200,7 +200,7 @@ async fn test_stream_message_full_sse_accumulates_and_returns_usage() {
 
     let conv = Arc::new(std::sync::Mutex::new(Vec::new()));
     add_streaming_messages(&conv, "hi");
-    let request = build_request("sys", &conv, "hi", true, None, crate::types::ReasoningEffort::Off, 4096);
+    let request = build_request("sys", &conv, "hi", true, None, crate::types::ReasoningEffort::Off, 4096, None, None);
     let resp = build_stream_request(&reqwest::Client::new(), &base, None, &request)
         .send()
         .await
@@ -275,7 +275,7 @@ async fn test_stream_message_cancel_mid_stream() {
 
     let conv = Arc::new(std::sync::Mutex::new(Vec::new()));
     add_streaming_messages(&conv, "hi");
-    let request = build_request("sys", &conv, "hi", true, None, crate::types::ReasoningEffort::Off, 4096);
+    let request = build_request("sys", &conv, "hi", true, None, crate::types::ReasoningEffort::Off, 4096, None, None);
     let resp = build_stream_request(&reqwest::Client::new(), &base, None, &request)
         .send()
         .await

@@ -87,6 +87,14 @@ pub struct Config {
     /// Reasoning effort for reasoning models (Off = omitted from requests).
     #[serde(default)]
     pub reasoning_effort: crate::types::ReasoningEffort,
+    /// llama.cpp reasoning tuning (Phase 3 items 3+4): the request-body
+    /// `reasoning_format` marker (e.g. "deepseek") and `reasoning_budget_tokens`
+    /// cap. Both None (default) = omitted from requests = server default;
+    /// old config files load with both None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_tokens: Option<i32>,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default = "default_max_messages")]
@@ -210,6 +218,8 @@ impl Default for Config {
             theme: "dark".to_string(),
             chat_history: Vec::new(),
             reasoning_effort: crate::types::ReasoningEffort::default(),
+            reasoning_format: None,
+            reasoning_budget_tokens: None,
             session_id: None,
             max_messages: 100,
             search_config: SearchConfig::default(),
