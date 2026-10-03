@@ -260,15 +260,40 @@ null — e.g. loaded by a non-app host — the tool reports `host_api: missing` 
 
 ## Phases
 
-### P0 — core: HostApi + loader plumbing
-- [ ] `HostApi` struct + `HOST_API_VERSION` in `tools/types` (`#[repr(C)]`).
-- [ ] `ToolRegistry::set_host_api(Option<NonNull<HostApi>>)`.
-- [ ] Loader: after `wuff_tool_create`, `lib.get(b"wuff_tool_host_api")` → call
-      with stored ptr/null; `PluginLoadOutcome` unchanged.
-- [ ] Unit tests: get-missing path (no call, old plugins unaffected); version
-      check helper in the plugin-side trait.
-- [ ] `cargo test -p wuffagent-core` green; `hello_plugin` still loads (manual:
-      `reload_plugins` → `hello`).
+### P0 — core: HostApi + loader plumbing ✅ (done — commit "P0: optional HostApi vtable...")
+- [x] `HostApi` struct + `HOST_API_VERSION` in `tools/types` (`#[repr(C)]`).
+      `HostApi` + `HostEventCallback` + `HOST_API_VERSION = 1` + `Send/Sync`;
+      doc'd blocking contract. (types.rs, after `PluginTool`.)
+- [x] `ToolRegistry::set_host_api(Option<NonNull<HostApi>>)` + `host_api_ptr()`
+      + `host_api: AtomicPtr<HostApi>` field (null by default).
+- [x] Loader: `PluginHandle::call_host_api(*const HostApi)` — `lib.get
+      (b"wuff_tool_host_api")`, `catch_unwind` around the call; missing symbol
+      = tool-only plugin (no call, no error). Wired in `load_one_plugin`: the
+      cheap Arc handle is cloned before it moves into the `ToolEntry`, and the
+      call happens only on a fresh `Loaded` outcome (re-scans keep the
+      original instance's vtable — no double-init). `PluginLoadOutcome` unchanged.
+- [x] Unit tests: `test_set_host_api_roundtrip` (default null, set round-trips,
+      `None` clears), `test_host_api_version_and_layout` (version constant +
+      repr(C) align/size guard), `test_tool_only_plugin_loads_with_host_api_set`
+      (END-TO-END get-missing path using the real `hello_plugin.dll` — hello has
+      no `wuff_tool_host_api`, loads + executes unchanged with a host API set,
+      and a re-scan still skips). Version check itself lives plugin-side
+      (compare `api.version` vs `HOST_API_VERSION`) — the constant is exported
+      for that; the comparison lands in P2.
+- [x] `cargo test -p wuffagent-core` green: **889 passed** (+2/2/1 integration
+      targets), exit 0. `cargo check --workspace` exit 0. Note: one pre-existing
+      `server::tests::attach_mode_when_port_free` llama-server port flake failed
+      once in a full run but passes in isolation (unrelated to this change).
+- [x] `hello_plugin` still loads — proven by the end-to-end loader test above
+      (real DLL, host API set, loads + executes). Manual `reload_plugins` →
+      `hello` is a UI round-trip; left for the user to confirm if desired.
+
+**Next (P1 — egui host bridge):** implement the vtable fns (extern "C" +
+`catch_unwind`), the command queue drained each frame (Inject/Create/Resolve/
+Count/Get + one-shot reply, 5 s timeout), the event-callback slot + AppEvent
+mapping (kind 0/1/2/3), and `registry.set_host_api(...)` at bootstrap before
+any plugin load. Then `cargo check -p wuffagent-egui` + egui suite + a
+command-queue→session-store unit test.
 
 ### P1 — egui: host bridge
 - [ ] Implement the vtable fns (extern "C", `std::panic::catch_unwind` around
