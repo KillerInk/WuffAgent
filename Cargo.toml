@@ -3,6 +3,7 @@ members = [
     "wuffagent-core",
     "wuffagent-egui",
     "plugins/hello_plugin",
+    "plugins/telegram_plugin",
 ]
 resolver = "2"
 
