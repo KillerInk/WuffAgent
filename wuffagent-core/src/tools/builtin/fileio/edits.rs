@@ -134,6 +134,16 @@ pub(crate) fn append_file(path: &str, content: &str) -> crate::tools::types::Too
 /// Blocks are applied in order. Fails (without touching the file) if a search
 /// text is not found or matches more than one place.
 ///
+/// Tolerant fallback: when the exact search text matches nothing, the block
+/// is retried as a whole-line match that ignores trailing whitespace (the
+/// most common cause of spurious failures). A unique tolerant match is
+/// applied and reported in the result as `fuzzy_blocks`.
+///
+/// Failure messages are self-correcting: an ambiguous match reports the line
+/// numbers of every occurrence, and a not-found match reports the closest
+/// matching file region(s) with line numbers, so the model can fix the SEARCH
+/// text without a full file re-read.
+///
 /// Line endings: SEARCH/REPLACE payloads are matched against a
 /// line-ending-normalized copy of the file (SEARCH text is always
 /// LF-normalized, but files on Windows are typically CRLF). The file's
@@ -172,23 +182,75 @@ pub(crate) fn apply_diff(path: &str, diff: &str) -> crate::tools::types::ToolRes
     };
 
     let mut applied: u32 = 0;
+    let mut fuzzy_blocks: u32 = 0;
     for (i, (search, replace)) in blocks.iter().enumerate() {
         let count = current.matches(search).count();
-        if count == 0 {
-            return Err(ToolError::Execution(format!(
-                "Block {}: search text not found in '{}'",
-                i + 1,
-                path
-            )));
+        if count == 1 {
+            current = current.replacen(search, replace, 1);
+            applied += 1;
+            continue;
         }
         if count > 1 {
             return Err(ToolError::Execution(format!(
-                "Block {}: search text matches {} places in '{}', add more context to make it unique",
-                i + 1, count, path
+                "Block {}: search text matches {} places in '{}' (lines {}), add more context to make it unique",
+                i + 1,
+                count,
+                path,
+                match_line_numbers(&current, search)
             )));
         }
-        current = current.replacen(search, replace, 1);
-        applied += 1;
+
+        // Exact match failed (0 matches): fall back to a whole-line match
+        // that ignores trailing whitespace on every line.
+        let lines: Vec<&str> = current.lines().collect();
+        let mut search_lines: Vec<&str> = search.lines().collect();
+        if search.ends_with('\n') {
+            search_lines.push(""); // trailing blank payload line, lost by lines()
+        }
+        let hits = tolerant_match_positions(&lines, &search_lines);
+        match hits.len() {
+            1 => {
+                let start = hits[0];
+                let had_trailing = current.ends_with('\n');
+                let mut new_lines: Vec<&str> = replace.lines().collect();
+                if replace.ends_with('\n') {
+                    new_lines.push("");
+                }
+                let mut out: Vec<&str> =
+                    Vec::with_capacity(lines.len().saturating_sub(search_lines.len()) + new_lines.len());
+                out.extend_from_slice(&lines[..start]);
+                out.extend_from_slice(&new_lines);
+                out.extend_from_slice(&lines[start + search_lines.len()..]);
+                let mut result = out.join("\n");
+                if had_trailing && !result.is_empty() && !result.ends_with('\n') {
+                    result.push('\n');
+                }
+                current = result;
+                applied += 1;
+                fuzzy_blocks += 1;
+            }
+            0 => {
+                return Err(ToolError::Execution(format!(
+                    "Block {}: search text not found in '{}' (file has {} lines). The SEARCH text must match the file exactly — closest matching region(s) below; copy the actual lines from there (or read_file the area):\n{}",
+                    i + 1,
+                    path,
+                    lines.len(),
+                    closest_regions(&lines, &search_lines)
+                )));
+            }
+            _ => {
+                let line_nos = hits
+                    .iter()
+                    .take(10)
+                    .map(|h| (h + 1).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ToolError::Execution(format!(
+                    "Block {}: search text matches multiple places in '{}' ignoring trailing whitespace (lines {}), add more context to make it unique",
+                    i + 1, path, line_nos
+                )));
+            }
+        }
     }
 
     if eol == Eol::Crlf {
@@ -204,8 +266,147 @@ pub(crate) fn apply_diff(path: &str, diff: &str) -> crate::tools::types::ToolRes
     Ok(ToolOutput::Success(serde_json::json!({
         "path": path,
         "blocks_applied": applied,
+        "fuzzy_blocks": fuzzy_blocks,
         "success": true,
     })))
+}
+
+/// 1-based line numbers of the (capped) occurrences of `needle` in
+/// `haystack`, comma-joined. Diagnostics for the ambiguous-match error.
+fn match_line_numbers(haystack: &str, needle: &str) -> String {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(off) = haystack[from..].find(needle) {
+        let abs = from + off;
+        out.push((haystack[..abs].lines().count() + 1).to_string());
+        if out.len() >= 10 {
+            break;
+        }
+        from = abs + needle.len().max(1);
+    }
+    out.join(", ")
+}
+
+/// Whole-line match positions of `search_lines` in `lines` where every line
+/// pair is equal ignoring trailing whitespace. Capped at 10 hits (the caller
+/// treats >1 as ambiguous). Empty vec = no match.
+fn tolerant_match_positions<'a>(lines: &[&'a str], search_lines: &[&str]) -> Vec<usize> {
+    let n = search_lines.len();
+    if n == 0 || n > lines.len() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for start in 0..=lines.len() - n {
+        if (0..n).all(|k| lines[start + k].trim_end() == search_lines[k].trim_end()) {
+            hits.push(start);
+            if hits.len() >= 10 {
+                break;
+            }
+        }
+    }
+    hits
+}
+
+/// Model-readable hint of where the search text probably belongs: up to 3
+/// file regions whose lines best resemble the search block's first non-empty
+/// line, each with 1-based line numbers. Used only in the not-found error so
+/// the model can fix the SEARCH text without re-reading the file.
+fn closest_regions(file_lines: &[&str], search_lines: &[&str]) -> String {
+    let head: Vec<String> = file_lines
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(i, l)| format!("{}: {}", i + 1, l))
+        .collect();
+    let head = if head.is_empty() {
+        "(file is empty)".to_string()
+    } else {
+        head.join("\n")
+    };
+
+    let anchor: Option<&str> = search_lines.iter().map(|l| l.trim()).find(|l| !l.is_empty());
+    let Some(anchor) = anchor else {
+        // The whole search block is blank lines.
+        return format!("(your SEARCH block is only blank lines; file head):\n{head}");
+    };
+    let anchor = truncate_char(anchor, 200);
+
+    let mut scored: Vec<(usize, usize)> = file_lines
+        .iter()
+        .take(4000)
+        .enumerate()
+        .map(|(i, l)| (common_substring_len(truncate_char(l, 200), anchor), i))
+        .filter(|(score, _)| *score >= 4)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+
+    let n = search_lines.len().max(1);
+    let mut picks: Vec<usize> = Vec::new();
+    for (_, i) in scored {
+        if picks.iter().all(|&p| p.max(i) - p.min(i) >= n) {
+            picks.push(i);
+            if picks.len() == 3 {
+                break;
+            }
+        }
+    }
+    picks.sort_unstable();
+    if picks.is_empty() {
+        return format!(
+            "(no similar lines found — the SEARCH text may be from an older version of the file; read_file to refresh)\nfile head:\n{head}"
+        );
+    }
+    let mut parts = Vec::new();
+    for start in picks {
+        let end = (start + n).min(file_lines.len());
+        let region: Vec<String> = file_lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(k, l)| format!("{}: {}", start + k + 1, l))
+            .collect();
+        let mut region = region.join("\n");
+        if region.len() > 600 {
+            region.truncate(600);
+            region.push_str(" …");
+        }
+        parts.push(region);
+    }
+    parts.join("\n…\n")
+}
+
+/// `&s[..s.len().min(max)]` but char-boundary safe (never panics on
+/// multi-byte boundaries).
+fn truncate_char(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Length of the longest common substring of `a` and `b` (naive DP; the
+/// caller caps input lengths so this stays cheap on the error path).
+fn common_substring_len(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut best = 0usize;
+    for &ca in &a {
+        let mut curr = vec![0usize; b.len() + 1];
+        for j in 1..=b.len() {
+            if ca == b[j - 1] {
+                curr[j] = prev[j - 1] + 1;
+                if curr[j] > best {
+                    best = curr[j];
+                }
+            }
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    best
 }
 
 /// Parse SEARCH/REPLACE blocks out of a diff string.

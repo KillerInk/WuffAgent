@@ -161,3 +161,90 @@ fn test_apply_diff_lf_file_stays_lf() {
     assert_eq!(bytes, b"A\nB\nc\n", "LF file must not gain CR bytes");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_apply_diff_trailing_whitespace_fallback() {
+    // File lines carry trailing spaces the model's SEARCH text lacks:
+    // exact match fails, tolerant whole-line match applies (fuzzy_blocks=1).
+    let dir = temp_dir("difffuzzy");
+    let p = dir.join("f.txt");
+    write(p.to_str().unwrap(), "fn main() {\n    let x = 5;   \n    let y = 3;\n}\n");
+    // A single search line is a prefix of the file line (exact substring),
+    // so include the next line: the 2-line block is NOT an exact substring
+    // (file line 2 carries trailing spaces), but IS a unique tolerant match.
+    let diff = "<<<<<<< SEARCH\n    let x = 5;\n    let y = 3;\n=======\n    let x = 6;\n    let y = 3;\n>>>>>>> REPLACE\n";
+    let out = apply_diff(p.to_str().unwrap(), diff).unwrap();
+    let json = success_json(out);
+    assert_eq!(json["blocks_applied"].as_u64().unwrap(), 1);
+    assert_eq!(json["fuzzy_blocks"].as_u64().unwrap(), 1);
+    assert_eq!(
+        read_string(p.to_str().unwrap()),
+        "fn main() {\n    let x = 6;\n    let y = 3;\n}\n"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_apply_diff_tolerant_ambiguous_fails() {
+    // "a"/"b" pairs occur twice (ignoring trailing spaces) -> ambiguous, file untouched.
+    let dir = temp_dir("difffuzzyamb");
+    let p = dir.join("fa.txt");
+    let original = "a   \nb\t\na  \nb \n";
+    write(p.to_str().unwrap(), original);
+    let diff = "<<<<<<< SEARCH\na\nb\n=======\nX\n>>>>>>> REPLACE\n";
+    let err = apply_diff(p.to_str().unwrap(), diff).unwrap_err();
+    let ToolError::Execution(msg) = &err else {
+        panic!("{err:?}")
+    };
+    assert!(msg.contains("multiple places"), "msg: {msg}");
+    assert!(msg.contains("1, 3"), "msg: {msg}");
+    assert_eq!(read_string(p.to_str().unwrap()), original);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_apply_diff_not_found_shows_closest_region() {
+    // Not-found error must point at the closest real region with line numbers.
+    let dir = temp_dir("diffnf2");
+    let p = dir.join("nf2.txt");
+    write(p.to_str().unwrap(), "line one\nfn foo() {\n    body\n}\nline five\n");
+    let diff = "<<<<<<< SEARCH\nfn foo() {\n    bodx\n=======\nfn foo() {}\n>>>>>>> REPLACE\n";
+    let err = apply_diff(p.to_str().unwrap(), diff).unwrap_err();
+    let ToolError::Execution(msg) = &err else {
+        panic!("{err:?}")
+    };
+    assert!(msg.contains("not found"), "msg: {msg}");
+    assert!(msg.contains("2: fn foo() {"), "msg: {msg}");
+    assert!(msg.contains("3:     body"), "msg: {msg}");
+    // File untouched.
+    assert!(read_string(p.to_str().unwrap()).contains("fn foo() {"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_apply_diff_ambiguous_shows_line_numbers() {
+    let dir = temp_dir("diffamb2");
+    let p = dir.join("amb2.txt");
+    write(p.to_str().unwrap(), "dup\ndup\ndup\n");
+    let diff = "<<<<<<< SEARCH\ndup\n=======\nunique\n>>>>>>> REPLACE\n";
+    let err = apply_diff(p.to_str().unwrap(), diff).unwrap_err();
+    let ToolError::Execution(msg) = &err else {
+        panic!("{err:?}")
+    };
+    assert!(msg.contains("3 places"), "msg: {msg}");
+    assert!(msg.contains("lines 1, 2, 3"), "msg: {msg}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_apply_diff_fuzzy_replace_last_line_keeps_trailing_newline() {
+    // SEARCH line has MORE trailing spaces than the file line: not an exact
+    // substring, but a unique tolerant match -> applied, trailing \n kept.
+    let dir = temp_dir("difffuzzylast");
+    let p = dir.join("fl.txt");
+    write(p.to_str().unwrap(), "a\nlast\n");
+    let diff = "<<<<<<< SEARCH\nlast   \n=======\nLAST\n>>>>>>> REPLACE\n";
+    apply_diff(p.to_str().unwrap(), diff).unwrap();
+    assert_eq!(read_string(p.to_str().unwrap()), "a\nLAST\n");
+    let _ = fs::remove_dir_all(&dir);
+}

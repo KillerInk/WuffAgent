@@ -264,8 +264,13 @@ impl Tool for ApplyDiffTool {
     fn description(&self) -> &str {
         "Apply targeted edits to an existing file using SEARCH/REPLACE blocks. \
          Each block's SEARCH text must match exactly one place in the file. \
-         Use read_file first to copy the exact current text. \
-         The file's line ending (CRLF/LF) and UTF-8 BOM are preserved."
+         Use read_file first to copy the exact current text. When no exact \
+         match exists, the block is retried as a whole-line match that ignores \
+         trailing whitespace (reported as fuzzy_blocks in the result). On \
+         failure the error shows the closest matching region(s) or all match \
+         locations with line numbers, so you can fix the SEARCH text without \
+         re-reading the file. The file's line ending (CRLF/LF) and UTF-8 BOM \
+         are preserved."
     }
     fn parameters_schema(&self) -> ToolSchema {
         build_schema(
