@@ -256,6 +256,90 @@ impl Drop for PluginTool {
     }
 }
 
+// ─── Host API (plugin → app, optional) ──────────────────────────────────────
+
+/// Version of the optional host-API vtable ([`HostApi`]).
+///
+/// Separate from [`PLUGIN_ABI_VERSION`]: the 3-symbol tool ABI is unchanged
+/// (old plugins keep loading), the host-API export `wuff_tool_host_api` is
+/// opt-in. Bump when the table's layout or a signature changes; a plugin that
+/// sees an unrecognized version must degrade (e.g. to send-only mode).
+pub const HOST_API_VERSION: u32 = 1;
+
+/// Event callback the plugin registers via [`HostApi::register_event_callback`].
+///
+/// Invoked on the host's UI thread for pipeline events of ANY session.
+/// Kinds: 0 = stream-chunk text; 1 = full final content; 2 = error message;
+/// 3 = round-complete marker (payload empty). `session_id`/`payload` are
+/// host-owned byte slices, valid for the call only — the callback must copy
+/// what it needs.
+///
+/// Contract: MUST be fast and non-blocking (it runs while the UI frame is
+/// drawn) — the implementation should just forward into an mpsc.
+pub type HostEventCallback = extern "C" fn(
+    kind: u32,
+    session_id: *const u8,
+    sid_len: usize,
+    payload: *const u8,
+    payload_len: usize,
+    user_data: *mut std::ffi::c_void,
+);
+
+/// C-compatible fn-pointer table the host hands to a plugin that exports the
+/// optional `wuff_tool_host_api(host_api: *const HostApi)` symbol.
+///
+/// `#[repr(C)]`, no Rust types by value. The host sets it once (before the
+/// first plugin load) and the pointer stays valid for the process lifetime
+/// (plugins are never unloaded).
+///
+/// Blocking contract: `inject_user_message` / `create_session` /
+/// `resolve_session` / `session_count` / `get_session` are command+wait
+/// (≤ 5 s timeout) — safe from the plugin's poller thread and from tool
+/// execution, but MUST NOT be called from the host's UI thread (deadlock).
+/// `register_event_callback` is a plain slot store and callable anywhere.
+#[repr(C)]
+pub struct HostApi {
+    /// [`HOST_API_VERSION`] the host was built against; the plugin must check
+    /// it and degrade on mismatch.
+    pub version: u32,
+    /// Enqueue a user message (UTF-8 bytes) for the session `session_id`
+    /// (UTF-8 bytes). Auto-creates the session if missing. Returns `false` on
+    /// timeout or when the app is shutting down.
+    pub inject_user_message:
+        extern "C" fn(session_id: *const u8, session_len: usize, text: *const u8, text_len: usize)
+            -> bool,
+    /// Create a named session; writes the new id (NUL-terminated) into
+    /// `out_id`/`out_cap`. Returns `false` on failure or when the buffer is
+    /// too small (`out_cap < 64`).
+    pub create_session:
+        extern "C" fn(name: *const u8, name_len: usize, out_id: *mut u8, out_cap: usize) -> bool,
+    /// Resolve a session by exact id, or by name (case-insensitive, first
+    /// match wins). Writes the id (NUL-terminated) into `out_id`/`out_cap`.
+    pub resolve_session:
+        extern "C" fn(query: *const u8, query_len: usize, out_id: *mut u8, out_cap: usize) -> bool,
+    /// Number of sessions in the store.
+    pub session_count: extern "C" fn() -> usize,
+    /// Write session `index`'s id and name (both NUL-terminated) into the two
+    /// out buffers (independent caps). Returns `false` if `index` is out of
+    /// range.
+    pub get_session: extern "C" fn(
+        index: usize,
+        out_id: *mut u8,
+        id_cap: usize,
+        out_name: *mut u8,
+        name_cap: usize,
+    ) -> bool,
+    /// Register the event callback (single slot; re-registration replaces the
+    /// previous one). `user_data` is passed back on every event.
+    pub register_event_callback:
+        extern "C" fn(cb: HostEventCallback, user_data: *mut std::ffi::c_void),
+}
+
+// SAFETY: `HostApi` is a plain `#[repr(C)]` aggregate of a `u32` and
+// `extern "C"` fn pointers — all `Send + Sync` — with no interior mutability.
+unsafe impl Send for HostApi {}
+unsafe impl Sync for HostApi {}
+
 // ─── Logger Trait ───────────────────────────────────────────────────────────
 
 pub trait ToolLogger: Send + Sync {

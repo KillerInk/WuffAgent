@@ -4,7 +4,8 @@ use std::sync::Arc;
 use libloading::{Library, Symbol};
 
 use crate::tools::types::{
-    PluginTool, Tool, ToolError, ToolLogger, ToolMetadata, ToolResult, PLUGIN_ABI_VERSION,
+    HostApi, PluginTool, Tool, ToolError, ToolLogger, ToolMetadata, ToolResult,
+    PLUGIN_ABI_VERSION,
 };
 
 /// A handle to a dynamically loaded plugin.
@@ -29,6 +30,11 @@ pub struct PluginHandle {
 // The plugin wraps its Tool via PluginTool::from_box(); the loader takes
 // ownership and turns it into an Arc<dyn Tool> (see `create_tool`).
 type PluginCreateFn = unsafe extern "C" fn() -> PluginTool;
+
+// Optional 4th export: hands the host-API vtable to the plugin. May be NULL
+// (the host has no host API, e.g. a non-app loader). Missing symbol = the
+// plugin is a classic tool-only plugin and is never invoked.
+type PluginHostApiFn = unsafe extern "C" fn(host_api: *const HostApi);
 
 impl PluginHandle {
     /// Load a plugin from the given path.
@@ -130,6 +136,52 @@ impl PluginHandle {
             let arc: Arc<dyn Tool> = Arc::from(tool);
             tracing::debug!(tool = arc.name(), "Created tool instance from plugin");
             Ok(arc)
+        }
+    }
+
+    /// Hand the host-API vtable to the plugin, IF it exports the optional
+    /// `wuff_tool_host_api` symbol.
+    ///
+    /// `host_api` may be null (the host has no host API — e.g. tests, or a
+    /// non-app loader); the plugin degrades accordingly. A missing symbol is
+    /// the classic tool-only plugin: no call, no error, the plugin loads
+    /// exactly as before (ABI backward compatible).
+    ///
+    /// A panic in the plugin's export is caught and logged (a buggy plugin
+    /// must not take down the whole discovery scan); the tool itself stays
+    /// registered — the plugin will report the missing/failed host API from
+    /// its own status output.
+    pub fn call_host_api(&self, host_api: *const HostApi) {
+        unsafe {
+            let sym: Result<Symbol<PluginHostApiFn>, libloading::Error> =
+                self.lib.get(b"wuff_tool_host_api");
+            match sym {
+                Ok(host_api_fn) => {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        host_api_fn(host_api)
+                    }));
+                    match result {
+                        Ok(()) => tracing::debug!(
+                            tool = self.metadata.name.as_str(),
+                            has_host_api = !host_api.is_null(),
+                            "Plugin host-API export invoked"
+                        ),
+                        Err(_) => tracing::warn!(
+                            tool = self.metadata.name.as_str(),
+                            "Plugin host-API export panicked — tool stays \
+                             registered, host API unavailable to it"
+                        ),
+                    }
+                }
+                Err(_) => {
+                    // No `wuff_tool_host_api` symbol: classic tool-only
+                    // plugin (e.g. hello_plugin) — nothing to hand over.
+                    tracing::debug!(
+                        tool = self.metadata.name.as_str(),
+                        "Plugin has no wuff_tool_host_api export (tool-only)"
+                    );
+                }
+            }
         }
     }
 

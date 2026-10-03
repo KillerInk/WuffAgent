@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::tools::builtin::{CalculationTool, ReadFileTool};
-use crate::tools::types::{ToolLogger, ToolOutput, ToolParams, TracingToolLogger};
+use crate::tools::types::{
+    HostApi, HostEventCallback, ToolLogger, ToolOutput, ToolParams, TracingToolLogger,
+    HOST_API_VERSION,
+};
 
 fn mock_logger() -> Arc<dyn ToolLogger> {
     Arc::new(TracingToolLogger)
@@ -210,6 +213,127 @@ fn test_plugin_tool_usable_after_discover_returns() {
     // then the registry (entry + keepalive handle → FreeLibrary), and only
     // then remove the dir (the DLL file is locked while mapped).
     drop(tool);
+    drop(registry);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ─── Host API (optional wuff_tool_host_api) ─────────────────────────────────
+
+/// A host-API vtable whose fns must never run (the tests only hand the
+/// pointer across; no loaded test plugin calls it).
+fn dummy_host_api() -> HostApi {
+    extern "C" fn inject(_sid: *const u8, _sl: usize, _t: *const u8, _tl: usize) -> bool {
+        unreachable!()
+    }
+    extern "C" fn create(_n: *const u8, _nl: usize, _o: *mut u8, _c: usize) -> bool {
+        unreachable!()
+    }
+    extern "C" fn resolve(_q: *const u8, _ql: usize, _o: *mut u8, _c: usize) -> bool {
+        unreachable!()
+    }
+    extern "C" fn count() -> usize {
+        unreachable!()
+    }
+    extern "C" fn get(
+        _i: usize,
+        _oi: *mut u8,
+        _ci: usize,
+        _on: *mut u8,
+        _cn: usize,
+    ) -> bool {
+        unreachable!()
+    }
+    extern "C" fn reg(_cb: HostEventCallback, _ud: *mut std::ffi::c_void) {
+        unreachable!()
+    }
+    HostApi {
+        version: HOST_API_VERSION,
+        inject_user_message: inject,
+        create_session: create,
+        resolve_session: resolve,
+        session_count: count,
+        get_session: get,
+        register_event_callback: reg,
+    }
+}
+
+#[test]
+fn test_set_host_api_roundtrip() {
+    let registry = ToolRegistry::new(vec![], mock_logger());
+    assert!(registry.host_api_ptr().is_null(), "default is null");
+
+    let api: *mut HostApi = Box::leak(Box::new(dummy_host_api()));
+    registry.set_host_api(Some(std::ptr::NonNull::new(api).unwrap()));
+    assert_eq!(
+        registry.host_api_ptr() as *const () as usize,
+        api as *const () as usize,
+        "set pointer round-trips"
+    );
+
+    registry.set_host_api(None);
+    assert!(registry.host_api_ptr().is_null(), "None clears to null");
+}
+
+#[test]
+fn test_host_api_version_and_layout() {
+    assert_eq!(HOST_API_VERSION, 1);
+    // repr(C) sanity: a u32 plus six fn pointers, aligned to the wider of
+    // the two (8 on 64-bit). Guards against accidental field reordering.
+    let fnptr = std::mem::size_of::<extern "C" fn() -> bool>();
+    assert_eq!(
+        std::mem::align_of::<HostApi>(),
+        fnptr.max(std::mem::align_of::<u32>())
+    );
+    assert!(std::mem::size_of::<HostApi>() >= 6 * fnptr);
+}
+
+#[test]
+fn test_tool_only_plugin_loads_with_host_api_set() {
+    // End-to-end for the get-missing path: hello_plugin has NO
+    // `wuff_tool_host_api` export, so loading it with a host API set must
+    // behave exactly as without — no call, no failure (ABI backward
+    // compatible), and a re-scan still skips (no re-invocation).
+    let manifest = match std::env::var("CARGO_MANIFEST_DIR").ok() {
+        Some(m) => m,
+        None => return,
+    };
+    let dll = Path::new(&manifest)
+        .parent()
+        .unwrap()
+        .join("target/debug/hello_plugin.dll");
+    if !dll.exists() {
+        eprintln!("skipping: hello_plugin.dll not built (cargo build -p hello_plugin)");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("wa-reg-hapi-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(&dll, dir.join("hello_plugin.dll")).unwrap();
+
+    let registry = ToolRegistry::new(vec![dir.clone()], mock_logger());
+    let api: *mut HostApi = Box::leak(Box::new(dummy_host_api()));
+    registry.set_host_api(Some(std::ptr::NonNull::new(api).unwrap()));
+
+    let outcomes = registry.discover_plugins_detailed().unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].status,
+        PluginLoadStatus::Loaded,
+        "tool-only plugin unaffected by a set host API: {:?}",
+        outcomes
+    );
+
+    // Re-scan: skip path — the already-registered instance keeps its
+    // (missing) vtable; the host-API export is not invoked twice.
+    let outcomes = registry.discover_plugins_detailed().unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].status,
+        PluginLoadStatus::Skipped,
+        "re-scan skips the registered plugin: {:?}",
+        outcomes
+    );
+
     drop(registry);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use crate::tools::dynamic::PluginHandle;
 use crate::tools::types::{
-    JsonSchema, Tool, ToolDefinition, ToolError, ToolFunctionSpec, ToolLogger, ToolMetadata,
-    ToolSchema,
+    HostApi, JsonSchema, Tool, ToolDefinition, ToolError, ToolFunctionSpec, ToolLogger,
+    ToolMetadata, ToolSchema,
 };
 
 /// Outcome of one plugin file during a discovery scan (T3b). The scan itself
@@ -68,6 +70,11 @@ pub struct ToolRegistry {
     /// read the list.
     discovery_paths: Mutex<Vec<PathBuf>>,
     logger: Arc<dyn ToolLogger>,
+    /// Optional host-API vtable handed to plugins that export
+    /// `wuff_tool_host_api` (null = no host API available). Set once by the
+    /// host app before the first plugin load; null is a valid value for
+    /// hosts (or tests) that don't provide one.
+    host_api: AtomicPtr<HostApi>,
 }
 
 impl ToolRegistry {
@@ -76,7 +83,29 @@ impl ToolRegistry {
             tools: RwLock::new(HashMap::new()),
             discovery_paths: Mutex::new(discovery_paths),
             logger,
+            host_api: AtomicPtr::new(std::ptr::null_mut()),
         }
+    }
+
+    /// Set (or clear with `None`) the host-API vtable passed to plugins via
+    /// their optional `wuff_tool_host_api` export.
+    ///
+    /// The host app calls this once at bootstrap, BEFORE the first plugin
+    /// load. The registry stores the pointer; each subsequently loaded plugin
+    /// (new `Loaded` outcome) is invoked with it. Plugins already registered
+    /// are not re-invoked — a re-scan that skips them keeps the vtable their
+    /// instance received at load time.
+    ///
+    /// SAFETY contract: the pointee must outlive every loaded plugin (the
+    /// host app keeps it alive for the process lifetime).
+    pub fn set_host_api(&self, api: Option<NonNull<HostApi>>) {
+        self.host_api.store(api.map(NonNull::as_ptr).unwrap_or_else(std::ptr::null_mut), Ordering::SeqCst);
+    }
+
+    /// The host-API pointer to hand to a newly loaded plugin (null when none
+    /// is set).
+    pub fn host_api_ptr(&self) -> *const HostApi {
+        self.host_api.load(Ordering::SeqCst)
     }
 
     /// Add an extra directory to scan for plugin files (T3b). Idempotent: a
@@ -280,6 +309,10 @@ impl ToolRegistry {
         let metadata = handle.metadata().clone();
         let tool = handle.create_tool()?;
         let name = tool.name().to_string();
+        // Captured before `handle` moves into the entry below: the Loaded arm
+        // uses this cheap Arc clone to hand the plugin its host-API vtable.
+        let host_api = self.host_api_ptr();
+        let api_handle = handle.clone();
         match self.register(ToolEntry {
             tool,
             metadata,
@@ -294,6 +327,13 @@ impl ToolRegistry {
                     path = %file_path.display(),
                     "Plugin tool registered (DLL kept alive by the entry)"
                 );
+                // Hand the host-API vtable to plugins that export the
+                // optional `wuff_tool_host_api` symbol (no-op for the classic
+                // 3-symbol tool-only plugins — the symbol lookup misses).
+                // Only newly registered (Loaded) plugins are invoked: a
+                // skipped re-scan keeps the vtable the original instance
+                // received at load time (re-invoking could double-init).
+                api_handle.call_host_api(host_api);
                 Ok(PluginLoadOutcome {
                     path: file_path.to_path_buf(),
                     status: PluginLoadStatus::Loaded,
