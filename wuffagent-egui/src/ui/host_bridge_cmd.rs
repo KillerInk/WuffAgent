@@ -16,7 +16,7 @@ impl ChatApp {
         // Take the receiver out (it is the only handle) so the per-command
         // `&mut self` work below doesn't fight a borrow of `self.host`;
         // put it back at the end (same pattern as process_pending_events).
-        let Some(mut rx) = self.host.rx.take() else {
+        let Some(rx) = self.host.rx.take() else {
             return;
         };
         loop {

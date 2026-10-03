@@ -2,7 +2,7 @@ use eframe::egui;
 use std::sync::{Arc, Mutex};
 
 use super::theme::Theme;
-use wuffagent_core::config::{get_presets_path, Config, PresetStore, SearchBackend};
+use wuffagent_core::config::{Config, PresetStore, SearchBackend};
 
 /// The settings dialog.
 pub struct SettingsDialog {

@@ -51,8 +51,12 @@ pub enum ConnectionType {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelPrice {
     pub model: String,
-    pub per_1M_in_usd: f64,
-    pub per_1M_out_usd: f64,
+    /// `#[serde(rename)]` keeps the config.json key (`per_1M_in_usd`) stable
+    /// while the Rust field is snake_case.
+    #[serde(rename = "per_1M_in_usd")]
+    pub per_1_m_in_usd: f64,
+    #[serde(rename = "per_1M_out_usd")]
+    pub per_1_m_out_usd: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

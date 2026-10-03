@@ -26,7 +26,7 @@ pub fn cost_usd(
     let Some(p) = prices.iter().find(|p| p.model.eq_ignore_ascii_case(model)) else {
         return 0.0;
     };
-    (prompt_tokens as f64 * p.per_1M_in_usd + completion_tokens as f64 * p.per_1M_out_usd)
+    (prompt_tokens as f64 * p.per_1_m_in_usd + completion_tokens as f64 * p.per_1_m_out_usd)
         / 1_000_000.0
 }
 
@@ -37,8 +37,8 @@ mod tests {
     fn price(model: &str, in_usd: f64, out_usd: f64) -> ModelPrice {
         ModelPrice {
             model: model.to_string(),
-            per_1M_in_usd: in_usd,
-            per_1M_out_usd: out_usd,
+            per_1_m_in_usd: in_usd,
+            per_1_m_out_usd: out_usd,
         }
     }
 

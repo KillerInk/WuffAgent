@@ -125,10 +125,10 @@ pub fn host_api() -> &'static HostApi {
 pub fn emit_event(kind: u32, session_id: &str, payload: &str) {
     let slot = EVENT_CB.lock().unwrap();
     if let Some((cb, user_data)) = &*slot {
-        // SAFETY: `cb`/`user_data` come from the plugin's own registration
-        // call and are valid for its lifetime; the byte slices live for the
-        // duration of this call.
-        let res = std::panic::catch_unwind(|| unsafe {
+        // `cb`/`user_data` come from the plugin's own registration call and
+        // are valid for its lifetime; the byte slices live for the duration
+        // of this call.
+        let res = std::panic::catch_unwind(|| {
             cb(
                 kind,
                 session_id.as_ptr(),
