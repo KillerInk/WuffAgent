@@ -109,6 +109,15 @@ pub struct EventRelay {
     pub pending_rx: Option<mpsc::Receiver<AppEvent>>,
 }
 
+/// Plugin host API (P1): receiver half of the host command queue. Plugins
+/// issue commands through the `HostApi` vtable (see `crate::host_bridge`);
+/// the UI thread drains this once per frame in
+/// `ChatApp::process_host_commands` and answers each on its one-shot reply
+/// channel.
+pub struct HostBridge {
+    pub rx: Option<mpsc::Receiver<crate::host_bridge::HostCommand>>,
+}
+
 /// Server-synced context window state (remote n_ctx).
 pub struct RemoteNctx {
     /// Remote n_ctx value (for remote mode).

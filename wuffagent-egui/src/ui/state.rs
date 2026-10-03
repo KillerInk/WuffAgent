@@ -67,7 +67,8 @@ impl Drop for RuntimeOnThread {
 /// - **`sessions`** — per-session runtime state + selection.
 /// - **`dialogs`** — transient dialog/panel widgets + visibility flags.
 /// - **`relay`** — core → UI event channel.
-/// - **`remote`** — server-synced context window state (n_ctx).
+    /// - **`host`** — plugin host-API command queue (P1).
+    /// - **`remote`** — server-synced context window state (n_ctx).
 /// - **`display`** — cached rendered messages (perf) + status bar.
 /// - **`restart`** — restart / auto-resume lifecycle.
 pub mod groups;
@@ -82,6 +83,8 @@ pub struct ChatApp {
     pub dialogs: groups::Dialogs,
     /// Core → UI event channel.
     pub relay: groups::EventRelay,
+    /// Plugin host-API command queue (P1).
+    pub host: groups::HostBridge,
     /// Server-synced context window state (remote n_ctx).
     pub remote: groups::RemoteNctx,
     /// Cached rendered messages (perf) + status bar.
@@ -107,6 +110,7 @@ impl ChatApp {
         auto_resume_reason: Option<String>,
         auto_resume_failed: Option<(String, String)>,
         server_status: Arc<Mutex<wuffagent_core::types::ServerStatusInfo>>,
+        host_rx: mpsc::Receiver<crate::host_bridge::HostCommand>,
     ) -> Self {
         // Build the sessions sidebar widget, pre-selecting the active session.
         let mut panel =
@@ -157,6 +161,9 @@ impl ChatApp {
             relay: groups::EventRelay {
                 pending_tx: Some(Arc::new(Mutex::new(event_tx))),
                 pending_rx: Some(event_rx),
+            },
+            host: groups::HostBridge {
+                rx: Some(host_rx),
             },
             remote: groups::RemoteNctx {
                 remote_n_ctx: 0,

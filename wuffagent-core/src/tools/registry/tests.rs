@@ -231,6 +231,9 @@ fn dummy_host_api() -> HostApi {
     extern "C" fn resolve(_q: *const u8, _ql: usize, _o: *mut u8, _c: usize) -> bool {
         unreachable!()
     }
+    extern "C" fn switch(_s: *const u8, _sl: usize) -> bool {
+        unreachable!()
+    }
     extern "C" fn count() -> usize {
         unreachable!()
     }
@@ -251,6 +254,7 @@ fn dummy_host_api() -> HostApi {
         inject_user_message: inject,
         create_session: create,
         resolve_session: resolve,
+        switch_session: switch,
         session_count: count,
         get_session: get,
         register_event_callback: reg,
@@ -336,4 +340,22 @@ fn test_tool_only_plugin_loads_with_host_api_set() {
 
     drop(registry);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_host_api_validate_helper() {
+    // A v1 table validates.
+    let api: *mut HostApi = Box::leak(Box::new(dummy_host_api()));
+    let validated = HostApi::validate(api).expect("v1 table must validate");
+    assert_eq!(validated.version, HOST_API_VERSION);
+
+    // Null rejects.
+    assert!(HostApi::validate(std::ptr::null::<HostApi>()).is_none());
+
+    // A future (unrecognized) version rejects — a plugin built against a
+    // newer host must degrade instead of assuming the layout.
+    let mut newer = dummy_host_api();
+    newer.version = HOST_API_VERSION + 1;
+    let newer_ptr: *mut HostApi = Box::leak(Box::new(newer));
+    assert!(HostApi::validate(newer_ptr).is_none());
 }

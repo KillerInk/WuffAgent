@@ -51,6 +51,21 @@ impl ChatApp {
             // Server status monitor — not session-bound (global server state).
             AppEvent::ServerStatus { .. } => String::new(),
         };
+
+        // Host bridge (P1): forward pipeline events to the registered plugin
+        // callback (fast, non-blocking — a plugin forwards them into its own
+        // mpsc). Kinds: 0 = chunk, 1 = complete, 2 = error, 3 = round-complete.
+        match &event {
+            AppEvent::StreamChunk { content, .. } => {
+                crate::host_bridge::emit_event(0, &sid, content)
+            }
+            AppEvent::StreamComplete { content, .. } => {
+                crate::host_bridge::emit_event(1, &sid, content)
+            }
+            AppEvent::StreamError { error, .. } => crate::host_bridge::emit_event(2, &sid, error),
+            AppEvent::StreamRoundComplete { .. } => crate::host_bridge::emit_event(3, &sid, ""),
+            _ => {}
+        }
         match event {
             // Stream lifecycle arms: see `stream.rs`.
             AppEvent::StreamChunk { content, .. } => {

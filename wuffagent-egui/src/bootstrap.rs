@@ -45,6 +45,9 @@ pub struct AppContext {
     pub event_rx: std::sync::mpsc::Receiver<AppEvent>,
     /// Latest server status snapshot (populated by the server status monitor).
     pub server_status: Arc<Mutex<ServerStatusInfo>>,
+    /// Plugin host-API command queue (receiver half; drained per frame by
+    /// `ChatApp::process_host_commands`).
+    pub host_rx: std::sync::mpsc::Receiver<crate::host_bridge::HostCommand>,
 }
 
 /// The three chat clients the app runs: the streaming session client
@@ -62,6 +65,9 @@ struct Tooling {
     registry: Arc<ToolRegistry>,
     tool_manager: Arc<ToolManager>,
     mcp_manager: Arc<McpManager>,
+    /// Receiver half of the plugin host-API command queue (plugins enqueue
+    /// commands through the `HostApi` vtable; the UI drains it per frame).
+    host_rx: std::sync::mpsc::Receiver<crate::host_bridge::HostCommand>,
 }
 
 /// Build the full app context (call once, from `main`).
@@ -267,6 +273,7 @@ pub fn bootstrap() -> AppContext {
         event_tx,
         event_rx,
         server_status,
+        host_rx: tooling.host_rx,
     }
 }
 
@@ -386,6 +393,14 @@ fn build_tooling(config: &Config) -> Tooling {
 
     let registry = Arc::new(ToolRegistry::new(discovery_paths, logger));
 
+    // Host bridge (P1): install the plugin host-API vtable BEFORE any plugin
+    // load so a plugin exporting `wuff_tool_host_api` can reach the UI
+    // thread (commands run once per frame on the UI thread; the table is
+    // process-lifetime). Tool-only plugins (no such export) are unaffected.
+    registry
+        .set_host_api(Some(std::ptr::NonNull::from(&*crate::host_bridge::host_api())));
+    let host_rx = crate::host_bridge::init();
+
     builtin::register_builtins(&registry, &config.search_config)
         .expect("Failed to register built-in tools");
     if let Err(e) = registry.discover_plugins() {
@@ -408,6 +423,7 @@ fn build_tooling(config: &Config) -> Tooling {
     Tooling {
         registry,
         tool_manager,
+        host_rx,
         mcp_manager,
     }
 }

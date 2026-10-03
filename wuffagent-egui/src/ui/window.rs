@@ -215,6 +215,11 @@ impl ChatApp {
                 self.handle_event(event);
             }
         }
+
+        // Host bridge (P1): run plugin-issued session commands (enqueued by a
+        // plugin's `HostApi` vtable fns on the plugin's thread; answered via
+        // one-shot reply channels).
+        self.process_host_commands();
     }
 
     /// Auto-resume after a restart: when `main` found a restart marker, send the

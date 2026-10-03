@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 mod bootstrap;
 mod fonts;
+mod host_bridge;
 mod image_loader;
 mod logging;
 mod ui;
@@ -109,6 +110,7 @@ async fn main() -> eframe::Result {
                 event_tx,
                 event_rx,
                 server_status,
+                host_rx,
             } = ctx;
             Ok(Box::new(ui::state::ChatApp::new(
                 config,
@@ -126,6 +128,7 @@ async fn main() -> eframe::Result {
                 auto_resume_reason,
                 auto_resume_failed,
                 server_status,
+                host_rx,
             )))
         }),
     )

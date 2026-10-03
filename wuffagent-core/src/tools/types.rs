@@ -317,6 +317,10 @@ pub struct HostApi {
     /// match wins). Writes the id (NUL-terminated) into `out_id`/`out_cap`.
     pub resolve_session:
         extern "C" fn(query: *const u8, query_len: usize, out_id: *mut u8, out_cap: usize) -> bool,
+    /// Switch the UI to the session `session_id` (UTF-8 bytes) — the desktop
+    /// follows along when the plugin joins/switches sessions. Returns `false`
+    /// when the session is unknown or on timeout.
+    pub switch_session: extern "C" fn(session_id: *const u8, session_len: usize) -> bool,
     /// Number of sessions in the store.
     pub session_count: extern "C" fn() -> usize,
     /// Write session `index`'s id and name (both NUL-terminated) into the two
@@ -339,6 +343,26 @@ pub struct HostApi {
 // `extern "C"` fn pointers — all `Send + Sync` — with no interior mutability.
 unsafe impl Send for HostApi {}
 unsafe impl Sync for HostApi {}
+
+impl HostApi {
+    /// Plugin-side version check for the vtable pointer the host handed over
+    /// (dual-link case: a statically linked plugin compares the host's
+    /// `version` field against its own copy of [`HOST_API_VERSION`]).
+    ///
+    /// Returns `None` when the pointer is null or the version is not
+    /// recognized — a plugin should then degrade (e.g. send-only) instead of
+    /// calling through an unknown layout.
+    pub fn validate(host_api: *const HostApi) -> Option<&'static HostApi> {
+        if host_api.is_null() {
+            return None;
+        }
+        // SAFETY: the host keeps the table alive for the process lifetime
+        // (see the struct docs), so a pointer obtained at load time stays
+        // valid for every later plugin call.
+        let api = unsafe { &*host_api };
+        (api.version == HOST_API_VERSION).then_some(api)
+    }
+}
 
 // ─── Logger Trait ───────────────────────────────────────────────────────────
 

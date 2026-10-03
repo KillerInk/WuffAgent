@@ -5,6 +5,7 @@ pub mod charts;
 pub mod chat_feedback;
 pub mod dashboard;
 pub mod event_handler;
+pub mod host_bridge_cmd;
 pub mod improvements;
 pub mod input;
 pub mod layout;

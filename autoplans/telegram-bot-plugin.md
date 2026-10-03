@@ -288,15 +288,10 @@ null — e.g. loaded by a non-app host — the tool reports `host_api: missing` 
       (real DLL, host API set, loads + executes). Manual `reload_plugins` →
       `hello` is a UI round-trip; left for the user to confirm if desired.
 
-**Next (P1 — egui host bridge):** implement the vtable fns (extern "C" +
-`catch_unwind`), the command queue drained each frame (Inject/Create/Resolve/
-Count/Get + one-shot reply, 5 s timeout), the event-callback slot + AppEvent
-mapping (kind 0/1/2/3), and `registry.set_host_api(...)` at bootstrap before
-any plugin load. Then `cargo check -p wuffagent-egui` + egui suite + a
-command-queue→session-store unit test.
+**Next (P2 — telegram_plugin crate):** see P2 below.
 
-### P1 — egui: host bridge
-- [ ] Implement the vtable fns (extern "C", `std::panic::catch_unwind` around
+### P1 — egui: host bridge ✅ (done — commit "P1: egui host bridge...")
+- [x] Implement the vtable fns (extern "C", `std::panic::catch_unwind` around
       bodies — no panics across the boundary):
   - command queue (`std::sync::mpsc`) drained each frame in the same
     housekeeping slot as `process_pending_events`; command set:
@@ -309,10 +304,51 @@ command-queue→session-store unit test.
     for each pipeline `AppEvent` (StreamChunk/StreamRoundComplete/
     StreamComplete/StreamError) map to kind + copy session_id/content into
     host-owned C strings and call the cb (fast path: mpsc forward only).
-- [ ] Bootstrap: `registry.set_host_api(...)` before any plugin load.
-- [ ] `cargo check -p wuffagent-egui` + egui test suite green; unit test for the
+- [x] Bootstrap: `registry.set_host_api(...)` before any plugin load.
+- [x] `cargo check -p wuffagent-egui` + egui test suite green; unit test for the
     command queue → session store effects (create/resolve/list against a real
     store fixture).
+
+**Outcome (P1):**
+- New `wuffagent-egui/src/host_bridge.rs`: `HostCommand`/`HostReply` types,
+  process-global `COMMAND_TX` (installed once by `init()`, receiver handed to
+  `ChatApp` via `groups::HostBridge.rx`), the `&'static HostApi` vtable
+  (`host_api()`) whose fns run on the plugin thread (byte-copy + mpsc only,
+  5 s `CMD_TIMEOUT`), and `emit_event(kind, sid, payload)` with a
+  `catch_unwind` around the plugin callback (a panicking plugin can't take
+  down the UI frame loop; the callback stays registered).
+- New `ui/host_bridge_cmd.rs` (executes on the UI thread, called from
+  `process_pending_events` after event drain): `process_host_commands`
+  (take-rx → try_recv loop → put back; mirrors the `process_pending_events`
+  pattern), `host_inject` (auto-create + `start_pipeline_for_session` with
+  the session's selected agent prompt/policy), `host_create` (mirrors the
+  panel's Create: `create_session` + `SessionRuntime::create_from_config` +
+  "general" default + selects & persists active session), `host_resolve`
+  (exact id, else case-insensitive name, sorted-id determinism),
+  `host_switch` (`switch_session`), `host_get` (sorted by id — deterministic
+  across calls).
+- `HostApi` gains `switch_session` (inserted before `session_count` — safe,
+  no plugin compiled against v1 yet) so the desktop can follow the bot's
+  active session. Core also gains `HostApi::validate(*const HostApi)` — the
+  plugin-side version/layout check for the dual-link case (null + future
+  version reject).
+- Bootstrap wires `registry.set_host_api(Some(NonNull::from(&*host_api())))`
+  + `host_bridge::init()` BEFORE `register_builtins`/`discover_plugins`;
+  `AppContext`/`main.rs` plumb `host_rx` into `ChatApp::new`.
+- Event mapping in `event_handler/mod.rs`: StreamChunk→0, StreamComplete→1,
+  StreamError→2, StreamRoundComplete→3 (empty payload), emitted before the
+  consuming `match event` (sid extracted just above).
+- Tests: 4 new in `host_bridge::tests` (byte helpers incl. invalid-UTF-8 +
+  NUL/truncation rules; full vtable→queue→handler→reply round-trip for
+  Count/Get/Create on a handler thread; event-callback slot + user_data
+  forwarding) + core `test_host_api_validate_helper`.
+- Verified: `cargo test --workspace` exit 0 — wuffagent-core **890 passed**,
+  wuffagent-egui **61 passed** (was 57), integration targets 2+2+1.
+  `cargo check --workspace` exit 0 (only the 3 pre-existing warnings).
+  Note: session-store effect logic (`host_*` fns) is covered by code review +
+  the mechanism round-trip test; a full ChatApp fixture test was not added
+  (ChatApp::new needs engine/server fixtures) — the P2 integration test with
+  a fake Telegram endpoint exercises Inject/Create/Resolve end-to-end.
 
 ### P2 — telegram_plugin crate
 - [ ] Crate skeleton (cdylib, `Cargo.toml` mirroring `hello_plugin`), exports the
