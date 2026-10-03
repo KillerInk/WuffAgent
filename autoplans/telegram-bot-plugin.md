@@ -1,6 +1,6 @@
 # Telegram bot plugin — talk to WuffAgent from Telegram
 
-**Date:** 2026-07-07
+**Date:** 2026-07-07 (rev 2: + session create/join/switch)
 **Scope:** new `plugins/telegram_plugin` crate (cdylib) + a small, backward-compatible
 extension of the plugin ABI (an *optional* host-API callback table) + a thin egui
 bridge. No new executable — the bot runs as a thread inside the running WuffAgent
@@ -10,6 +10,9 @@ process, per the requirement "a plugin, not an extra exe".
 
 - User messages from Telegram (private chat or group) reach a WuffAgent session and
   run a full agent turn (LLM + tools + MCP tools + plugins — the app's real registry).
+- **Session control from Telegram:** the bot can **create** sessions, **join** any
+  existing one (incl. sessions created in the GUI), and **switch** between them —
+  independently per Telegram chat.
 - The agent's reply is sent back to Telegram.
 - The plugin is installed like `hello_plugin`: build → copy `.dll` to
   `~/.wuffagent/plugins/` → `reload_plugins` (or app restart). Auto-starts if a config
@@ -27,11 +30,19 @@ exports exactly three symbols: `wuff_tool_abi_version`, `wuff_tool_metadata`,
    (`HashMap<String, SessionRuntime>`) and the pipeline driver
    (`start_pipeline_for_session`, `wuffagent-egui/src/ui/input/mod.rs:482`) live in
    the egui app; nothing hands the plugin a handle to them.
-2. **receive pipeline events** — `AppEvent` (`wuffagent-core/src/types/events.rs`)
+2. **manage sessions** — create/list/resolve are egui-side
+   (`apply_sessions_action`, the `session_store` in `ChatApp`).
+3. **receive pipeline events** — `AppEvent` (`wuffagent-core/src/types/events.rs`)
    flows core→UI over the app's own mpsc; there is no plugin-facing channel.
 
 So a pure tool plugin could at best *send* to Telegram, not *talk to* the running
 agent. The plan therefore adds a minimal, optional host-API vtable.
+
+Session model facts (verified): `SessionRuntime` carries `session_id: String` and
+`name: String` (display name, renamable in the GUI; sessions panel renders
+`session.name` + count + preview + timestamp). Ids look like
+`session_{millis}_{8hex}` (~30 chars). GUI create/rename already exist — the bridge
+reuses them rather than duplicating session logic.
 
 ## Architecture
 
@@ -41,40 +52,55 @@ Telegram ⇄ api.telegram.org (HTTPS long-poll / sendMessage)
    telegram_plugin (cdylib, loaded via reload_plugins)
    ┌───────────────────────────────────────────────┐
    │ poller thread (dedicated OS thread, blocking  │
-   │ reqwest): getUpdates → allowlist → HostApi::  │
-   │ inject_user_message; HostApi event callback   │
+   │ reqwest): getUpdates → allowlist → slash-     │
+   │ commands (/new /sessions /use /current /help) │
+   │ or free text → per-chat current session →     │
+   │ HostApi::inject_user_message(session_id, text)│
+   │ Event callback (all sessions, sid in payload) │
+   │ filters to each chat's current session,       │
    │ accumulates StreamChunk, sends final text on  │
    │ StreamComplete / StreamError                  │
-   │ `telegram` tool: start | stop | status | send │
+   │ `telegram` tool: start|stop|status|send +     │
+   │ new_session|list_sessions|use_session         │
    └──────────────┬────────────────────────────────┘
                   │ HostApi vtable (C fn-ptrs, passed at load)
    WuffAgent app (egui main thread)
-   ├─ drains inject queue → start_pipeline_for_session(bot_session, text)
-   └─ forwards AppEvents (filtered to bot session) → plugin callback
+   ├─ drains command queue → create_session / list / resolve (reply via
+   │   std-mpsc oneshot) / inject → start_pipeline_for_session(sid, text)
+   └─ forwards AppEvents (chunk/round/complete/error + session_id) →
+        plugin callback
         → real pipeline: LLM (llama server / API), full tool registry incl. MCP
 ```
 
 Key properties:
 
-- **Dedicated bot session** (MVP): the bot talks in its own session (default name
-  `Telegram`, configurable), so it never interleaves with the user's interactive
-  chat. The session is a normal session file under `~/.wuffagent/sessions/` — the
-  GUI can open it, and its runs show up in metrics / fleet dashboard / memory
-  exactly like any other run (they go through the real pipeline).
-- **Full tool access**: because the turn runs in the *app's* pipeline, the bot's
+- **Per-chat sessions with full control (core requirement):** each Telegram chat id
+  has its own "current session" (plugin state, persisted in
+  `~/.wuffagent/telegram-state.json`). Default on first use: a `Telegram` session
+  (auto-created on first free-text message, so nothing needs pre-setup). Slash
+  commands then allow `/new [name]` (create + switch), `/sessions` (list all,
+  `*` marks current), `/use <name|id>` (join ANY session — including ones created
+  or renamed in the GUI), `/current`, `/help`. GUI and bot see the same session
+  store: a `/new`-ed session appears in the GUI sessions panel immediately, and a
+  GUI session can be joined with `/use`.
+- **Full tool access:** because the turn runs in the *app's* pipeline, the bot's
   agent has the app's registry — builtin tools, MCP server tools, other plugins.
-  (A headless in-plugin loop would have seen only builtin+plugin tools; that is the
-  reason for the host API.)
-- **Plugin-process reality (dual linking)**: the cdylib statically links its own
+  (A headless in-plugin loop would have seen only builtin+plugin tools; that is
+  the reason for the host API.)
+- **Shared-session semantics (documented, not solved):** joining a session the user
+  is also driving in the GUI means both sides append to the same conversation;
+  the existing abort-on-new-send pipeline semantics apply (a new send replaces the
+  in-flight run). No per-side locking in MVP.
+- **Plugin-process reality (dual linking):** the cdylib statically links its own
   copy of `wuffagent-core` and its deps (same as `hello_plugin`). Consequences:
   - the vtable pointer is the *only* thing handed across; types are layout-
     compatible because both copies compile from the same core source;
   - `tracing!` inside the plugin goes to the plugin's own (unset) global
     dispatcher → **silently dropped**. The plugin logs via `eprintln!` (app
     console) + a small append-only log at `~/.wuffagent/telegram.log`.
-  - plugins are never unloaded (live until process exit) → host-side callback
-    slots also live until process exit; no teardown needed, `stop` just halts
-    the poller.
+  - plugins are never unloaded (live until process exit) → host-side state
+    (command queue, callback slot) also lives until process exit; `stop` just
+    halts the poller.
 
 ## ABI extension (backward compatible)
 
@@ -87,24 +113,49 @@ wuff_tool_host_api(host_api: *const HostApi) -> ()   // may be NULL
 ```rust
 /// C-compatible fn-pointer table. Lives in `wuffagent-core::tools::types`
 /// (next to ToolMetadata / PluginTool). `#[repr(C)]`, no Rust types by value.
+///
+/// Blocking contract: `inject_user_message` / `create_session` /
+/// `resolve_session` / `session_count` / `get_session` are command+wait
+/// (≤5 s timeout) — safe from the plugin's poller thread and from tool
+/// execution, but MUST NOT be called from the UI thread (deadlock).
 pub struct HostApi {
     pub version: u32,                       // HOST_API_VERSION; plugin must check
-    /// Enqueue a user message for `session_id` (bytes, UTF-8). Returns false if
-    /// the app is shutting down. Implemented by the egui app (drains into
-    /// start_pipeline_for_session on the UI thread).
+    /// Enqueue a user message for `session_id` (bytes, UTF-8). Auto-creates the
+    /// session (name = id tail) if missing. Returns false if the app is busy
+    /// beyond the timeout or shutting down.
     pub inject_user_message:
         extern "C" fn(session_id: *const u8, session_len: usize,
                       text: *const u8, text_len: usize) -> bool,
-    /// Register a callback, invoked on the UI thread for each AppEvent whose
-    /// session_id equals the filter (bytes). payload is a host-owned C string
-    /// valid for the call only (kind 0: chunk text; 1: full final content;
-    /// 2: error message; 3: round-complete marker, payload empty).
-    /// MUST be fast + non-blocking (the callback runs while the UI frame is
-    /// being drawn) — implementation just forwards into a std mpsc.
+    /// Create a named session; writes the new id (NUL-terminated) into
+    /// out_id/out_cap. Returns false on failure or buffer too small (cap < 64).
+    pub create_session:
+        extern "C" fn(name: *const u8, name_len: usize,
+                      out_id: *mut u8, out_cap: usize) -> bool,
+    /// Resolve a session by exact id, or by name (case-insensitive).
+    pub resolve_session:
+        extern "C" fn(query: *const u8, query_len: usize,
+                      out_id: *mut u8, out_cap: usize) -> bool,
+    /// Number of sessions in the store.
+    pub session_count: extern "C" fn() -> usize,
+    /// Write session `i`'s id and name into the two out buffers (both
+    /// NUL-terminated, independent caps). Returns false if i out of range.
+    pub get_session:
+        extern "C" fn(index: usize,
+                      out_id: *mut u8, id_cap: usize,
+                      out_name: *mut u8, name_cap: usize) -> bool,
+    /// Register the event callback (single slot; re-registration replaces).
+    /// Invoked on the UI thread for pipeline AppEvents of ANY session —
+    /// the plugin filters by session_id itself (session switches are
+    /// plugin-side state; a host-side filter slot would go stale on /use).
+    /// payload per kind: 0 = chunk text; 1 = full final content;
+    /// 2 = error message; 3 = round-complete marker (payload empty).
+    /// Host-owned C strings, valid for the call only.
+    /// MUST be fast + non-blocking (runs while the UI frame is drawn) —
+    /// implementation just forwards into a std mpsc.
     pub register_event_callback:
-        extern "C" fn(session_filter: *const u8, filter_len: usize,
-                      cb: extern "C" fn(kind: u32, payload: *const u8,
-                                        payload_len: usize,
+        extern "C" fn(cb: extern "C" fn(kind: u32,
+                                        session_id: *const u8, sid_len: usize,
+                                        payload: *const u8, payload_len: usize,
                                         user_data: *mut core::ffi::c_void),
                       user_data: *mut core::ffi::c_void),
 }
@@ -120,7 +171,7 @@ Loader changes (`wuffagent-core/src/tools/registry.rs`):
   stored pointer (or null). Missing symbol → no call (old plugins unaffected).
 - **No `PLUGIN_ABI_VERSION` bump** (existing three exports unchanged; the new
   symbol is opt-in). `HOST_API_VERSION: u32 = 1` is separate; the plugin
-  degrades to tool-only mode if the version is unrecognized.
+  degrades to send-only mode if the version is unrecognized.
 
 ## Plugin design (`plugins/telegram_plugin`)
 
@@ -134,9 +185,9 @@ in-process precedent), `serde`/`serde_json` for config + Telegram JSON.
 {
   "token": "123456:ABC...",
   "allow_chat_ids": [123456789],
-  "session": "Telegram",          // session name (or id) the bot talks in
-  "agent_profile": null,          // null = session's current agent selection
-  "chunk_chars": 4096
+  "default_session": "Telegram",  // session each chat starts in (auto-created)
+  "chunk_chars": 4096,
+  "api_base": null                // test override: full base URL of the Bot API
 }
 ```
 
@@ -146,36 +197,59 @@ in-process precedent), `serde`/`serde_json` for config + Telegram JSON.
 - Token stays in the local config file (same trust level as the LLM API key in
   the app config). Note Windows ACL hardening as a doc remark, not code.
 
+**Per-chat state** — `~/.wuffagent/telegram-state.json`:
+`{ "<chat_id>": { "session_id": "...", "session_name": "..." } }`, written on
+every switch/create (atomic temp+rename). Loaded at poller start. This is what
+makes each Telegram chat keep its own conversation context across app restarts.
+
 **Poller** (dedicated OS thread, started via `std::sync::Once`):
 
 1. `getUpdates?offset=<n+1>&timeout=50` long-poll (HTTP timeout 65 s > 50 s
    server hold). `offset` persists in memory + last-seen `update_id` for dedupe.
-2. On `message`: filter by allowlist; strip nothing (plain text only in MVP).
-3. Send `sendChatAction` (`typing`) before injecting; clear the accumulated reply
-   buffer; `HostApi::inject_user_message(session_id, text)`.
-4. Event callback (UI thread): kind 0 → append to buffer; kind 1 → buffer
-   replaced by full content, mark final; kind 2 → error text, mark final; kind 3
-   → round boundary (MVP: ignore).
-5. On final: chunk at ≤4096 chars (split on newline, then hard split — Telegram
-   hard limit), `sendMessage` per chunk **plain text** (no parse_mode → no
-   MarkdownV2 escaping failures in MVP).
-6. Serialization: one in-flight turn per chat id (std Mutex<Option<...>> queue);
-   a second message while busy is queued (MVP: max 1 queued, else reply "still
-   working — try again in a moment").
-7. Failure handling: 409 `Conflict` (another poller — e.g. two WuffAgent builds
-   running) → back off 30 s, log + `telegram status` shows the conflict; do not
-   crash the loop. 401 → "bad token, bot stopped". LLM-side errors arrive as
-   kind-2 events → forwarded to the chat.
-8. Log to `~/.wuffagent/telegram.log` (append, small rotation cap) + `eprintln!`.
+2. On `message`: filter by allowlist; then dispatch:
+   - **Slash commands** (case-insensitive, plain-text prefixes — no Bot API
+     command menu needed in MVP):
+     - `/new [name]` → `create_session` (default name `Telegram <HH:mm>`);
+       switch the chat to it; reply `✔ session '<name>' created`.
+     - `/sessions` → `session_count` + `get_session` loop → numbered list,
+       `*` on the chat's current one (names truncated to 40 chars).
+     - `/use <name|id>` → `resolve_session`; on success switch + reply
+       `→ now in '<name>'`; on failure reply with the current `/sessions` list.
+     - `/current` → `● <name> (<id-tail>)`.
+     - `/help` → command list.
+     - Unknown `/…` → short "unknown command, see /help".
+   - **Free text** → current session for this chat (first-ever message:
+     `create_session(default_session)` once). Send `sendChatAction(typing)`,
+     reset the reply buffer, `inject_user_message(session_id, text)`.
+3. Event callback (UI thread → relay mpsc): match `session_id` against the
+   chat's current session (a turn always belongs to the session it was sent in —
+   the poller records `inflight: (chat_id, session_id)` at send time and only
+   accepts events for that pair, so a `/use` mid-turn doesn't misroute the old
+   turn's tail); kind 0 → append; kind 1 → replace + final; kind 2 → error +
+   final; kind 3 → ignore (MVP).
+4. On final: chunk at ≤4096 chars (split on newline, then hard split),
+   `sendMessage` per chunk **plain text** (no parse_mode in MVP).
+5. Serialization: one in-flight turn per chat id; a second free-text message
+   while busy is queued (max 1; else "still working — try again in a moment").
+   Slash commands are always processed (they don't block on the LLM).
+6. Failure handling: 409 `Conflict` (two pollers — e.g. two WuffAgent builds)
+   → 30 s backoff, log + visible in `status`; 401 → "bad token, bot stopped";
+   inject/resolve failure (session deleted in the GUI meanwhile) → reply
+   `session '<name>' no longer exists — /sessions` and clear the chat's pointer;
+   LLM-side errors arrive as kind-2 → forwarded.
+7. Log to `~/.wuffagent/telegram.log` (append, small rotation cap) + `eprintln!`.
 
-**`telegram` tool** (the standard 3-symbol exports, name `telegram`):
+**`telegram` tool** (standard 3-symbol exports, name `telegram`) — gives the
+*agent* the same session control, so it can organize work (e.g. "I'll move this
+to a dedicated session"):
 
 | action | params | result |
 |---|---|---|
-| `start` | — | reads config, starts poller (idempotent) |
-| `stop` | — | stops poller (config/token changes) |
-| `status` | — | running? poller state, last update id, last error, 409 flag |
-| `send` | `to` (chat id), `text` | proactive bot→user message (lets the *agent* message the user, e.g. "done" notifications) |
+| `start` / `stop` / `status` | — | poller lifecycle + state (token prefix only) |
+| `send` | `to` (chat id), `text` | proactive bot→user message |
+| `new_session` | `name` | creates + returns id (does NOT switch any chat) |
+| `list_sessions` | — | `[{id, name}]` |
+| `use_session` | `name` or `id` | sets the calling chat's current session (no-op if invoked outside a telegram-originated turn; then just resolves + reports) |
 
 Auto-start: if the config file parses at `wuff_tool_create` time, start the
 poller immediately (so "install → reload_plugins → talk" works with no further
@@ -184,10 +258,6 @@ before the poller can use it (the loader calls it at load time; if it arrives as
 null — e.g. loaded by a non-app host — the tool reports `host_api: missing` and
 `start` degrades to send-only mode with a clear error on inject).
 
-**Session bootstrap:** the egui bridge's `inject_user_message` must tolerate a
-bot session that does not exist yet → create it (name from config) before
-starting the pipeline (the sessions panel will then show it like any session).
-
 ## Phases
 
 ### P0 — core: HostApi + loader plumbing
@@ -195,71 +265,80 @@ starting the pipeline (the sessions panel will then show it like any session).
 - [ ] `ToolRegistry::set_host_api(Option<NonNull<HostApi>>)`.
 - [ ] Loader: after `wuff_tool_create`, `lib.get(b"wuff_tool_host_api")` → call
       with stored ptr/null; `PluginLoadOutcome` unchanged.
-- [ ] Unit tests: registry without host_api set + fake plugin that exports the
-      symbol (build a tiny in-tree cdylib? — if too heavy for a unit test, cover
-      via the loader's get-missing path + the P2 integration test); version
-      check in the plugin-side helper.
+- [ ] Unit tests: get-missing path (no call, old plugins unaffected); version
+      check helper in the plugin-side trait.
 - [ ] `cargo test -p wuffagent-core` green; `hello_plugin` still loads (manual:
       `reload_plugins` → `hello`).
 
 ### P1 — egui: host bridge
-- [ ] Implement the two vtable fns (extern "C", no panics across the boundary —
-      wrap bodies in `std::panic::catch_unwind`, log on panic):
-  - `inject_user_message` → `std::sync::mpsc` send `(session_id, text)`; the
-    egui update loop drains it each frame (same housekeeping slot as
-    `process_pending_events`) → ensure session exists →
-    `start_pipeline_for_session(...)` with the session's current agent.
-  - `register_event_callback` → store `(filter, cb, user_data)` in a small
-    app-side slot (single slot is enough: one bot; document it). UI-thread
-    event processing: before/while handling `AppEvent`s for the bot session,
-    call the cb with the right kind/payload (cheap C-string copies).
-- [ ] Register the vtable at bootstrap via `registry.set_host_api(...)` before
-    any plugin load; `request_repaint` where needed (typing indicator not needed
-    — it's a Telegram-side action).
-- [ ] `cargo check -p wuffagent-egui` + egui test suite green.
+- [ ] Implement the vtable fns (extern "C", `std::panic::catch_unwind` around
+      bodies — no panics across the boundary):
+  - command queue (`std::sync::mpsc`) drained each frame in the same
+    housekeeping slot as `process_pending_events`; command set:
+    `Inject { sid, text }` (auto-create if missing → `start_pipeline_for_session`
+    with the session's current agent), `Create { name, reply }`,
+    `Resolve { query, reply }`, `Count { reply }`, `Get { i, reply }` —
+    replies via one-shot `std::sync::mpsc` recv (5 s timeout) on the calling
+    thread;
+  - `register_event_callback` → single slot store; UI-thread event processing:
+    for each pipeline `AppEvent` (StreamChunk/StreamRoundComplete/
+    StreamComplete/StreamError) map to kind + copy session_id/content into
+    host-owned C strings and call the cb (fast path: mpsc forward only).
+- [ ] Bootstrap: `registry.set_host_api(...)` before any plugin load.
+- [ ] `cargo check -p wuffagent-egui` + egui test suite green; unit test for the
+    command queue → session store effects (create/resolve/list against a real
+    store fixture).
 
 ### P2 — telegram_plugin crate
 - [ ] Crate skeleton (cdylib, `Cargo.toml` mirroring `hello_plugin`), exports the
-      4 symbols, `telegram` tool with the table above.
-- [ ] Config load/validate (`telegram.json`), log file, `Once`-guarded poller
-      thread, blocking reqwest (client built **once** — the llama-integration
-      P1 lesson), offset/dedupe state.
+      4 symbols, `telegram` tool with the full action table.
+- [ ] Config + state files (load/validate, atomic write), log file, `Once`-
+      guarded poller thread, blocking reqwest (client built **once** — the
+      llama-integration P1 lesson), offset/dedupe state.
 - [ ] Telegram calls: `getUpdates` (long-poll), `sendMessage` (plain, chunked),
       `sendChatAction`. 401/409/5xx handling per design.
-- [ ] Reply accumulation via the registered event callback (std mpsc relay from
-      UI thread → poller thread).
+- [ ] Slash-command dispatch + per-chat session map + inflight pairing + reply
+      accumulation via the event callback relay.
 - [ ] `README.md`: setup (BotFather token, allowlist, build, install,
-      `reload_plugins`), config reference, troubleshooting (409, bad token,
-      server down), the dual-linking logging note.
+      `reload_plugins`), command reference, config reference, troubleshooting
+      (409, bad token, server down, shared-session semantics), the dual-linking
+      logging note.
 
 ### P3 — verification, docs, close-out
-- [ ] Unit tests (plugin crate): chunking (boundary 4096/4100, CRLF), allowlist
-      filter, offset dedupe, config parse errors, version-check degrade path.
+- [ ] Unit tests (plugin crate): chunking (4096/4100 boundaries, CRLF), allowlist
+      filter, offset dedupe, config/state parse errors, version-check degrade,
+      command parsing (`/new`, `/use` name vs id, unknown).
 - [ ] Integration test with a **fake Telegram server** (in-test `TcpListener`
-      serving canned `getUpdates`/`sendMessage` JSON; point the client at
-      `http://127.0.0.1:<port>` via a config override field `api_base` — add it
-      in P2) asserting the full message→inject→callback→sendMessage round trip.
-- [ ] Manual E2E (needs a real bot token — **ask the user to run this**):
-      install plugin, `reload_plugins`, message the bot, verify the reply in
-      Telegram AND the turn visible in the GUI's `Telegram` session + fleet
-      dashboard metrics.
-- [ ] Main README: short "Plugins → Telegram bot" section; `git commit` plan +
-      code; save a memory entry (agent:wuffagent) with the ABI-extension shape.
+      serving canned `getUpdates`/`sendMessage` JSON via `api_base`) asserting:
+      free text → inject round trip; `/new` → create + switch; `/use <id>` →
+      switch; `/sessions` lists both.
+- [ ] Manual E2E (real bot token — **ask the user to run this**): message the
+      bot (default session), `/new fix-thing`, `/sessions`, `/use <a GUI-created
+      session>`, verify: replies in Telegram, sessions visible/switchable in the
+      GUI, runs in the fleet dashboard.
+- [ ] Main README: short "Plugins → Telegram bot" section; `git commit`; save a
+      memory entry (agent:wuffagent) with the ABI-extension shape + command set.
 
 ## Risks / mitigations
 
 | Risk | Mitigation |
 |---|---|
 | Callback invoked mid-frame does slow work → UI jank | cb contract: forward to mpsc only; host-side copy is a small C-string; review in P1 |
+| vtable call from the UI thread → deadlock on the command reply | documented blocking contract; only call sites are the poller thread + tool execution (pipeline thread); assert with a thread check + debug log |
+| `/use` mid-turn misroutes the old turn's trailing events | inflight `(chat_id, session_id)` pair recorded at send time; events matched against it, not against the live current session |
+| Session deleted in the GUI while a chat points at it | inject/resolve failure → friendly reply + pointer cleared (state file updated) |
 | Two pollers (two app builds / dev + release) → 409 storm | 30 s backoff + `status` flag; documented |
 | Token leaked via `status` output | `status` prints only token prefix `1234…` |
-| Bot session grows unbounded (context) | It's a normal session — the existing trimming/context-overflow machinery applies unchanged |
-| Plugin built against older core (vtable layout drift) | Separate `HOST_API_VERSION` + plugin degrades to send-only with a clear error; same stale-DLL philosophy as `PLUGIN_ABI_VERSION` |
+| Bot sessions grow unbounded (context) | normal sessions — existing trimming/context-overflow machinery applies unchanged |
+| Plugin built against older core (vtable layout drift) | separate `HOST_API_VERSION` + degrade to send-only with clear error; same stale-DLL philosophy as `PLUGIN_ABI_VERSION` |
 | `extern "C"` boundary panic aborts the app | `catch_unwind` in both host fns; plugin cb never allocates across the boundary beyond the mpsc send |
+| `/new` name collision (GUI already has that name) | names are not unique in the store — allowed; `/use` resolves case-insensitive, first match wins (documented) |
 
 ## Explicitly out of scope (follow-ups)
 
-- `session: "active"` mode (bot joins the user's currently open session).
-- Rich formatting (MarkdownV2 with escaping), images/voice in/out, group topics.
+- Rich formatting (MarkdownV2 with escaping), images/voice in/out, group topics,
+  Telegram command menu (`setMyCommands` — the text prefixes already work).
+- Per-side turn locking for shared sessions (bot + GUI driving one session
+  concurrently) — MVP relies on abort-on-new-send.
 - Plugin *unload* (ABI-wide, not bot-specific) — `stop` covers the practical need.
 - Multi-bot configs (one token per plugin instance).
