@@ -350,35 +350,50 @@ null — e.g. loaded by a non-app host — the tool reports `host_api: missing` 
   (ChatApp::new needs engine/server fixtures) — the P2 integration test with
   a fake Telegram endpoint exercises Inject/Create/Resolve end-to-end.
 
-### P2 — telegram_plugin crate
-- [ ] Crate skeleton (cdylib, `Cargo.toml` mirroring `hello_plugin`), exports the
+### P2 — telegram_plugin crate ✅ (done — commit "P2: telegram_plugin crate...")
+- [x] Crate skeleton (cdylib, `Cargo.toml` mirroring `hello_plugin`), exports the
       4 symbols, `telegram` tool with the full action table.
-- [ ] Config + state files (load/validate, atomic write), log file, `Once`-
+- [x] Config + state files (load/validate, atomic write), log file, `Once`-
       guarded poller thread, blocking reqwest (client built **once** — the
       llama-integration P1 lesson), offset/dedupe state.
-- [ ] Telegram calls: `getUpdates` (long-poll), `sendMessage` (plain, chunked),
+- [x] Telegram calls: `getUpdates` (long-poll), `sendMessage` (plain, chunked),
       `sendChatAction`. 401/409/5xx handling per design.
-- [ ] Slash-command dispatch + per-chat session map + inflight pairing + reply
+- [x] Slash-command dispatch + per-chat session map + inflight pairing + reply
       accumulation via the event callback relay.
-- [ ] `README.md`: setup (BotFather token, allowlist, build, install,
+- [x] `README.md`: setup (BotFather token, allowlist, build, install,
       `reload_plugins`), command reference, config reference, troubleshooting
       (409, bad token, server down, shared-session semantics), the dual-linking
       logging note.
 
-### P3 — verification, docs, close-out
-- [ ] Unit tests (plugin crate): chunking (4096/4100 boundaries, CRLF), allowlist
-      filter, offset dedupe, config/state parse errors, version-check degrade,
-      command parsing (`/new`, `/use` name vs id, unknown).
-- [ ] Integration test with a **fake Telegram server** (in-test `TcpListener`
+**Outcome (P2):** crate at `plugins/telegram_plugin` (cdylib; `bot.rs`
+poller+worker threads, `tg.rs` blocking API client + chunking, `config.rs`
+config/state, `log.rs` rotation, `lib.rs` the 4 ABI exports + `telegram`
+tool). Notable bug found by the e2e test: a self-deadlock in
+`dispatch_free_text` — the `chats` mutex guard's temporary lived across the
+whole `match` (the `Some` arm borrows the map), so re-locking `chats` in the
+`None` arm blocked forever; fixed by cloning the entry out first (`.cloned()`
+before the match). 12 unit tests + the integration test below.
+
+### P3 — verification, docs, close-out (nearly done — manual E2E pending user)
+- [x] Unit tests (plugin crate): chunking (4096/4100 boundaries, CRLF,
+      multibyte, hard split), allowlist filter, offset dedupe
+      (`test_next_offset`), config/state parse errors + corrupt recovery,
+      command parsing (`/new`, `/use` name vs id, unknown), token prefix,
+      start preconditions. (Version-check degrade lives in the core/loader
+      tests from P0/P1: `test_host_api_version_and_layout` + end-to-end loader
+      test with a real host API set.)
+- [x] Integration test with a **fake Telegram server** (in-test `TcpListener`
       serving canned `getUpdates`/`sendMessage` JSON via `api_base`) asserting:
       free text → inject round trip; `/new` → create + switch; `/use <id>` →
-      switch; `/sessions` lists both.
+      switch; `/sessions` lists both; + event-callback reply path and
+      state-file persistence. Green: `cargo test -p telegram_plugin` → 12 + 1,
+      `cargo test --workspace` exit 0 (core 890, egui 61).
 - [ ] Manual E2E (real bot token — **ask the user to run this**): message the
       bot (default session), `/new fix-thing`, `/sessions`, `/use <a GUI-created
       session>`, verify: replies in Telegram, sessions visible/switchable in the
       GUI, runs in the fleet dashboard.
-- [ ] Main README: short "Plugins → Telegram bot" section; `git commit`; save a
-      memory entry (agent:wuffagent) with the ABI-extension shape + command set.
+- [x] Main README: "Plugins" section with the Telegram bot subsection;
+      `git commit` (P2 + docs); memory entry saved (agent:wuffagent).
 
 ## Risks / mitigations
 

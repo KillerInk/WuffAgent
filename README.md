@@ -233,6 +233,14 @@ Servers are configured in the `mcp_servers` array of `config.json` (old configs 
 
 Server names are restricted to `[a-zA-Z0-9_-]` because they become part of the generated tool names.
 
+## Plugins
+
+Native tool plugins are `cdylib`s (`.dll`/`.so`) that export the WuffAgent tool ABI (`wuff_tool_abi_version`, `wuff_tool_metadata`, `wuff_tool_create` — see [`plugins/hello_plugin`](plugins/hello_plugin) for the reference implementation). Build, copy the artifact into the platform plugins dir (`%APPDATA%\wuffagent\plugins` on Windows, `~/.wuffagent/plugins` elsewhere), then call the `reload_plugins` tool (or restart). Plugins can optionally export a 4th symbol, `wuff_tool_host_api`, to receive a host-API vtable for talking *back* into the running app (injecting messages into sessions, creating/resolving sessions, receiving pipeline events).
+
+### Telegram bot
+
+[`plugins/telegram_plugin`](plugins/telegram_plugin) is a plugin that lets you talk to WuffAgent from Telegram: each chat keeps its own session (auto-created on first message), and `/new`, `/sessions`, `/use <name|id>`, `/current` create/join/switch sessions — the same store the GUI uses, so bot-created sessions appear in the sessions panel and GUI sessions can be joined from Telegram. The agent also gets a `telegram` tool for proactive messages and session control. Setup (BotFather token, chat-id allowlist, config, install) and troubleshooting are in [its README](plugins/telegram_plugin/README.md).
+
 ## Token usage
 
 Every completed LLM call appends one JSON line to `~/.wuffagent/usage.jsonl`:
