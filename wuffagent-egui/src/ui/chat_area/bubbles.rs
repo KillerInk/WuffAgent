@@ -554,7 +554,7 @@ impl ChatApp {
         }
         // In-place edit keeps the message count unchanged, so force the display
         // snapshot to rebuild next frame (the len-based check would miss it).
-        self.display.display_dirty = true;
+        self.chat_area.display_dirty = true;
     }
 
     pub(super) fn delete_message(&mut self, index: usize) {

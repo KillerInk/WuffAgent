@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+
 use eframe::egui;
+
+use wuffagent_core::types::ChatMessage;
 
 use super::state::ChatApp;
 use super::theme::Theme;
@@ -17,6 +21,182 @@ mod markdown;
 mod tool_cards;
 mod tool_json;
 
+/// Chat-area VIEW state (the panel-VM half of the chat column): the cached
+/// message / streaming snapshots rebuilt from the session store each frame
+/// plus their staleness keys, and the `display_dirty` flag set by in-place
+/// message edits. Owned by [`ChatApp::chat_area`], so the chat column's
+/// draw code reads/writes `self.chat_area.*` instead of the god-struct.
+///
+/// Per-session chat RUNTIME (messages, generation state, scroll state) stays
+/// in `wuffagent_core::sessions::SessionRuntime` — this struct only caches
+/// what the chat view renders.
+pub struct ChatArea {
+    /// Cached message list for the displayed session, rebuilt only when the
+    /// displayed session changed or the message count changed (append /
+    /// remove). Shared as an `Arc` so a steady-state frame is an `Arc::clone`
+    /// instead of a deep clone of every message (which copies large tool
+    /// outputs + base64 images and is the main lag).
+    pub display_snapshot: std::sync::Arc<Vec<ChatMessage>>,
+    /// Session ID the current `display_snapshot` holds.
+    pub snapshot_session: Option<String>,
+    /// Message count the current `display_snapshot` was built for.
+    pub snapshot_len: usize,
+    /// Set by in-place message edits (content changed, count unchanged);
+    /// cleared when the next snapshot is rebuilt.
+    pub display_dirty: bool,
+    /// Cached streaming state `(current_thinking, stream_buffer, active_tools,
+    /// is_generating)` for the displayed session. Rebuilt only when
+    /// `stream_snapshot_key` changes, so a steady-state frame is an O(1)
+    /// `Arc::clone` instead of a per-frame deep clone of the (multi-MB)
+    /// growing thinking/stream buffers. Field 0 is the `(current_thinking,
+    /// stream_buffer)` pair so draw code receives a `&(String, String)`
+    /// unchanged.
+    pub stream_snapshot:
+        std::sync::Arc<((String, String), Vec<wuffagent_core::sessions::ActiveTool>, bool)>,
+    /// Key the streaming snapshot was last built from (see [`stream_snapshot_key`]).
+    pub stream_snapshot_key: StreamSnapshotKey,
+}
+
+/// Staleness key for the streaming snapshot:
+/// `(session, is_generating, thinking_len, buffer_len, active_tools_revision)`.
+/// The text buffers only GROW while generating (a reset passes through a
+/// different length), so their lengths are a sufficient staleness key. The
+/// live tool cards are keyed on the monotonically increasing revision because
+/// their content can be REPLACED with same-length content (live output tail).
+pub type StreamSnapshotKey = (Option<String>, bool, usize, usize, u64);
+
+/// Build the streaming-snapshot key from the displayed session's state.
+/// The text-buffer lengths are zeroed when not generating (the snapshot stores
+/// empty buffers in that case).
+pub fn stream_snapshot_key(
+    session: &Option<String>,
+    is_generating: bool,
+    current_thinking_len: usize,
+    stream_buffer_len: usize,
+    active_tools_revision: u64,
+) -> StreamSnapshotKey {
+    (
+        session.clone(),
+        is_generating,
+        if is_generating { current_thinking_len } else { 0 },
+        if is_generating { stream_buffer_len } else { 0 },
+        active_tools_revision,
+    )
+}
+
+impl ChatArea {
+    pub fn new() -> Self {
+        Self {
+            display_snapshot: std::sync::Arc::new(Vec::new()),
+            snapshot_session: None,
+            snapshot_len: 0,
+            display_dirty: false,
+            stream_snapshot: std::sync::Arc::new((
+                (String::new(), String::new()),
+                Vec::new(),
+                false,
+            )),
+            stream_snapshot_key: (None, false, 0, 0, 0),
+        }
+    }
+
+    /// Rebuild the cached message list for the displayed session if it is
+    /// stale (the displayed session changed, an in-place edit set
+    /// `display_dirty`, or the message count changed — append/remove) and
+    /// return a shared `Arc` to it. Otherwise reuse it: a per-frame redraw
+    /// is then an O(1) `Arc::clone` rather than a deep clone of every
+    /// message (which copies large tool outputs + base64 images and is the
+    /// main lag).
+    pub fn refresh_display_snapshot(
+        &mut self,
+        sessions: &HashMap<String, wuffagent_core::sessions::SessionRuntime>,
+        displayed_session_id: Option<&str>,
+    ) -> std::sync::Arc<Vec<ChatMessage>> {
+        let selected = displayed_session_id.map(|s| s.to_string());
+        let current_len = selected
+            .as_deref()
+            .and_then(|sid| sessions.get(sid))
+            .map(|r| r.chat_state.messages.len())
+            .unwrap_or(0);
+        if selected != self.snapshot_session
+            || self.display_dirty
+            || current_len != self.snapshot_len
+        {
+            let msgs = selected
+                .as_deref()
+                .and_then(|sid| sessions.get(sid))
+                .map(|r| r.chat_state.messages.clone())
+                .unwrap_or_default();
+            self.snapshot_len = msgs.len();
+            // The snapshot only records which session it holds; the caller
+            // keeps its own `selected` for the rest of the frame (error
+            // card, streaming, scroll state).
+            self.snapshot_session = selected;
+            self.display_snapshot = std::sync::Arc::new(msgs);
+            self.display_dirty = false;
+        }
+        self.display_snapshot.clone()
+    }
+
+    /// Rebuild the cached streaming-state snapshot for the displayed session
+    /// if its staleness key changed and return a shared `Arc` to it.
+    ///
+    /// The snapshot is a deep clone of the (multi-MB) growing
+    /// thinking/stream buffers plus the live tool cards — see
+    /// [`StreamSnapshotKey`] for the staleness key and why a steady-state
+    /// frame is an O(1) `Arc::clone`.
+    pub fn refresh_stream_snapshot(
+        &mut self,
+        sessions: &HashMap<String, wuffagent_core::sessions::SessionRuntime>,
+        displayed_session_id: Option<&str>,
+    ) -> std::sync::Arc<((String, String), Vec<wuffagent_core::sessions::ActiveTool>, bool)> {
+        let selected = displayed_session_id.map(|s| s.to_string());
+        let key = {
+            let (is_gen, t_len, b_len, t_rev) = selected
+                .as_deref()
+                .and_then(|sid| sessions.get(sid))
+                .map(|r| {
+                    (
+                        r.chat_state.is_generating,
+                        r.chat_state.current_thinking.len(),
+                        r.chat_state.stream_buffer.len(),
+                        r.chat_state.active_tools_revision,
+                    )
+                })
+                .unwrap_or((false, 0, 0, 0));
+            stream_snapshot_key(&selected, is_gen, t_len, b_len, t_rev)
+        };
+        if self.stream_snapshot_key != key {
+            let snap = selected
+                .as_deref()
+                .and_then(|sid| sessions.get(sid))
+                .map(|r| {
+                    let gen = r.chat_state.is_generating;
+                    (
+                        (
+                            if gen {
+                                r.chat_state.current_thinking.clone()
+                            } else {
+                                String::new()
+                            },
+                            if gen {
+                                r.chat_state.stream_buffer.clone()
+                            } else {
+                                String::new()
+                            },
+                        ),
+                        r.chat_state.active_tools.clone(),
+                        gen,
+                    )
+                })
+                .unwrap_or_default();
+            self.stream_snapshot = std::sync::Arc::new(snap);
+            self.stream_snapshot_key = key;
+        }
+        self.stream_snapshot.clone()
+    }
+}
+
 impl ChatApp {
     /// Threshold in pixels to consider the user as "at bottom"
     const SCROLL_BOTTOM_THRESHOLD: f32 = 10.0;
@@ -32,37 +212,17 @@ impl ChatApp {
             self.draw_sub_session_tabs(ui, &theme);
         }
 
-        // Get the current session's chat state, or show empty state
-        // Rebuild the shared message snapshot only when it is stale: the selected
-        // session changed, an in-place edit set `display_dirty`, or the message
-        // count changed (append/remove). Otherwise reuse it — a per-frame redraw is
-        // then an O(1) `Arc::clone` rather than a deep clone of every message
-        // (which copies large tool outputs + base64 images and is the main lag).
-        // Re-key on the DISPLAYED session (active sub-session tab, else the
-        // selected one) so the tab bar swaps the chat area per tab.
+        // Get the current session's chat state, or show empty state.
+        // The shared message snapshot lives in the chat-area panel state and
+        // is rebuilt only when stale (displayed session changed, in-place
+        // edit set `display_dirty`, message count changed) — see
+        // `ChatArea::refresh_display_snapshot`. Re-key on the DISPLAYED
+        // session (active sub-session tab, else the selected one) so the tab
+        // bar swaps the chat area per tab.
         let selected = self.displayed_session_id().map(|s| s.to_string());
-        let current_len = selected
-            .as_deref()
-            .and_then(|sid| self.sessions.session_store.get(sid))
-            .map(|r| r.chat_state.messages.len())
-            .unwrap_or(0);
-        if selected != self.display.snapshot_session
-            || self.display.display_dirty
-            || current_len != self.display.snapshot_len
-        {
-            let msgs = selected
-                .as_deref()
-                .and_then(|sid| self.sessions.session_store.get(sid))
-                .map(|r| r.chat_state.messages.clone())
-                .unwrap_or_default();
-            self.display.snapshot_len = msgs.len();
-            // Clone so `selected` stays usable below (error card, streaming,
-            // scroll state) — the snapshot only records which session it holds.
-            self.display.snapshot_session = selected.clone();
-            self.display.display_snapshot = std::sync::Arc::new(msgs);
-            self.display.display_dirty = false;
-        }
-        let messages = self.display.display_snapshot.clone();
+        let messages = self
+            .chat_area
+            .refresh_display_snapshot(&self.sessions.session_store, selected.as_deref());
 
         // Show pending error as a subtle red-tinted card (from the current session)
         if let Some(sid) = &selected {
@@ -88,54 +248,14 @@ impl ChatApp {
 
         // Snapshot streaming state up front so the scroll closure can call
         // `&mut self` helpers without holding an immutable borrow of the store.
-        // P4: served from a shared `Arc` that is only rebuilt when its
-        // staleness key changes (see `groups::stream_snapshot_key`) — a
-        // steady-state frame is an O(1) `Arc::clone` instead of a per-frame
-        // deep clone of the (multi-MB) growing thinking/stream buffers plus
-        // the live tool cards.
-        let stream_key = {
-            let (is_gen, t_len, b_len, t_rev) = selected
-                .as_deref()
-                .and_then(|sid| self.sessions.session_store.get(sid))
-                .map(|r| {
-                    (
-                        r.chat_state.is_generating,
-                        r.chat_state.current_thinking.len(),
-                        r.chat_state.stream_buffer.len(),
-                        r.chat_state.active_tools_revision,
-                    )
-                })
-                .unwrap_or((false, 0, 0, 0));
-            super::state::groups::stream_snapshot_key(&selected, is_gen, t_len, b_len, t_rev)
-        };
-        if self.display.stream_snapshot_key != stream_key {
-            let snap = selected
-                .as_deref()
-                .and_then(|sid| self.sessions.session_store.get(sid))
-                .map(|r| {
-                    let gen = r.chat_state.is_generating;
-                    (
-                        (
-                            if gen {
-                                r.chat_state.current_thinking.clone()
-                            } else {
-                                String::new()
-                            },
-                            if gen {
-                                r.chat_state.stream_buffer.clone()
-                            } else {
-                                String::new()
-                            },
-                        ),
-                        r.chat_state.active_tools.clone(),
-                        gen,
-                    )
-                })
-                .unwrap_or_default();
-            self.display.stream_snapshot = std::sync::Arc::new(snap);
-            self.display.stream_snapshot_key = stream_key;
-        }
-        let stream_snapshot = self.display.stream_snapshot.clone();
+        // Served from a shared `Arc` (in the chat-area panel state) that is
+        // only rebuilt when its staleness key changes — see
+        // `ChatArea::refresh_stream_snapshot` — a steady-state frame is an
+        // O(1) `Arc::clone` instead of a per-frame deep clone of the
+        // (multi-MB) growing thinking/stream buffers plus the live tool cards.
+        let stream_snapshot = self
+            .chat_area
+            .refresh_stream_snapshot(&self.sessions.session_store, selected.as_deref());
         let streaming = &stream_snapshot.0;
         let is_streaming = stream_snapshot.2;
         let active_tools = &stream_snapshot.1;
@@ -692,5 +812,223 @@ impl ChatApp {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wuffagent_core::agents::{AgentEngine, ChatClientAdapter, ChatPipeline, LlmClient};
+    use wuffagent_core::client::{ChatClient, ConnectionSettings};
+    use wuffagent_core::tools::ToolManager;
+    use wuffagent_core::types::ReasoningMode;
+
+    /// Minimal in-memory `SessionRuntime` for exercising the snapshot refresh
+    /// logic (no server contacted, no session file touched).
+    fn test_runtime(session_id: &str) -> wuffagent_core::sessions::SessionRuntime {
+        let client = std::sync::Arc::new(ChatClient::from_settings(
+            ConnectionSettings::new("http://127.0.0.1:9999", None),
+        ));
+        let llm: std::sync::Arc<dyn LlmClient> =
+            std::sync::Arc::new(ChatClientAdapter::new(client.as_ref().clone()));
+        let engine = AgentEngine::new(
+            llm,
+            std::sync::Arc::new(ToolManager::new_empty()),
+            client.clone(),
+        );
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let pipeline = ChatPipeline::new(
+            std::sync::Arc::new(engine.clone()),
+            tx,
+            ReasoningMode::default(),
+            session_id.to_string(),
+        );
+        wuffagent_core::sessions::SessionRuntime::new(
+            session_id.to_string(),
+            format!("test-{session_id}"),
+            client,
+            pipeline,
+            engine,
+            tokio_util::sync::CancellationToken::new(),
+        )
+    }
+
+    fn sessions_with(id: &str) -> HashMap<String, wuffagent_core::sessions::SessionRuntime> {
+        let mut m = HashMap::new();
+        m.insert(id.to_string(), test_runtime(id));
+        m
+    }
+
+    fn user_msg(content: &str) -> wuffagent_core::types::ChatMessage {
+        wuffagent_core::types::ChatMessage {
+            role: "user".to_string(),
+            content: content.to_string(),
+            timestamp: String::new(),
+            image: None,
+            kind: wuffagent_core::types::MessageKind::Normal,
+        }
+    }
+
+    // ---- stream_snapshot_key ----
+
+    #[test]
+    fn stream_snapshot_key_stable_when_state_unchanged() {
+        let session = Some("s1".to_string());
+        let a = stream_snapshot_key(&session, true, 10, 20, 3);
+        let b = stream_snapshot_key(&session, true, 10, 20, 3);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn stream_snapshot_key_detects_each_single_change() {
+        let session = Some("s1".to_string());
+        let base = stream_snapshot_key(&session, true, 10, 20, 3);
+        // Session switch (or to none).
+        let other = Some("s2".to_string());
+        assert_ne!(stream_snapshot_key(&other, true, 10, 20, 3), base);
+        let none = None;
+        assert_ne!(stream_snapshot_key(&none, true, 10, 20, 3), base);
+        // A new chunk grows one of the buffers.
+        assert_ne!(stream_snapshot_key(&session, true, 11, 20, 3), base);
+        assert_ne!(stream_snapshot_key(&session, true, 10, 21, 3), base);
+        // A tool-card mutation bumps the revision (catches same-length
+        // content replacement, which lengths alone would miss).
+        assert_ne!(stream_snapshot_key(&session, true, 10, 20, 4), base);
+        // The generating flag flips while all lengths are zero.
+        assert_ne!(
+            stream_snapshot_key(&session, false, 0, 0, 3),
+            stream_snapshot_key(&session, true, 0, 0, 3)
+        );
+    }
+
+    #[test]
+    fn stream_snapshot_key_zeroes_text_lengths_when_not_generating() {
+        let session = Some("s1".to_string());
+        assert_eq!(
+            stream_snapshot_key(&session, false, 99, 99, 5),
+            (Some("s1".to_string()), false, 0, 0, 5)
+        );
+    }
+
+    // ---- refresh_display_snapshot ----
+
+    #[test]
+    fn display_snapshot_rebuilds_on_dirty_len_change_and_reuse() {
+        let mut area = ChatArea::new();
+        area.display_dirty = true; // mirrors ChatApp::new (first-frame build)
+        let mut sessions = sessions_with("s1");
+        sessions
+            .get_mut("s1")
+            .unwrap()
+            .chat_state
+            .messages
+            .push(user_msg("hi"));
+
+        let a1 = area.refresh_display_snapshot(&sessions, Some("s1"));
+        assert_eq!(a1.len(), 1);
+        assert_eq!(area.snapshot_session.as_deref(), Some("s1"));
+        assert!(!area.display_dirty);
+
+        // Unchanged session → same `Arc` reused (no deep clone).
+        let a2 = area.refresh_display_snapshot(&sessions, Some("s1"));
+        assert!(std::sync::Arc::ptr_eq(&a1, &a2));
+
+        // In-place edit (dirty flag, count unchanged) → rebuild.
+        area.display_dirty = true;
+        let a3 = area.refresh_display_snapshot(&sessions, Some("s1"));
+        assert!(!std::sync::Arc::ptr_eq(&a2, &a3));
+        assert!(!area.display_dirty);
+
+        // Message append (count change, no dirty flag) → rebuild.
+        sessions
+            .get_mut("s1")
+            .unwrap()
+            .chat_state
+            .messages
+            .push(user_msg("again"));
+        let a4 = area.refresh_display_snapshot(&sessions, Some("s1"));
+        assert!(!std::sync::Arc::ptr_eq(&a3, &a4));
+        assert_eq!(a4.len(), 2);
+
+        // Session switch → rebuild from the other session.
+        sessions.insert("s2".to_string(), test_runtime("s2"));
+        let a5 = area.refresh_display_snapshot(&sessions, Some("s2"));
+        assert!(!std::sync::Arc::ptr_eq(&a4, &a5));
+        assert_eq!(a5.len(), 0);
+        assert_eq!(area.snapshot_session.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn display_snapshot_empty_for_missing_session() {
+        let mut area = ChatArea::new();
+        area.display_dirty = true;
+        let sessions: HashMap<String, wuffagent_core::sessions::SessionRuntime> =
+            HashMap::new();
+        let a = area.refresh_display_snapshot(&sessions, Some("nope"));
+        assert!(a.is_empty());
+        assert_eq!(area.snapshot_session.as_deref(), Some("nope"));
+    }
+
+    // ---- refresh_stream_snapshot ----
+
+    #[test]
+    fn stream_snapshot_reuse_and_rebuild_on_state_changes() {
+        let mut area = ChatArea::new();
+        let mut sessions = sessions_with("s1");
+
+        // Not generating → empty buffers, `is_generating = false`.
+        let r1 = area.refresh_stream_snapshot(&sessions, Some("s1"));
+        assert!(!r1.2);
+        assert!(r1.0 .0.is_empty() && r1.0 .1.is_empty());
+
+        // Unchanged → same `Arc` reused.
+        let r2 = area.refresh_stream_snapshot(&sessions, Some("s1"));
+        assert!(std::sync::Arc::ptr_eq(&r1, &r2));
+
+        // Generation starts with content → rebuild, buffers cloned.
+        {
+            let s = sessions.get_mut("s1").unwrap();
+            s.chat_state.is_generating = true;
+            s.chat_state.current_thinking.push_str("thinking...");
+            s.chat_state.stream_buffer.push_str("hello");
+        }
+        let r3 = area.refresh_stream_snapshot(&sessions, Some("s1"));
+        assert!(!std::sync::Arc::ptr_eq(&r2, &r3));
+        assert!(r3.2);
+        assert_eq!(r3.0 .0, "thinking...");
+        assert_eq!(r3.0 .1, "hello");
+
+        // Steady state (no new text) → reuse again.
+        let r4 = area.refresh_stream_snapshot(&sessions, Some("s1"));
+        assert!(std::sync::Arc::ptr_eq(&r3, &r4));
+
+        // A streamed chunk grows the buffer → rebuild.
+        sessions
+            .get_mut("s1")
+            .unwrap()
+            .chat_state
+            .stream_buffer
+            .push_str(" world");
+        let r5 = area.refresh_stream_snapshot(&sessions, Some("s1"));
+        assert!(!std::sync::Arc::ptr_eq(&r4, &r5));
+        assert_eq!(r5.0 .1, "hello world");
+
+        // Generation ends → rebuild, buffers cleared.
+        sessions.get_mut("s1").unwrap().chat_state.is_generating = false;
+        let r6 = area.refresh_stream_snapshot(&sessions, Some("s1"));
+        assert!(!std::sync::Arc::ptr_eq(&r5, &r6));
+        assert!(!r6.2);
+        assert!(r6.0 .0.is_empty() && r6.0 .1.is_empty());
+    }
+
+    #[test]
+    fn stream_snapshot_empty_for_missing_session() {
+        let mut area = ChatArea::new();
+        let sessions: HashMap<String, wuffagent_core::sessions::SessionRuntime> =
+            HashMap::new();
+        let r = area.refresh_stream_snapshot(&sessions, Some("nope"));
+        assert!(!r.2);
+        assert!(r.0 .0.is_empty() && r.0 .1.is_empty());
+        assert!(r.1.is_empty());
     }
 }

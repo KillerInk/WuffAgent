@@ -69,7 +69,9 @@ impl Drop for RuntimeOnThread {
 /// - **`relay`** — core → UI event channel.
     /// - **`host`** — plugin host-API command queue (P1).
     /// - **`remote`** — server-synced context window state (n_ctx).
-/// - **`display`** — cached rendered messages (perf) + status bar.
+/// - **`display`** — status bar + live LLM-activity pills.
+/// - **`chat_area`** — chat-area panel state: cached message/streaming
+///   snapshots of the displayed session (perf).
 /// - **`restart`** — restart / auto-resume lifecycle.
 pub mod groups;
 pub struct ChatApp {
@@ -87,8 +89,11 @@ pub struct ChatApp {
     pub host: groups::HostBridge,
     /// Server-synced context window state (remote n_ctx).
     pub remote: groups::RemoteNctx,
-    /// Cached rendered messages (perf) + status bar.
+    /// Status bar + live LLM-activity pills.
     pub display: groups::DisplayState,
+    /// Chat-area panel state: cached message/streaming snapshots of the
+    /// displayed session (the chat column's view state).
+    pub chat_area: super::chat_area::ChatArea,
     /// Restart / auto-resume lifecycle state.
     pub restart: groups::RestartState,
 }
@@ -171,14 +176,15 @@ impl ChatApp {
                 remote_n_ctx_arc: None,
             },
             display: groups::DisplayState {
-                display_snapshot: std::sync::Arc::new(Vec::new()),
-                snapshot_session: None,
-                snapshot_len: 0,
-                display_dirty: true,
-                stream_snapshot: std::sync::Arc::new(((String::new(), String::new()), Vec::new(), false)),
-                stream_snapshot_key: (None, false, 0, 0, 0),
                 status: AppStatus::Stopped,
                 llm_activities: Vec::new(),
+            },
+            chat_area: {
+                let mut chat_area = super::chat_area::ChatArea::new();
+                // Force a snapshot rebuild on the first frame (matches the
+                // previous `display_dirty: true` initialization).
+                chat_area.display_dirty = true;
+                chat_area
             },
             restart: groups::RestartState {
                 pending_restart: false,
