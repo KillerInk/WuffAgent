@@ -3968,6 +3968,7 @@ dependencies = [
 name = "telegram_plugin"
 version = "0.1.0"
 dependencies = [
+ "hyper",
  "reqwest",
  "serde",
  "serde_json",

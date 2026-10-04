@@ -12,3 +12,4 @@ wuffagent-core = { path = "../../wuffagent-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+hyper = { version = "1" }

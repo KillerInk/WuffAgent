@@ -326,6 +326,9 @@ impl ChatApp {
 impl eframe::App for ChatApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx();
+        // Let the plugin host bridge wake this (possibly idle) loop when a
+        // command is enqueued (no-op after the first frame).
+        crate::host_bridge::set_repaint_ctx(ctx);
         // Request repaint during streaming for real-time updates
         if self
             .selected_chat_state()

@@ -65,6 +65,14 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Write this config as pretty JSON (used by tests; normal operation
+    /// reads a hand-written `telegram.json`).
+    pub fn write_to(&self, dir: &Path) -> Result<(), String> {
+        let path = dir.join(CONFIG_FILE);
+        let raw = serde_json::to_string_pretty(self).map_err(|e| format!("config serialize: {e}"))?;
+        std::fs::write(&path, raw).map_err(|e| format!("config write {}: {e}", path.display()))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.token.trim().is_empty() {
             return Err("token is empty".into());

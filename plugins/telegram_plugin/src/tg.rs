@@ -6,6 +6,7 @@
 //! llama-integration P1 lesson — keep long-lived clients long-lived).
 
 use serde_json::{json, Value};
+use std::sync::atomic::{Ordering as AtomicOrdering};
 use std::time::Duration;
 
 /// Error classes the poller reacts to differently.
@@ -47,6 +48,14 @@ pub struct TelegramApi {
     client: reqwest::blocking::Client,
     base: String,
     token: String,
+    /// The host vtable (kept here so `stop()` can detach the pipeline event
+    /// callback without going back through the process-global `host_api()`).
+    pub host: Option<&'static wuffagent_core::tools::types::HostApi>,
+    /// Set by the e2e test: log every `getUpdates` request (the test's fake
+    /// server responds with `Connection: close`, so a response that never
+    /// arrives is visible here as a request with no follow-up body).
+    #[allow(dead_code)]
+    pub debug_get_updates: Option<&'static std::sync::atomic::AtomicBool>,
 }
 
 impl TelegramApi {
@@ -61,6 +70,19 @@ impl TelegramApi {
                 .expect("reqwest client build"),
             base,
             token: token.to_string(),
+            host: None,
+            debug_get_updates: None,
+        }
+    }
+
+    /// Build with an explicit client (tests inject a pool-less client).
+    pub fn with_client(client: reqwest::blocking::Client, base: String, token: &str) -> Self {
+        Self {
+            client,
+            base,
+            token: token.to_string(),
+            host: None,
+            debug_get_updates: None,
         }
     }
 
@@ -70,6 +92,20 @@ impl TelegramApi {
 
     /// Long-poll `getUpdates`; `timeout` is the hold (seconds).
     pub fn get_updates(&self, offset: i64, timeout_secs: u64) -> Result<Vec<Update>, TgError> {
+        // (Debug hook: `debug_get_updates` — the e2e test sets it to trace
+        // every poll; the test's fake server responds with `Connection:
+        // close`, so a request with no follow-up body is the smoking gun for
+        // a stuck poll.)
+        if let Some(d) = &self.debug_get_updates {
+            if d.load(AtomicOrdering::Relaxed) {
+                eprintln!("[tg] getUpdates offset={offset} hold={timeout_secs}s");
+            }
+        }
+        // Per-request timeout override: `timeout_secs` is the server-side
+        // hold, but the CLIENT must not hang on a connection that never
+        // completes (e.g. a `connect` that is accepted and never answered) —
+        // the reqwest builder timeout only covers the normal request
+        // lifetime, not a stuck connect.
         let resp = self
             .client
             .get(self.url("getUpdates"))
@@ -78,11 +114,22 @@ impl TelegramApi {
                 ("timeout", timeout_secs.to_string()),
                 ("allowed_updates", "[\"message\"]".to_string()),
             ])
+            .timeout(std::time::Duration::from_secs(timeout_secs + 10))
             .send()
             .map_err(|e| TgError::Retry(e.to_string()))?;
+        // NOTE: no debug logging between `.send()` and the body drain here —
+        // a log line in that gap would itself be the hang (the test's fake
+        // server responds with `Connection: close` and reqwest reads the
+        // whole body before `.send()` returns; the drain is the only safe
+        // spot to observe).
+        // Drain the body into a string first (same reason as
+        // `send_message`): the body must be fully read before the
+        // connection is handed back to the pool.
         let status = resp.status().as_u16();
-        let body: Value = resp
-            .json()
+        let body_text = resp
+            .text()
+            .map_err(|e| TgError::Retry(format!("getUpdates body: {e}")))?;
+        let body: Value = serde_json::from_str(&body_text)
             .map_err(|e| TgError::Retry(format!("getUpdates body: {e}")))?;
         match status {
             200..=299 => {}
@@ -124,6 +171,15 @@ impl TelegramApi {
 
     /// Plain-text `sendMessage` (no HTML/MarkdownV2, preview disabled).
     pub fn send_message(&self, chat_id: i64, text: &str) -> Result<(), TgError> {
+        self.send_message_timeout(chat_id, text, std::time::Duration::from_secs(15))
+    }
+
+    fn send_message_timeout(
+        &self,
+        chat_id: i64,
+        text: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), TgError> {
         let resp = self
             .client
             .post(self.url("sendMessage"))
@@ -132,11 +188,23 @@ impl TelegramApi {
                 "text": text,
                 "disable_web_page_preview": true,
             }))
+            .timeout(timeout)
             .send()
             .map_err(|e| TgError::Retry(e.to_string()))?;
+        // Drain the response body into a STRING (not `resp.json()`): the
+        // body must be fully read before the connection is handed back to
+        // the pool, otherwise a pooled connection can carry a half-read body
+        // into the next request and the response bytes get interleaved —
+        // which makes the follow-up `.json()` parse fail (the body is
+        // consumed by the NEXT response) and, worse, can deadlock on a
+        // connection that is never closed.
+        // Drain the body BEFORE reading the status — `Response::text` takes
+        // `self` by value, so the status must be captured first.
         let status = resp.status().as_u16();
-        let body: Value = resp
-            .json()
+        let body_text = resp
+            .text()
+            .map_err(|e| TgError::Retry(format!("sendMessage body: {e}")))?;
+        let body: Value = serde_json::from_str(&body_text)
             .map_err(|e| TgError::Retry(format!("sendMessage body: {e}")))?;
         match status {
             200..=299 => Ok(()),
@@ -153,11 +221,16 @@ impl TelegramApi {
     }
 
     /// Best-effort "typing…" indicator (shown up to 10 s); errors ignored.
+    /// The explicit per-request timeout is the same reason as in
+    /// [`Self::get_updates`]: the builder timeout does not cover a stuck
+    /// connect, and this runs on the WORKER thread — a hang would stall
+    /// every subsequent update/event for the bot's whole lifetime.
     pub fn send_chat_action(&self, chat_id: i64) {
         let _ = self
             .client
             .post(self.url("sendChatAction"))
             .json(&json!({ "chat_id": chat_id, "action": "typing" }))
+            .timeout(std::time::Duration::from_secs(10))
             .send();
     }
 }

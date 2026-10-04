@@ -28,7 +28,7 @@ use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wuffagent_core::tools::types::{HostApi, HostEventCallback};
 
@@ -144,38 +144,83 @@ pub struct BotState {
     last_poll: Mutex<Instant>,
 }
 
-static BOT: OnceLock<Arc<BotState>> = OnceLock::new();
+static BOT: Mutex<Option<Arc<BotState>>> = Mutex::new(None);
 static EVENT_TX: Mutex<Option<mpsc::Sender<Event>>> = Mutex::new(None);
+/// Serializes `start_inner` (its wait-then-set is not atomic) — without it
+/// two concurrent starts could both pass the `running()` check, and the
+/// loser's `OnceLock::set` failure would leave a bot with dead threads.
+static START_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn running() -> bool {
-    BOT.get()
+    BOT.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
         .map(|b| b.running.load(Ordering::Relaxed))
         .unwrap_or(false)
 }
 
+
 /// Start the bot threads. `dir` is where `telegram.json`/`telegram-state.json`
 /// live (`~/.wuffagent` in normal operation; a temp dir in tests).
 pub fn start(cfg: Config, dir: PathBuf) -> Result<String, String> {
-    cfg.validate().map_err(|e| format!("config: {e}"))?;
-    if running() {
-        return Err("bot already running (stop it first)".into());
-    }
-    let api = crate::host_api()
-        .ok_or_else(|| "host API unavailable (WuffAgent build too old?) — bot needs session access".to_string())?;
-    let host = Host::new(api);
+    start_inner(&cfg, dir, true)
+}
 
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+/// Build the API client for a config; a test override (`set_api_for_testing`)
+/// wins when set — the e2e test injects a pool-less `reqwest` client so its
+/// per-request timeout overrides (see `TelegramApi::get_updates`) actually
+/// apply (reqwest's builder `.timeout()` is silently ignored by a pooled
+/// connection whose idle time is unbounded).
+pub fn set_api_for_testing(api: Option<fn(&Config) -> TelegramApi>) {
+    *TEST_API_OVERRIDE.lock().unwrap() = api;
+}
+
+fn build_api(cfg: &Config) -> TelegramApi {
+    let f = *TEST_API_OVERRIDE.lock().unwrap();
+    match f {
+        Some(f) => f(cfg),
+        None => TelegramApi::new(&cfg.token, cfg.api_base.as_deref(), cfg.poll_timeout_secs),
+    }
+}
+
+static TEST_API_OVERRIDE: Mutex<Option<fn(&Config) -> TelegramApi>> = Mutex::new(None);
+/// Test flag: when true, `try_autostart` is a no-op (the e2e test sets it
+/// before `wuff_tool_host_api` so its explicit `bot::start` is the only
+/// path — autostart would race it and the test's stop-wait loop would hang
+/// on a bot the test didn't start).
+pub static AUTOSTART_DISABLED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+fn start_inner(cfg: &Config, dir: PathBuf, log_started: bool) -> Result<String, String> {
+    cfg.validate().map_err(|e| format!("config: {e}"))?;
+    let _guard = START_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if BOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .is_some()
+    {
+        return Err("bot already registered (stop it first)".into());
+    }
+    let api_ref = crate::host_api()
+        .ok_or_else(|| "host API unavailable (WuffAgent build too old?) — bot needs session access".to_string())?;
+    let host = Host::new(api_ref);
+
+    std::fs::create_dir_all(&dir).map_err(|err| format!("create {}: {err}", dir.display()))?;
     let file = BotStateFile::load(&dir);
 
-    // Replace any previous instance's event channel.
+    // Replace any previous instance's event channel, then its host callback:
+    // the callback holds a `Sender` clone (the worker's `Rx` keeps it
+    // connected until the worker exits), so replacing it before spawning the
+    // new threads is what makes `stop()` actually release the event relay.
     let (event_tx, event_rx) = mpsc::channel::<Event>();
     *EVENT_TX.lock().unwrap() = Some(event_tx);
 
     // Register the pipeline event callback (single slot; replaces previous).
     host.register_event_callback(telegram_event_cb, std::ptr::null_mut());
 
+    let mut api = build_api(&cfg);
+    api.host = Some(api_ref);
     let state = Arc::new(BotState {
-        api: TelegramApi::new(&cfg.token, cfg.api_base.as_deref(), cfg.poll_timeout_secs),
+        api,
         chats: Mutex::new(
             file
                 .chats
@@ -192,14 +237,15 @@ pub fn start(cfg: Config, dir: PathBuf) -> Result<String, String> {
         running: AtomicBool::new(true),
         last_error: Mutex::new(String::new()),
         last_poll: Mutex::new(Instant::now()),
-        cfg,
+        cfg: cfg.clone(),
         dir,
     });
-    if BOT.set(state.clone()).is_err() {
-        // A previous instance is still registered (stop raced) — bail cleanly.
-        *EVENT_TX.lock().unwrap() = None;
-        return Err("internal: previous bot instance still registered".into());
-    }
+    // Unreachable under START_LOCK (the check above), kept as a belt-and-braces
+    // guard: if it ever fires, roll back the event wiring.
+    let mut bot_slot = BOT.lock().unwrap_or_else(|p| p.into_inner());
+    debug_assert!(bot_slot.is_none());
+    *bot_slot = Some(state.clone());
+    drop(bot_slot);
 
     let (updates_tx, updates_rx) = mpsc::channel::<Vec<Update>>();
     let poller_state = state.clone();
@@ -216,15 +262,17 @@ pub fn start(cfg: Config, dir: PathBuf) -> Result<String, String> {
             format!("spawn worker: {e}")
         })?;
 
-    log::log(
-        &state.dir,
-        &format!(
-            "started ({} chat(s) in allowlist, {} persisted chat pointer(s), offset {})",
-            state.cfg.allow_chat_ids.len(),
-            state.chats.lock().unwrap().len(),
-            state.last_update_id.lock().unwrap(),
-        ),
-    );
+    if log_started {
+        log::log(
+            &state.dir,
+            &format!(
+                "started ({} chat(s) in allowlist, {} persisted chat pointer(s), offset {})",
+                state.cfg.allow_chat_ids.len(),
+                state.chats.lock().unwrap().len(),
+                state.last_update_id.lock().unwrap(),
+            ),
+        );
+    }
     Ok(format!("Telegram bot started (token prefix {:?})", token_prefix(&state.cfg.token)))
 }
 
@@ -232,13 +280,21 @@ pub fn start(cfg: Config, dir: PathBuf) -> Result<String, String> {
 /// (≤ `poll_timeout_secs` — shortened to 2 s once stop is requested), so the
 /// threads exit within a couple of seconds.
 pub fn stop() -> String {
-    match BOT.get() {
+    let state = BOT.lock().unwrap_or_else(|p| p.into_inner()).take();
+    match state {
         Some(state) if state.running.load(Ordering::Relaxed) => {
             state.stop.store(true, Ordering::Relaxed);
             log::log(&state.dir, "stop requested");
+            // Detach the pipeline event callback now (not when the worker
+            // exits, which can take up to a poll cycle): it holds a
+            // `Sender` clone the UI calls per pipeline event, and keeping it
+            // up would relay events to a dead relay until then.
+            if let Some(api) = state.api.host {
+                Host::new(api).register_event_callback(telegram_event_cb, std::ptr::null_mut());
+            }
             "Telegram bot stopping (threads exit within a few seconds)".into()
         }
-        Some(_) => "Telegram bot is not running".into(),
+        Some(_) => "Telegram bot is not running (slot cleared)".into(),
         None => "Telegram bot was never started".into(),
     }
 }
@@ -251,7 +307,7 @@ pub fn token_prefix(token: &str) -> String {
 }
 
 pub fn status_json() -> serde_json::Value {
-    let Some(state) = BOT.get() else {
+    let Some(state) = BOT.lock().unwrap_or_else(|p| p.into_inner()).clone() else {
         return serde_json::json!({ "running": false, "note": "never started" });
     };
     let last_poll = *state.last_poll.lock().unwrap();
@@ -275,7 +331,7 @@ pub fn use_session(query: &str) -> Result<serde_json::Value, String> {
         .list()
         .iter()
         .find_map(|(sid, n)| (sid == &id).then_some(n.clone()));
-    let state = BOT.get().cloned();
+    let state = BOT.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let switched_chat = if let Some(state) = &state {
         if state.running.load(Ordering::Relaxed) {
             let chat = *state.active_chat.lock().unwrap();
@@ -318,7 +374,7 @@ pub fn list_sessions() -> Result<serde_json::Value, String> {
 
 /// `send` tool action.
 pub fn send_message(chat_id: i64, text: &str) -> Result<serde_json::Value, String> {
-    let Some(state) = BOT.get() else {
+    let Some(state) = BOT.lock().unwrap_or_else(|p| p.into_inner()).clone() else {
         return Err("bot not started".into());
     };
     let chunks = tg::chunk_text(text, state.cfg.chunk_chars);
@@ -333,7 +389,7 @@ pub fn send_message(chat_id: i64, text: &str) -> Result<serde_json::Value, Strin
 
 /// The pipeline event callback — runs on the WuffAgent **UI thread**.
 /// Contract: forward to the mpsc and return; no other work.
-extern "C" fn telegram_event_cb(
+pub extern "C" fn telegram_event_cb(
     kind: u32,
     sid: *const u8,
     sid_len: usize,
@@ -354,6 +410,10 @@ extern "C" fn telegram_event_cb(
 fn set_error(state: &BotState, msg: &str) {
     log::log(&state.dir, msg);
     *state.last_error.lock().unwrap() = msg.to_string();
+    // The plugin's `tracing!` goes to its own (unset) global dispatcher and
+    // is silently dropped (README: dual-linking note) — mirror the error to
+    // the console so it is visible when running from a terminal.
+    eprintln!("telegram_plugin error: {msg}");
 }
 
 fn set_chat(state: &BotState, host: &Host, chat_id: i64, sid: &str, name: &str) {
@@ -459,11 +519,18 @@ fn worker_thread(
     let mut events_disconnected = false;
     loop {
         // Drain relayed pipeline events first (fast path keeps replies flowing
-        // even while a long-poll is in flight).
+        // even while a long-poll is in flight). The `try_recv` loop is
+        // re-checked after EVERY handled event — a `handle_event` that takes
+        // a 2 s send-retry must not starve the drain of events queued behind
+        // it (they would only be picked up after the next 100 ms update
+        // timeout, and a reply can be missed entirely in the meantime).
         if !events_disconnected {
             loop {
                 match event_rx.try_recv() {
-                    Ok(ev) => handle_event(&state, &host, ev),
+                    Ok(ev) => {
+                        handle_event(&state, &host, ev);
+                        continue;
+                    }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
                         events_disconnected = true;
@@ -774,12 +841,17 @@ fn drain_queued(state: &Arc<BotState>, host: &Host) {
 }
 
 fn send_reply(state: &BotState, chat_id: i64, text: &str) {
+    let dir = state.dir.clone();
     let chunks = tg::chunk_text(text, state.cfg.chunk_chars);
     for chunk in chunks {
         match state.api.send_message(chat_id, &chunk) {
             Ok(()) => {}
             // One retry for transient failures (rate limit / 5xx / network).
             Err(TgError::Retry(_)) => {
+                log::log(
+                    &dir,
+                    &format!("sendMessage to {chat_id} failed (retrying in 2 s): {chunk}"),
+                );
                 std::thread::sleep(Duration::from_secs(2));
                 match state.api.send_message(chat_id, &chunk) {
                     Ok(()) => {}

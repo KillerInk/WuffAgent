@@ -265,15 +265,23 @@ fn handle_conn(sock: &mut std::net::TcpStream, updates: &Arc<Mutex<VecDeque<serd
         .map(|p| p.rsplit('/').next().unwrap_or("").split('?').next().unwrap_or(""))
         .unwrap_or("");
     if is_get && method == "getUpdates" {
-        // Long-poll: hold up to ~800 ms waiting for an update to appear.
+        // Long-poll: hold up to ~800 ms, RETURNING AS SOON AS the first
+        // update appears (not a fixed 800 ms hold). A fixed hold makes the
+        // test racy: the fake server's 800 ms hold vs the worker's
+        // 100 ms update drain means an event emitted while the worker is
+        // mid-long-poll can be delayed by up to 800 ms — long enough for the
+        // test's 5 s wait to expire before the reply is sent.
         let deadline = Instant::now() + Duration::from_millis(800);
         let mut batch = Vec::new();
-        while Instant::now() < deadline {
+        loop {
             if let Some(u) = updates.lock().unwrap().pop_front() {
                 batch.push(u);
-            } else {
-                thread::sleep(Duration::from_millis(20));
+                break;
             }
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
         }
         respond(sock, &format!("{{\"ok\":true,\"result\":{}}}", serde_json::json!(batch)));
         return true;
@@ -336,16 +344,73 @@ fn fake_telegram_end_to_end() {
     let server = FakeTg::start(updates.clone(), sent.clone());
 
     let dir = std::env::temp_dir().join(format!(
-        "tg_plugin_e2e_{}_{}",
-        std::process::id(),
-        server.port
+        "tg_plugin_e2e_{}",
+        std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
+    // Redirect the app home for THIS test process (the plugin's copy of
+    // wuffagent-core honors `set_wuffagent_home_for_testing`): the autostart
+    // triggered by `wuff_tool_host_api` below reads `telegram.json` from the
+    // app home, and we must not let a real `~/.wuffagent/telegram.json` on a
+    // dev box win (or write the test's state/log into the user's dir).
+    wuffagent_core::config::set_wuffagent_home_for_testing(Some(dir.clone()));
+
+    // Write the test's `telegram.json` (pointing at the fake server) BEFORE
+    // handing the plugin the host vtable: `wuff_tool_host_api` also triggers
+    // an autostart attempt (the loader contract), which must pick up THIS
+    // config — otherwise a valid `~/.wuffagent/telegram.json` on a dev box
+    // would win and the autostarted bot would poll the real API with the
+    // test's throwaway token (401 → self-stop → the explicit start below
+    // races it).
+    telegram_plugin::config::Config {
+        token: "1:2".into(),
+        allow_chat_ids: vec![42],
+        default_session: "Telegram".into(),
+        chunk_chars: 4096,
+        api_base: Some(format!("http://127.0.0.1:{}", server.port)),
+        poll_timeout_secs: 1,
+    }
+    .write_to(&dir)
+    .expect("test config writes");
+
     // Hand the plugin the host vtable (what the loader does via
     // `wuff_tool_host_api`).
+    // The test's fake server closes every connection right after the
+    // response, so a POOLED connection never gets observed idle time:
+    // reqwest's builder-level `.timeout()` is then ignored (the idle check
+    // passes unconditionally) and only the per-request `.timeout()`
+    // overrides (see `TelegramApi::get_updates`) can bound the request —
+    // without them, a response that never comes hangs the worker thread
+    // forever. Inject a pool-less client (and the matching builder timeout
+    // as a backstop) so the per-request overrides do the work.
+    telegram_plugin::bot::set_api_for_testing(Some(|cfg| {
+        let client = reqwest::blocking::Client::builder()
+            .pool_idle_timeout(std::time::Duration::ZERO)
+            .timeout(std::time::Duration::from_secs(cfg.poll_timeout_secs + 15))
+            .build()
+            .unwrap();
+        telegram_plugin::tg::TelegramApi::with_client(
+            client,
+            cfg.api_base.clone().unwrap_or_else(|| "https://api.telegram.org".into()),
+            &cfg.token,
+        )
+    }));
+    // Override the host vtable so `host_api()` returns the stub (in a plugin
+    // binary the loader calls `wuff_tool_host_api` before the test body runs,
+    // but here we call it explicitly — the override is set BEFORE that call
+    // so `host_api()` sees the stub instead of null; without it the worker
+    // thread exits immediately on "host API unavailable" and no reply is
+    // ever sent). Also disable autostart (the explicit `bot::start` below
+    // is the only path — autostart would race it and the stop-wait loop
+    // would hang on a bot the test didn't start).
+    telegram_plugin::TEST_HOST_OVERRIDE.lock().unwrap().replace(host());
+    *telegram_plugin::bot::AUTOSTART_DISABLED.lock().unwrap() = true;
+
     telegram_plugin::wuff_tool_host_api(host());
+    // Autostart is disabled (set above) so the explicit `bot::start` below
+    // is the only path — no autostarted bot to stop and no race.
 
     let cfg = telegram_plugin::config::Config {
         token: "1:2".into(),
@@ -355,7 +420,9 @@ fn fake_telegram_end_to_end() {
         api_base: Some(format!("http://127.0.0.1:{}", server.port)),
         poll_timeout_secs: 1,
     };
-    let start_msg = telegram_plugin::bot::start(cfg.clone(), dir.clone()).expect("bot starts");
+    let start_res = telegram_plugin::bot::start(cfg.clone(), dir.clone());
+    println!("start result: {start_res:?}");
+    let start_msg = start_res.expect("bot starts");
     println!("bot: {start_msg}");
     assert!(telegram_plugin::bot::running());
 

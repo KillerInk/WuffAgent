@@ -247,7 +247,10 @@ impl Tool for RestartTool {
          For WuffAgent itself, omit BOTH build_cmd and exe_path: the tool then builds and launches the \
          OTHER of WuffAgent's two standard builds — the default `cargo build` output (target/debug) and a \
          second copy (target/relaunch) — alternating between them on every restart, because on Windows the \
-         running exe cannot be relinked in place. Your turn ends when you call it; WuffAgent closes and \
+         running exe cannot be relinked in place. A WuffAgent self-restart also installs any freshly-built plugin files (your build dir's \
+          *.dll / *.so) into the plugins dir before the new process loads them, so after changing a plugin \
+          just rebuild and restart (no manual copy needed). Your turn ends when you call it; WuffAgent \
+          closes and \
          reopens, then continues the same work."
     }
 

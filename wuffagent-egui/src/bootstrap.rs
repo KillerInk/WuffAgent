@@ -386,10 +386,10 @@ fn build_tooling(config: &Config) -> Tooling {
     // Default plugin discovery dir: `<config dir>/plugins` — i.e.
     // `~/.wuffagent/plugins/`, next to `agents/` and `sessions/` (the
     // config dir is the directory holding config.json).
-    let discovery_paths: Vec<PathBuf> = vec![config.file_path.parent().map(|p| p.join("plugins"))]
-        .into_iter()
-        .flatten()
-        .collect();
+    // Captured separately (as an `Option`) so the post-restart plugin install
+    // below can use it after `discovery_paths` is moved into the registry.
+    let plugins_dir: Option<PathBuf> = config.file_path.parent().map(|p| p.join("plugins"));
+    let discovery_paths: Vec<PathBuf> = plugins_dir.clone().into_iter().collect();
 
     let registry = Arc::new(ToolRegistry::new(discovery_paths, logger));
 
@@ -403,6 +403,50 @@ fn build_tooling(config: &Config) -> Tooling {
 
     builtin::register_builtins(&registry, &config.search_config)
         .expect("Failed to register built-in tools");
+
+    // (Self-restart) Install freshly-built plugin DLLs before discovery. After a
+    // WuffAgent self-restart the OLD process has already spawned this one and
+    // closed, so the plugin DLLs in our build dir are no longer file-locked —
+    // the only window in which the installed copies can be overwritten. Gated on
+    // the restart marker, which `main` still holds at this point (it is consumed
+    // AFTER `bootstrap` returns), so a normal launch never touches the plugins
+    // dir. A bounded retry covers the rare case where the old process is still
+    // in its exit path when we first try.
+    if wuffagent_core::config::get_restart_marker_path().exists() {
+        if let Some(exe) = std::env::current_exe().ok() {
+            if exe.file_stem().and_then(|s| s.to_str()) == Some("wuffagent-egui") {
+                if let Some(src) = exe.parent() {
+                    if let Some(dst) = plugins_dir.as_ref() {
+                        for attempt in 0..3 {
+                            let results =
+                                wuffagent_core::config::install_built_plugins(src, dst);
+                            let mut failures = 0;
+                            for result in &results {
+                                match result {
+                                    Ok(p) => tracing::info!(
+                                        plugin = %p.display(),
+                                        "Installed freshly-built plugin after restart"
+                                    ),
+                                    Err(e) => {
+                                        failures += 1;
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Could not install freshly-built plugin after restart"
+                                        );
+                                    }
+                                }
+                            }
+                            if failures == 0 || attempt == 2 {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Err(e) = registry.discover_plugins() {
         tracing::warn!(error = %e, "Failed to discover plugins");
     }

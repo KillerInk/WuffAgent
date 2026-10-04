@@ -87,6 +87,13 @@ unsafe impl Sync for CbUser {}
 /// ABI; re-registration replaces the previous callback).
 static EVENT_CB: Mutex<Option<(HostEventCallback, CbUser)>> = Mutex::new(None);
 
+/// A clone of the app's `egui::Context`, registered once from the UI thread
+/// (`ChatApp::ui`) so the plugin thread can wake the eframe loop. `eframe`
+/// redraws only on input or an explicit `request_repaint`, so without this a
+/// host command enqueued while the window is idle would sit in the queue until
+/// the next user interaction and time out in [`send_and_wait`].
+static REPAINT_CTX: OnceLock<egui::Context> = OnceLock::new();
+
 /// Install the command channel. Must be called before the first plugin load
 /// (bootstrap); vtable calls made before it return errors/defaults. Returns
 /// the receiver half for the UI to drain.
@@ -94,6 +101,15 @@ pub fn init() -> mpsc::Receiver<HostCommand> {
     let (tx, rx) = mpsc::channel();
     *COMMAND_TX.get_or_init(Default::default).lock().unwrap() = Some(tx);
     rx
+}
+
+/// Register the app's `egui::Context` so [`send_and_wait`] can wake the eframe
+/// loop with `request_repaint` when a command is enqueued. Called from the UI
+/// thread every frame; the `OnceLock` makes it a no-op after the first call.
+pub fn set_repaint_ctx(ctx: &egui::Context) {
+    if REPAINT_CTX.get().is_none() {
+        let _ = REPAINT_CTX.set(ctx.clone());
+    }
 }
 
 /// The vtable passed to `ToolRegistry::set_host_api` at bootstrap. The table
@@ -185,7 +201,16 @@ fn send_and_wait(cmd: HostCommand, reply_rx: mpsc::Receiver<HostReply>) -> Optio
     let tx = COMMAND_TX
         .get()
         .and_then(|slot| slot.lock().unwrap().clone())?;
-    tx.send(cmd).ok()?;
+    if tx.send(cmd).is_err() {
+        return None;
+    }
+    // Wake the eframe loop so the UI thread drains this command promptly even
+    // when the window is idle: `eframe::run_native` only redraws on input or an
+    // explicit repaint request, so an inject arriving during idle would
+    // otherwise wait out the full `CMD_TIMEOUT` and be mis-read as a failure.
+    if let Some(ctx) = REPAINT_CTX.get() {
+        ctx.request_repaint();
+    }
     reply_rx.recv_timeout(CMD_TIMEOUT).ok()
 }
 
