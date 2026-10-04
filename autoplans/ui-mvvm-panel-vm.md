@@ -170,6 +170,6 @@ input), pure-helper extraction with tests, the gate discipline.
 ## Progress
 
 - [x] **Step 1a** (commit `388b18d`): `tool_cards.rs` pure helpers → free fns + 17 unit tests. `parse_tool_card`, `tool_result_image_uri`, `tool_result_summary`, `data_uri_to_bytes` are now module-level; call sites rewired. `cargo test -p wuffagent-egui tool_cards` = 17 passed.
-- [ ] **Step 1b**: `bubbles.rs` (`strip_thinking_tags`, `display_content_ref`) + `mod.rs` (`day_label`, `format_duration`, `tool_icon`, `char_width`, `is_at_bottom_from_output`, `breaking_label`) → free fns + tests. NOTE `format_duration`/`tool_icon` are called cross-module via `Self::` from bubbles/tool_cards/tool_json — must switch those to `super::` (or keep on ChatApp).
+- [x] **Step 1b** (commit `f919e12`): `bubbles.rs` `strip_thinking_tags` + `display_content_ref` → free fns (+2 tests); 3 `Self::breaking_label` → `super::`. `mod.rs` `char_width` + `breaking_label` now unit-tested (egui `Context` via `Context::run_ui`, `FullOutput.textures_delta.clear()`); the other 4 helpers (`day_label`/`tool_icon`/`format_duration`/`is_at_bottom_from_values`) were already tested. `tool_cards.rs`/`tool_json.rs` cross-module `Self::{tool_icon, breaking_label, format_duration, char_width}` → `super::`. `cargo test -p wuffagent-egui` = 91 passed.
 - [ ] **Step 1c**: rewire `draw_chat_area` + the self-using draw fns to take `&mut ChatArea` (or `&mut ChatApp` narrowed) instead of the god-object; commit.
 - [ ] **Step 2**: `InputArea` extraction. **Step 3**: status.rs (may stay as-is). **Step 4**: sweep + docs.
