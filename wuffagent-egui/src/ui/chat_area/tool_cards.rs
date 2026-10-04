@@ -82,6 +82,223 @@ fn parsed_tool_json(ctx: &egui::Context, raw: &str) -> std::sync::Arc<Option<ser
     arc
 }
 
+/// Parse a tool message's content into card fields.
+///
+/// New format: `header||call_id||result||duration_ms` where header is
+/// `🔧 <name>: <args>` (success) or `✗ <name>: <args> — <error>` (failure).
+/// Legacy format: `🔧 <name>: <result preview>||call_id||result` or
+/// `Tool '<name>' error: <msg>||call_id||`, or a bare result.
+fn parse_tool_card(content: &str) -> ToolCardInfo {
+    let parts: Vec<&str> = content.splitn(4, "||").collect();
+    let header = parts.first().copied().unwrap_or("").trim();
+    let raw_result: &str = if parts.len() >= 3 { parts[2] } else { content };
+    let duration_ms = parts.get(3).and_then(|d| d.trim().parse::<u64>().ok());
+
+    // Legacy error header: `Tool '<name>' error: <msg>`.
+    if let Some(stripped) = header.strip_prefix("Tool '") {
+        if let Some((name, rest)) = stripped.split_once('\'') {
+            let err = rest
+                .trim()
+                .strip_prefix("error:")
+                .map(|e| e.trim())
+                .unwrap_or(rest.trim())
+                .to_string();
+            return ToolCardInfo {
+                name: name.to_string(),
+                args: String::new(),
+                summary: err,
+                is_error: true,
+                duration_ms,
+                raw_result: raw_result.trim().to_string(),
+                image_uri: None,
+            };
+        }
+    }
+    // New error header: `✗ <name>: <args> — <error>`.
+    if let Some(tail) = header.strip_prefix('✗') {
+        let tail = tail.trim();
+        if let Some((name, rest)) = tail.split_once(": ") {
+            let (args, err) = match rest.rsplit_once(" — ") {
+                Some((a, e)) if !e.is_empty() => (a.trim(), e.trim()),
+                _ => (rest.trim(), ""),
+            };
+            return ToolCardInfo {
+                name: name.trim().to_string(),
+                args: args.to_string(),
+                summary: err.to_string(),
+                is_error: true,
+                duration_ms,
+                raw_result: raw_result.trim().to_string(),
+                image_uri: None,
+            };
+        }
+    }
+    // Success header: `🔧 <name>: <tail>`. For new-format calls the tail is
+    // the ARGS preview; for legacy calls it's a result preview (ignored —
+    // the summary comes from the result itself, as before).
+    let has_header = parts.len() >= 2 && !header.is_empty();
+    let name = if has_header {
+        let tail = header
+            .find(|c: char| c.is_alphanumeric())
+            .map(|i| &header[i..])
+            .unwrap_or(header);
+        let n: String = tail
+            .chars()
+            .take_while(|c| !matches!(c, ':' | '(' | ' '))
+            .collect();
+        if n.is_empty() {
+            "Tool".to_string()
+        } else {
+            n
+        }
+    } else {
+        "Tool".to_string()
+    };
+    // New-format success header tail = args preview (after "name: ").
+    let args = if duration_ms.is_some() {
+        header
+            .find(&format!("{}: ", name))
+            .map(|i| header[i + name.len() + 2..].trim().to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    ToolCardInfo {
+        name,
+        args,
+        summary: tool_result_summary(raw_result),
+        is_error: false,
+        duration_ms,
+        raw_result: raw_result.trim().to_string(),
+        image_uri: tool_result_image_uri(raw_result),
+    }
+}
+
+/// Extract a renderable image `data:` URI from a tool result (show_image
+/// returns one in its JSON `data_uri` field), if present.
+fn tool_result_image_uri(raw: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw.trim()).ok()?;
+    value
+        .get("data_uri")
+        .and_then(|d| d.as_str())
+        .filter(|d| d.starts_with("data:image/"))
+        .map(str::to_string)
+}
+
+/// One-line summary of a tool result shown in the collapsed tool card.
+fn tool_result_summary(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "(no output)".to_string();
+    }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        // Image result (show_image): name/caption + dimensions, not "N chars".
+        if json
+            .get("data_uri")
+            .and_then(|v| v.as_str())
+            .is_some_and(|d| d.starts_with("data:image/"))
+        {
+            let label = json
+                .get("caption")
+                .and_then(|v| v.as_str())
+                .or_else(|| json.get("path").and_then(|v| v.as_str()))
+                .unwrap_or("image");
+            let label: String = label.chars().take(64).collect();
+            let w = json.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+            let h = json.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+            return format!("🖼 {label} · {w}×{h} px");
+        }
+        // Shell output: exit status + output volume.
+        if let Some(code) = json.get("exit_code").and_then(|v| v.as_u64()) {
+            let lines_part = |key: &str| -> Option<String> {
+                let n = json
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.lines().count())?;
+                if n == 0 {
+                    None
+                } else {
+                    Some(format!(
+                        "{} {} line{}",
+                        n,
+                        key,
+                        if n == 1 { "" } else { "s" }
+                    ))
+                }
+            };
+            let mut detail = lines_part("stdout");
+            if let Some(e) = lines_part("stderr") {
+                detail = Some(match detail {
+                    Some(d) => format!("{} · {}", d, e),
+                    None => e,
+                });
+            }
+            let detail = detail.map(|d| format!(" · {}", d)).unwrap_or_default();
+            if code == 0 {
+                return format!("✓ exit 0{}", detail);
+            }
+            return format!("✗ exit {}{}", code, detail);
+        }
+        if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+            if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
+                return format!("{} · {} entries", path, entries.len());
+            }
+            if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                let lines = json
+                    .get("total_lines")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize)
+                    .unwrap_or_else(|| content.lines().count());
+                return format!("{} · {} lines", path, lines);
+            }
+            if let Some(bytes) = json.get("bytes_written").and_then(|v| v.as_u64()) {
+                return format!("✓ {} bytes written", bytes);
+            }
+            if json.get("success").and_then(|v| v.as_bool()) == Some(true) {
+                return "✓ done".to_string();
+            }
+            return path.to_string();
+        }
+        if let Some(matches) = json.get("matches").and_then(|v| v.as_array()) {
+            let files = json
+                .get("files_searched")
+                .and_then(|v| v.as_u64())
+                .map(|f| format!(" in {} files", f))
+                .unwrap_or_default();
+            let plural = if matches.len() == 1 { "" } else { "es" };
+            return format!("{} match{}{}", matches.len(), plural, files);
+        }
+        if let Some(expr) = json.get("expression").and_then(|v| v.as_str()) {
+            if let Some(result) = json.get("result").and_then(|v| v.as_f64()) {
+                return format!("{} = {}", expr, result);
+            }
+        }
+        return format!("{} chars", trimmed.len());
+    }
+    // Plain text: first line, truncated.
+    let first_line = trimmed.lines().next().unwrap_or("").trim();
+    let first: String = first_line.chars().take(72).collect();
+    if first_line.chars().count() > 72 {
+        format!("{}…", first)
+    } else if trimmed.lines().count() > 1 {
+        format!("{} … ({} lines)", first, trimmed.lines().count())
+    } else {
+        first
+    }
+}
+
+/// Decode a `data:[<mime>];base64,<payload>` URI into raw image bytes.
+fn data_uri_to_bytes(uri: &str) -> Option<Vec<u8>> {
+    let rest = uri.strip_prefix("data:")?;
+    let (meta, payload) = rest.split_once(',')?;
+    if !meta.to_ascii_lowercase().ends_with(";base64") {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()
+}
+
 impl ChatApp {
     /// Collapsed row: status icon, tool icon + name, the call's args preview
     /// (what it did), a result/error summary, a duration chip, and the time.
@@ -313,98 +530,6 @@ impl ChatApp {
         });
     }
 
-    /// Parse a tool message's content into card fields.
-    ///
-    /// New format: `header||call_id||result||duration_ms` where header is
-    /// `🔧 <name>: <args>` (success) or `✗ <name>: <args> — <error>` (failure).
-    /// Legacy format: `🔧 <name>: <result preview>||call_id||result` or
-    /// `Tool '<name>' error: <msg>||call_id||`, or a bare result.
-    fn parse_tool_card(content: &str) -> ToolCardInfo {
-        let parts: Vec<&str> = content.splitn(4, "||").collect();
-        let header = parts.first().copied().unwrap_or("").trim();
-        let raw_result: &str = if parts.len() >= 3 { parts[2] } else { content };
-        let duration_ms = parts.get(3).and_then(|d| d.trim().parse::<u64>().ok());
-
-        // Legacy error header: `Tool '<name>' error: <msg>`.
-        if let Some(stripped) = header.strip_prefix("Tool '") {
-            if let Some((name, rest)) = stripped.split_once('\'') {
-                let err = rest
-                    .trim()
-                    .strip_prefix("error:")
-                    .map(|e| e.trim())
-                    .unwrap_or(rest.trim())
-                    .to_string();
-                return ToolCardInfo {
-                    name: name.to_string(),
-                    args: String::new(),
-                    summary: err,
-                    is_error: true,
-                    duration_ms,
-                    raw_result: raw_result.trim().to_string(),
-                    image_uri: None,
-                };
-            }
-        }
-        // New error header: `✗ <name>: <args> — <error>`.
-        if let Some(tail) = header.strip_prefix('✗') {
-            let tail = tail.trim();
-            if let Some((name, rest)) = tail.split_once(": ") {
-                let (args, err) = match rest.rsplit_once(" — ") {
-                    Some((a, e)) if !e.is_empty() => (a.trim(), e.trim()),
-                    _ => (rest.trim(), ""),
-                };
-                return ToolCardInfo {
-                    name: name.trim().to_string(),
-                    args: args.to_string(),
-                    summary: err.to_string(),
-                    is_error: true,
-                    duration_ms,
-                    raw_result: raw_result.trim().to_string(),
-                    image_uri: None,
-                };
-            }
-        }
-        // Success header: `🔧 <name>: <tail>`. For new-format calls the tail is
-        // the ARGS preview; for legacy calls it's a result preview (ignored —
-        // the summary comes from the result itself, as before).
-        let has_header = parts.len() >= 2 && !header.is_empty();
-        let name = if has_header {
-            let tail = header
-                .find(|c: char| c.is_alphanumeric())
-                .map(|i| &header[i..])
-                .unwrap_or(header);
-            let n: String = tail
-                .chars()
-                .take_while(|c| !matches!(c, ':' | '(' | ' '))
-                .collect();
-            if n.is_empty() {
-                "Tool".to_string()
-            } else {
-                n
-            }
-        } else {
-            "Tool".to_string()
-        };
-        // New-format success header tail = args preview (after "name: ").
-        let args = if duration_ms.is_some() {
-            header
-                .find(&format!("{}: ", name))
-                .map(|i| header[i + name.len() + 2..].trim().to_string())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        ToolCardInfo {
-            name,
-            args,
-            summary: Self::tool_result_summary(raw_result),
-            is_error: false,
-            duration_ms,
-            raw_result: raw_result.trim().to_string(),
-            image_uri: Self::tool_result_image_uri(raw_result),
-        }
-    }
-
     /// Parsed tool-card fields for `content`, cached per content in the egui
     /// context (same pattern as `parsed_tool_json` above). Immediate mode
     /// redraws every visible card each frame, but a committed tool result never
@@ -429,7 +554,7 @@ impl ChatApp {
         if let Some(hit) = cached {
             return hit;
         }
-        let info = Self::parse_tool_card(content);
+        let info = parse_tool_card(content);
         let arc = std::sync::Arc::new(info);
         ctx.data_mut(|d| {
             let cache = d.get_temp_mut_or_default::<ToolCardInfoCache>(egui::Id::NULL);
@@ -439,119 +564,6 @@ impl ChatApp {
             cache.entries.insert(key, arc.clone());
         });
         arc
-    }
-
-    /// Extract a renderable image `data:` URI from a tool result (show_image
-    /// returns one in its JSON `data_uri` field), if present.
-    fn tool_result_image_uri(raw: &str) -> Option<String> {
-        let value = serde_json::from_str::<serde_json::Value>(raw.trim()).ok()?;
-        value
-            .get("data_uri")
-            .and_then(|d| d.as_str())
-            .filter(|d| d.starts_with("data:image/"))
-            .map(str::to_string)
-    }
-
-    /// One-line summary of a tool result shown in the collapsed tool card.
-    fn tool_result_summary(raw: &str) -> String {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return "(no output)".to_string();
-        }
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            // Image result (show_image): name/caption + dimensions, not "N chars".
-            if json
-                .get("data_uri")
-                .and_then(|v| v.as_str())
-                .is_some_and(|d| d.starts_with("data:image/"))
-            {
-                let label = json
-                    .get("caption")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| json.get("path").and_then(|v| v.as_str()))
-                    .unwrap_or("image");
-                let label: String = label.chars().take(64).collect();
-                let w = json.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
-                let h = json.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                return format!("🖼 {label} · {w}×{h} px");
-            }
-            // Shell output: exit status + output volume.
-            if let Some(code) = json.get("exit_code").and_then(|v| v.as_u64()) {
-                let lines_part = |key: &str| -> Option<String> {
-                    let n = json
-                        .get(key)
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.lines().count())?;
-                    if n == 0 {
-                        None
-                    } else {
-                        Some(format!(
-                            "{} {} line{}",
-                            n,
-                            key,
-                            if n == 1 { "" } else { "s" }
-                        ))
-                    }
-                };
-                let mut detail = lines_part("stdout");
-                if let Some(e) = lines_part("stderr") {
-                    detail = Some(match detail {
-                        Some(d) => format!("{} · {}", d, e),
-                        None => e,
-                    });
-                }
-                let detail = detail.map(|d| format!(" · {}", d)).unwrap_or_default();
-                if code == 0 {
-                    return format!("✓ exit 0{}", detail);
-                }
-                return format!("✗ exit {}{}", code, detail);
-            }
-            if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
-                if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
-                    return format!("{} · {} entries", path, entries.len());
-                }
-                if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
-                    let lines = json
-                        .get("total_lines")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n as usize)
-                        .unwrap_or_else(|| content.lines().count());
-                    return format!("{} · {} lines", path, lines);
-                }
-                if let Some(bytes) = json.get("bytes_written").and_then(|v| v.as_u64()) {
-                    return format!("✓ {} bytes written", bytes);
-                }
-                if json.get("success").and_then(|v| v.as_bool()) == Some(true) {
-                    return "✓ done".to_string();
-                }
-                return path.to_string();
-            }
-            if let Some(matches) = json.get("matches").and_then(|v| v.as_array()) {
-                let files = json
-                    .get("files_searched")
-                    .and_then(|v| v.as_u64())
-                    .map(|f| format!(" in {} files", f))
-                    .unwrap_or_default();
-                let plural = if matches.len() == 1 { "" } else { "es" };
-                return format!("{} match{}{}", matches.len(), plural, files);
-            }
-            if let Some(expr) = json.get("expression").and_then(|v| v.as_str()) {
-                if let Some(result) = json.get("result").and_then(|v| v.as_f64()) {
-                    return format!("{} = {}", expr, result);
-                }
-            }
-            return format!("{} chars", trimmed.len());
-        }
-        // Plain text: first line, truncated.
-        let first_line = trimmed.lines().next().unwrap_or("").trim();
-        let first: String = first_line.chars().take(72).collect();
-        if first_line.chars().count() > 72 {
-            format!("{}…", first)
-        } else if trimmed.lines().count() > 1 {
-            format!("{} … ({} lines)", first, trimmed.lines().count())
-        } else {
-            first
-        }
     }
 
     /// Draw a clickable file path chip.
@@ -633,7 +645,7 @@ impl ChatApp {
         max_height: f32,
         theme: &Theme,
     ) {
-        let Some(bytes) = Self::data_uri_to_bytes(uri) else {
+        let Some(bytes) = data_uri_to_bytes(uri) else {
             ui.label(
                 egui::RichText::new("(could not decode image)")
                     .color(theme.text_dim)
@@ -650,18 +662,6 @@ impl ChatApp {
         ui.add(img.max_size(egui::Vec2::new(max_width, max_height)));
     }
 
-    /// Decode a `data:[<mime>];base64,<payload>` URI into raw image bytes.
-    fn data_uri_to_bytes(uri: &str) -> Option<Vec<u8>> {
-        let rest = uri.strip_prefix("data:")?;
-        let (meta, payload) = rest.split_once(',')?;
-        if !meta.to_ascii_lowercase().ends_with(";base64") {
-            return None;
-        }
-        base64::engine::general_purpose::STANDARD
-            .decode(payload)
-            .ok()
-    }
-
     /// Themed code block: theme background, 1px border, uniform padding.
     pub(super) fn code_block(
         ui: &mut egui::Ui,
@@ -674,5 +674,150 @@ impl ChatApp {
             .corner_radius(6)
             .inner_margin(egui::Margin::same(8))
             .show(ui, add_contents);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_empty_is_placeholder() {
+        assert_eq!(tool_result_summary(""), "(no output)");
+        assert_eq!(tool_result_summary("   \n  "), "(no output)");
+    }
+
+    #[test]
+    fn summary_shell_success_shows_exit_and_line_count() {
+        assert_eq!(
+            tool_result_summary(r#"{"exit_code":0,"stdout":"hello\n"}"#),
+            "✓ exit 0 · 1 stdout line"
+        );
+    }
+
+    #[test]
+    fn summary_shell_failure_shows_exit_and_stderr() {
+        assert_eq!(
+            tool_result_summary(r#"{"exit_code":1,"stderr":"boom\n"}"#),
+            "✗ exit 1 · 1 stderr line"
+        );
+    }
+
+    #[test]
+    fn summary_shell_both_streams_joined() {
+        let s = tool_result_summary(r#"{"exit_code":0,"stdout":"a\nb\n","stderr":"w\n"}"#);
+        assert_eq!(s, "✓ exit 0 · 2 stdout lines · 1 stderr line");
+    }
+
+    #[test]
+    fn summary_calculation_shows_expression_and_result() {
+        assert_eq!(
+            tool_result_summary(r#"{"expression":"2+3","result":5}"#),
+            "2+3 = 5"
+        );
+    }
+
+    #[test]
+    fn summary_image_shows_label_and_dimensions() {
+        assert_eq!(
+            tool_result_summary(
+                r#"{"data_uri":"data:image/png;base64,AAA","caption":"pic","width":100,"height":50}"#
+            ),
+            "🖼 pic · 100×50 px"
+        );
+    }
+
+    #[test]
+    fn summary_plain_single_line_unchanged() {
+        assert_eq!(tool_result_summary("hello"), "hello");
+    }
+
+    #[test]
+    fn summary_plain_long_line_truncated() {
+        let s = tool_result_summary(&"a".repeat(80));
+        assert!(s.ends_with('…'));
+        // 72 kept chars + ellipsis
+        assert_eq!(s.chars().count(), 73);
+    }
+
+    #[test]
+    fn summary_plain_multi_line_appends_count() {
+        assert_eq!(
+            tool_result_summary("line1\nline2\nline3"),
+            "line1 … (3 lines)"
+        );
+    }
+
+    #[test]
+    fn image_uri_extracted_from_json() {
+        assert_eq!(
+            tool_result_image_uri(r#"{"data_uri":"data:image/png;base64,AAA"}"#),
+            Some("data:image/png;base64,AAA".to_string())
+        );
+    }
+
+    #[test]
+    fn image_uri_none_when_missing_or_not_image() {
+        assert_eq!(tool_result_image_uri(r#"{"foo":1}"#), None);
+        assert_eq!(tool_result_image_uri(r#"{"data_uri":"http://x"}"#), None);
+        assert_eq!(tool_result_image_uri("not json"), None);
+    }
+
+    #[test]
+    fn parse_new_format_success() {
+        let c = "🔧 shell: echo hi||call123||{\"exit_code\":0}||42";
+        let info = parse_tool_card(c);
+        assert_eq!(info.name, "shell");
+        assert_eq!(info.args, "echo hi");
+        assert!(!info.is_error);
+        assert_eq!(info.duration_ms, Some(42));
+        assert_eq!(info.summary, "✓ exit 0");
+        assert_eq!(info.raw_result, "{\"exit_code\":0}");
+    }
+
+    #[test]
+    fn parse_new_format_error() {
+        let c = "✗ read_file: path x — not found||c1||||10";
+        let info = parse_tool_card(c);
+        assert!(info.is_error);
+        assert_eq!(info.name, "read_file");
+        assert_eq!(info.args, "path x");
+        assert_eq!(info.summary, "not found");
+        assert_eq!(info.duration_ms, Some(10));
+    }
+
+    #[test]
+    fn parse_legacy_error() {
+        let c = "Tool 'write_file' error: disk full||c1||";
+        let info = parse_tool_card(c);
+        assert!(info.is_error);
+        assert_eq!(info.name, "write_file");
+        assert_eq!(info.args, "");
+        assert_eq!(info.summary, "disk full");
+        assert_eq!(info.duration_ms, None);
+    }
+
+    #[test]
+    fn parse_bare_result() {
+        let info = parse_tool_card("just some plain output");
+        assert_eq!(info.name, "Tool");
+        assert!(!info.is_error);
+        assert_eq!(info.summary, "just some plain output");
+        assert_eq!(info.duration_ms, None);
+    }
+
+    #[test]
+    fn data_uri_decodes_base64() {
+        assert_eq!(
+            data_uri_to_bytes("data:image/png;base64,SGVsbG8="),
+            Some(b"Hello".to_vec())
+        );
+    }
+
+    #[test]
+    fn data_uri_rejects_non_base64_and_garbage() {
+        assert_eq!(data_uri_to_bytes("data:image/png,SGVsbG8="), None);
+        assert_eq!(data_uri_to_bytes("nope"), None);
+        assert_eq!(data_uri_to_bytes("data:image/png;base64,!!!"), None);
     }
 }
