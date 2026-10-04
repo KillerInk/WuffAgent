@@ -166,3 +166,10 @@ problem the borrow checker already solves), formal Phases 4–6
 (window/layout thin-down, event_handler split) — all demoted to
 opportunistic Follow-ups. Kept: the two real extractions (chat_area,
 input), pure-helper extraction with tests, the gate discipline.
+
+## Progress
+
+- [x] **Step 1a** (commit `388b18d`): `tool_cards.rs` pure helpers → free fns + 17 unit tests. `parse_tool_card`, `tool_result_image_uri`, `tool_result_summary`, `data_uri_to_bytes` are now module-level; call sites rewired. `cargo test -p wuffagent-egui tool_cards` = 17 passed.
+- [ ] **Step 1b**: `bubbles.rs` (`strip_thinking_tags`, `display_content_ref`) + `mod.rs` (`day_label`, `format_duration`, `tool_icon`, `char_width`, `is_at_bottom_from_output`, `breaking_label`) → free fns + tests. NOTE `format_duration`/`tool_icon` are called cross-module via `Self::` from bubbles/tool_cards/tool_json — must switch those to `super::` (or keep on ChatApp).
+- [ ] **Step 1c**: rewire `draw_chat_area` + the self-using draw fns to take `&mut ChatArea` (or `&mut ChatApp` narrowed) instead of the god-object; commit.
+- [ ] **Step 2**: `InputArea` extraction. **Step 3**: status.rs (may stay as-is). **Step 4**: sweep + docs.
