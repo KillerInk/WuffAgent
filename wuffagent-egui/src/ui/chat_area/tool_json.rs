@@ -98,7 +98,7 @@ impl ChatApp {
                 );
                 if let Some(d) = dur {
                     ui.label(
-                        egui::RichText::new(format!("· {}", Self::format_duration(d)))
+                        egui::RichText::new(format!("· {}", super::format_duration(d)))
                             .color(theme.text_dim)
                             .size(10.5),
                     );
@@ -129,7 +129,7 @@ impl ChatApp {
                         const MAX_LINES: usize = 300;
                         ui.vertical(|ui| {
                             for line in &lines[..lines.len().min(MAX_LINES)] {
-                                ui.add(Self::breaking_label(
+                                ui.add(super::breaking_label(
                                     line,
                                     egui::FontId::monospace(11.5),
                                     color,
@@ -198,7 +198,7 @@ impl ChatApp {
                                     .unwrap_or_default();
                                 format!("{}  [{}{}]", name, typ, size)
                             };
-                            ui.add(Self::breaking_label(
+                            ui.add(super::breaking_label(
                                 line,
                                 egui::FontId::monospace(13.0),
                                 theme.code_text,
@@ -227,7 +227,7 @@ impl ChatApp {
                         egui::ScrollArea::vertical()
                             .max_height(300.0)
                             .show(ui, |ui| {
-                                ui.add(Self::breaking_label(
+                                ui.add(super::breaking_label(
                                     content,
                                     egui::FontId::monospace(12.5),
                                     theme.code_text,
@@ -270,7 +270,7 @@ impl ChatApp {
                     // The expression wraps at the block width; the result goes
                     // on its own line so a long expression cannot push it past
                     // the right edge.
-                    ui.add(Self::breaking_label(
+                    ui.add(super::breaking_label(
                         expr,
                         egui::FontId::monospace(13.0),
                         theme.text_secondary,
@@ -299,14 +299,14 @@ impl ChatApp {
             serde_json::Value::Object(map) => {
                 for (key, value) in map {
                     ui.horizontal(|ui| {
-                        ui.add(Self::breaking_label(
+                        ui.add(super::breaking_label(
                             format!("{}:", key),
                             egui::FontId::monospace(11.0),
                             theme.text_secondary,
                             false,
                         ));
                         let val_str = Self::json_value_to_string(value);
-                        ui.add(Self::breaking_label(
+                        ui.add(super::breaking_label(
                             val_str,
                             egui::FontId::monospace(11.0),
                             theme.code_text,
@@ -317,7 +317,7 @@ impl ChatApp {
             }
             serde_json::Value::Array(arr) => {
                 for item in arr {
-                    ui.add(Self::breaking_label(
+                    ui.add(super::breaking_label(
                         Self::json_value_to_string(item),
                         egui::FontId::monospace(11.0),
                         theme.code_text,
@@ -326,7 +326,7 @@ impl ChatApp {
                 }
             }
             other => {
-                ui.add(Self::breaking_label(
+                ui.add(super::breaking_label(
                     Self::json_value_to_string(other),
                     egui::FontId::monospace(11.0),
                     theme.code_text,

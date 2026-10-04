@@ -369,7 +369,7 @@ impl ChatApp {
                                     .monospace(),
                             );
                             ui.label(
-                                egui::RichText::new(format!("{} {}", Self::tool_icon(&name), name))
+                                egui::RichText::new(format!("{} {}", super::tool_icon(&name), name))
                                     .color(if is_error {
                                         theme.warning
                                     } else {
@@ -388,7 +388,7 @@ impl ChatApp {
                                 let args_max = (avail - 160.0).clamp(80.0, 420.0);
                                 ui.scope(|ui| {
                                     ui.set_max_width(args_max);
-                                    ui.add(Self::breaking_label(
+                                    ui.add(super::breaking_label(
                                         &args,
                                         egui::FontId::monospace(10.5),
                                         theme.text_dim,
@@ -408,7 +408,7 @@ impl ChatApp {
                                 let summary_max = (ui.available_width() - 200.0).max(120.0);
                                 ui.scope(|ui| {
                                     ui.set_max_width(summary_max);
-                                    ui.add(Self::breaking_label(
+                                    ui.add(super::breaking_label(
                                         if is_error {
                                             format!("✗ {}", summary)
                                         } else {
@@ -428,7 +428,7 @@ impl ChatApp {
                                         ui.label(
                                             egui::RichText::new(format!(
                                                 "· {}",
-                                                Self::format_duration(ms)
+                                                super::format_duration(ms)
                                             ))
                                             .color(theme.text_dim)
                                             .size(9.5),
@@ -571,7 +571,7 @@ impl ChatApp {
         // Elide the displayed path when it cannot fit (buttons can't
         // wrap); the click handler still uses the full path.
         let font_id = egui::FontId::new(10.0, egui::FontFamily::Monospace);
-        let per_char = Self::char_width(ui, &font_id);
+        let per_char = super::char_width(ui, &font_id);
         // Reserve room for chip padding.
         let budget = (ui.available_width() - 28.0).max(40.0);
         let max_chars = ((budget * 0.96) / per_char).floor() as usize;
@@ -623,7 +623,7 @@ impl ChatApp {
                 .max_height(300.0)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add(Self::breaking_label(
+                    ui.add(super::breaking_label(
                         text,
                         egui::FontId::monospace(13.0),
                         theme.code_text,

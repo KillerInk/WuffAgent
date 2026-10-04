@@ -197,9 +197,128 @@ impl ChatArea {
     }
 }
 
+// ── Pure display helpers (extracted from `impl ChatApp`; unit-tested below) ──
+
+/// Human label for a `YYYY-MM-DD` day string.
+fn day_label(day: &str) -> String {
+    let now = chrono::Local::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let yesterday = (now - chrono::TimeDelta::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    if day == today {
+        "Today".to_string()
+    } else if day == yesterday {
+        "Yesterday".to_string()
+    } else {
+        chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+            .map(|d| d.format("%a, %b %e").to_string())
+            .unwrap_or_else(|_| day.to_string())
+    }
+}
+
+/// Small per-tool glyph for the tool card headers.
+fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "shell" => "⚡",
+        "read_file" => "📄",
+        "write_file" | "append_file" | "apply_diff" | "replace_lines" => "✏️",
+        "list_dir" | "mkdir" => "📁",
+        "search_files" | "search_content" => "🔍",
+        "copy" | "move" | "delete" | "file_info" => "📦",
+        "web_search" => "🌐",
+        "fetch_url" => "🔗",
+        "show_image" => "🖼️",
+        "calculation" => "🧮",
+        "time" => "🕐",
+        "save_memory"
+        | "update_memory"
+        | "search_memory"
+        | "consolidate_memories"
+        | "delete_memory" => "🧠",
+        "handoff" => "🔀",
+        "restart" => "🔁",
+        _ => "🔧",
+    }
+}
+
+/// Compact duration for chips: `42ms`, `1.3s`, `2m 05s`.
+fn format_duration(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        let m = ms / 60_000;
+        let s = (ms % 60_000) / 1000;
+        format!("{}m {:02}s", m, s)
+    }
+}
+
+/// Threshold in pixels to consider the user as "at bottom"
+const SCROLL_BOTTOM_THRESHOLD: f32 = 10.0;
+
+/// Core at-bottom check on plain values — unit-testable without an egui
+/// context (the egui `ScrollAreaOutput`/`State` fields are private, so the
+/// struct can't be constructed in a test; this keeps the logic testable).
+fn is_at_bottom_from_values(
+    content_height: f32,
+    viewport_height: f32,
+    current_offset: f32,
+) -> bool {
+    // If content fits in viewport, no scrolling needed - at bottom
+    if content_height <= viewport_height {
+        return true;
+    }
+    let max_offset = content_height - viewport_height;
+    current_offset >= max_offset - SCROLL_BOTTOM_THRESHOLD
+}
+
+/// Check if the scroll area is at the bottom using ScrollAreaOutput after render.
+fn is_at_bottom_from_output(
+    output: &egui::containers::scroll_area::ScrollAreaOutput<()>,
+) -> bool {
+    is_at_bottom_from_values(
+        output.content_size.y,
+        output.inner_rect.height(),
+        output.state.offset.y,
+    )
+}
+
+/// Wrapping label that also splits long unbreakable words (URLs, long
+/// paths, tokens). egui's default word-wrap prefers word boundaries and
+/// will overflow the bubble when a single word is wider than the line,
+/// so we enable `break_anywhere` on the layout job.
+fn breaking_label(
+    text: impl AsRef<str>,
+    font_id: egui::FontId,
+    color: egui::Color32,
+    italics: bool,
+) -> egui::Label {
+    let mut job = egui::epaint::text::LayoutJob::default();
+    let mut tf = egui::epaint::text::TextFormat::default();
+    tf.font_id = font_id;
+    tf.color = color;
+    tf.italics = italics;
+    job.append(text.as_ref(), 0.0, tf);
+    job.wrap.break_anywhere = true;
+    egui::Label::new(job).wrap()
+}
+
+/// Pixel width of a single glyph in the given font.
+/// egui memoizes layout results, so this stays cheap across frames.
+fn char_width(ui: &egui::Ui, font_id: &egui::FontId) -> f32 {
+    const SAMPLE: &str = "0123456789";
+    let width = ui.ctx().fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(SAMPLE.to_string(), font_id.clone(), egui::Color32::WHITE)
+            .rect
+            .width()
+    });
+    (width / SAMPLE.len() as f32).max(1.0)
+}
+
 impl ChatApp {
-    /// Threshold in pixels to consider the user as "at bottom"
-    const SCROLL_BOTTOM_THRESHOLD: f32 = 10.0;
 
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
         LAYOUT_DBG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -234,7 +353,7 @@ impl ChatApp {
                         .corner_radius(8)
                         .inner_margin(egui::Margin::symmetric(10, 6))
                         .show(ui, |ui| {
-                            ui.add(Self::breaking_label(
+                            ui.add(breaking_label(
                                 format!("⚠  {}", err),
                                 egui::FontId::proportional(12.0),
                                 theme.error,
@@ -336,7 +455,7 @@ impl ChatApp {
 
         // Update scroll state for the current session.
         // Compute `at_bottom` (immutable self borrow) before mutating the store.
-        let at_bottom = self.is_at_bottom_from_output(&scroll_output);
+        let at_bottom = is_at_bottom_from_output(&scroll_output);
         if let Some(sid) = &selected {
             if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.scroll_to_bottom_requested = false;
@@ -475,7 +594,7 @@ impl ChatApp {
     /// Centered divider ("Today" / "Yesterday" / date) between message groups
     /// that cross a day boundary.
     fn draw_date_separator(ui: &mut egui::Ui, day: &str, theme: &Theme) {
-        let label = Self::day_label(day);
+        let label = day_label(day);
         ui.add_space(10.0);
         let (row_rect, _resp) = ui.allocate_exact_size(
             egui::vec2(ui.available_width().max(0.0), 16.0),
@@ -506,24 +625,6 @@ impl ChatApp {
             theme.text_dim,
         );
         ui.add_space(6.0);
-    }
-
-    /// Human label for a `YYYY-MM-DD` day string.
-    fn day_label(day: &str) -> String {
-        let now = chrono::Local::now();
-        let today = now.format("%Y-%m-%d").to_string();
-        let yesterday = (now - chrono::TimeDelta::days(1))
-            .format("%Y-%m-%d")
-            .to_string();
-        if day == today {
-            "Today".to_string()
-        } else if day == yesterday {
-            "Yesterday".to_string()
-        } else {
-            chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
-                .map(|d| d.format("%a, %b %e").to_string())
-                .unwrap_or_else(|_| day.to_string())
-        }
     }
 
     /// Rounded-square avatar with a letter label, allocated in row flow.
@@ -592,95 +693,6 @@ impl ChatApp {
                 }
             }
         });
-    }
-
-    /// Small per-tool glyph for the tool card headers.
-    fn tool_icon(name: &str) -> &'static str {
-        match name {
-            "shell" => "⚡",
-            "read_file" => "📄",
-            "write_file" | "append_file" | "apply_diff" | "replace_lines" => "✏️",
-            "list_dir" | "mkdir" => "📁",
-            "search_files" | "search_content" => "🔍",
-            "copy" | "move" | "delete" | "file_info" => "📦",
-            "web_search" => "🌐",
-            "fetch_url" => "🔗",
-            "show_image" => "🖼️",
-            "calculation" => "🧮",
-            "time" => "🕐",
-            "save_memory"
-            | "update_memory"
-            | "search_memory"
-            | "consolidate_memories"
-            | "delete_memory" => "🧠",
-            "handoff" => "🔀",
-            "restart" => "🔁",
-            _ => "🔧",
-        }
-    }
-
-    /// Compact duration for chips: `42ms`, `1.3s`, `2m 05s`.
-    fn format_duration(ms: u64) -> String {
-        if ms < 1000 {
-            format!("{}ms", ms)
-        } else if ms < 60_000 {
-            format!("{:.1}s", ms as f64 / 1000.0)
-        } else {
-            let m = ms / 60_000;
-            let s = (ms % 60_000) / 1000;
-            format!("{}m {:02}s", m, s)
-        }
-    }
-
-    /// Check if the scroll area is at the bottom using ScrollAreaOutput after render.
-    fn is_at_bottom_from_output(
-        &self,
-        output: &egui::containers::scroll_area::ScrollAreaOutput<()>,
-    ) -> bool {
-        let content_height = output.content_size.y;
-        let viewport_height = output.inner_rect.height();
-
-        // If content fits in viewport, no scrolling needed - at bottom
-        if content_height <= viewport_height {
-            return true;
-        }
-
-        let max_offset = content_height - viewport_height;
-        let current_offset = output.state.offset.y;
-        current_offset >= max_offset - Self::SCROLL_BOTTOM_THRESHOLD
-    }
-
-    /// Wrapping label that also splits long unbreakable words (URLs, long
-    /// paths, tokens). egui's default word-wrap prefers word boundaries and
-    /// will overflow the bubble when a single word is wider than the line,
-    /// so we enable `break_anywhere` on the layout job.
-    fn breaking_label(
-        text: impl AsRef<str>,
-        font_id: egui::FontId,
-        color: egui::Color32,
-        italics: bool,
-    ) -> egui::Label {
-        let mut job = egui::epaint::text::LayoutJob::default();
-        let mut tf = egui::epaint::text::TextFormat::default();
-        tf.font_id = font_id;
-        tf.color = color;
-        tf.italics = italics;
-        job.append(text.as_ref(), 0.0, tf);
-        job.wrap.break_anywhere = true;
-        egui::Label::new(job).wrap()
-    }
-
-    /// Pixel width of a single glyph in the given font.
-    /// egui memoizes layout results, so this stays cheap across frames.
-    fn char_width(ui: &egui::Ui, font_id: &egui::FontId) -> f32 {
-        const SAMPLE: &str = "0123456789";
-        let width = ui.ctx().fonts_mut(|fonts| {
-            fonts
-                .layout_no_wrap(SAMPLE.to_string(), font_id.clone(), egui::Color32::WHITE)
-                .rect
-                .width()
-        });
-        (width / SAMPLE.len() as f32).max(1.0)
     }
 
     /// S2: 👍/👎 feedback row under an assistant answer.
@@ -1030,5 +1042,133 @@ mod tests {
         assert!(!r.2);
         assert!(r.0 .0.is_empty() && r.0 .1.is_empty());
         assert!(r.1.is_empty());
+    }
+
+    // ── Pure display helpers ─────────────────────────────────────────────
+    #[test]
+    fn format_duration_ms_seconds_minutes() {
+        assert_eq!(format_duration(0), "0ms");
+        assert_eq!(format_duration(42), "42ms");
+        assert_eq!(format_duration(999), "999ms");
+        assert_eq!(format_duration(1000), "1.0s");
+        assert_eq!(format_duration(1300), "1.3s");
+        assert_eq!(format_duration(59_999), "60.0s");
+        assert_eq!(format_duration(60_000), "1m 00s");
+        assert_eq!(format_duration(125_000), "2m 05s");
+        assert_eq!(format_duration(3_600_000), "60m 00s");
+    }
+
+    #[test]
+    fn tool_icon_known_and_fallback() {
+        assert_eq!(tool_icon("shell"), "⚡");
+        assert_eq!(tool_icon("read_file"), "📄");
+        assert_eq!(tool_icon("write_file"), "✏️");
+        assert_eq!(tool_icon("append_file"), "✏️");
+        assert_eq!(tool_icon("apply_diff"), "✏️");
+        assert_eq!(tool_icon("replace_lines"), "✏️");
+        assert_eq!(tool_icon("list_dir"), "📁");
+        assert_eq!(tool_icon("mkdir"), "📁");
+        assert_eq!(tool_icon("search_content"), "🔍");
+        assert_eq!(tool_icon("search_files"), "🔍");
+        assert_eq!(tool_icon("web_search"), "🌐");
+        assert_eq!(tool_icon("fetch_url"), "🔗");
+        assert_eq!(tool_icon("show_image"), "🖼️");
+        assert_eq!(tool_icon("calculation"), "🧮");
+        assert_eq!(tool_icon("time"), "🕐");
+        assert_eq!(tool_icon("save_memory"), "🧠");
+        assert_eq!(tool_icon("update_memory"), "🧠");
+        assert_eq!(tool_icon("search_memory"), "🧠");
+        assert_eq!(tool_icon("consolidate_memories"), "🧠");
+        assert_eq!(tool_icon("delete_memory"), "🧠");
+        assert_eq!(tool_icon("handoff"), "🔀");
+        assert_eq!(tool_icon("restart"), "🔁");
+        assert_eq!(tool_icon("copy"), "📦");
+        assert_eq!(tool_icon("move"), "📦");
+        assert_eq!(tool_icon("delete"), "📦");
+        assert_eq!(tool_icon("file_info"), "📦");
+        assert_eq!(tool_icon("some_unknown_tool"), "🔧");
+    }
+
+    #[test]
+    fn day_label_today_yesterday_and_other() {
+        let now = chrono::Local::now();
+        let today = now.format("%Y-%m-%d").to_string();
+        let yesterday = (now - chrono::TimeDelta::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        let other = (now - chrono::TimeDelta::days(10))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(day_label(&today), "Today");
+        assert_eq!(day_label(&yesterday), "Yesterday");
+        let lbl = day_label(&other);
+        assert_ne!(lbl, "Today");
+        assert_ne!(lbl, "Yesterday");
+        assert!(!lbl.is_empty());
+        assert_eq!(day_label("not-a-date"), "not-a-date");
+    }
+
+    #[test]
+    fn is_at_bottom_from_output_logic() {
+        // Content fits in the viewport → always "at bottom".
+        assert!(is_at_bottom_from_values(100.0, 200.0, 0.0));
+        // Scrolled to the very bottom (offset == content - viewport = 300).
+        assert!(is_at_bottom_from_values(500.0, 200.0, 300.0));
+        // Within the 10px threshold of the bottom.
+        assert!(is_at_bottom_from_values(500.0, 200.0, 295.0));
+        // Mid-scroll → not at bottom.
+        assert!(!is_at_bottom_from_values(500.0, 200.0, 100.0));
+    }
+
+    fn test_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(800.0, 600.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn char_width_is_clamped_positive() {
+        let ctx = egui::Context::default();
+        let font_id = egui::FontId::proportional(16.0);
+        let mut out = ctx.run_ui(test_input(), |ui| {
+            let w = char_width(ui, &font_id);
+            assert!(
+                w >= 1.0,
+                "char_width should be clamped to >= 1.0, got {w}"
+            );
+            assert!(w.is_finite(), "char_width should be finite, got {w}");
+        });
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn breaking_label_lays_out_text() {
+        let ctx = egui::Context::default();
+        let font_id = egui::FontId::proportional(14.0);
+        let mut out = ctx.run_ui(test_input(), |ui| {
+            let fid = font_id.clone();
+            let resp = ui.add(breaking_label(
+                "hello world",
+                fid.clone(),
+                egui::Color32::WHITE,
+                false,
+            ));
+            assert!(
+                resp.rect.width() > 0.0,
+                "label for non-empty text should have width, got {:?}",
+                resp.rect
+            );
+            let empty = ui.add(breaking_label("", fid, egui::Color32::WHITE, false));
+            assert!(
+                empty.rect.width() <= 1.0,
+                "empty label should have ~zero width, got {:?}",
+                empty.rect
+            );
+        });
+        out.textures_delta.clear();
     }
 }
