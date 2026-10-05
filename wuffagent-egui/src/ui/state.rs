@@ -67,17 +67,32 @@ impl Drop for RuntimeOnThread {
 /// - **`sessions`** — per-session runtime state + selection.
 /// - **`dialogs`** — transient dialog/panel widgets + visibility flags.
 /// - **`relay`** — core → UI event channel.
-    /// - **`host`** — plugin host-API command queue (P1).
-    /// - **`remote`** — server-synced context window state (n_ctx).
+/// - **`host`** — plugin host-API command queue (P1).
+/// - **`remote`** — server-synced context window state (n_ctx).
 /// - **`display`** — status bar + live LLM-activity pills.
 /// - **`chat_area`** — chat-area panel state: cached message/streaming
 ///   snapshots of the displayed session (perf).
+/// - **`input_area`** — chat-input panel state: the image staged for the next
+///   message (the egui-side half of the image flow).
 /// - **`restart`** — restart / auto-resume lifecycle.
+///
+/// ## Panel-VM layout
+///
+/// The UI is a view model: this struct owns the *business logic* (event
+/// handlers, the send pipeline, config sync) plus the *core service handles*,
+/// while each *panel's* per-frame view state lives in a self-owned struct —
+/// `chat_area` ([`super::chat_area::ChatArea`]), `input_area`
+/// ([`super::input::InputArea`]), and the dialog widgets (`dialogs.memory_panel`
+/// / `dialogs.mcp_panel`, which own their own `draw`). The pure render helpers
+/// are free fns in their panel modules (not methods on this struct); the
+/// per-panel `draw_*` orchestrator stays a method so it can extract narrow
+/// `&self.<group>` borrows to pass to those helpers.
 pub mod groups;
 pub struct ChatApp {
     /// App-wide service handles (server, connection, engine, memory, MCP, tools).
     pub core: groups::CoreServices,
-    /// Per-session runtime state + session selection + chat-input staging.
+    /// Per-session runtime state + session selection (the staged input text
+    /// and the selected agent live in core's per-session `SessionRuntime`).
     pub sessions: groups::SessionState,
     /// The sessions sidebar widget (manages its own list + selection).
     pub sessions_panel: Option<super::sessions_panel::SessionsPanel>,
