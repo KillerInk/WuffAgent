@@ -12,8 +12,6 @@ use std::sync::{Arc, Mutex};
 
 use tokio::task::JoinHandle;
 
-use eframe::egui;
-
 use wuffagent_core::config::Config;
 use wuffagent_core::server::ServerManager;
 use wuffagent_core::tools::ToolManager;
@@ -70,11 +68,6 @@ pub struct SessionState {
     /// (selected) session tab. Reset to None when the selected session
     /// changes (the user switched to another session in the sidebar).
     pub active_tab: Option<String>,
-    /// Attached-but-unsent image per session (pasted or attached, not yet
-    /// sent). The egui-side half of the image flow: the UI keeps the
-    /// `ImageSource` for preview rendering and converts it to a `data:` URI
-    /// when the message crosses into core (`QueuedMessage.image`).
-    pub pending_images: HashMap<String, egui::ImageSource<'static>>,
 }
 
 /// Transient dialog/panel widgets and their visibility flags.

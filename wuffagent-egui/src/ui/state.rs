@@ -94,6 +94,9 @@ pub struct ChatApp {
     /// Chat-area panel state: cached message/streaming snapshots of the
     /// displayed session (the chat column's view state).
     pub chat_area: super::chat_area::ChatArea,
+    /// Chat-input panel state: the image staged to attach to the next message
+    /// (pasted / attached) — the egui-side half of the image flow.
+    pub input_area: super::input::InputArea,
     /// Restart / auto-resume lifecycle state.
     pub restart: groups::RestartState,
 }
@@ -142,7 +145,6 @@ impl ChatApp {
                 selected_session_id,
                 sub_session_tabs: Vec::new(),
                 active_tab: None,
-                pending_images: HashMap::new(),
             },
             sessions_panel,
             dialogs: groups::Dialogs {
@@ -186,6 +188,7 @@ impl ChatApp {
                 chat_area.display_dirty = true;
                 chat_area
             },
+            input_area: super::input::InputArea::new(),
             restart: groups::RestartState {
                 pending_restart: false,
                 // A marker whose session failed to load can never resume.

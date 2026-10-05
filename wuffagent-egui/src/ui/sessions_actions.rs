@@ -84,7 +84,7 @@ pub fn apply_sessions_action(app: &mut ChatApp, action: PanelAction) {
             match wuffagent_core::sessions::delete_session(&sessions_dir, &id) {
                 Ok(()) => {
                     app.sessions.session_store.remove(&id);
-                    app.sessions.pending_images.remove(&id);
+                    app.input_area.pending_images.remove(&id);
                     // Close any open sub-session tab for the deleted session.
                     app.sessions.sub_session_tabs.retain(|t| t != &id);
                     if app.sessions.active_tab.as_deref() == Some(id.as_str()) {

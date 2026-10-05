@@ -89,7 +89,7 @@ impl ChatApp {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hasher::write(&mut hasher, png.as_slice());
         let hash = std::hash::Hasher::finish(&hasher);
-        self.sessions.pending_images.insert(
+        self.input_area.pending_images.insert(
             sid,
             egui::ImageSource::Bytes {
                 uri: format!("bytes://attached_image_{hash:016x}.png").into(),

@@ -9,6 +9,26 @@ use wuffagent_core::types::{AppStatus, MessageKind};
 mod agent_profile;
 mod images;
 
+/// Chat-input panel state: the image staged to attach to the NEXT message
+/// (pasted with Ctrl/Cmd+V or added via the attach button), one per session.
+///
+/// The staged `input_text` and the selected agent are per-session RUNTIME and
+/// stay in `wuffagent_core::sessions::SessionRuntime` — this struct owns only
+/// the egui-side pending-image staging (the `ImageSource` kept for preview,
+/// converted to a `data:` URI when the message crosses into core).
+pub struct InputArea {
+    /// Attached-but-unsent image per session (pasted or attached, not yet sent).
+    pub pending_images: std::collections::HashMap<String, egui::ImageSource<'static>>,
+}
+
+impl InputArea {
+    pub fn new() -> Self {
+        Self {
+            pending_images: std::collections::HashMap::new(),
+        }
+    }
+}
+
 impl ChatApp {
     pub(super) fn draw_input_area(&mut self, ui: &mut egui::Ui) {
         let theme = Theme::from_name(&self.core.config.theme);
@@ -24,7 +44,7 @@ impl ChatApp {
         let target = self.input_target_session_id();
         let pending_image = target
             .as_deref()
-            .and_then(|sid| self.sessions.pending_images.get(sid))
+            .and_then(|sid| self.input_area.pending_images.get(sid))
             .cloned();
         let (has_session, is_generating, has_history, selected_agent) = target
             .as_deref()
@@ -55,7 +75,7 @@ impl ChatApp {
                         .clicked()
                     {
                         if let Some(sid) = target.clone() {
-                            self.sessions.pending_images.remove(&sid);
+                            self.input_area.pending_images.remove(&sid);
                         }
                     }
                 });
@@ -329,8 +349,8 @@ impl ChatApp {
                 let agent_prompt = self.resolve_agent_prompt(&agent);
                 let tool_policy = self.resolve_tool_policy(&agent);
                 // Attached image (if any): the UI keeps the egui source in
-                // `pending_images`; core receives the `data:` URI form.
-                let image_source = self.sessions.pending_images.remove(&sid);
+                // `input_area.pending_images`; core receives the `data:` URI form.
+                let image_source = self.input_area.pending_images.remove(&sid);
                 let image = image_source
                     .as_ref()
                     .and_then(images::image_source_data_uri);
@@ -468,7 +488,7 @@ impl ChatApp {
         // Attached image (if any): convert the egui source to the `data:`
         // URI form core expects.
         let image = self
-            .sessions
+            .input_area
             .pending_images
             .remove(sid)
             .as_ref()
