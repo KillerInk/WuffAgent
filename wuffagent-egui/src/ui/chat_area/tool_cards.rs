@@ -3,7 +3,7 @@
 
 use eframe::egui;
 
-use crate::ui::state::ChatApp;
+use crate::ui::state::groups::SessionState;
 use base64::Engine;
 
 use crate::ui::theme::Theme;
@@ -299,272 +299,269 @@ fn data_uri_to_bytes(uri: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-impl ChatApp {
-    /// Collapsed row: status icon, tool icon + name, the call's args preview
-    /// (what it did), a result/error summary, a duration chip, and the time.
-    /// Clicking the header row expands the full result detail (right-click
-    /// opens the delete menu). The card is indented to sit under the AI
-    /// message column and has no avatar, keeping tool chatter visually quiet
-    /// compared to normal messages.
-    pub(super) fn draw_tool_card(
-        &mut self,
-        ui: &mut egui::Ui,
-        message: &ChatMessage,
-        index: usize,
-        theme: &Theme,
-    ) {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            // Indent under the AI bubble (28px avatar + 8px gap).
-            ui.add_space(36.0);
-            // The card Frame's content ui inherits this ui's layout (egui 0.36
-            // Frame has no layout option of its own), so without this the card
-            // body would be laid out HORIZONTALLY: the header row (stretched to
-            // full width by the right-aligned timestamp) consumes the whole row
-            // and the expanded content is squeezed into a ~0px sliver, wrapping
-            // one character per line. Force a vertical layout for the card body.
-            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                let is_expanded = self
-                    .sessions
-                    .selected_session_id
-                    .as_ref()
-                    .map(|sid| {
-                        self.sessions
-                            .session_store
-                            .get(sid)
-                            .map(|r| r.chat_state.expanded_messages.contains(&index))
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
+/// Collapsed row: status icon, tool icon + name, the call's args preview
+/// (what it did), a result/error summary, a duration chip, and the time.
+/// Clicking the header row expands the full result detail (right-click
+/// opens the delete menu). The card is indented to sit under the AI
+/// message column and has no avatar, keeping tool chatter visually quiet
+/// compared to normal messages.
+pub(super) fn draw_tool_card(
+    sessions: &mut SessionState,
+    ui: &mut egui::Ui,
+    message: &ChatMessage,
+    index: usize,
+    theme: &Theme,
+) {
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        // Indent under the AI bubble (28px avatar + 8px gap).
+        ui.add_space(36.0);
+        // The card Frame's content ui inherits this ui's layout (egui 0.36
+        // Frame has no layout option of its own), so without this the card
+        // body would be laid out HORIZONTALLY: the header row (stretched to
+        // full width by the right-aligned timestamp) consumes the whole row
+        // and the expanded content is squeezed into a ~0px sliver, wrapping
+        // one character per line. Force a vertical layout for the card body.
+        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+            let is_expanded = sessions
+                .selected_session_id
+                .as_ref()
+                .map(|sid| {
+                    sessions
+                        .session_store
+                        .get(sid)
+                        .map(|r| r.chat_state.expanded_messages.contains(&index))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
 
-                // Content is "header||call_id||result[||duration_ms]" — or a
-                // bare result for messages loaded from older sessions.
-                let card = Self::cached_tool_card(ui.ctx(), &message.content);
-                let name = card.name.clone();
-                let summary = card.summary.clone();
-                let is_error = card.is_error;
-                let args = card.args.clone();
-                let duration_ms = card.duration_ms;
-                let image_uri = card.image_uri.clone();
-                let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
+            // Content is "header||call_id||result[||duration_ms]" — or a
+            // bare result for messages loaded from older sessions.
+            let card = cached_tool_card(ui.ctx(), &message.content);
+            let name = card.name.clone();
+            let summary = card.summary.clone();
+            let is_error = card.is_error;
+            let args = card.args.clone();
+            let duration_ms = card.duration_ms;
+            let image_uri = card.image_uri.clone();
+            let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
 
-                egui::Frame::NONE
-                    .fill(theme.surface)
-                    .stroke(egui::Stroke::new(1.0, theme.bubble_border))
-                    .corner_radius(8)
-                    .inner_margin(egui::Margin::symmetric(10, 6))
-                    .show(ui, |ui| {
-                        ui.take_available_width();
-                        // Header row: chevron + tool icon+name + args preview +
-                        // result/error summary + duration + timestamp. The whole
-                        // row is clickable (expand/collapse) and
-                        // right-clickable (delete).
-                        let row = ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            let chev = if is_expanded { "▾" } else { "▸" };
-                            ui.label(
-                                egui::RichText::new(chev)
-                                    .color(theme.text_dim)
-                                    .size(9.0)
-                                    .monospace(),
-                            );
-                            ui.label(
-                                egui::RichText::new(format!("{} {}", super::tool_icon(&name), name))
-                                    .color(if is_error {
-                                        theme.warning
-                                    } else {
-                                        theme.accent
-                                    })
-                                    .strong()
-                                    .size(11.5),
-                            );
-                            // What the call did (new-format calls); legacy calls
-                            // have no args preview and just show the summary.
-                            // A wrapping label in a horizontal row claims all
-                            // remaining width, so cap it — reserving room for
-                            // the summary and the duration/timestamp cluster.
-                            if !args.is_empty() {
-                                let avail = ui.available_width();
-                                let args_max = (avail - 160.0).clamp(80.0, 420.0);
-                                ui.scope(|ui| {
-                                    ui.set_max_width(args_max);
-                                    ui.add(super::breaking_label(
-                                        &args,
-                                        egui::FontId::monospace(10.5),
-                                        theme.text_dim,
-                                        false,
-                                    ));
-                                });
-                            }
-                            let summary_color = if is_error {
-                                theme.warning
-                            } else {
-                                theme.text_dim
-                            };
-                            // Wrap the summary within the leftover header width (reserving
-                            // 200px for the duration/timestamp cluster) so a long summary
-                            // wraps instead of overflowing the now full-width card.
-                            if !summary.is_empty() {
-                                let summary_max = (ui.available_width() - 200.0).max(120.0);
-                                ui.scope(|ui| {
-                                    ui.set_max_width(summary_max);
-                                    ui.add(super::breaking_label(
-                                        if is_error {
-                                            format!("✗ {}", summary)
-                                        } else {
-                                            summary.clone()
-                                        },
-                                        egui::FontId::proportional(10.5),
-                                        summary_color,
-                                        false,
-                                    ));
-                                });
-                            }
-                            // Right cluster: duration chip + timestamp.
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if let Some(ms) = duration_ms {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "· {}",
-                                                super::format_duration(ms)
-                                            ))
-                                            .color(theme.text_dim)
-                                            .size(9.5),
-                                        );
-                                    }
-                                    if !ts.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(ts).color(theme.text_dim).size(9.5),
-                                        );
-                                    }
-                                },
-                            );
-                        });
-                        // The layout's own response only tracks hover, so
-                        // register an explicit click interaction over the row.
-                        let row_click = ui.interact(
-                            row.response.rect,
-                            ui.id().with("tool_toggle").with(index),
-                            egui::Sense::click(),
+            egui::Frame::NONE
+                .fill(theme.surface)
+                .stroke(egui::Stroke::new(1.0, theme.bubble_border))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.take_available_width();
+                    // Header row: chevron + tool icon+name + args preview +
+                    // result/error summary + duration + timestamp. The whole
+                    // row is clickable (expand/collapse) and
+                    // right-clickable (delete).
+                    let row = ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        let chev = if is_expanded { "▾" } else { "▸" };
+                        ui.label(
+                            egui::RichText::new(chev)
+                                .color(theme.text_dim)
+                                .size(9.0)
+                                .monospace(),
                         );
-                        if row_click.hovered() {
-                            // Subtle highlight signals the row is clickable.
-                            ui.painter().rect(
-                                row.response.rect,
-                                6.0,
-                                theme.hover_bg,
-                                egui::Stroke::NONE,
-                                egui::StrokeKind::Middle,
-                            );
-                        }
-                        if row_click.clicked() {
-                            if let Some(sid) = &self.sessions.selected_session_id {
-                                if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
-                                    if is_expanded {
-                                        runtime
-                                            .chat_state
-                                            .expanded_messages
-                                            .retain(|&i| i != index);
-                                    } else {
-                                        runtime.chat_state.expanded_messages.push(index);
-                                    }
-                                }
-                            }
-                        }
-                        if row_click.secondary_clicked() {
-                            row_click.context_menu(|menu_ui| {
-                                menu_ui.set_min_width(120.0);
-                                if menu_ui.button("Delete").clicked() {
-                                    super::bubbles::delete_message(&mut self.sessions, index);
-                                }
+                        ui.label(
+                            egui::RichText::new(format!("{} {}", super::tool_icon(&name), name))
+                                .color(if is_error {
+                                    theme.warning
+                                } else {
+                                    theme.accent
+                                })
+                                .strong()
+                                .size(11.5),
+                        );
+                        // What the call did (new-format calls); legacy calls
+                        // have no args preview and just show the summary.
+                        // A wrapping label in a horizontal row claims all
+                        // remaining width, so cap it — reserving room for
+                        // the summary and the duration/timestamp cluster.
+                        if !args.is_empty() {
+                            let avail = ui.available_width();
+                            let args_max = (avail - 160.0).clamp(80.0, 420.0);
+                            ui.scope(|ui| {
+                                ui.set_max_width(args_max);
+                                ui.add(super::breaking_label(
+                                    &args,
+                                    egui::FontId::monospace(10.5),
+                                    theme.text_dim,
+                                    false,
+                                ));
                             });
                         }
-                        if is_expanded {
-                            ui.add_space(6.0);
-                            let min = ui.cursor().min;
-                            ui.painter().hline(
-                                min.x..=min.x + ui.available_width(),
-                                min.y,
-                                egui::Stroke::new(1.0, theme.divider),
-                            );
-                            ui.add_space(6.0);
-                        } else if let Some(uri) = &image_uri {
-                            // show_image: the whole point is the picture — render
-                            // it right in the collapsed card (the expanded view
-                            // shows the image plus the metadata JSON fields).
-                            ui.add_space(6.0);
-                            draw_data_uri_image(ui, uri, 260.0, theme);
-                        }
-                        if is_expanded {
-                        if card.raw_result.trim().is_empty() {
-                            ui.label(
-                                egui::RichText::new("(no output)")
-                                    .color(theme.text_dim)
-                                    .italics()
-                                    .size(11.0),
-                            );
+                        let summary_color = if is_error {
+                            theme.warning
                         } else {
-                            // Parse once per result body (cached in the egui
-                            // context): re-parsing multi-MB results ran on
-                            // every frame for each expanded card.
-                            let parsed = parsed_tool_json(ui.ctx(), card.raw_result.as_str());
-                            match &*parsed {
-                                Some(json) => {
-                                    super::tool_json::draw_tool_json_result(
-                                        ui,
-                                        json,
-                                        card.raw_result.as_str(),
-                                        theme,
+                            theme.text_dim
+                        };
+                        // Wrap the summary within the leftover header width (reserving
+                        // 200px for the duration/timestamp cluster) so a long summary
+                        // wraps instead of overflowing the now full-width card.
+                        if !summary.is_empty() {
+                            let summary_max = (ui.available_width() - 200.0).max(120.0);
+                            ui.scope(|ui| {
+                                ui.set_max_width(summary_max);
+                                ui.add(super::breaking_label(
+                                    if is_error {
+                                        format!("✗ {}", summary)
+                                    } else {
+                                        summary.clone()
+                                    },
+                                    egui::FontId::proportional(10.5),
+                                    summary_color,
+                                    false,
+                                ));
+                            });
+                        }
+                        // Right cluster: duration chip + timestamp.
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if let Some(ms) = duration_ms {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "· {}",
+                                            super::format_duration(ms)
+                                        ))
+                                        .color(theme.text_dim)
+                                        .size(9.5),
                                     );
                                 }
-                                None => {
-                                    draw_tool_plain_result(ui, card.raw_result.as_str(), theme);
+                                if !ts.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(ts).color(theme.text_dim).size(9.5),
+                                    );
+                                }
+                            },
+                        );
+                    });
+                    // The layout's own response only tracks hover, so
+                    // register an explicit click interaction over the row.
+                    let row_click = ui.interact(
+                        row.response.rect,
+                        ui.id().with("tool_toggle").with(index),
+                        egui::Sense::click(),
+                    );
+                    if row_click.hovered() {
+                        // Subtle highlight signals the row is clickable.
+                        ui.painter().rect(
+                            row.response.rect,
+                            6.0,
+                            theme.hover_bg,
+                            egui::Stroke::NONE,
+                            egui::StrokeKind::Middle,
+                        );
+                    }
+                    if row_click.clicked() {
+                        if let Some(sid) = &sessions.selected_session_id {
+                            if let Some(runtime) = sessions.session_store.get_mut(sid) {
+                                if is_expanded {
+                                    runtime
+                                        .chat_state
+                                        .expanded_messages
+                                        .retain(|&i| i != index);
+                                } else {
+                                    runtime.chat_state.expanded_messages.push(index);
                                 }
                             }
                         }
+                    }
+                    if row_click.secondary_clicked() {
+                        row_click.context_menu(|menu_ui| {
+                            menu_ui.set_min_width(120.0);
+                            if menu_ui.button("Delete").clicked() {
+                                super::bubbles::delete_message(sessions, index);
+                            }
+                        });
+                    }
+                    if is_expanded {
+                        ui.add_space(6.0);
+                        let min = ui.cursor().min;
+                        ui.painter().hline(
+                            min.x..=min.x + ui.available_width(),
+                            min.y,
+                            egui::Stroke::new(1.0, theme.divider),
+                        );
+                        ui.add_space(6.0);
+                    } else if let Some(uri) = &image_uri {
+                        // show_image: the whole point is the picture — render
+                        // it right in the collapsed card (the expanded view
+                        // shows the image plus the metadata JSON fields).
+                        ui.add_space(6.0);
+                        draw_data_uri_image(ui, uri, 260.0, theme);
+                    }
+                    if is_expanded {
+                    if card.raw_result.trim().is_empty() {
+                        ui.label(
+                            egui::RichText::new("(no output)")
+                                .color(theme.text_dim)
+                                .italics()
+                                .size(11.0),
+                        );
+                    } else {
+                        // Parse once per result body (cached in the egui
+                        // context): re-parsing multi-MB results ran on
+                        // every frame for each expanded card.
+                        let parsed = parsed_tool_json(ui.ctx(), card.raw_result.as_str());
+                        match &*parsed {
+                            Some(json) => {
+                                super::tool_json::draw_tool_json_result(
+                                    ui,
+                                    json,
+                                    card.raw_result.as_str(),
+                                    theme,
+                                );
+                            }
+                            None => {
+                                draw_tool_plain_result(ui, card.raw_result.as_str(), theme);
+                            }
                         }
-                    });
-            });
+                    }
+                    }
+                });
         });
-    }
+    });
+}
 
-    /// Parsed tool-card fields for `content`, cached per content in the egui
-    /// context (same pattern as `parsed_tool_json` above). Immediate mode
-    /// redraws every visible card each frame, but a committed tool result never
-    /// changes. The parse is the expensive part: it copies `raw_result`, then
-    /// runs two full `serde_json` parses (a `data:`-URI scan for the header + a
-    /// JSON summary), so caching it avoids ~2 JSON parses + 1 large copy per
-    /// card per frame.
-    fn cached_tool_card(ctx: &egui::Context, content: &str) -> std::sync::Arc<ToolCardInfo> {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        content.hash(&mut h);
-        let key = (h.finish(), content.len() as u32);
-        // Raw read (no clone of the whole map): type-keyed at `Id::NULL`.
-        let cached = ctx.data(|d| {
-            d.get_temp_raw(egui::util::id_type_map::RawKey::new::<ToolCardInfoCache>(
-                egui::Id::NULL,
-            ))
-            .and_then(|v| v.downcast_ref::<ToolCardInfoCache>())
-            .and_then(|c| c.entries.get(&key))
-            .cloned()
-        });
-        if let Some(hit) = cached {
-            return hit;
-        }
-        let info = parse_tool_card(content);
-        let arc = std::sync::Arc::new(info);
-        ctx.data_mut(|d| {
-            let cache = d.get_temp_mut_or_default::<ToolCardInfoCache>(egui::Id::NULL);
-            if cache.entries.len() >= MAX_TOOL_CARD_CACHE_ENTRIES {
-                cache.entries.clear();
-            }
-            cache.entries.insert(key, arc.clone());
-        });
-        arc
+/// Parsed tool-card fields for `content`, cached per content in the egui
+/// context (same pattern as `parsed_tool_json` above). Immediate mode
+/// redraws every visible card each frame, but a committed tool result never
+/// changes. The parse is the expensive part: it copies `raw_result`, then
+/// runs two full `serde_json` parses (a `data:`-URI scan for the header + a
+/// JSON summary), so caching it avoids ~2 JSON parses + 1 large copy per
+/// card per frame.
+fn cached_tool_card(ctx: &egui::Context, content: &str) -> std::sync::Arc<ToolCardInfo> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut h);
+    let key = (h.finish(), content.len() as u32);
+    // Raw read (no clone of the whole map): type-keyed at `Id::NULL`.
+    let cached = ctx.data(|d| {
+        d.get_temp_raw(egui::util::id_type_map::RawKey::new::<ToolCardInfoCache>(
+            egui::Id::NULL,
+        ))
+        .and_then(|v| v.downcast_ref::<ToolCardInfoCache>())
+        .and_then(|c| c.entries.get(&key))
+        .cloned()
+    });
+    if let Some(hit) = cached {
+        return hit;
     }
+    let info = parse_tool_card(content);
+    let arc = std::sync::Arc::new(info);
+    ctx.data_mut(|d| {
+        let cache = d.get_temp_mut_or_default::<ToolCardInfoCache>(egui::Id::NULL);
+        if cache.entries.len() >= MAX_TOOL_CARD_CACHE_ENTRIES {
+            cache.entries.clear();
+        }
+        cache.entries.insert(key, arc.clone());
+    });
+    arc
 }
 
 /// Draw a clickable file path chip.

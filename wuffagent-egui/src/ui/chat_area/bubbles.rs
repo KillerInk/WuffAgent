@@ -266,7 +266,7 @@ impl ChatApp {
         // Tool messages render as a compact collapsible card (result hidden
         // by default, expandable on click) instead of a full bubble.
         if message.kind == MessageKind::Tool && !is_editing {
-            self.draw_tool_card(ui, message, index, theme);
+            super::tool_cards::draw_tool_card(&mut self.sessions, ui, message, index, theme);
             return;
         }
 
