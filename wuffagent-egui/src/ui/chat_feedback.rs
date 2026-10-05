@@ -78,42 +78,49 @@ pub fn task_snippet_for(messages: &[ChatMessage], assistant_index: usize) -> Str
 }
 
 /// ChatApp extension: record a user rating for an assistant message.
-impl crate::ui::state::ChatApp {
-    /// S2: record the user's rating of the assistant message at `index` in
-    /// the selected session. The profile name comes from the session's
-    /// current agent selection — messages don't carry their generating agent,
-    /// so a profile switched after the fact is attributed to the new one.
-    /// On success (or "skipped: memory disabled") the rating is reflected in
-    /// the chat state; on store failure nothing is marked so the user can
-    /// retry.
-    pub(super) fn save_message_feedback(&mut self, index: usize, good: bool, comment: &str) {
-        let Some(sid) = self.sessions.selected_session_id.clone() else {
-            return;
-        };
-        let Some((profile, snippet)) = self.sessions.session_store.get(&sid).map(|r| {
-            (
-                r.selected_agent
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                task_snippet_for(&r.chat_state.messages, index),
-            )
-        }) else {
-            return;
-        };
+/// S2: record the user's rating of the assistant message at `index` in
+/// the selected session. The profile name comes from the session's
+/// current agent selection — messages don't carry their generating agent,
+/// so a profile switched after the fact is attributed to the new one.
+/// On success (or "skipped: memory disabled") the rating is reflected in
+/// the chat state; on store failure nothing is marked so the user can
+/// retry.
+///
+/// Free fn (step 1c-ii): takes the narrow `&mut SessionState` + the shared
+/// `&MemoryManager` instead of `&mut ChatApp`.
+pub fn save_message_feedback(
+    sessions: &mut crate::ui::state::groups::SessionState,
+    memory: &MemoryManager,
+    index: usize,
+    good: bool,
+    comment: &str,
+) {
+    let Some(sid) = sessions.selected_session_id.clone() else {
+        return;
+    };
+    let Some((profile, snippet)) = sessions.session_store.get(&sid).map(|r| {
+        (
+            r.selected_agent
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            task_snippet_for(&r.chat_state.messages, index),
+        )
+    }) else {
+        return;
+    };
 
-        match remember_feedback(&self.core.memory_manager, &profile, good, &snippet, comment) {
-            Ok(_) => {
-                if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
-                    rt.chat_state
-                        .message_ratings
-                        .insert(index, if good { "good" } else { "bad" }.to_string());
-                    rt.chat_state.feedback_comment_for = None;
-                    rt.chat_state.feedback_comment.clear();
-                }
+    match remember_feedback(memory, &profile, good, &snippet, comment) {
+        Ok(_) => {
+            if let Some(rt) = sessions.session_store.get_mut(&sid) {
+                rt.chat_state
+                    .message_ratings
+                    .insert(index, if good { "good" } else { "bad" }.to_string());
+                rt.chat_state.feedback_comment_for = None;
+                rt.chat_state.feedback_comment.clear();
             }
-            Err(e) => {
-                tracing::warn!("[FEEDBACK] Failed to save user rating: {}", e);
-            }
+        }
+        Err(e) => {
+            tracing::warn!("[FEEDBACK] Failed to save user rating: {}", e);
         }
     }
 }

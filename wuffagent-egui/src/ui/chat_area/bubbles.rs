@@ -434,7 +434,7 @@ impl ChatApp {
 
                     // S2: feedback (ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ‚Â/ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ…Â½) under assistant answers only.
                     if !is_user && !is_editing && message.kind == MessageKind::Normal {
-                        self.draw_feedback_row(ui, index, theme);
+                        super::draw_feedback_row(&mut self.sessions, &self.core.memory_manager, ui, index, theme);
                     }
 
                     // Hover reveal: copy button in the top-right corner.

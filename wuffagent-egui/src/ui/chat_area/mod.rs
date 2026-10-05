@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use eframe::egui;
 
+use wuffagent_core::memory::MemoryManager;
 use wuffagent_core::types::ChatMessage;
 
 use super::state::ChatApp;
@@ -635,137 +636,139 @@ impl ChatApp {
         });
     }
 
-    /// S2: 👍/👎 feedback row under an assistant answer.
-    ///
-    /// 👍 saves immediately; 👎 opens a one-line optional comment with
-    /// save (✓) / cancel (✕). A rated message shows the chosen button
-    /// highlighted with both buttons disabled (no double-save).
-    fn draw_feedback_row(&mut self, ui: &mut egui::Ui, index: usize, theme: &Theme) {
-        let Some(sid) = self.displayed_session_id().map(|s| s.to_string()) else {
-            return;
-        };
-        let (rated, comment_open, mut comment) = match self.sessions.session_store.get(&sid) {
-            Some(rt) => (
-                rt.chat_state.message_ratings.get(&index).cloned(),
-                rt.chat_state.feedback_comment_for == Some(index),
-                rt.chat_state.feedback_comment.clone(),
-            ),
-            None => return,
-        };
+}
 
-        ui.add_space(2.0);
-        let mut save_good = false;
-        let mut open_bad = false;
-        let mut save_bad = false;
-        let mut cancel = false;
+/// S2: 👍/👎 feedback row under an assistant answer.
+///
+/// 👍 saves immediately; 👎 opens a one-line optional comment with
+/// save (✓) / cancel (✕). A rated message shows the chosen button
+/// highlighted with both buttons disabled (no double-save).
+fn draw_feedback_row(sessions: &mut SessionState, memory: &MemoryManager, ui: &mut egui::Ui, index: usize, theme: &Theme) {
+    let Some(sid) = sessions.active_tab.as_deref().or(sessions.selected_session_id.as_deref()).map(|s| s.to_string()) else {
+        return;
+    };
+    let (rated, comment_open, mut comment) = match sessions.session_store.get(&sid) {
+        Some(rt) => (
+            rt.chat_state.message_ratings.get(&index).cloned(),
+            rt.chat_state.feedback_comment_for == Some(index),
+            rt.chat_state.feedback_comment.clone(),
+        ),
+        None => return,
+    };
 
-        ui.horizontal(|ui| {
-            ui.set_height(16.0);
-            let is_good = rated.as_deref() == Some("good");
-            let is_bad = rated.as_deref() == Some("bad");
+    ui.add_space(2.0);
+    let mut save_good = false;
+    let mut open_bad = false;
+    let mut save_bad = false;
+    let mut cancel = false;
 
+    ui.horizontal(|ui| {
+        ui.set_height(16.0);
+        let is_good = rated.as_deref() == Some("good");
+        let is_bad = rated.as_deref() == Some("bad");
+
+        if ui
+            .add_enabled(
+                rated.is_none(),
+                egui::Button::new(egui::RichText::new("👍").size(if is_good {
+                    13.0
+                } else {
+                    11.0
+                }))
+                .fill(if is_good {
+                    theme.primary
+                } else {
+                    theme.hover_bg
+                })
+                .corner_radius(4),
+            )
+            .clicked()
+        {
+            save_good = true;
+        }
+        if ui
+            .add_enabled(
+                rated.is_none(),
+                egui::Button::new(egui::RichText::new("👎").size(if is_bad {
+                    13.0
+                } else {
+                    11.0
+                }))
+                .fill(if is_bad {
+                    theme.primary
+                } else {
+                    theme.hover_bg
+                })
+                .corner_radius(4),
+            )
+            .clicked()
+        {
+            open_bad = true;
+        }
+        if rated.is_some() {
+            ui.label(egui::RichText::new("rated").color(theme.text_dim).size(9.5));
+        }
+        if comment_open {
+            ui.add(
+                egui::TextEdit::singleline(&mut comment)
+                    .desired_width(220.0)
+                    .hint_text("Optional comment…"),
+            );
             if ui
-                .add_enabled(
-                    rated.is_none(),
-                    egui::Button::new(egui::RichText::new("👍").size(if is_good {
-                        13.0
-                    } else {
-                        11.0
-                    }))
-                    .fill(if is_good {
-                        theme.primary
-                    } else {
-                        theme.hover_bg
-                    })
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("✓").color(theme.text_dim).size(11.0),
+                    )
+                    .fill(theme.success)
                     .corner_radius(4),
                 )
                 .clicked()
             {
-                save_good = true;
+                save_bad = true;
             }
             if ui
-                .add_enabled(
-                    rated.is_none(),
-                    egui::Button::new(egui::RichText::new("👎").size(if is_bad {
-                        13.0
-                    } else {
-                        11.0
-                    }))
-                    .fill(if is_bad {
-                        theme.primary
-                    } else {
-                        theme.hover_bg
-                    })
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("✕").color(theme.text_dim).size(11.0),
+                    )
+                    .fill(theme.hover_bg)
                     .corner_radius(4),
                 )
                 .clicked()
             {
-                open_bad = true;
-            }
-            if rated.is_some() {
-                ui.label(egui::RichText::new("rated").color(theme.text_dim).size(9.5));
-            }
-            if comment_open {
-                ui.add(
-                    egui::TextEdit::singleline(&mut comment)
-                        .desired_width(220.0)
-                        .hint_text("Optional comment…"),
-                );
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("✓").color(theme.text_dim).size(11.0),
-                        )
-                        .fill(theme.success)
-                        .corner_radius(4),
-                    )
-                    .clicked()
-                {
-                    save_bad = true;
-                }
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("✕").color(theme.text_dim).size(11.0),
-                        )
-                        .fill(theme.hover_bg)
-                        .corner_radius(4),
-                    )
-                    .clicked()
-                {
-                    cancel = true;
-                }
-            }
-        });
-
-        // Persist the typed comment back to the session state (the field edits
-        // a per-frame copy).
-        if cancel {
-            if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
-                rt.chat_state.feedback_comment_for = None;
-                rt.chat_state.feedback_comment.clear();
+                cancel = true;
             }
         }
-        if save_good {
-            self.save_message_feedback(index, true, "");
-        } else if save_bad {
-            self.save_message_feedback(index, false, &comment);
-        } else if open_bad {
-            if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
-                rt.chat_state.feedback_comment_for = Some(index);
-                rt.chat_state.feedback_comment.clear();
-            }
-        } else if comment_open {
-            // Field still open after this frame (no save/cancel): persist the
-            // typed comment. On a failed save the field stays open for retry.
-            if let Some(rt) = self.sessions.session_store.get_mut(&sid) {
-                if rt.chat_state.feedback_comment_for == Some(index) {
-                    rt.chat_state.feedback_comment = comment;
-                }
+    });
+
+    // Persist the typed comment back to the session state (the field edits
+    // a per-frame copy).
+    if cancel {
+        if let Some(rt) = sessions.session_store.get_mut(&sid) {
+            rt.chat_state.feedback_comment_for = None;
+            rt.chat_state.feedback_comment.clear();
+        }
+    }
+    if save_good {
+        super::chat_feedback::save_message_feedback(sessions, memory, index, true, "");
+    } else if save_bad {
+        super::chat_feedback::save_message_feedback(sessions, memory, index, false, &comment);
+    } else if open_bad {
+        if let Some(rt) = sessions.session_store.get_mut(&sid) {
+            rt.chat_state.feedback_comment_for = Some(index);
+            rt.chat_state.feedback_comment.clear();
+        }
+    } else if comment_open {
+        // Field still open after this frame (no save/cancel): persist the
+        // typed comment. On a failed save the field stays open for retry.
+        if let Some(rt) = sessions.session_store.get_mut(&sid) {
+            if rt.chat_state.feedback_comment_for == Some(index) {
+                rt.chat_state.feedback_comment = comment;
             }
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
