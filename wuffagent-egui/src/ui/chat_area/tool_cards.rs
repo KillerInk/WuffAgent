@@ -477,7 +477,7 @@ impl ChatApp {
                             row_click.context_menu(|menu_ui| {
                                 menu_ui.set_min_width(120.0);
                                 if menu_ui.button("Delete").clicked() {
-                                    self.delete_message(index);
+                                    super::bubbles::delete_message(&mut self.sessions, index);
                                 }
                             });
                         }
