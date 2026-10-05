@@ -304,30 +304,16 @@ pub(super) fn draw_message(
             // the input field (user bubbles still sit at the right edge
             // because the row flows right-to-left).
             ui.take_available_width();
-            // Handle right-click context menu for edit/delete
-            let response = ui.interact(
-                ui.max_rect(),
-                ui.id().with("msg_ctx").with(index),
-                egui::Sense::click(),
-            );
-            if !is_editing && response.secondary_clicked() {
-                response.context_menu(|menu_ui| {
-                    menu_ui.set_min_width(120.0);
-                    if menu_ui.button("Edit").clicked() {
-                        if let Some(sid) = &sessions.selected_session_id {
-                            if let Some(runtime) = sessions.session_store.get_mut(sid) {
-                                runtime.chat_state.editing_message_index = Some(index);
-                                runtime.chat_state.editing_message_content =
-                                    message.content.clone();
-                            }
-                        }
-                    }
-                    if menu_ui.button("Delete").clicked() {
-                        delete_message(sessions, index);
-                    }
-                });
-            }
-
+            // Draw the bubble content first so we know its actual rect.
+            // The right-click context menu is handled *after* the content
+            // (see below): the selectable text body sits on top of the bubble
+            // background and steals the right-click, so a pre-drawn
+            // `ui.interact(ui.max_rect(), ..)` background would never report
+            // `secondary_clicked()`. Instead we detect the secondary click
+            // globally (pointer inside the bubble rect) and open the menu
+            // manually — which also keeps text selection working and avoids
+            // the overlapping-`max_rect` ambiguity of a pre-drawn background.
+            let mut bubble_rect = egui::Rect::NOTHING;
             ui.vertical(|ui| {
                 let inner = egui::Frame::NONE
                     .fill(bubble_bg)
@@ -414,6 +400,7 @@ pub(super) fn draw_message(
                             }
                         }
                     });
+                bubble_rect = inner.response.rect;
 
                 if layout_dbg_enabled() {
                     eprintln!(
@@ -475,6 +462,50 @@ pub(super) fn draw_message(
                     }
                 }
             });
+
+            // Right-click context menu (edit/delete) for the bubble.
+            // Detected globally (pointer inside the bubble rect) because the
+            // selectable text body on top steals the right-click from the
+            // bubble background; opening the menu manually keeps text
+            // selection working and avoids the overlapping-`max_rect`
+            // ambiguity of a pre-drawn background interact.
+            if !is_editing {
+                let right_clicked_bubble = ui.ctx().input(|i| {
+                    i.pointer.secondary_clicked()
+                        && i.pointer
+                            .interact_pos()
+                            .is_some_and(|p| bubble_rect.contains(p))
+                });
+                let anchor = ui.interact(
+                    bubble_rect,
+                    ui.id().with("msg_ctx").with(index),
+                    egui::Sense::hover(),
+                );
+                egui::Popup::menu(&anchor)
+                    .open_memory(
+                        if right_clicked_bubble {
+                            Some(egui::SetOpenCommand::Bool(true))
+                        } else {
+                            None
+                        },
+                    )
+                    .at_pointer_fixed()
+                    .show(|menu_ui| {
+                        menu_ui.set_min_width(120.0);
+                        if menu_ui.button("Edit").clicked() {
+                            if let Some(sid) = &sessions.selected_session_id {
+                                if let Some(runtime) = sessions.session_store.get_mut(sid) {
+                                    runtime.chat_state.editing_message_index = Some(index);
+                                    runtime.chat_state.editing_message_content =
+                                        message.content.clone();
+                                }
+                            }
+                        }
+                        if menu_ui.button("Delete").clicked() {
+                            delete_message(sessions, index);
+                        }
+                    });
+            }
         });
     });
 
@@ -633,5 +664,138 @@ mod tests {
         let cow = display_content_ref(s);
         assert!(matches!(cow, std::borrow::Cow::Owned(_)));
         assert_eq!(&*cow, "reasoning");
+    }
+
+    // ---- right-click context menu on message bubbles ----
+
+    fn diag_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn context_menu_right_click_on_body() {
+        let ctx = egui::Context::default();
+        let mut log = Vec::new();
+        // Capture each bubble's body rect so we can click on msg0's body.
+        let body_rects = std::cell::RefCell::new(Vec::new());
+
+        fn draw_msg(
+            ui: &mut egui::Ui,
+            index: usize,
+            is_user: bool,
+            text: &str,
+            log: &mut Vec<String>,
+            body_rects: &std::cell::RefCell<Vec<egui::Rect>>,
+        ) {
+            // Capture the frame (bubble) rect, exactly like the real
+            // `draw_message` does.
+            let mut bubble_rect = egui::Rect::NOTHING;
+            let bg = if is_user {
+                egui::Color32::from_rgb(70, 130, 220)
+            } else {
+                egui::Color32::from_rgb(30, 30, 34)
+            };
+            let frame = egui::Frame::NONE
+                .fill(bg)
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    // Body: selectable label — the widget that steals the
+                    // right-click from a pre-drawn background.
+                    let body_resp = ui.add(
+                        egui::Label::new(egui::RichText::new(text))
+                            .sense(egui::Sense::click()),
+                    );
+                    body_rects.borrow_mut().push(body_resp.rect);
+                    log.push(format!(
+                        "msg{} body: rect={:?} secondary_clicked={}",
+                        index, body_resp.rect, body_resp.secondary_clicked()
+                    ));
+                });
+            bubble_rect = frame.response.rect;
+
+            // The NEW fix: detect the secondary click globally (pointer inside
+            // the bubble rect).
+            let right_clicked_bubble = ui.ctx().input(|i| {
+                i.pointer.secondary_clicked()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| bubble_rect.contains(p))
+            });
+            log.push(format!(
+                "msg{} bubble: rect={:?} right_clicked_bubble={}",
+                index, bubble_rect, right_clicked_bubble
+            ));
+        }
+
+        fn build(
+            ui: &mut egui::Ui,
+            log: &mut Vec<String>,
+            body_rects: &std::cell::RefCell<Vec<egui::Rect>>,
+        ) {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                        draw_msg(ui, 0, true, "first message body", log, body_rects);
+                        draw_msg(ui, 1, false, "second message body", log, body_rects);
+                    });
+                });
+        }
+
+        // frame 1: no input (capture the layout).
+        let mut out = ctx.run_ui(diag_input(vec![]), |ui| build(ui, &mut log, &body_rects));
+        out.textures_delta.clear();
+        log.push("=== frame 1 ===".to_owned());
+
+        // Click on msg0's body (the first captured body rect).
+        let rects = body_rects.borrow().clone();
+        let click_pos = rects[0].center();
+        log.push(format!("click_pos={:?}", click_pos));
+
+        // frame 2: move + press.
+        let mut out = ctx.run_ui(
+            diag_input(vec![
+                egui::Event::PointerMoved(click_pos),
+                egui::Event::PointerButton {
+                    pos: click_pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]),
+            |ui| build(ui, &mut log, &body_rects),
+        );
+        out.textures_delta.clear();
+        log.push("=== frame 2 (press) ===".to_owned());
+
+        // frame 3: release.
+        let mut out = ctx.run_ui(
+            diag_input(vec![egui::Event::PointerButton {
+                pos: click_pos,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]),
+            |ui| build(ui, &mut log, &body_rects),
+        );
+        out.textures_delta.clear();
+        log.push("=== frame 3 (release) ===".to_owned());
+
+        for l in &log {
+            eprintln!("CTXMENU: {l}");
+        }
+        assert!(
+            log.iter().any(|l| l.contains("msg0 bubble:") && l.contains("right_clicked_bubble=true")),
+            "expected right-clicking msg0's body to report right_clicked_bubble=true\n{log:#?}"
+        );
     }
 }
