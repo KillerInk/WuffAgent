@@ -6,14 +6,14 @@ use super::super::state::groups::SessionState;
 use super::super::theme::Theme;
 use wuffagent_core::types::{ChatMessage, MessageKind};
 
-// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ TEMPORARY layout debugging (set WUFF_LAYOUT_DBG=1 to enable) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+// ── TEMPORARY layout debugging (set WUFF_LAYOUT_DBG=1 to enable) ────────
 static LAYOUT_DBG_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn layout_dbg_enabled() -> bool {
     std::env::var_os("WUFF_LAYOUT_DBG").is_some()
         && (2..7).contains(&(LAYOUT_DBG_FRAME.load(std::sync::atomic::Ordering::Relaxed) % 1000))
 }
-// ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+// ── TEMPORARY layout debugging (set WUFF_LAYOUT_DBG=1 to enable) ────────
 
 /// Strip <think...> tags wrapper from thinking content for display.
 fn strip_thinking_tags(content: &str) -> String {
@@ -62,7 +62,7 @@ pub(super) fn draw_streaming_line(
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
                                     ui.label(
-                                        egui::RichText::new("ThinkingÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦")
+                                        egui::RichText::new("Thinking…")
                                             .color(theme.text_dim)
                                             .italics()
                                             .size(11.0),
@@ -85,7 +85,7 @@ pub(super) fn draw_streaming_line(
                         ui.add_space(8.0);
                     }
                     if !stream_buffer.is_empty() {
-                        // Same bubble as a committed AI message ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â rendered as
+                        // Same bubble as a committed AI message — rendered as
                         // markdown live, so bold/code/lists/tables appear while
                         // the answer streams (matching the committed view).
                         egui::Frame::NONE
@@ -148,7 +148,7 @@ pub(super) fn draw_streaming_line(
     /// Live tool card shown while a tool call is executing.
     ///
     /// Shows the tool icon + name, its args preview (what it's doing), a live
-    /// elapsed readout, and ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â for tools that stream (the shell) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a live tail
+    /// elapsed readout, and — for tools that stream (the shell) — a live tail
     /// of the output so long commands are visible while they run. The card
     /// carries the same indent as a committed tool card, so the transcript
     /// doesn't jump when the live card is replaced by the persisted result.
@@ -208,7 +208,7 @@ pub(super) fn draw_active_tool_card(
                                 |ui| {
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "running Ãƒâ€šÃ‚Â· {}",
+                                            "running · {}",
                                             super::format_duration(elapsed.as_millis() as u64)
                                         ))
                                         .color(theme.text_dim)
@@ -372,11 +372,11 @@ pub(super) fn draw_message(
                                     ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
                                 }
                             }
-                            // Branch on message kind ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no string-prefix sniffing.
+                            // Branch on message kind — no string-prefix sniffing.
                             // (Tool messages never reach the bubble: they are
                             // rendered as collapsible cards above.)
                             if message.kind == MessageKind::Thinking {
-                                // Thinking message ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â dim markdown (regular
+                                // Thinking message — dim markdown (regular
                                 // weight, dimmed links/code).
                                 super::markdown::draw_markdown_dimmed(
                                     ui,
@@ -387,7 +387,7 @@ pub(super) fn draw_message(
                                     true,
                                 );
                             } else {
-                                // Normal message ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â strip legacy think tags.
+                                // Normal message — strip legacy think tags.
                                 // Borrows the content when no tags are present
                                 // (the common case), avoiding a per-frame clone.
                                 let display_content =
@@ -402,7 +402,7 @@ pub(super) fn draw_message(
                                     ));
                                 } else {
                                     // AI messages render as markdown
-                                    // (bold, code blocks, lists, tablesÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦).
+                                    // (bold, code blocks, lists, tables…).
                                     super::markdown::draw_markdown(
                                         ui,
                                         &display_content,
@@ -424,7 +424,7 @@ pub(super) fn draw_message(
                     );
                 }
 
-                // Timestamp ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â always visible, part of the layout flow.
+                // Timestamp — always visible, part of the layout flow.
                 let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
                 if !ts.is_empty() {
                     ui.add(egui::Label::new(
@@ -432,7 +432,7 @@ pub(super) fn draw_message(
                     ));
                 }
 
-                // S2: feedback (ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ‚Â/ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ…Â½) under assistant answers only.
+                // S2: feedback (👍/👎) under assistant answers only.
                 if !is_user && !is_editing && message.kind == MessageKind::Normal {
                     super::draw_feedback_row(sessions, memory, ui, index, theme);
                 }
@@ -446,8 +446,8 @@ pub(super) fn draw_message(
                 // bubble frame (a hover-only widget) stops reporting
                 // `hovered` because the click-sensitive button covers it.
                 // Gating on the frame's hover made the button vanish the
-                // instant the pointer touched it ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a per-frame show/hide
-                // flicker ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â and egui drops the pending click when the
+                // instant the pointer touched it — a per-frame show/hide
+                // flicker — and egui drops the pending click when the
                 // widget disappears, so the click never registered and
                 // nothing was copied. The button rect lies inside the
                 // frame rect, so "pointer over the bubble" covers both.
@@ -465,7 +465,7 @@ pub(super) fn draw_message(
                     let copy_resp = ui.put(
                         btn_rect,
                         egui::Button::new(
-                            egui::RichText::new("ÃƒÂ¢Ã‚Â§Ã¢â‚¬Â°").color(theme.text_dim).size(11.0),
+                            egui::RichText::new("⧉").color(theme.text_dim).size(11.0),
                         )
                         .fill(theme.hover_bg)
                         .corner_radius(4),
@@ -576,7 +576,7 @@ pub(super) fn delete_message(sessions: &mut SessionState, index: usize) {
                         Some(f) if f > index => Some(f - 1),
                         other => other,
                     };
-                // Also remove from the underlying client conversation ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â but only
+                // Also remove from the underlying client conversation — but only
                 // while the display and the store are the same length. They are
                 // separate arrays that drift apart as soon as the display gains
                 // entries the store does not hold (e.g. Thinking blocks: one
