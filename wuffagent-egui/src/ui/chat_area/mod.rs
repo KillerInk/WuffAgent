@@ -465,7 +465,7 @@ impl ChatApp {
                         );
                     }
                     if messages.is_empty() && !is_streaming {
-                        Self::draw_empty_state(ui, &theme);
+                        draw_empty_state(ui, &theme);
                         return;
                     }
                     let mut prev_day: Option<&str> = None;
@@ -475,7 +475,7 @@ impl ChatApp {
                         {
                             if prev_day != Some(day) {
                                 if prev_day.is_some() {
-                                    Self::draw_date_separator(ui, day, &theme);
+                                    draw_date_separator(ui, day, &theme);
                                 }
                                 prev_day = Some(day);
                             }
@@ -527,116 +527,121 @@ impl ChatApp {
             .map(|r| (r.chat_state.button_visible, r.chat_state.button_opacity))
             .unwrap_or((false, 0.0));
         if button_visible && button_opacity > 0.01 {
-            self.draw_scroll_to_bottom_button(ui, &theme, button_opacity);
+            draw_scroll_to_bottom_button(&mut self.sessions, ui, &theme, button_opacity);
         }
     }
+}
 
-    /// Placeholder shown for sessions without any messages yet.
-    fn draw_empty_state(ui: &mut egui::Ui, theme: &Theme) {
-        // Nudge down toward the vertical middle of the visible area.
-        let top_padding = (ui.available_height() - 160.0) * 0.35;
-        ui.add_space(top_padding.max(24.0));
-        ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new("🐾").size(36.0));
-            ui.add_space(14.0);
-            ui.label(
-                egui::RichText::new("Start a conversation")
-                    .color(theme.text_primary)
-                    .strong()
-                    .size(16.0),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("Ask a question or give the agent a task.")
-                    .color(theme.text_dim)
-                    .size(12.0),
-            );
-        });
-    }
-
-    /// Centered divider ("Today" / "Yesterday" / date) between message groups
-    /// that cross a day boundary.
-    fn draw_date_separator(ui: &mut egui::Ui, day: &str, theme: &Theme) {
-        let label = day_label(day);
-        ui.add_space(10.0);
-        let (row_rect, _resp) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width().max(0.0), 16.0),
-            egui::Sense::hover(),
-        );
-        let font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
-        let galley = ui
-            .ctx()
-            .fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme.text_dim));
-        let half_gap = galley.rect.width() / 2.0 + 12.0;
-        let line_y = row_rect.center().y;
-        let stroke = egui::Stroke::new(1.0, theme.divider);
-        ui.painter().hline(
-            row_rect.left()..=(row_rect.center().x - half_gap),
-            line_y,
-            stroke,
-        );
-        ui.painter().hline(
-            (row_rect.center().x + half_gap)..=row_rect.right(),
-            line_y,
-            stroke,
-        );
-        ui.painter().text(
-            row_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            font,
-            theme.text_dim,
+/// Placeholder shown for sessions without any messages yet.
+fn draw_empty_state(ui: &mut egui::Ui, theme: &Theme) {
+    // Nudge down toward the vertical middle of the visible area.
+    let top_padding = (ui.available_height() - 160.0) * 0.35;
+    ui.add_space(top_padding.max(24.0));
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new("🐾").size(36.0));
+        ui.add_space(14.0);
+        ui.label(
+            egui::RichText::new("Start a conversation")
+                .color(theme.text_primary)
+                .strong()
+                .size(16.0),
         );
         ui.add_space(6.0);
-    }
+        ui.label(
+            egui::RichText::new("Ask a question or give the agent a task.")
+                .color(theme.text_dim)
+                .size(12.0),
+        );
+    });
+}
 
-    /// Rounded-square avatar with a letter label, allocated in row flow.
-    fn draw_scroll_to_bottom_button(
-        &mut self,
-        ui: &mut egui::Ui,
-        theme: &Theme,
-        button_opacity: f32,
-    ) {
-        let button_size = egui::vec2(36.0, 36.0);
-        let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 16.0, 16.0);
-        let button_rect = egui::Rect::from_min_size(button_pos, button_size);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
-            ui.set_max_size(button_size);
-            ui.set_min_size(button_size);
-            // Apply opacity via semi-transparent fill color (premultiplied alpha)
-            let alpha = (button_opacity * 0.95 * 255.0) as u8;
-            let fill_color = egui::Color32::from_rgba_premultiplied(
-                theme.surface_light.r(),
-                theme.surface_light.g(),
-                theme.surface_light.b(),
-                alpha,
-            );
-            let border_color = egui::Color32::from_rgba_premultiplied(
-                theme.border.r(),
-                theme.border.g(),
-                theme.border.b(),
-                alpha,
-            );
-            let scroll_btn = egui::Button::new(
-                egui::RichText::new("↓")
-                    .color(theme.text_primary)
-                    .size(15.0),
-            )
-            .fill(fill_color)
-            .stroke(egui::Stroke::new(1.0, border_color))
-            .corner_radius(18);
-            if ui.add(scroll_btn).clicked() {
-                // Trigger auto-scroll on next frame (for the displayed session)
-                if let Some(sid) = self.displayed_session_id().map(|s| s.to_string()) {
-                    if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
-                        runtime.chat_state.scroll_to_bottom_requested = true;
-                    }
+/// Centered divider ("Today" / "Yesterday" / date) between message groups
+/// that cross a day boundary.
+fn draw_date_separator(ui: &mut egui::Ui, day: &str, theme: &Theme) {
+    let label = day_label(day);
+    ui.add_space(10.0);
+    let (row_rect, _resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(0.0), 16.0),
+        egui::Sense::hover(),
+    );
+    let font = egui::FontId::new(10.0, egui::FontFamily::Proportional);
+    let galley = ui
+        .ctx()
+        .fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme.text_dim));
+    let half_gap = galley.rect.width() / 2.0 + 12.0;
+    let line_y = row_rect.center().y;
+    let stroke = egui::Stroke::new(1.0, theme.divider);
+    ui.painter().hline(
+        row_rect.left()..=(row_rect.center().x - half_gap),
+        line_y,
+        stroke,
+    );
+    ui.painter().hline(
+        (row_rect.center().x + half_gap)..=row_rect.right(),
+        line_y,
+        stroke,
+    );
+    ui.painter().text(
+        row_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        theme.text_dim,
+    );
+    ui.add_space(6.0);
+}
+
+/// Rounded-square avatar with a letter label, allocated in row flow.
+fn draw_scroll_to_bottom_button(
+    sessions: &mut SessionState,
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    button_opacity: f32,
+) {
+    let button_size = egui::vec2(36.0, 36.0);
+    let button_pos = ui.max_rect().right_top() - egui::vec2(button_size.x + 16.0, 16.0);
+    let button_rect = egui::Rect::from_min_size(button_pos, button_size);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
+        ui.set_max_size(button_size);
+        ui.set_min_size(button_size);
+        // Apply opacity via semi-transparent fill color (premultiplied alpha)
+        let alpha = (button_opacity * 0.95 * 255.0) as u8;
+        let fill_color = egui::Color32::from_rgba_premultiplied(
+            theme.surface_light.r(),
+            theme.surface_light.g(),
+            theme.surface_light.b(),
+            alpha,
+        );
+        let border_color = egui::Color32::from_rgba_premultiplied(
+            theme.border.r(),
+            theme.border.g(),
+            theme.border.b(),
+            alpha,
+        );
+        let scroll_btn = egui::Button::new(
+            egui::RichText::new("↓")
+                .color(theme.text_primary)
+                .size(15.0),
+        )
+        .fill(fill_color)
+        .stroke(egui::Stroke::new(1.0, border_color))
+        .corner_radius(18);
+        if ui.add(scroll_btn).clicked() {
+            // Trigger auto-scroll on next frame (for the displayed session)
+            if let Some(sid) = sessions
+                .active_tab
+                .as_deref()
+                .or(sessions.selected_session_id.as_deref())
+                .map(|s| s.to_string())
+            {
+                if let Some(runtime) = sessions.session_store.get_mut(&sid) {
+                    runtime.chat_state.scroll_to_bottom_requested = true;
                 }
             }
-        });
-    }
-
+        }
+    });
 }
+
 
 /// S2: 👍/👎 feedback row under an assistant answer.
 ///
