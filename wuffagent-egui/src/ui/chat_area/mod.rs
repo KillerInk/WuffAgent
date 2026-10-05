@@ -344,6 +344,21 @@ pub(super) fn draw_avatar(ui: &mut egui::Ui, theme: &Theme, is_user: bool, size:
     ui.allocate_space(egui::vec2(size, size));
 }
 
+/// Themed code block: theme background, 1px border, uniform padding. Pure —
+/// takes a closure to add the contents, so it is a module-level free fn.
+pub(super) fn code_block(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::NONE
+        .fill(theme.code_bg)
+        .stroke(egui::Stroke::new(1.0, theme.code_border))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, add_contents);
+}
+
 impl ChatApp {
 
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {

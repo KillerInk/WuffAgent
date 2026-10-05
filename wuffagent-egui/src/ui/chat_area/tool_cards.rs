@@ -618,7 +618,7 @@ impl ChatApp {
     /// Long text (e.g. read_file's raw output) scrolls inside a capped
     /// height, mirroring the JSON file-read card.
     pub(super) fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, theme: &Theme) {
-        Self::code_block(ui, theme, |ui| {
+        super::code_block(ui, theme, |ui| {
             egui::ScrollArea::vertical()
                 .max_height(300.0)
                 .auto_shrink([false, false])
@@ -660,20 +660,6 @@ impl ChatApp {
         let img = egui::Image::from_bytes(format!("show_image_{hash:016x}.jpg"), bytes);
         let max_width = (ui.available_width() - 8.0).max(60.0);
         ui.add(img.max_size(egui::Vec2::new(max_width, max_height)));
-    }
-
-    /// Themed code block: theme background, 1px border, uniform padding.
-    pub(super) fn code_block(
-        ui: &mut egui::Ui,
-        theme: &Theme,
-        add_contents: impl FnOnce(&mut egui::Ui),
-    ) {
-        egui::Frame::NONE
-            .fill(theme.code_bg)
-            .stroke(egui::Stroke::new(1.0, theme.code_border))
-            .corner_radius(6)
-            .inner_margin(egui::Margin::same(8))
-            .show(ui, add_contents);
     }
 }
 

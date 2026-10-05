@@ -218,7 +218,7 @@ pub(super) fn draw_active_tool_card(
                         // Live output tail (shell). Latest lines only.
                         if !tool.live_output.is_empty() {
                             ui.add_space(4.0);
-                            ChatApp::code_block(ui, theme, |ui| {
+                            super::code_block(ui, theme, |ui| {
                                 ui.vertical(|ui| {
                                     let lines: Vec<&str> = tool.live_output.lines().collect();
                                     // Show at most the last 6 lines (latest tail).

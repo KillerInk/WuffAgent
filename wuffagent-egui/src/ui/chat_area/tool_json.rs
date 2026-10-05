@@ -124,7 +124,7 @@ impl ChatApp {
                             .monospace(),
                     );
                     ui.add_space(2.0);
-                    Self::code_block(ui, theme, |ui| {
+                    super::code_block(ui, theme, |ui| {
                         let lines: Vec<&str> = value.lines().collect();
                         const MAX_LINES: usize = 300;
                         ui.vertical(|ui| {
@@ -180,7 +180,7 @@ impl ChatApp {
                     let max_entries = 50;
                     let display_entries: Vec<&serde_json::Value> =
                         entries.iter().take(max_entries).collect();
-                    Self::code_block(ui, theme, |ui| {
+                    super::code_block(ui, theme, |ui| {
                         for entry in display_entries {
                             // New list_dir returns {name, type, size} objects;
                             // older sessions stored plain strings.
@@ -223,7 +223,7 @@ impl ChatApp {
                 self.draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
                 if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
-                    Self::code_block(ui, theme, |ui| {
+                    super::code_block(ui, theme, |ui| {
                         egui::ScrollArea::vertical()
                             .max_height(300.0)
                             .show(ui, |ui| {
@@ -295,7 +295,7 @@ impl ChatApp {
 
     /// Render JSON as a key-value list.
     fn draw_tool_json_kv(&self, ui: &mut egui::Ui, json: &serde_json::Value, theme: &Theme) {
-        Self::code_block(ui, theme, |ui| match json {
+        super::code_block(ui, theme, |ui| match json {
             serde_json::Value::Object(map) => {
                 for (key, value) in map {
                     ui.horizontal(|ui| {

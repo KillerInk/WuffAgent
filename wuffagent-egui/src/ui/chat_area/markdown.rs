@@ -23,7 +23,6 @@ use std::collections::VecDeque;
 use eframe::egui;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use crate::ui::state::ChatApp;
 use crate::ui::theme::Theme;
 
 fn options() -> Options {
@@ -605,7 +604,7 @@ fn render_code_block(ui: &mut egui::Ui, theme: &Theme, lang: &str, code: &str) {
     if code.trim().is_empty() && lang.is_empty() {
         return;
     }
-    ChatApp::code_block(ui, theme, |ui| {
+    super::code_block(ui, theme, |ui| {
         if !lang.is_empty() {
             ui.label(egui::RichText::new(lang).color(theme.text_dim).size(9.5));
             ui.add_space(3.0);
