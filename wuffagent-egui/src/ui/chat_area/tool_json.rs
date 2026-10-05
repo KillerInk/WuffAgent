@@ -37,7 +37,7 @@ impl ChatApp {
                 }
             }
             let uri = json["data_uri"].as_str().unwrap_or_default().to_string();
-            Self::draw_data_uri_image(ui, &uri, 420.0, theme);
+            super::tool_cards::draw_data_uri_image(ui, &uri, 420.0, theme);
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -57,7 +57,7 @@ impl ChatApp {
                 );
                 if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
                     if json.get("source").and_then(|v| v.as_str()) == Some("file") {
-                        self.draw_tool_path_badge(ui, path, theme);
+                        super::tool_cards::draw_tool_path_badge(ui, path, theme);
                     } else if !path.is_empty() {
                         let p: String = path.chars().take(80).collect();
                         ui.label(
@@ -174,7 +174,7 @@ impl ChatApp {
 
             if is_dir_list {
                 // Directory listing: show path badge + entries list
-                self.draw_tool_path_badge(ui, path, theme);
+                super::tool_cards::draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
                 if let Some(entries) = json.get("entries").and_then(|v| v.as_array()) {
                     let max_entries = 50;
@@ -220,7 +220,7 @@ impl ChatApp {
             } else if is_file_read {
                 // File read: path badge + content in a height-capped scroll area
                 // (the surrounding tool card already controls expand/collapse).
-                self.draw_tool_path_badge(ui, path, theme);
+                super::tool_cards::draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
                 if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
                     super::code_block(ui, theme, |ui| {
@@ -238,7 +238,7 @@ impl ChatApp {
                 }
             } else if is_file_write {
                 // File write: show compact success badge
-                self.draw_tool_path_badge(ui, path, theme);
+                super::tool_cards::draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
                 if let Some(bytes) = json.get("bytes_written").and_then(|v| v.as_u64()) {
                     ui.horizontal(|ui| {
@@ -258,7 +258,7 @@ impl ChatApp {
                 }
             } else {
                 // Generic JSON with path — render as structured key-value
-                self.draw_tool_path_badge(ui, path, theme);
+                super::tool_cards::draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
                 self.draw_tool_json_kv(ui, json, theme);
             }
@@ -288,7 +288,7 @@ impl ChatApp {
                 self.draw_tool_json_kv(ui, json, theme);
             } else {
                 // Array or scalar — fall back to plain rendering
-                self.draw_tool_plain_result(ui, raw, theme);
+                super::tool_cards::draw_tool_plain_result(ui, raw, theme);
             }
         }
     }

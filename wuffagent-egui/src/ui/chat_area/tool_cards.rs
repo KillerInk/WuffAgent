@@ -495,7 +495,7 @@ impl ChatApp {
                             // it right in the collapsed card (the expanded view
                             // shows the image plus the metadata JSON fields).
                             ui.add_space(6.0);
-                            Self::draw_data_uri_image(ui, uri, 260.0, theme);
+                            draw_data_uri_image(ui, uri, 260.0, theme);
                         }
                         if is_expanded {
                         if card.raw_result.trim().is_empty() {
@@ -520,7 +520,7 @@ impl ChatApp {
                                     );
                                 }
                                 None => {
-                                    self.draw_tool_plain_result(ui, card.raw_result.as_str(), theme);
+                                    draw_tool_plain_result(ui, card.raw_result.as_str(), theme);
                                 }
                             }
                         }
@@ -565,9 +565,10 @@ impl ChatApp {
         });
         arc
     }
+}
 
-    /// Draw a clickable file path chip.
-    pub(super) fn draw_tool_path_badge(&self, ui: &mut egui::Ui, path: &str, theme: &Theme) {
+/// Draw a clickable file path chip.
+pub(super) fn draw_tool_path_badge(ui: &mut egui::Ui, path: &str, theme: &Theme) {
         // Elide the displayed path when it cannot fit (buttons can't
         // wrap); the click handler still uses the full path.
         let font_id = egui::FontId::new(10.0, egui::FontFamily::Monospace);
@@ -617,7 +618,7 @@ impl ChatApp {
     /// Render a plain (non-JSON) tool result as a monospace code block.
     /// Long text (e.g. read_file's raw output) scrolls inside a capped
     /// height, mirroring the JSON file-read card.
-    pub(super) fn draw_tool_plain_result(&self, ui: &mut egui::Ui, text: &str, theme: &Theme) {
+pub(super) fn draw_tool_plain_result(ui: &mut egui::Ui, text: &str, theme: &Theme) {
         super::code_block(ui, theme, |ui| {
             egui::ScrollArea::vertical()
                 .max_height(300.0)
@@ -639,12 +640,12 @@ impl ChatApp {
     /// The decoded bytes are hashed into the texture URI because egui's bytes
     /// loader keeps the FIRST payload stored per URI (a fixed URI would show
     /// a stale image — same reasoning as the chat-input attach flow).
-    pub(super) fn draw_data_uri_image(
-        ui: &mut egui::Ui,
-        uri: &str,
-        max_height: f32,
-        theme: &Theme,
-    ) {
+pub(super) fn draw_data_uri_image(
+    ui: &mut egui::Ui,
+    uri: &str,
+    max_height: f32,
+    theme: &Theme,
+) {
         let Some(bytes) = data_uri_to_bytes(uri) else {
             ui.label(
                 egui::RichText::new("(could not decode image)")
@@ -661,7 +662,6 @@ impl ChatApp {
         let max_width = (ui.available_width() - 8.0).max(60.0);
         ui.add(img.max_size(egui::Vec2::new(max_width, max_height)));
     }
-}
 
 #[cfg(test)]
 mod tests {
