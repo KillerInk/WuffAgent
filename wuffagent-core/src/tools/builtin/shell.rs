@@ -15,6 +15,18 @@ const MAX_COMMAND_LEN: usize = 10_000;
 /// Maximum output size in bytes (1MB).
 const MAX_OUTPUT_SIZE: usize = 1_048_576;
 
+/// UTF-8 prologue prepended to every PowerShell command. PowerShell 5.1
+/// decodes child-process output with the machine's ANSI codepage (cp1252 on
+/// this box), which double-encodes UTF-8 text from git/builds/redirections
+/// into mojibake (em dashes → "â€"", emojis → "ðŸ‘½"). Forcing the console
+/// in/out encoding to UTF-8 — plus `chcp 65001` so children inherit a UTF-8
+/// console codepage — makes shell-mediated file round-trips byte-safe.
+const UTF8_PROLOGUE_PS: &str =
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::InputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; chcp 65001 > $null; ";
+/// Same idea for cmd: switch the console to UTF-8 before running the command
+/// (`&` so the command runs even if chcp is unavailable).
+const UTF8_PROLOGUE_CMD: &str = "chcp 65001 >nul & ";
+
 /// Dangerous patterns that are always blocked.
 /// Covers common destructive operations across bash, cmd, and PowerShell.
 const DANGEROUS_PATTERNS: &[&str] = &[
@@ -207,15 +219,19 @@ impl ShellTool {
     }
 
     /// Get the shell command and arguments for the given shell type.
+    ///
+    /// The UTF-8 prologue is prepended (see `UTF8_PROLOGUE_*`) AFTER the
+    /// allowlist/dangerous checks have run on the user's command, so the
+    /// allowlist keeps matching the command as the model wrote it.
     fn get_shell_command(&self, command: &str) -> (String, Vec<String>) {
         match self.config.shell_type.as_str() {
             "powershell" => (
                 "powershell.exe".to_string(),
-                vec!["-Command".to_string(), command.to_string()],
+                vec!["-Command".to_string(), format!("{UTF8_PROLOGUE_PS}{command}")],
             ),
             "cmd" => (
                 "cmd.exe".to_string(),
-                vec!["/C".to_string(), command.to_string()],
+                vec!["/C".to_string(), format!("{UTF8_PROLOGUE_CMD}{command}")],
             ),
             "bash" => (
                 "bash".to_string(),
@@ -223,7 +239,7 @@ impl ShellTool {
             ),
             _ => (
                 "powershell.exe".to_string(),
-                vec!["-Command".to_string(), command.to_string()],
+                vec!["-Command".to_string(), format!("{UTF8_PROLOGUE_PS}{command}")],
             ),
         }
     }
@@ -450,7 +466,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command (PowerShell, cmd, or bash). Use for building, running tests, and system operations."
+        "Execute a shell command (PowerShell, cmd, or bash). Use for building, running tests, git, and system operations. Do NOT use it for reading/writing/editing/searching file content — use read_file / write_file / append_file / apply_diff / replace_lines / search_content instead: shell redirection, Get-Content and command-line arguments can mangle non-ASCII text (UTF-8 output is normalized to cp65001, but Get-Content/Out-File default encodings and files without BOM are not covered)."
     }
 
     fn parameters_schema(&self) -> ToolSchema {
