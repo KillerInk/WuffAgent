@@ -31,20 +31,18 @@ fn display_content_ref<'a>(content: &'a str) -> std::borrow::Cow<'a, str> {
     }
 }
 
-impl ChatApp {
-    /// Live streaming row shown while a response is in flight.
-    /// Mirrors the committed message layout (avatar + AI bubble) so the text
-    /// doesn't jump when the message is committed.
-    pub(super) fn draw_streaming_line(
-        &mut self,
-        ui: &mut egui::Ui,
-        theme: &Theme,
-        streaming: &(String, String),
-    ) {
+/// Live streaming row shown while a response is in flight.
+/// Mirrors the committed message layout (avatar + AI bubble) so the text
+/// doesn't jump when the message is committed.
+pub(super) fn draw_streaming_line(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    streaming: &(String, String),
+) {
         let (current_thinking, stream_buffer) = streaming;
         ui.add_space(14.0);
         ui.horizontal(|ui| {
-            self.draw_avatar(ui, theme, false, 28.0);
+            super::draw_avatar(ui, theme, false, 28.0);
             ui.add_space(8.0);
             ui.scope(|ui| {
                 // Dock to the full remaining row width (mirrors draw_message).
@@ -152,12 +150,11 @@ impl ChatApp {
     /// of the output so long commands are visible while they run. The card
     /// carries the same indent as a committed tool card, so the transcript
     /// doesn't jump when the live card is replaced by the persisted result.
-    pub(super) fn draw_active_tool_card(
-        &mut self,
-        ui: &mut egui::Ui,
-        tool: &wuffagent_core::sessions::ActiveTool,
-        theme: &Theme,
-    ) {
+pub(super) fn draw_active_tool_card(
+    ui: &mut egui::Ui,
+    tool: &wuffagent_core::sessions::ActiveTool,
+    theme: &Theme,
+) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             // Same indent as a committed tool card (28px avatar + 8px gap).
@@ -221,7 +218,7 @@ impl ChatApp {
                         // Live output tail (shell). Latest lines only.
                         if !tool.live_output.is_empty() {
                             ui.add_space(4.0);
-                            Self::code_block(ui, theme, |ui| {
+                            ChatApp::code_block(ui, theme, |ui| {
                                 ui.vertical(|ui| {
                                     let lines: Vec<&str> = tool.live_output.lines().collect();
                                     // Show at most the last 6 lines (latest tail).
@@ -242,6 +239,7 @@ impl ChatApp {
         });
     }
 
+impl ChatApp {
     pub(super) fn draw_message(
         &mut self,
         ui: &mut egui::Ui,
@@ -295,7 +293,7 @@ impl ChatApp {
         };
 
         ui.with_layout(row_layout, |ui| {
-            self.draw_avatar(ui, theme, is_user, 28.0);
+            super::draw_avatar(ui, theme, is_user, 28.0);
             ui.add_space(8.0); // gap between avatar and bubble
 
             // Content column (bubble + hover metadata)

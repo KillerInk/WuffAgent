@@ -318,6 +318,32 @@ fn char_width(ui: &egui::Ui, font_id: &egui::FontId) -> f32 {
     (width / SAMPLE.len() as f32).max(1.0)
 }
 
+/// Draw a small round avatar ("U" for user, "AI" for assistant): a filled
+/// circle with a short label. Pure — depends only on the painter + theme, so
+/// it is a module-level free fn (no `ChatApp` in sight).
+pub(super) fn draw_avatar(ui: &mut egui::Ui, theme: &Theme, is_user: bool, size: f32) {
+    let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(size, size));
+    let color = if is_user { theme.primary } else { theme.accent };
+    let label = if is_user { "U" } else { "AI" };
+    let font_size = if is_user { size * 0.42 } else { size * 0.34 };
+    ui.painter()
+        .rect(
+            rect,
+            7.0,
+            color,
+            egui::Stroke::NONE,
+            egui::StrokeKind::Middle,
+        );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::new(font_size, egui::FontFamily::Proportional),
+        egui::Color32::WHITE,
+    );
+    ui.allocate_space(egui::vec2(size, size));
+}
+
 impl ChatApp {
 
     pub(super) fn draw_chat_area(&mut self, ui: &mut egui::Ui) {
@@ -443,11 +469,11 @@ impl ChatApp {
                     // Only while a response is actually in flight — otherwise the
                     // empty-buffer branch would draw a stray "AI:" + spinner.
                     if is_streaming {
-                        self.draw_streaming_line(ui, &theme, streaming);
+                        bubbles::draw_streaming_line(ui, &theme, streaming);
                     }
                     // Live tool cards for calls that are executing right now.
                     for tool in active_tools {
-                        self.draw_active_tool_card(ui, tool, &theme);
+                        bubbles::draw_active_tool_card(ui, tool, &theme);
                     }
                     ui.add_space(12.0);
                 });
@@ -628,28 +654,6 @@ impl ChatApp {
     }
 
     /// Rounded-square avatar with a letter label, allocated in row flow.
-    fn draw_avatar(&self, ui: &mut egui::Ui, theme: &Theme, is_user: bool, size: f32) {
-        let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(size, size));
-        let color = if is_user { theme.primary } else { theme.accent };
-        let label = if is_user { "U" } else { "AI" };
-        let font_size = if is_user { size * 0.42 } else { size * 0.34 };
-        ui.painter().rect(
-            rect,
-            7.0,
-            color,
-            egui::Stroke::NONE,
-            egui::StrokeKind::Middle,
-        );
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            egui::FontId::new(font_size, egui::FontFamily::Proportional),
-            egui::Color32::WHITE,
-        );
-        ui.allocate_space(egui::vec2(size, size));
-    }
-
     fn draw_scroll_to_bottom_button(
         &mut self,
         ui: &mut egui::Ui,
