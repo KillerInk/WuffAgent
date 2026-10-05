@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::super::state::ChatApp;
+use wuffagent_core::memory::MemoryManager;
 use super::ChatArea;
 use super::super::state::groups::SessionState;
 use super::super::theme::Theme;
@@ -241,261 +241,259 @@ pub(super) fn draw_active_tool_card(
         });
     }
 
-impl ChatApp {
-    pub(super) fn draw_message(
-        &mut self,
-        ui: &mut egui::Ui,
-        message: &ChatMessage,
-        index: usize,
-        theme: &Theme,
-    ) {
-        let is_user = message.role == "user";
-        let is_editing = self
-            .sessions
-            .selected_session_id
-            .as_ref()
-            .map(|sid| {
-                self.sessions
-                    .session_store
-                    .get(sid)
-                    .map(|r| r.chat_state.editing_message_index == Some(index))
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
+pub(super) fn draw_message(
+    sessions: &mut SessionState,
+    memory: &MemoryManager,
+    chat: &mut ChatArea,
+    ui: &mut egui::Ui,
+    message: &ChatMessage,
+    index: usize,
+    theme: &Theme,
+) {
+    let is_user = message.role == "user";
+    let is_editing = sessions
+        .selected_session_id
+        .as_ref()
+        .map(|sid| {
+            sessions
+                .session_store
+                .get(sid)
+                .map(|r| r.chat_state.editing_message_index == Some(index))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
 
-        // Tool messages render as a compact collapsible card (result hidden
-        // by default, expandable on click) instead of a full bubble.
-        if message.kind == MessageKind::Tool && !is_editing {
-            super::tool_cards::draw_tool_card(&mut self.sessions, ui, message, index, theme);
-            return;
-        }
-
-        let bubble_bg = if is_user {
-            theme.user_bg
-        } else if message.kind == MessageKind::Tool {
-            theme.tool_bg
-        } else {
-            theme.ai_bg
-        };
-        let text_color = if is_user {
-            egui::Color32::WHITE
-        } else {
-            theme.text_primary
-        };
-
-        // Gap between messages.
-        ui.add_space(14.0);
-
-        // Row flows right-to-left for user messages so the whole
-        // avatar + bubble group sits at the right edge.
-        let row_layout = if is_user {
-            egui::Layout::right_to_left(egui::Align::TOP)
-        } else {
-            egui::Layout::left_to_right(egui::Align::TOP)
-        };
-
-        ui.with_layout(row_layout, |ui| {
-            super::draw_avatar(ui, theme, is_user, 28.0);
-            ui.add_space(8.0); // gap between avatar and bubble
-
-            // Content column (bubble + hover metadata)
-            ui.scope(|ui| {
-                // Bubbles span the full chat width, docked edge-to-edge like
-                // the input field (user bubbles still sit at the right edge
-                // because the row flows right-to-left).
-                ui.take_available_width();
-                // Handle right-click context menu for edit/delete
-                let response = ui.interact(
-                    ui.max_rect(),
-                    ui.id().with("msg_ctx").with(index),
-                    egui::Sense::click(),
-                );
-                if !is_editing && response.secondary_clicked() {
-                    response.context_menu(|menu_ui| {
-                        menu_ui.set_min_width(120.0);
-                        if menu_ui.button("Edit").clicked() {
-                            if let Some(sid) = &self.sessions.selected_session_id {
-                                if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
-                                    runtime.chat_state.editing_message_index = Some(index);
-                                    runtime.chat_state.editing_message_content =
-                                        message.content.clone();
-                                }
-                            }
-                        }
-                        if menu_ui.button("Delete").clicked() {
-                            delete_message(&mut self.sessions, index);
-                        }
-                    });
-                }
-
-                ui.vertical(|ui| {
-                    let inner = egui::Frame::NONE
-                        .fill(bubble_bg)
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(12)
-                        .inner_margin(egui::Margin::same(10))
-                        .show(ui, |ui| {
-                            ui.take_available_width();
-                            if layout_dbg_enabled() {
-                                eprintln!(
-                                    "[ldbg] msg {:>3} frame avail_w={:.1}",
-                                    index,
-                                    ui.available_width()
-                                );
-                            }
-                            if is_editing {
-                                if let Some(sid) = &self.sessions.selected_session_id {
-                                    if let Some(runtime) = self.sessions.session_store.get_mut(sid)
-                                    {
-                                        ui.add_sized(
-                                            egui::vec2(ui.available_width().max(160.0), 80.0),
-                                            egui::TextEdit::multiline(
-                                                &mut runtime.chat_state.editing_message_content,
-                                            ),
-                                        );
-                                    }
-                                }
-                            } else {
-                                // Display image if present
-                                if let Some(ref img_data) = message.image {
-                                    if let Ok(decoded) = base64::Engine::decode(
-                                        &base64::engine::general_purpose::STANDARD,
-                                        img_data,
-                                    ) {
-                                        // Per-message id so multiple images don't
-                                        // share one texture slot.
-                                        let img = egui::Image::from_bytes(
-                                            format!("chat_image_{}", index),
-                                            decoded,
-                                        );
-                                        let max_img_width = (ui.available_width() - 10.0).max(50.0);
-                                        ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
-                                    }
-                                }
-                                // Branch on message kind ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no string-prefix sniffing.
-                                // (Tool messages never reach the bubble: they are
-                                // rendered as collapsible cards above.)
-                                if message.kind == MessageKind::Thinking {
-                                    // Thinking message ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â dim markdown (regular
-                                    // weight, dimmed links/code).
-                                    super::markdown::draw_markdown_dimmed(
-                                        ui,
-                                        &message.content,
-                                        12.5,
-                                        theme.text_dim,
-                                        theme,
-                                        true,
-                                    );
-                                } else {
-                                    // Normal message ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â strip legacy think tags.
-                                    // Borrows the content when no tags are present
-                                    // (the common case), avoiding a per-frame clone.
-                                    let display_content =
-                                        display_content_ref(&message.content);
-                                    if is_user {
-                                        // User messages stay plain text.
-                                        ui.add(super::breaking_label(
-                                            display_content,
-                                            egui::FontId::proportional(13.5),
-                                            text_color,
-                                            false,
-                                        ));
-                                    } else {
-                                        // AI messages render as markdown
-                                        // (bold, code blocks, lists, tablesÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦).
-                                        super::markdown::draw_markdown(
-                                            ui,
-                                            &display_content,
-                                            13.5,
-                                            text_color,
-                                            theme,
-                                        );
-                                    }
-                                }
-                            }
-                        });
-
-                    if layout_dbg_enabled() {
-                        eprintln!(
-                            "[ldbg] msg {:>3} bubble_w={:.1} bubble_rect={:?}",
-                            index,
-                            inner.response.rect.width(),
-                            inner.response.rect
-                        );
-                    }
-
-                    // Timestamp ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â always visible, part of the layout flow.
-                    let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
-                    if !ts.is_empty() {
-                        ui.add(egui::Label::new(
-                            egui::RichText::new(ts).color(theme.text_dim).size(9.5),
-                        ));
-                    }
-
-                    // S2: feedback (ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ‚Â/ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ…Â½) under assistant answers only.
-                    if !is_user && !is_editing && message.kind == MessageKind::Normal {
-                        super::draw_feedback_row(&mut self.sessions, &self.core.memory_manager, ui, index, theme);
-                    }
-
-                    // Hover reveal: copy button in the top-right corner.
-                    // Placed (not laid out) so it never shifts the message flow.
-                    //
-                    // Gate visibility on the raw pointer position, NOT on
-                    // `inner.response.hovered()`: the button is placed on top
-                    // of the bubble, and while the pointer is over it, the
-                    // bubble frame (a hover-only widget) stops reporting
-                    // `hovered` because the click-sensitive button covers it.
-                    // Gating on the frame's hover made the button vanish the
-                    // instant the pointer touched it ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a per-frame show/hide
-                    // flicker ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â and egui drops the pending click when the
-                    // widget disappears, so the click never registered and
-                    // nothing was copied. The button rect lies inside the
-                    // frame rect, so "pointer over the bubble" covers both.
-                    if !is_editing
-                        && ui
-                            .ctx()
-                            .pointer_hover_pos()
-                            .is_some_and(|pos| inner.response.rect.contains(pos))
-                    {
-                        let btn_size = egui::vec2(16.0, 16.0);
-                        let btn_rect = egui::Rect::from_min_size(
-                            inner.response.rect.right_top() - egui::vec2(btn_size.x + 3.0, 3.0),
-                            btn_size,
-                        );
-                        let copy_resp = ui.put(
-                            btn_rect,
-                            egui::Button::new(
-                                egui::RichText::new("ÃƒÂ¢Ã‚Â§Ã¢â‚¬Â°").color(theme.text_dim).size(11.0),
-                            )
-                            .fill(theme.hover_bg)
-                            .corner_radius(4),
-                        );
-                        if copy_resp.clicked() {
-                            ui.ctx().copy_text(message.content.clone());
-                        }
-                    }
-                });
-            });
-        });
-
-        // Handle keyboard shortcuts when editing
-        if is_editing {
-            ui.ctx().input(|i| {
-                if i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl {
-                    commit_message_edit(&mut self.sessions, &mut self.chat_area, index);
-                }
-                if i.key_pressed(egui::Key::Escape) {
-                    if let Some(sid) = &self.sessions.selected_session_id {
-                        if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
-                            runtime.chat_state.editing_message_index = None;
-                            runtime.chat_state.editing_message_content.clear();
-                        }
-                    }
-                }
-            });
-        }
+    // Tool messages render as a compact collapsible card (result hidden
+    // by default, expandable on click) instead of a full bubble.
+    if message.kind == MessageKind::Tool && !is_editing {
+        super::tool_cards::draw_tool_card(sessions, ui, message, index, theme);
+        return;
     }
 
+    let bubble_bg = if is_user {
+        theme.user_bg
+    } else if message.kind == MessageKind::Tool {
+        theme.tool_bg
+    } else {
+        theme.ai_bg
+    };
+    let text_color = if is_user {
+        egui::Color32::WHITE
+    } else {
+        theme.text_primary
+    };
+
+    // Gap between messages.
+    ui.add_space(14.0);
+
+    // Row flows right-to-left for user messages so the whole
+    // avatar + bubble group sits at the right edge.
+    let row_layout = if is_user {
+        egui::Layout::right_to_left(egui::Align::TOP)
+    } else {
+        egui::Layout::left_to_right(egui::Align::TOP)
+    };
+
+    ui.with_layout(row_layout, |ui| {
+        super::draw_avatar(ui, theme, is_user, 28.0);
+        ui.add_space(8.0); // gap between avatar and bubble
+
+        // Content column (bubble + hover metadata)
+        ui.scope(|ui| {
+            // Bubbles span the full chat width, docked edge-to-edge like
+            // the input field (user bubbles still sit at the right edge
+            // because the row flows right-to-left).
+            ui.take_available_width();
+            // Handle right-click context menu for edit/delete
+            let response = ui.interact(
+                ui.max_rect(),
+                ui.id().with("msg_ctx").with(index),
+                egui::Sense::click(),
+            );
+            if !is_editing && response.secondary_clicked() {
+                response.context_menu(|menu_ui| {
+                    menu_ui.set_min_width(120.0);
+                    if menu_ui.button("Edit").clicked() {
+                        if let Some(sid) = &sessions.selected_session_id {
+                            if let Some(runtime) = sessions.session_store.get_mut(sid) {
+                                runtime.chat_state.editing_message_index = Some(index);
+                                runtime.chat_state.editing_message_content =
+                                    message.content.clone();
+                            }
+                        }
+                    }
+                    if menu_ui.button("Delete").clicked() {
+                        delete_message(sessions, index);
+                    }
+                });
+            }
+
+            ui.vertical(|ui| {
+                let inner = egui::Frame::NONE
+                    .fill(bubble_bg)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(12)
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.take_available_width();
+                        if layout_dbg_enabled() {
+                            eprintln!(
+                                "[ldbg] msg {:>3} frame avail_w={:.1}",
+                                index,
+                                ui.available_width()
+                            );
+                        }
+                        if is_editing {
+                            if let Some(sid) = &sessions.selected_session_id {
+                                if let Some(runtime) = sessions.session_store.get_mut(sid)
+                                {
+                                    ui.add_sized(
+                                        egui::vec2(ui.available_width().max(160.0), 80.0),
+                                        egui::TextEdit::multiline(
+                                            &mut runtime.chat_state.editing_message_content,
+                                        ),
+                                    );
+                                }
+                            }
+                        } else {
+                            // Display image if present
+                            if let Some(ref img_data) = message.image {
+                                if let Ok(decoded) = base64::Engine::decode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    img_data,
+                                ) {
+                                    // Per-message id so multiple images don't
+                                    // share one texture slot.
+                                    let img = egui::Image::from_bytes(
+                                        format!("chat_image_{}", index),
+                                        decoded,
+                                    );
+                                    let max_img_width = (ui.available_width() - 10.0).max(50.0);
+                                    ui.add(img.max_size(egui::Vec2::new(max_img_width, 300.0)));
+                                }
+                            }
+                            // Branch on message kind ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no string-prefix sniffing.
+                            // (Tool messages never reach the bubble: they are
+                            // rendered as collapsible cards above.)
+                            if message.kind == MessageKind::Thinking {
+                                // Thinking message ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â dim markdown (regular
+                                // weight, dimmed links/code).
+                                super::markdown::draw_markdown_dimmed(
+                                    ui,
+                                    &message.content,
+                                    12.5,
+                                    theme.text_dim,
+                                    theme,
+                                    true,
+                                );
+                            } else {
+                                // Normal message ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â strip legacy think tags.
+                                // Borrows the content when no tags are present
+                                // (the common case), avoiding a per-frame clone.
+                                let display_content =
+                                    display_content_ref(&message.content);
+                                if is_user {
+                                    // User messages stay plain text.
+                                    ui.add(super::breaking_label(
+                                        display_content,
+                                        egui::FontId::proportional(13.5),
+                                        text_color,
+                                        false,
+                                    ));
+                                } else {
+                                    // AI messages render as markdown
+                                    // (bold, code blocks, lists, tablesÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦).
+                                    super::markdown::draw_markdown(
+                                        ui,
+                                        &display_content,
+                                        13.5,
+                                        text_color,
+                                        theme,
+                                    );
+                                }
+                            }
+                        }
+                    });
+
+                if layout_dbg_enabled() {
+                    eprintln!(
+                        "[ldbg] msg {:>3} bubble_w={:.1} bubble_rect={:?}",
+                        index,
+                        inner.response.rect.width(),
+                        inner.response.rect
+                    );
+                }
+
+                // Timestamp ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â always visible, part of the layout flow.
+                let ts = wuffagent_core::types::timestamp_time(&message.timestamp);
+                if !ts.is_empty() {
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(ts).color(theme.text_dim).size(9.5),
+                    ));
+                }
+
+                // S2: feedback (ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ‚Â/ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ…Â½) under assistant answers only.
+                if !is_user && !is_editing && message.kind == MessageKind::Normal {
+                    super::draw_feedback_row(sessions, memory, ui, index, theme);
+                }
+
+                // Hover reveal: copy button in the top-right corner.
+                // Placed (not laid out) so it never shifts the message flow.
+                //
+                // Gate visibility on the raw pointer position, NOT on
+                // `inner.response.hovered()`: the button is placed on top
+                // of the bubble, and while the pointer is over it, the
+                // bubble frame (a hover-only widget) stops reporting
+                // `hovered` because the click-sensitive button covers it.
+                // Gating on the frame's hover made the button vanish the
+                // instant the pointer touched it ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a per-frame show/hide
+                // flicker ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â and egui drops the pending click when the
+                // widget disappears, so the click never registered and
+                // nothing was copied. The button rect lies inside the
+                // frame rect, so "pointer over the bubble" covers both.
+                if !is_editing
+                    && ui
+                        .ctx()
+                        .pointer_hover_pos()
+                        .is_some_and(|pos| inner.response.rect.contains(pos))
+                {
+                    let btn_size = egui::vec2(16.0, 16.0);
+                    let btn_rect = egui::Rect::from_min_size(
+                        inner.response.rect.right_top() - egui::vec2(btn_size.x + 3.0, 3.0),
+                        btn_size,
+                    );
+                    let copy_resp = ui.put(
+                        btn_rect,
+                        egui::Button::new(
+                            egui::RichText::new("ÃƒÂ¢Ã‚Â§Ã¢â‚¬Â°").color(theme.text_dim).size(11.0),
+                        )
+                        .fill(theme.hover_bg)
+                        .corner_radius(4),
+                    );
+                    if copy_resp.clicked() {
+                        ui.ctx().copy_text(message.content.clone());
+                    }
+                }
+            });
+        });
+    });
+
+    // Handle keyboard shortcuts when editing
+    if is_editing {
+        ui.ctx().input(|i| {
+            if i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl {
+                commit_message_edit(sessions, chat, index);
+            }
+            if i.key_pressed(egui::Key::Escape) {
+                if let Some(sid) = &sessions.selected_session_id {
+                    if let Some(runtime) = sessions.session_store.get_mut(sid) {
+                        runtime.chat_state.editing_message_index = None;
+                        runtime.chat_state.editing_message_content.clear();
+                    }
+                }
+            }
+        });
+    }
 }
 
 pub(super) fn commit_message_edit(sessions: &mut SessionState, chat: &mut ChatArea, index: usize) {

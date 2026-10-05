@@ -480,7 +480,7 @@ impl ChatApp {
                                 prev_day = Some(day);
                             }
                         }
-                        self.draw_message(ui, msg, i, &theme);
+                        bubbles::draw_message(&mut self.sessions, &self.core.memory_manager, &mut self.chat_area, ui, msg, i, &theme);
                     }
                     // Draw streaming line (values snapshotted before the scroll area).
                     // Only while a response is actually in flight — otherwise the
