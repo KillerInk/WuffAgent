@@ -3,21 +3,18 @@
 //! JSON → display string conversion.
 
 use eframe::egui;
-
-use crate::ui::state::ChatApp;
+
 use crate::ui::theme::Theme;
 
-impl ChatApp {
-    /// Render a tool result that is valid JSON with smart field extraction.
-    /// Called only with the tool card already expanded, so long content
-    /// (e.g. file reads) is shown directly in a height-capped scroll area.
-    pub(super) fn draw_tool_json_result(
-        &self,
-        ui: &mut egui::Ui,
-        json: &serde_json::Value,
-        raw: &str,
-        theme: &Theme,
-    ) {
+/// Render a tool result that is valid JSON with smart field extraction.
+/// Called only with the tool card already expanded, so long content
+/// (e.g. file reads) is shown directly in a height-capped scroll area.
+pub(super) fn draw_tool_json_result(
+    ui: &mut egui::Ui,
+    json: &serde_json::Value,
+    raw: &str,
+    theme: &Theme,
+) {
         // Image result (show_image): render the picture itself, then a small
         // metadata line (format/dimensions/size + source path or URL).
         if json
@@ -260,7 +257,7 @@ impl ChatApp {
                 // Generic JSON with path — render as structured key-value
                 super::tool_cards::draw_tool_path_badge(ui, path, theme);
                 ui.add_space(4.0);
-                self.draw_tool_json_kv(ui, json, theme);
+                draw_tool_json_kv(ui, json, theme);
             }
         } else {
             // No path field — check for other common patterns
@@ -281,11 +278,11 @@ impl ChatApp {
                         ui.colored_label(theme.success, format!("{}", result));
                     });
                 } else {
-                    self.draw_tool_json_kv(ui, json, theme);
+                    draw_tool_json_kv(ui, json, theme);
                 }
             } else if json.is_object() {
                 // Generic JSON object — render as key-value pairs
-                self.draw_tool_json_kv(ui, json, theme);
+                draw_tool_json_kv(ui, json, theme);
             } else {
                 // Array or scalar — fall back to plain rendering
                 super::tool_cards::draw_tool_plain_result(ui, raw, theme);
@@ -293,8 +290,8 @@ impl ChatApp {
         }
     }
 
-    /// Render JSON as a key-value list.
-    fn draw_tool_json_kv(&self, ui: &mut egui::Ui, json: &serde_json::Value, theme: &Theme) {
+/// Render JSON as a key-value list.
+fn draw_tool_json_kv(ui: &mut egui::Ui, json: &serde_json::Value, theme: &Theme) {
         super::code_block(ui, theme, |ui| match json {
             serde_json::Value::Object(map) => {
                 for (key, value) in map {
@@ -305,7 +302,7 @@ impl ChatApp {
                             theme.text_secondary,
                             false,
                         ));
-                        let val_str = Self::json_value_to_string(value);
+                        let val_str = json_value_to_string(value);
                         ui.add(super::breaking_label(
                             val_str,
                             egui::FontId::monospace(11.0),
@@ -318,7 +315,7 @@ impl ChatApp {
             serde_json::Value::Array(arr) => {
                 for item in arr {
                     ui.add(super::breaking_label(
-                        Self::json_value_to_string(item),
+                        json_value_to_string(item),
                         egui::FontId::monospace(11.0),
                         theme.code_text,
                         false,
@@ -327,7 +324,7 @@ impl ChatApp {
             }
             other => {
                 ui.add(super::breaking_label(
-                    Self::json_value_to_string(other),
+                    json_value_to_string(other),
                     egui::FontId::monospace(11.0),
                     theme.code_text,
                     false,
@@ -344,16 +341,15 @@ impl ChatApp {
             serde_json::Value::Bool(b) => b.to_string(),
             serde_json::Value::Null => "null".to_string(),
             serde_json::Value::Array(arr) => {
-                let items: Vec<String> = arr.iter().map(Self::json_value_to_string).collect();
+                let items: Vec<String> = arr.iter().map(json_value_to_string).collect();
                 format!("[{}]", items.join(", "))
             }
             serde_json::Value::Object(map) => {
                 let pairs: Vec<String> = map
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, Self::json_value_to_string(v)))
+                    .map(|(k, v)| format!("{}: {}", k, json_value_to_string(v)))
                     .collect();
                 format!("{{{}}}", pairs.join(", "))
             }
         }
     }
-}

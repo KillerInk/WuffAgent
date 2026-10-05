@@ -512,7 +512,7 @@ impl ChatApp {
                             let parsed = parsed_tool_json(ui.ctx(), card.raw_result.as_str());
                             match &*parsed {
                                 Some(json) => {
-                                    self.draw_tool_json_result(
+                                    super::tool_json::draw_tool_json_result(
                                         ui,
                                         json,
                                         card.raw_result.as_str(),
