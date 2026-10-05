@@ -328,7 +328,7 @@ impl ChatApp {
             None => return false,
         };
 
-        if let Err(e) = self.validate_input(input) {
+        if let Err(e) = validate_input(input) {
             if let Some(runtime) = self.sessions.session_store.get_mut(&sid) {
                 runtime.chat_state.pending_error = Some(e);
             }
@@ -463,13 +463,6 @@ impl ChatApp {
             .unwrap_or_default()
     }
 
-    pub(super) fn validate_input(&self, text: &str) -> Result<(), String> {
-        if text.trim().is_empty() {
-            return Err("Message cannot be empty".to_string());
-        }
-        Ok(())
-    }
-
     pub(super) fn send_message_to_session(&mut self, sid: &str) {
         let (input, agent) = match self.sessions.session_store.get(sid) {
             Some(r) => (
@@ -478,7 +471,7 @@ impl ChatApp {
             ),
             None => return,
         };
-        if let Err(e) = self.validate_input(&input) {
+        if let Err(e) = validate_input(&input) {
             if let Some(runtime) = self.sessions.session_store.get_mut(sid) {
                 runtime.chat_state.pending_error = Some(e);
             }
@@ -689,5 +682,32 @@ impl ChatApp {
                 tracing::warn!("Failed to save session after stop: {}", e);
             }
         }
+    }
+}
+
+/// Validate a chat message before it is sent: non-blank text. Pure — no view
+/// state needed, so it lives outside the view model and is unit-tested.
+pub(super) fn validate_input(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("Message cannot be empty".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::validate_input;
+
+    #[test]
+    fn rejects_blank() {
+        assert!(validate_input("").is_err());
+        assert!(validate_input("   ").is_err());
+        assert!(validate_input("\n\t  ").is_err());
+    }
+
+    #[test]
+    fn accepts_text() {
+        assert!(validate_input("hello").is_ok());
+        assert!(validate_input("  padded  ").is_ok());
     }
 }
