@@ -5,6 +5,7 @@ use eframe::egui;
 use wuffagent_core::types::ChatMessage;
 
 use super::state::ChatApp;
+use super::state::groups::SessionState;
 use super::theme::Theme;
 
 // ── TEMPORARY layout debugging (set WUFF_LAYOUT_DBG=1 to enable) ────────
@@ -369,7 +370,7 @@ impl ChatApp {
         // Only shown while at least one sub-session tab is open, so plain
         // sessions keep their current look.
         if self.displayed_session_id().is_some() && !self.sessions.sub_session_tabs.is_empty() {
-            self.draw_sub_session_tabs(ui, &theme);
+            draw_sub_session_tabs(ui, &theme, &mut self.sessions);
         }
 
         // Get the current session's chat state, or show empty state.
@@ -527,86 +528,6 @@ impl ChatApp {
         if button_visible && button_opacity > 0.01 {
             self.draw_scroll_to_bottom_button(ui, &theme, button_opacity);
         }
-    }
-
-    /// Tab bar for sub-sessions: the main tab (currently selected session)
-    /// plus one tab per open sub-session. Clicking a tab makes it the
-    /// displayed session (the chat area re-keys on it); the × on a sub-tab
-    /// closes it (the session file stays in the session list). A sub-tab shows
-    /// a running dot while its session's turn is generating.
-    fn draw_sub_session_tabs(&mut self, ui: &mut egui::Ui, theme: &Theme) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.set_min_height(30.0);
-            // Main tab (the currently selected session)
-            let main_name = self
-                .sessions
-                .selected_session_id
-                .as_ref()
-                .and_then(|sid| self.sessions.session_store.get(sid))
-                .map(|r| r.name.clone())
-                .unwrap_or_else(|| "Session".to_string());
-            let main_active = self.sessions.active_tab.is_none();
-            if ui
-                .selectable_label(
-                    main_active,
-                    egui::RichText::new(main_name).color(if main_active {
-                        theme.text_primary
-                    } else {
-                        theme.text_dim
-                    }),
-                )
-                .clicked()
-            {
-                self.sessions.active_tab = None;
-            }
-            // One tab per open sub-session
-            for sub_id in self.sessions.sub_session_tabs.clone() {
-                let (label, generating) = self
-                    .sessions
-                    .session_store
-                    .get(&sub_id)
-                    .map(|r| (r.name.clone(), r.chat_state.is_generating))
-                    .unwrap_or_else(|| (sub_id.clone(), false));
-                let active = self.sessions.active_tab.as_deref() == Some(sub_id.as_str());
-                let mut text = label;
-                if generating {
-                    text = format!("● {}", text);
-                }
-                if ui
-                    .selectable_label(
-                        active,
-                        egui::RichText::new(text).color(if active {
-                            theme.text_primary
-                        } else {
-                            theme.text_dim
-                        }),
-                    )
-                    .clicked()
-                {
-                    self.sessions.active_tab = Some(sub_id.clone());
-                }
-                let close = ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("×").size(12.0).color(theme.text_dim),
-                        )
-                        .min_size(egui::vec2(18.0, 18.0))
-                        .fill(egui::Color32::TRANSPARENT),
-                    )
-                    .on_hover_text("Close tab (the session stays in the session list)");
-                if close.clicked() {
-                    if self.sessions.active_tab.as_deref() == Some(sub_id.as_str()) {
-                        self.sessions.active_tab = None;
-                    }
-                    self.sessions.sub_session_tabs.retain(|t| t != &sub_id);
-                }
-                ui.add_space(2.0);
-            }
-        });
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(4.0);
     }
 
     /// Placeholder shown for sessions without any messages yet.
@@ -1190,4 +1111,82 @@ mod tests {
         });
         out.textures_delta.clear();
     }
+}
+
+/// Tab bar for sub-sessions: the main tab (currently selected session)
+/// plus one tab per open sub-session. Clicking a tab makes it the
+/// displayed session (the chat area re-keys on it); the × on a sub-tab
+/// closes it (the session file stays in the session list). A sub-tab shows
+/// a running dot while its session's turn is generating.
+fn draw_sub_session_tabs(ui: &mut egui::Ui, theme: &Theme, sessions: &mut SessionState) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.set_min_height(30.0);
+        // Main tab (the currently selected session)
+        let main_name = sessions
+            .selected_session_id
+            .as_ref()
+            .and_then(|sid| sessions.session_store.get(sid))
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| "Session".to_string());
+        let main_active = sessions.active_tab.is_none();
+        if ui
+            .selectable_label(
+                main_active,
+                egui::RichText::new(main_name).color(if main_active {
+                    theme.text_primary
+                } else {
+                    theme.text_dim
+                }),
+            )
+            .clicked()
+        {
+            sessions.active_tab = None;
+        }
+        // One tab per open sub-session
+        for sub_id in sessions.sub_session_tabs.clone() {
+            let (label, generating) = sessions
+                .session_store
+                .get(&sub_id)
+                .map(|r| (r.name.clone(), r.chat_state.is_generating))
+                .unwrap_or_else(|| (sub_id.clone(), false));
+            let active = sessions.active_tab.as_deref() == Some(sub_id.as_str());
+            let mut text = label;
+            if generating {
+                text = format!("● {}", text);
+            }
+            if ui
+                .selectable_label(
+                    active,
+                    egui::RichText::new(text).color(if active {
+                        theme.text_primary
+                    } else {
+                        theme.text_dim
+                    }),
+                )
+                .clicked()
+            {
+                sessions.active_tab = Some(sub_id.clone());
+            }
+            let close = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("×").size(12.0).color(theme.text_dim),
+                    )
+                    .min_size(egui::vec2(18.0, 18.0))
+                    .fill(egui::Color32::TRANSPARENT),
+                )
+                .on_hover_text("Close tab (the session stays in the session list)");
+            if close.clicked() {
+                if sessions.active_tab.as_deref() == Some(sub_id.as_str()) {
+                    sessions.active_tab = None;
+                }
+                sessions.sub_session_tabs.retain(|t| t != &sub_id);
+            }
+            ui.add_space(2.0);
+        }
+    });
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
 }
