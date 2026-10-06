@@ -570,11 +570,19 @@ fn render_table<'a, 'it>(
                 // Explicit max_rect: `set_width` only extends, never shrinks,
                 // so a scope inheriting the row's full width would wrap at
                 // that width and push the following cells past the column.
+                // The scope must get an explicit VERTICAL layout: inheriting
+                // the row's left-to-right layout would treat the 1M-px
+                // max_rect height as the cross axis, vertically center the
+                // label ~500,000px down (invisible, clipped) and make the
+                // row's response rect 1M px tall — a huge blank gap per row.
+                let cell_rect = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(col_w, VERTICAL_GROW_CAP),
+                );
                 ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
-                        ui.cursor().min,
-                        egui::vec2(col_w, VERTICAL_GROW_CAP),
-                    )),
+                    egui::UiBuilder::new()
+                        .layout(egui::Layout::top_down_justified(egui::Align::LEFT))
+                        .max_rect(cell_rect),
                     |ui| ui.add(egui::Label::new(cc).wrap()),
                 );
             }
@@ -815,6 +823,73 @@ mod tests {
         assert!(text.contains("think"), "bold run missing: {text:?}");
         assert!(text.contains("foo"), "code run missing: {text:?}");
     }
+    /// A table with long wrapping cells must render in place: every cell's
+    /// text drawn near the top of the message and the total height compact.
+    /// Regression test: cells previously inherited the row's horizontal
+    /// layout, which vertically centered each label in the 1M-px `max_rect`
+    /// (invisible text) and made every row 1M px tall (huge blank gap).
+    #[test]
+    fn table_with_long_cells_renders_in_place() {
+        use egui::{Align, Layout, Margin};
+        const COL_W: f32 = 560.0;
+        let ctx = egui::Context::default();
+        ctx.set_fonts(crate::fonts::emoji_fonts());
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(COL_W + 200.0, 4000.0),
+        ));
+        let text = "\u{23} Code fixes needed for 6.1\n\n| File | Fix |\n|---|---|\n| `sdkconfig` + `sdkconfig.defaults` | Flash size **2MB \u{2192} 4MB** \u{2014} `custom_partitions.csv` ends at 0x400000, so 6.1's partition generator rejected the 2MB default (this also protects against a fresh `set-target`) |\n| `main/wifi_manager/wifi_manager.c` | Removed `WIFI_REASON_{ASSOC_EXPIRE,NOT_AUTHED,NOT_ASSOCED}` \u{2014} dropped from the 6.1 enum (they were in the \"log string\" switch only, now hit `default: \"UNKNOWN\"`) |\n| `main/sensors/sensor_service.{h,c}` | Real latent bug: `bme280_get_vpd_air()` was called **outside** the `CONFIG_SENSOR_BME280` guard (fine on 5.5.1 because implicit decl = warning; hard error on 6.1's `-std=gnu23`). Fixed by adding a `bme_vpd_air` field to the snapshot \u{2014} also makes the facade consistent |\n\n### Result\n";
+        let out = ctx.run_ui(raw, |ui| {
+            ui.set_width(COL_W);
+            ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+                ui.add_sized(egui::vec2(28.0, 28.0), egui::Label::new("A"));
+                ui.add_space(8.0);
+                ui.scope(|ui| {
+                    ui.take_available_width();
+                    ui.vertical(|ui| {
+                        egui::Frame::NONE
+                            .fill(egui::Color32::from_rgb(38, 42, 50))
+                            .inner_margin(Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.take_available_width();
+                                draw_markdown(ui, &text, 13.5, egui::Color32::WHITE, &Theme::dark());
+                            });
+                    });
+                });
+            });
+        });
+        // The last table row's text must actually be drawn (it used to be
+        // centered ~500,000px down, i.e. invisible).
+        let last_row = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) if t.galley.job.text.contains("bme280") => {
+                    Some((t.pos.y, t.galley.rect.max.y))
+                }
+                _ => None,
+            })
+            .next();
+        let (y0, y1) = last_row.expect("last table row text not drawn");
+        assert!(
+            y0.is_finite() && y1.is_finite() && y1 < 1000.0,
+            "table text drawn far off the visible area: y=[{y0}..{y1}]"
+        );
+        // And the whole message must stay compact (no 1M-px gap per row).
+        let max_y = out.shapes.iter().filter_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) => Some(t.pos.y + t.galley.rect.max.y),
+            _ => None,
+        })
+        .max_by(|a, b| a.total_cmp(b))
+        .unwrap_or(0.0);
+        assert!(
+            max_y < 1000.0,
+            "content height exploded to {max_y}px (table rows allocating huge heights)"
+        );
+        out.drop_without_applying_deltas();
+    }
+
     /// Horizontal bounding box (min_x, max_x) of a shape.
     fn shape_x_bounds(shape: &egui::Shape) -> (f32, f32) {
         match shape {
