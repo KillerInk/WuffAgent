@@ -33,6 +33,7 @@ impl ChatApp {
                         args_preview,
                         started_at: std::time::Instant::now(),
                         live_output: String::new(),
+                        cancelling: false,
                     });
                 // P4: bump the snapshot revision (live card appeared).
                 runtime.chat_state.active_tools_revision += 1;

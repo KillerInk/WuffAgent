@@ -489,8 +489,12 @@ impl ChatApp {
                         bubbles::draw_streaming_line(ui, &theme, streaming);
                     }
                     // Live tool cards for calls that are executing right now.
-                    for tool in active_tools {
-                        bubbles::draw_active_tool_card(ui, tool, &theme);
+                    // (The snapshot is empty when no session is selected, so
+                    // the sid the Stop button needs is always available here.)
+                    if let Some(sid) = &selected {
+                        for tool in active_tools {
+                            bubbles::draw_active_tool_card(&mut self.sessions, ui, sid, tool, &theme);
+                        }
                     }
                     ui.add_space(12.0);
                 });

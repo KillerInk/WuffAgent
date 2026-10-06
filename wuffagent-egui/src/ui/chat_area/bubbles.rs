@@ -153,7 +153,9 @@ pub(super) fn draw_streaming_line(
     /// carries the same indent as a committed tool card, so the transcript
     /// doesn't jump when the live card is replaced by the persisted result.
 pub(super) fn draw_active_tool_card(
+    sessions: &mut SessionState,
     ui: &mut egui::Ui,
+    sid: &str,
     tool: &wuffagent_core::sessions::ActiveTool,
     theme: &Theme,
 ) {
@@ -206,9 +208,55 @@ pub(super) fn draw_active_tool_card(
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    // Per-call Stop (rightmost): fires this
+                                    // call's cancel token — the shell kills
+                                    // its process, other tools surface
+                                    // "Cancelled" to the loop. The card
+                                    // flips to "stopping…" until the call
+                                    // completes (the completion event closes
+                                    // it).
+                                    if !tool.cancelling
+                                        && ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("■ stop")
+                                                        .color(theme.error)
+                                                        .size(9.5),
+                                                )
+                                                .fill(egui::Color32::TRANSPARENT),
+                                            )
+                                            .clicked()
+                                    {
+                                        if let Some(runtime) =
+                                            sessions.session_store.get_mut(sid)
+                                        {
+                                            let key = format!("{sid}:{}", tool.call_id);
+                                            if runtime.pipeline.cancel_tool(&key) {
+                                                if let Some(active) = runtime
+                                                    .chat_state
+                                                    .active_tools
+                                                    .iter_mut()
+                                                    .find(|t| t.call_id == tool.call_id)
+                                                {
+                                                    active.cancelling = true;
+                                                }
+                                                // Re-snapshot next frame so
+                                                // this card flips to
+                                                // "stopping…".
+                                                runtime
+                                                    .chat_state
+                                                    .active_tools_revision += 1;
+                                            }
+                                        }
+                                    }
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "running · {}",
+                                            "{} · {}",
+                                            if tool.cancelling {
+                                                "stopping"
+                                            } else {
+                                                "running"
+                                            },
                                             super::format_duration(elapsed.as_millis() as u64)
                                         ))
                                         .color(theme.text_dim)

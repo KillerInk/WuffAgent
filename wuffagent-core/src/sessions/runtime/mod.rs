@@ -23,6 +23,10 @@ pub struct ActiveTool {
     /// Latest tail of live output reported by the tool (e.g. shell output
     /// lines). Replaced, not appended, on every progress event.
     pub live_output: String,
+    /// The user clicked Stop on this card (per-call cancellation was issued).
+    /// The card shows "stopping…" until the call's completion event closes
+    /// it; the underlying process is killed for the shell.
+    pub cancelling: bool,
 }
 
 /// State for the chat area (per-session UI display state).
