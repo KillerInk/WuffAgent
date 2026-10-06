@@ -79,12 +79,12 @@ pieces) instead of a silent `[CANCELLED]` run abort.
 
 ## Implementation order (short verified turns)
 
-- [ ] A: plan file + commit
-- [ ] B: `tools/cancel.rs` + exports + `types.rs` trait method + `manager.rs` → `cargo check`
-- [ ] C: engine RunParams + agent builder/loop/tool_exec wiring + test call-site updates → `cargo check`
-- [ ] D: chat_pipeline registry + `cancel_tool` + shell kill + unit tests → `cargo test -p wuffagent-core tools`
-- [ ] E: UI (ActiveTool field, event_handler, bubbles button, chat_area call site) → `cargo build`
-- [ ] F: full `cargo test` + commit + restart for user round-trip verification
+- [x] A: plan file + commit
+- [x] B: `tools/cancel.rs` + exports + `types.rs` trait method + `manager.rs` → `cargo check`
+- [x] C: engine RunParams + agent builder/loop/tool_exec wiring + test call-site updates → `cargo check`
+- [x] D: chat_pipeline registry + `cancel_tool` + shell kill + unit tests → `cargo test -p wuffagent-core tools`
+- [x] E: UI (ActiveTool field, event_handler, bubbles button, chat_area call site) → `cargo check` (exe in use: built via self-restart)
+- [x] F: full `cargo test` (905 core + 95 egui, 0 failed) + commit + restart for user round-trip verification
 
 ## Verification
 
