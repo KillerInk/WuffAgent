@@ -31,6 +31,15 @@ impl ChatClient {
         messages: &[Message],
         tools: Option<&[crate::tools::ToolDefinition]>,
     ) -> Result<(String, Option<Usage>), Error> {
+        // llama.cpp correlation: attribute this request to its WuffAgent
+        // session (empty for the adapter clients — judge / improvement /
+        // memory / eval traffic), so the server's task logs (which only know
+        // their own task ids) can be matched against ours by timestamp.
+        tracing::info!(
+            session = %self.session_id().unwrap_or_default(),
+            messages = messages.len(),
+            "LLM request start (non-stream)"
+        );
         let mut msgs = messages.to_vec();
         let (reasoning_effort, chat_template_kwargs) = http::reasoning_wire(self.reasoning_effort());
         let (reasoning_format, reasoning_budget_tokens) = self.reasoning_budget();
@@ -130,6 +139,11 @@ impl ChatClient {
         prompt: &str,
         tools: Option<&[crate::tools::ToolDefinition]>,
     ) -> Result<(String, Option<Usage>), Error> {
+        // llama.cpp correlation (see `complete_messages`).
+        tracing::info!(
+            session = %self.session_id().unwrap_or_default(),
+            "LLM request start (conversation)"
+        );
         let (reasoning_format, reasoning_budget_tokens) = self.reasoning_budget();
         let request = build_request(
             &self.session.system_prompt(),
@@ -303,6 +317,15 @@ impl ChatClient {
             reasoning_budget_tokens,
         };
         let body = request.to_json()?;
+
+        // llama.cpp correlation (see `complete_messages`): the server log
+        // only shows its own task ids, so each streaming round is attributed
+        // here to the session that owns this client.
+        tracing::info!(
+            session = %client.session_id().unwrap_or_default(),
+            messages = messages.len(),
+            "LLM request start (stream)"
+        );
 
         let url = format!("{}/v1/chat/completions", base_url);
         let auth = api_key.as_deref().map(|k| format!("Bearer {}", k));
