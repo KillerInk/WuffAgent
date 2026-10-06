@@ -25,6 +25,13 @@ impl Agent {
         if msg.role == "assistant" && msg.content.is_empty() && msg.tool_calls.is_none() {
             return false;
         }
+        // The query-aware memory context block is injected as a request-only
+        // `user` message (not `system`, which a chat template would reject
+        // mid-conversation); recognize it by its marker so it is never
+        // persisted or re-sent on a later turn.
+        if msg.role == "user" && msg.content.contains(crate::memory::MEMORY_CONTEXT_MARKER) {
+            return false;
+        }
         !(msg.role == "user" && msg.content == VERIFICATION_NUDGE && msg.timestamp.is_empty())
     }
 

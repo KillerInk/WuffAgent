@@ -400,15 +400,23 @@ impl Agent {
             }
         }
 
-        // Query-aware memory context, injected as its own system message right
+        // Query-aware memory context, injected as its own `user` message right
         // after this turn's user message (the store message whose content is
-        // exactly `task`). This position is stable across the turn's LLM
-        // rounds (the list only ever grows at the tail afterwards) and across
-        // turns (each turn's block sits after its own user message), so the
-        // prefix up to the new user message is byte-identical to the previous
-        // request — llama.cpp reuses the KV cache and re-prompting only the
-        // new user message + this block. Falls back to the end of the list
-        // when the task message is not in the snapshot (e.g. already trimmed).
+        // exactly `task`). It must NOT be a `system` message: the agent
+        // streaming path (`stream_with_messages_arc`) serializes this list
+        // verbatim, and chat templates (e.g. llama.cpp's Jinja template for
+        // Qwen) reject a `system` message that is not at the very start of the
+        // array with "System message must be at the beginning." `user` is the
+        // same role the session brief / session notes use for injected
+        // request-only context; `is_storable` keeps this block out of the
+        // shared store via `MEMORY_CONTEXT_MARKER`. This position is stable
+        // across the turn's LLM rounds (the list only ever grows at the tail
+        // afterwards) and across turns (each turn's block sits after its own
+        // user message), so the prefix up to the new user message is
+        // byte-identical to the previous request — llama.cpp reuses the KV
+        // cache and re-prompting only the new user message + this block.
+        // Falls back to the end of the list when the task message is not in
+        // the snapshot (e.g. already trimmed).
         if let Some(memory) = &self.memory {
             let memory_block = memory.build_context_block(task);
             if !memory_block.is_empty() {
@@ -420,7 +428,7 @@ impl Agent {
                 messages.insert(
                     insert_at,
                     Message {
-                        role: "system".to_string(),
+                        role: "user".to_string(),
                         content: memory_block,
                         timestamp: now.clone(),
                         tool_calls: None,

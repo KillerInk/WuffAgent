@@ -5,6 +5,11 @@
 use super::manager::MemoryManager;
 use super::types::MemoryEntry;
 
+/// Header line that marks the rendered memory context block. The block is
+/// injected as a request-only `user` message (see `Agent::build_initial_messages`);
+/// `Agent::is_storable` matches this marker to keep it out of the shared store.
+pub const MEMORY_CONTEXT_MARKER: &str = "═══ MEMORY CONTEXT ═══";
+
 impl MemoryManager {
     /// Build the memory context block for injection into system prompts.
     pub fn build_context_block(&self, query: &str) -> String {
@@ -40,8 +45,10 @@ impl MemoryManager {
         }
 
         let max_chars = self.config().injection_max_chars;
-        let mut block =
-            String::from("\n═══ MEMORY CONTEXT ═══\n(Relevant memories from past sessions)\n\n");
+        let mut block = format!(
+            "\n{MARKER}\n(Relevant memories from past sessions)\n\n",
+            MARKER = MEMORY_CONTEXT_MARKER
+        );
         let mut chars = 0;
 
         for memory in &memories {

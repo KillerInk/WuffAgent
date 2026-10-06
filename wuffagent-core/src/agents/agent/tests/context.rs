@@ -289,7 +289,7 @@ fn test_memory_block_sits_after_user_message_not_in_system_prompt() {
         .iter()
         .position(|m| m.content == task1)
         .expect("the user message must be in the request");
-    assert_eq!(msgs1[u + 1].role, "system");
+    assert_eq!(msgs1[u + 1].role, "user");
     assert!(
         msgs1[u + 1]
             .content
@@ -324,7 +324,7 @@ fn test_memory_block_sits_after_user_message_not_in_system_prompt() {
         assert_eq!(a.role, b.role);
         assert_eq!(a.content, b.content, "prefix must be identical across turns");
     }
-    assert_eq!(msgs2[u2 + 1].role, "system");
+    assert_eq!(msgs2[u2 + 1].role, "user");
     assert!(
         msgs2[u2 + 1].content.contains("MEMORY CONTEXT"),
         "turn-2 memory block must sit right after the turn-2 user message"

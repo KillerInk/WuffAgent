@@ -23,6 +23,7 @@ pub mod types;
 // MemoryManager::suggest_improvements, which calls into it).
 pub use crate::agents::improvement::suggest_improvements;
 pub use crate::types::{ImprovementSuggestion, NewAgentProposal};
+pub use context::MEMORY_CONTEXT_MARKER;
 pub use maintenance::{MaintenanceProgress, MaintenanceReport};
 pub use manager::{MemoryAddResult, MemoryManager};
 pub use pending_store::PendingStore;
