@@ -5,8 +5,16 @@ use super::Agent;
 impl Agent {
 
     /// Build the system prompt for this agent.
-    /// `query` is the user's current request; it makes memory injection query-aware.
-    pub(crate) fn build_system_prompt(&self, query: &str) -> String {
+    ///
+    /// The prompt is STATIC per (profile, memory store, skills) — it must not
+    /// change per user message. The query-aware memory context is injected by
+    /// [`Self::build_initial_messages`] as a separate message right after the
+    /// turn's user message, NOT here: message 0 is the longest prefix llama.cpp
+    /// can reuse from the previous request's KV cache (LCP slot matching), so
+    /// anything query-dependent in it would invalidate the whole conversation
+    /// prefix on every new user message (a stopped-then-continued session
+    /// re-prompted all ~45k tokens).
+    pub(crate) fn build_system_prompt(&self) -> String {
         let mut prompt = if self.config.system_prompt.is_empty() {
             format!(
                 "You are the '{}' agent. {}",
@@ -72,15 +80,6 @@ impl Agent {
                  cannot be relinked in place. Your turn ends when you call it; WuffAgent closes and reopens, then \
                  continues the same work.",
             );
-        }
-
-        // Inject memories relevant to the current request (query-aware)
-        if let Some(memory) = &self.memory {
-            let memory_block = memory.build_context_block(query);
-            if !memory_block.is_empty() {
-                prompt.push_str("\n\n");
-                prompt.push_str(&memory_block);
-            }
         }
 
         // Inject the available skills (name + when_to_use, capped) so the

@@ -222,3 +222,113 @@ async fn test_truncated_tool_call_repaired_before_storing() {
         tool_msg.content
     );
 }
+
+/// KV-prefix cache reuse: the query-aware memory block must NOT sit inside
+/// the system prompt (message 0) — it is a separate system message right
+/// after the turn's user message, so the prefix up to the new user message
+/// is byte-identical between turns and llama.cpp's LCP slot matching can
+/// reuse the KV cache (stop → continue must not re-prompt the whole
+/// conversation).
+#[test]
+fn test_memory_block_sits_after_user_message_not_in_system_prompt() {
+    let dir = std::env::temp_dir().join(format!(
+        "wuffagent-memory-placement-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let memory = crate::memory::MemoryManager::new(crate::memory::MemoryConfig {
+        memories_dir: Some(dir.to_str().unwrap().to_string()),
+        injection_mode: crate::memory::InjectionMode::Always,
+        ..Default::default()
+    })
+    .unwrap();
+    let _ = memory.add(crate::memory::MemoryEntry::new(
+        MemoryType::Fact,
+        "The widget test fixture lives in fixtures/widget.json",
+        "test",
+        &[],
+    ));
+
+    let client = Arc::new(ChatClient::new("http://127.0.0.1:1"));
+    let mut agent = Agent::builder(
+        AgentConfig {
+            name: "test".to_string(),
+            ..Default::default()
+        },
+        Arc::new(NoopLlm),
+        client.clone(),
+    )
+    .tool_manager(Arc::new(ToolManager::new(Arc::new(
+        ToolRegistry::new(vec![], Arc::new(TracingToolLogger)),
+    ))))
+    .memory(Some(Arc::new(memory)))
+    .build();
+
+    // Turn 1: the user message is in the store (as `execute` does).
+    let task1 = "fix the widget test";
+    agent.client.conversation().lock().unwrap().push(Message {
+        role: "user".to_string(),
+        content: task1.to_string(),
+        timestamp: crate::types::format_timestamp(),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+        image: None,
+    });
+    let msgs1 = agent.build_initial_messages(task1);
+
+    // The system prompt itself carries no memory context.
+    assert_eq!(msgs1[0].role, "system");
+    assert!(
+        !msgs1[0].content.contains("MEMORY CONTEXT"),
+        "memory block must not be in the system prompt"
+    );
+    // The block is its own message, directly after the user's task message.
+    let u = msgs1
+        .iter()
+        .position(|m| m.content == task1)
+        .expect("the user message must be in the request");
+    assert_eq!(msgs1[u + 1].role, "system");
+    assert!(
+        msgs1[u + 1]
+            .content
+            .contains("The widget test fixture lives in fixtures/widget.json"),
+        "memory block must sit right after the user message: {:?}",
+        msgs1[u + 1].content
+    );
+
+    // Turn 2 (stop → continue): the prefix up to the new user message must
+    // be byte-identical to turn 1's request — that is what the KV cache
+    // reuses.
+    let task2 = "now run the widget tests";
+    agent.client.conversation().lock().unwrap().push(Message {
+        role: "user".to_string(),
+        content: task2.to_string(),
+        timestamp: crate::types::format_timestamp(),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning_content: None,
+        image: None,
+    });
+    let msgs2 = agent.build_initial_messages(task2);
+    let u2 = msgs2
+        .iter()
+        .position(|m| m.content == task2)
+        .expect("turn-2 user message must be in the request");
+    // The prefix through turn 1's user message is byte-identical; the
+    // divergence starts exactly where turn 1's request-only memory block sat
+    // (it was query-specific to task1 and is not re-sent). Everything the
+    // store holds — the whole conversation — is cached.
+    for (a, b) in msgs1.iter().take(u2).zip(msgs2.iter().take(u2)) {
+        assert_eq!(a.role, b.role);
+        assert_eq!(a.content, b.content, "prefix must be identical across turns");
+    }
+    assert_eq!(msgs2[u2 + 1].role, "system");
+    assert!(
+        msgs2[u2 + 1].content.contains("MEMORY CONTEXT"),
+        "turn-2 memory block must sit right after the turn-2 user message"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

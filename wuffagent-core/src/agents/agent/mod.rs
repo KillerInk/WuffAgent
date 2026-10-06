@@ -353,25 +353,31 @@ impl Agent {
     }
 
     /// Build the throwaway request list for the current turn: the fresh system
-    /// prompt followed by a snapshot of the shared store.
+    /// prompt, a snapshot of the shared store, and the query-aware memory
+    /// context injected right after this turn's user message.
     ///
-    /// The system prompt is rebuilt each run (current memory context) and lives
-    /// ONLY in outgoing requests — it is never written to the store. The user
-    /// message for this turn is already in the shared store (appended at turn
-    /// start in `execute`), so it is included here via the store snapshot.
+    /// The system prompt is rebuilt each run and lives ONLY in outgoing
+    /// requests — it is never written to the store. It is STATIC per
+    /// (profile, memory store, skills): the query-aware memory block is a
+    /// separate message so the first message (and the whole conversation
+    /// prefix) stays byte-identical between turns, which is what lets
+    /// llama.cpp's LCP slot matching reuse the KV cache when a session
+    /// continues. The user message for this turn is already in the shared
+    /// store (appended at turn start in `execute`), so it is included here
+    /// via the store snapshot.
     ///
     /// This list is a request body, not history: it may contain the system
-    /// message and verification nudge, neither of which is persisted.
+    /// message, the memory-context message, and the verification nudge, none
+    /// of which is persisted.
     pub fn build_initial_messages(&self, task: &str) -> Vec<Message> {
         let now = crate::types::format_timestamp();
         let mut messages: Vec<Message> = Vec::new();
 
         // Start with the fresh system prompt (request-only, never stored).
-        // The task is passed so memory injection can be query-aware.
         messages.push(Message {
             role: "system".to_string(),
-            content: self.build_system_prompt(task),
-            timestamp: now,
+            content: self.build_system_prompt(),
+            timestamp: now.clone(),
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
@@ -391,6 +397,38 @@ impl Agent {
                     continue;
                 }
                 messages.push(msg.clone());
+            }
+        }
+
+        // Query-aware memory context, injected as its own system message right
+        // after this turn's user message (the store message whose content is
+        // exactly `task`). This position is stable across the turn's LLM
+        // rounds (the list only ever grows at the tail afterwards) and across
+        // turns (each turn's block sits after its own user message), so the
+        // prefix up to the new user message is byte-identical to the previous
+        // request — llama.cpp reuses the KV cache and re-prompting only the
+        // new user message + this block. Falls back to the end of the list
+        // when the task message is not in the snapshot (e.g. already trimmed).
+        if let Some(memory) = &self.memory {
+            let memory_block = memory.build_context_block(task);
+            if !memory_block.is_empty() {
+                let insert_at = messages
+                    .iter()
+                    .rposition(|m| m.role == "user" && m.content == task)
+                    .map(|i| i + 1)
+                    .unwrap_or(messages.len());
+                messages.insert(
+                    insert_at,
+                    Message {
+                        role: "system".to_string(),
+                        content: memory_block,
+                        timestamp: now.clone(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                        image: None,
+                    },
+                );
             }
         }
 
