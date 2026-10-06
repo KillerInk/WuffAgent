@@ -223,7 +223,11 @@ pub trait Tool: Send + Sync {
 /// layouts of `Tool`/`ToolSchema`/`ToolParams` etc. can change, and loading a
 /// stale DLL would then corrupt the host's heap (segfault / access violation
 /// deep in unrelated code) instead of failing cleanly.
-pub const PLUGIN_ABI_VERSION: u32 = 1;
+///
+/// v2: `Tool` gained `execute_with_cancel` (per-call cancellation) — a new
+/// vtable slot, so a v1 plugin's `dyn Tool` vtable is too short and the
+/// slot would read past its end.
+pub const PLUGIN_ABI_VERSION: u32 = 2;
 
 /// Opaque FFI-safe wrapper for passing trait objects across the plugin boundary.
 /// Plugins box their Tool and return this wrapper; the host converts it back.
