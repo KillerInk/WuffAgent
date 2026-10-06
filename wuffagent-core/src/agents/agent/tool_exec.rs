@@ -100,7 +100,13 @@ pub(crate) struct PendingToolRuns {
     /// Cheap-clone manager (Arc fields inside), so each spawned task takes
     /// its own copy and no lock is held across awaits.
     manager: Arc<ToolManager>,
+    /// The RUN-level cancel token: each tool call gets a child token of it
+    /// (registered in `registry`) so a run-level cancel cascades to every
+    /// in-flight call, while a per-call cancel (UI Stop button) stops only
+    /// that one.
     cancel: CancellationToken,
+    /// Per-call cancel tokens, keyed `"{session_id}:{call_id}"`.
+    registry: Arc<crate::tools::cancel::CancelRegistry>,
 }
 
 /// Execute ONE tool call and normalize its result text.
@@ -124,7 +130,9 @@ pub(crate) async fn execute_tool_call(
         Err(e) => return Err(e),
     };
     let result = tokio::select! {
-        r = manager.execute_with_progress(name, params, progress) => r,
+        // The token reaches the tool itself (the shell kills its process);
+        // the second arm covers tools whose default impl ignores it.
+        r = manager.execute_with_progress_and_cancel(name, params, progress, cancel) => r,
         _ = cancel.cancelled() => {
             return Ok(format!("Error: Cancelled (tool '{name}' aborted)"))
         }
@@ -150,12 +158,14 @@ impl PendingToolRuns {
         sink: EventSink,
         manager: ToolManager,
         cancel: CancellationToken,
+        registry: Arc<crate::tools::cancel::CancelRegistry>,
     ) -> Self {
         Self {
             map: Arc::new(Mutex::new(HashMap::new())),
             sink,
             manager: Arc::new(manager),
             cancel,
+            registry,
         }
     }
 
@@ -166,11 +176,16 @@ impl PendingToolRuns {
         for h in self.map.lock().unwrap().values() {
             h.abort();
         }
+        // Defensive: the run token cascade already cancels every per-call
+        // token; cancel_all covers calls whose handles were taken out of the
+        // map but are still running.
+        self.registry.cancel_all();
     }
 
     /// Drop all handles (overflow-retry: the request is re-issued fresh).
     pub(crate) fn clear(&self) {
         self.map.lock().unwrap().clear();
+        self.registry.cancel_all();
     }
 
     /// Take the early-started handle for `call_id` (if any) out of the map.
@@ -219,9 +234,18 @@ impl PendingToolRuns {
             &id,
         );
         let tool_mgr = Arc::clone(&self.manager);
-        let token = self.cancel.clone();
+        // Per-call cancel token: keyed "{session}:{call_id}" so the UI can
+        // address this exact live tool card (Stop button); child of the run
+        // token so a run-level cancel cascades. Deregistered when the call
+        // finishes.
+        let key = format!("{}:{}", self.sink.session_id(), id);
+        let token = self.registry.register(&key, Some(&self.cancel));
+        let registry = Arc::clone(&self.registry);
+        let key_owned = key;
         let handle = tokio::spawn(async move {
-            execute_tool_call(&tool_mgr, &token, &name, &args, &progress).await
+            let result = execute_tool_call(&tool_mgr, &token, &name, &args, &progress).await;
+            registry.deregister(&key_owned);
+            result
         });
         self.map.lock().unwrap().insert(id, handle);
     }

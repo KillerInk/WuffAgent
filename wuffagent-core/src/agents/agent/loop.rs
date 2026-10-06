@@ -450,6 +450,7 @@ impl Agent {
                     super::tool_exec::EventSink::new(self.event_tx.clone(), self.session_id()),
                     tool_manager.clone(),
                     cancel_token.clone(),
+                    self.cancel_registry.clone(),
                 ),
             );
 

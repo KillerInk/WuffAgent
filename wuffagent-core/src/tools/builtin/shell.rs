@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use tokio_util::sync::CancellationToken;
 
 use crate::tools::types::{Tool, ToolError, ToolOutput, ToolParams, ToolProgress, ToolSchema};
 
@@ -265,12 +266,17 @@ impl ShellTool {
     /// chunks over a channel while this loop accumulates the full (capped)
     /// output and keeps a rolling window of recent lines for the progress
     /// display. Semantics of the returned `Output` match `cmd.output()`.
+    ///
+    /// `cancel` is the per-call token (the live tool card's Stop button):
+    /// when it fires, the process is killed and `wait()` reaps it (no
+    /// zombie) — the error tells the model the user stopped the command.
     fn run_command(
         shell_cmd: &str,
         shell_args: &[String],
         working_dir: Option<&str>,
         timeout_ms: u64,
         progress: Option<&(dyn Fn(&str) + Send + Sync)>,
+        cancel: &CancellationToken,
     ) -> Result<std::process::Output, ToolError> {
         let mut cmd = StdCommand::new(shell_cmd);
         cmd.args(shell_args);
@@ -328,6 +334,17 @@ impl ShellTool {
                     "Command timed out after {}ms",
                     timeout_ms
                 )));
+            }
+            // Per-call cancellation (the live tool card's Stop button):
+            // kill the process and report an error so the model can adapt
+            // (e.g. break the command into smaller pieces) instead of the
+            // whole run being aborted.
+            if cancel.is_cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ToolError::Execution(
+                    "Command was cancelled by the user (process stopped)".to_string(),
+                ));
             }
 
             // Drain everything available right now.
@@ -515,10 +532,26 @@ impl Tool for ShellTool {
 
     /// Run the command, streaming output lines to the progress sink so the
     /// UI tool card shows live command output while it runs.
+    ///
+    /// No cancel token (no live UI): delegates with a fresh token that
+    /// never fires.
     fn execute_with_progress(
         &self,
         params: ToolParams,
         progress: &ToolProgress,
+    ) -> crate::tools::types::ToolResult<ToolOutput> {
+        self.execute_with_cancel(params, progress, &CancellationToken::new())
+    }
+
+    /// Same as [`Tool::execute_with_progress`], plus the per-call cancel
+    /// token (the live tool card's Stop button): when it fires, the running
+    /// process is killed and the call returns the "cancelled by the user"
+    /// error, which the agent loop feeds back to the model.
+    fn execute_with_cancel(
+        &self,
+        params: ToolParams,
+        progress: &ToolProgress,
+        cancel: &CancellationToken,
     ) -> crate::tools::types::ToolResult<ToolOutput> {
         let command: String = params
             .get("command")
@@ -551,6 +584,7 @@ impl Tool for ShellTool {
                 .or(self.config.working_dir.as_deref()),
             timeout_ms,
             fp,
+            cancel,
         );
 
         match result {

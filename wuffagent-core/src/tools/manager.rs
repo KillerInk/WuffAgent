@@ -8,6 +8,7 @@ use crate::tools::types::{
     ToolResult, TracingToolLogger,
 };
 use crate::types::Message;
+use tokio_util::sync::CancellationToken;
 
 /// Parse raw tool-call argument JSON into `ToolParams`.
 ///
@@ -348,6 +349,19 @@ impl ToolManager {
         params: ToolParams,
         progress: &ToolProgress,
     ) -> ToolResult<ToolOutput> {
+        self.execute_with_progress_and_cancel(tool_name, params, progress, &CancellationToken::new())
+            .await
+    }
+
+    /// Execute a tool by name, forwarding incremental progress reports and a
+    /// per-call cancel token (the live tool card's Stop button) to the tool.
+    pub async fn execute_with_progress_and_cancel(
+        &self,
+        tool_name: &str,
+        params: ToolParams,
+        progress: &ToolProgress,
+        cancel: &CancellationToken,
+    ) -> ToolResult<ToolOutput> {
         // Check allowlist first
         if let Some(ref allowlist) = self.allowlist {
             if !allowlist.contains(&tool_name.to_string()) {
@@ -369,13 +383,15 @@ impl ToolManager {
 
         self.logger.log_tool_call(tool_name, &params);
 
-        // Clone the sink so it can be moved into the blocking task.
+        // Clone the sink and token so they can be moved into the blocking task.
         let progress = progress.clone();
+        let cancel = cancel.clone();
         // Execute on the blocking thread to avoid holding the main runtime.
-        let result =
-            tokio::task::spawn_blocking(move || tool.execute_with_progress(params, &progress))
-                .await
-                .map_err(|e| ToolError::Execution(format!("Join error: {}", e)))?;
+        let result = tokio::task::spawn_blocking(move || {
+            tool.execute_with_cancel(params, &progress, &cancel)
+        })
+        .await
+        .map_err(|e| ToolError::Execution(format!("Join error: {}", e)))?;
 
         match &result {
             Ok(output) => self.logger.log_tool_result(tool_name, output),

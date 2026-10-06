@@ -214,3 +214,41 @@ fn execute_with_progress_streams_live_output() {
     let last = reports.last().expect("at least one report");
     assert!(last.contains("line"), "last report: {last}");
 }
+
+/// Per-call cancellation: a pre-cancelled token kills a slow command
+/// quickly and returns the "cancelled by the user" error (the live tool
+/// card's Stop button path).
+#[test]
+fn execute_with_cancel_kills_slow_command() {
+    let config = ShellConfig {
+        enabled: true,
+        allowed_commands: vec![".*".to_string()],
+        timeout_ms: 30_000,
+        ..Default::default()
+    };
+    let tool = ShellTool::new(config);
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel(); // pre-cancelled: the command must die immediately
+    #[cfg(windows)]
+    let cmd = "powershell -NoProfile -c \"Start-Sleep -Seconds 30\"";
+    #[cfg(not(windows))]
+    let cmd = "sleep 30";
+    let mut params = ToolParams::new();
+    params.values.insert(
+        "command".to_string(),
+        serde_json::Value::String(cmd.to_string()),
+    );
+    let started = std::time::Instant::now();
+    let err = tool
+        .execute_with_cancel(params, &ToolProgress::none(), &token)
+        .err()
+        .expect("a cancelled command must fail");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "cancellation must not wait for the 30s command"
+    );
+    assert!(
+        err.to_string().contains("cancelled"),
+        "expected the cancellation error, got: {err}"
+    );
+}

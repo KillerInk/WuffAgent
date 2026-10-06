@@ -56,6 +56,12 @@ pub struct RunParams {
     /// this run: the loop drains it at LLM round boundaries, and
     /// `execute_with_tools` drains the remainder after the loop ends.
     pub injection: Option<Arc<Mutex<mpsc::Receiver<crate::sessions::QueuedMessage>>>>,
+    /// Run-scoped per-call tool-cancellation registry: every in-flight tool
+    /// call registers its own token here keyed `"{session_id}:{call_id}"`,
+    /// so the UI can stop ONE live tool card (the shell's process is killed).
+    /// None = the agent keeps a private registry (headless: nothing can
+    /// address individual calls).
+    pub tool_cancel: Option<Arc<crate::tools::cancel::CancelRegistry>>,
 }
 
 /// Run an LLM memory-maintenance step at most once every N completed tasks.
@@ -228,6 +234,12 @@ impl AgentEngine {
         // injected into the current turn as soon as the model can see them).
         if let Some(rx) = &params.injection {
             agent = agent.with_injection_channel(Arc::clone(rx));
+        }
+        // Per-call tool cancellation (live tool card's Stop button): the
+        // chat pipeline created a run-scoped registry and keeps it to cancel
+        // individual calls by `"{session_id}:{call_id}"` key.
+        if let Some(registry) = &params.tool_cancel {
+            agent = agent.with_tool_cancel_registry(Arc::clone(registry));
         }
 
         let result = agent.execute(request, image, cancel_token).await;

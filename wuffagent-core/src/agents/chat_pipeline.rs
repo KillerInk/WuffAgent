@@ -21,6 +21,10 @@ struct RunState {
     token: Option<CancellationToken>,
     handle: Option<JoinHandle<()>>,
     injection: Option<Arc<Mutex<mpsc::Receiver<QueuedMessage>>>>,
+    /// Run-scoped per-call tool-cancellation registry: every in-flight tool
+    /// call registers its own token here keyed `"{session_id}:{call_id}"`,
+    /// so the UI can stop ONE live tool card (see `cancel_tool`).
+    tool_cancel: Option<Arc<crate::tools::cancel::CancelRegistry>>,
 }
 
 /// ChatPipeline routes chat requests through the AgentEngine's tool pipeline,
@@ -67,6 +71,7 @@ impl ChatPipeline {
                 token: None,
                 handle: None,
                 injection: None,
+                tool_cancel: None,
             }),
             event_tx,
             reasoning_mode,
@@ -112,9 +117,15 @@ impl ChatPipeline {
         let task_token = CancellationToken::new();
         let (injection_tx, injection_rx) = mpsc::channel();
         let injection_holder = Arc::new(Mutex::new(injection_rx));
+        // Run-scoped per-call tool-cancellation registry: the agent loop
+        // registers every in-flight tool call here (keyed
+        // "{session_id}:{call_id}"), and `cancel_tool` addresses one call by
+        // key (the live tool card's Stop button).
+        let tool_cancel = Arc::new(crate::tools::cancel::CancelRegistry::new());
         let mut run = self.run.lock().unwrap();
         run.token = Some(task_token.clone());
         run.injection = Some(Arc::clone(&injection_holder));
+        run.tool_cancel = Some(Arc::clone(&tool_cancel));
         drop(run);
         *self.injection_tx.lock().unwrap() = injection_tx;
 
@@ -139,6 +150,7 @@ impl ChatPipeline {
                 session_id: Some(session_id.clone()),
                 reasoning: reasoning_mode,
                 injection: Some(injection_holder),
+                tool_cancel: Some(tool_cancel),
             };
 
             tracing::info!("[CHAT PIPELINE] Starting chat with prompt: {}", prompt);
@@ -208,11 +220,36 @@ impl ChatPipeline {
                 });
             }
         }
+        if let Some(registry) = {
+            self.run.lock().unwrap().tool_cancel.clone()
+        } {
+            // Defensive: the run token cascade already cancels every
+            // per-call token (they are children of it).
+            registry.cancel_all();
+        }
         // Clear this run's injection channel and abort the running task if any.
         let mut run = self.run.lock().unwrap();
         run.injection = None;
+        run.tool_cancel = None;
         if let Some(handle) = run.handle.take() {
             handle.abort();
+        }
+    }
+
+    /// Stop ONE in-flight tool call (the live tool card's Stop button).
+    ///
+    /// `key` is `"{session_id}:{call_id}"` — the same key the agent loop
+    /// registered the call under. Returns `false` when no in-flight call
+    /// carries that key (already finished, or no run is active).
+    ///
+    /// A cancelled tool call yields a tool-result error
+    /// ("Error: …cancelled…") that the agent loop feeds back to the model,
+    /// so the run CONTINUES (unlike [`Self::cancel`], which stops the whole
+    /// run).
+    pub fn cancel_tool(&self, key: &str) -> bool {
+        match self.run.lock().unwrap().tool_cancel.as_ref() {
+            Some(registry) => registry.cancel(key),
+            None => false,
         }
     }
 }

@@ -84,6 +84,13 @@ pub struct Agent {
     /// Status-bar label for this agent's activity (default: `agent:
     /// <config.name>`; the eval harness overrides it with `eval: <id>`).
     activity_label: Option<String>,
+    /// Per-call tool-cancellation registry: each in-flight tool call
+    /// registers its own cancel token (child of the run token) keyed
+    /// `"{session_id}:{call_id}"`, so the UI can stop ONE live tool card
+    /// (the shell's process is then killed). Created in `build` unless a
+    /// run-scoped registry was attached (the chat pipeline shares one per
+    /// run so it can cancel individual calls).
+    cancel_registry: Arc<crate::tools::cancel::CancelRegistry>,
 }
 
 /// Builder for [`Agent`] (see [`Agent::builder`]).
@@ -108,6 +115,7 @@ pub struct AgentBuilder {
     model_prices: Vec<crate::config::ModelPrice>,
     activity: Option<Arc<crate::activity::ActivityTracker>>,
     activity_label: Option<String>,
+    cancel_registry: Option<Arc<crate::tools::cancel::CancelRegistry>>,
 }
 
 impl AgentBuilder {
@@ -128,6 +136,7 @@ impl AgentBuilder {
             model_prices: Vec::new(),
             activity: None,
             activity_label: None,
+            cancel_registry: None,
         }
     }
 
@@ -182,6 +191,17 @@ impl AgentBuilder {
         self
     }
 
+    /// Use a shared per-call tool-cancellation registry (default: a fresh
+    /// private one; the chat pipeline shares one per run so it can cancel
+    /// individual in-flight calls by `"{session_id}:{call_id}"` key).
+    pub fn cancel_registry(
+        mut self,
+        cancel_registry: Arc<crate::tools::cancel::CancelRegistry>,
+    ) -> Self {
+        self.cancel_registry = Some(cancel_registry);
+        self
+    }
+
     /// Build the agent.
     ///
     /// Applies the per-agent policy:
@@ -218,6 +238,7 @@ impl AgentBuilder {
             model_prices,
             activity,
             activity_label,
+            cancel_registry,
         } = self;
         let client = if config.reasoning_effort != crate::types::ReasoningEffort::Off {
             let c = (*client).clone();
@@ -316,6 +337,9 @@ impl AgentBuilder {
             injection_rx: None,
             activity,
             activity_label,
+            cancel_registry: cancel_registry.unwrap_or_else(|| {
+                Arc::new(crate::tools::cancel::CancelRegistry::new())
+            }),
         }
     }
 }
@@ -349,6 +373,17 @@ impl Agent {
         rx: Arc<Mutex<std::sync::mpsc::Receiver<crate::sessions::QueuedMessage>>>,
     ) -> Self {
         self.injection_rx = Some(rx);
+        self
+    }
+
+    /// Attach a run-scoped per-call tool-cancellation registry (see the
+    /// `cancel_registry` field). Only the chat path sets this; plan/registry
+    /// agents run without a live UI and keep a private registry.
+    pub fn with_tool_cancel_registry(
+        mut self,
+        registry: Arc<crate::tools::cancel::CancelRegistry>,
+    ) -> Self {
+        self.cancel_registry = registry;
         self
     }
 

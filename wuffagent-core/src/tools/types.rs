@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 // ─── Error Types ────────────────────────────────────────────────────────────
 
@@ -190,6 +191,25 @@ pub trait Tool: Send + Sync {
     ) -> ToolResult<ToolOutput> {
         let _ = progress;
         self.execute(params)
+    }
+
+    /// Execute the tool with the given parameters, optionally reporting
+    /// incremental progress, plus a per-call cancel token (the live tool
+    /// card's Stop button).
+    ///
+    /// Default implementation ignores the token and delegates to
+    /// [`Tool::execute_with_progress`]; only tools with a killable
+    /// long-running workload (the shell) override this. A cancelled token
+    /// does NOT stop the default implementation itself — the caller's
+    /// `select!` on the token is what makes the agent loop move on.
+    fn execute_with_cancel(
+        &self,
+        params: ToolParams,
+        progress: &ToolProgress,
+        cancel: &CancellationToken,
+    ) -> ToolResult<ToolOutput> {
+        let _ = cancel;
+        self.execute_with_progress(params, progress)
     }
 }
 

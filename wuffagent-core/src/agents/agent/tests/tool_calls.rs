@@ -57,6 +57,7 @@ async fn test_native_tool_calls_accumulate_run_counters() {
         super::tool_exec::EventSink::new(None, "test".to_string()),
         tm.clone(),
         CancellationToken::new(),
+        Arc::new(crate::tools::cancel::CancelRegistry::new()),
     );
     let mut messages = vec![test_msg("user", "do the math")];
     let mut counters = RunStats::default();
@@ -94,6 +95,7 @@ async fn test_text_embedded_calls_accumulate_run_counters() {
         super::tool_exec::EventSink::new(None, "test".to_string()),
         tm.clone(),
         CancellationToken::new(),
+        Arc::new(crate::tools::cancel::CancelRegistry::new()),
     );
     let tool_defs = Some(tm.get_tool_definitions());
     let mut messages = vec![test_msg("user", "do the math")];
