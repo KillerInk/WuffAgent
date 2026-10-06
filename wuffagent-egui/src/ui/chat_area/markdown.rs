@@ -509,8 +509,21 @@ fn render_table<'a, 'it>(
             break;
         };
         match ev {
-            Event::Start(Tag::TableHead) => in_head = true,
-            Event::End(TagEnd::TableHead) => in_head = false,
+            // Header cells come directly under TableHead (no TableRow event
+            // around them in pulldown-cmark), so open the row here and
+            // commit it at End(TableHead) — otherwise header cells are
+            // dropped (`row` is None) and the table renders without its
+            // header row or divider.
+            Event::Start(Tag::TableHead) => {
+                in_head = true;
+                row = Some(Vec::new());
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(r) = row.take() {
+                    header = r;
+                }
+                in_head = false;
+            }
             Event::Start(Tag::TableRow) => row = Some(Vec::new()),
             Event::Start(Tag::TableCell) => {
                 cell = Some(new_job());
@@ -876,6 +889,19 @@ mod tests {
             y0.is_finite() && y1.is_finite() && y1 < 1000.0,
             "table text drawn far off the visible area: y=[{y0}..{y1}]"
         );
+        // The header row must be drawn too (pulldown-cmark emits header
+        // cells directly under TableHead, no TableRow event).
+        let header_drawn = out.shapes.iter().any(|cs| match &cs.shape {
+            egui::Shape::Text(t) => t.galley.job.text.trim() == "File",
+            _ => false,
+        });
+        assert!(header_drawn, "table header row not drawn");
+        // ... and the divider under it.
+        let divider = out
+            .shapes
+            .iter()
+            .any(|cs| matches!(&cs.shape, egui::Shape::LineSegment { .. }));
+        assert!(divider, "table header divider not drawn");
         // And the whole message must stay compact (no 1M-px gap per row).
         let max_y = out.shapes.iter().filter_map(|cs| match &cs.shape {
             egui::Shape::Text(t) => Some(t.pos.y + t.galley.rect.max.y),
